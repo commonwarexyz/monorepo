@@ -1,6 +1,8 @@
 use super::*;
 use crate::chain::state::{machine_guard_key, machine_key};
-use commonware_storage::qmdb::{any::value::VariableEncoding, current::ordered::ExclusionProof};
+use commonware_storage::qmdb::{
+    any::value::VariableEncoding, current::ordered::proof::constant::ExclusionProof,
+};
 
 #[test]
 fn certified_absence_omits_private_checkpoint_across_restart() {

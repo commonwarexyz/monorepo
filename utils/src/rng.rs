@@ -112,6 +112,15 @@ impl TryRng for ScriptedRng {
     }
 }
 
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<ScriptedRng> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(rng: ScriptedRng) -> Self {
+        Box::new(rng)
+    }
+}
+
 // SAFETY: ScriptedRng is not cryptographically secure. It implements CryptoRng only because test
 // runtimes require CryptoRng-bounded RNGs. This type must never be used outside tests.
 #[stability(ALPHA)]
@@ -192,6 +201,48 @@ pub struct FuzzRng {
     ctr: u64,
     cache: [u8; BLOCK_BYTES],
     cache_pos: usize,
+}
+
+/// Fuzzer-provided entropy backing a [FuzzRng].
+///
+/// Its `Arbitrary` implementation consumes the input's remaining bytes, so declare it as
+/// the LAST field of a fuzz input struct. Every [FuzzRng] converted from the same entropy
+/// yields an identical stream.
+#[stability(ALPHA)]
+#[derive(Clone, Debug)]
+pub struct Entropy(Vec<u8>);
+
+#[cfg(feature = "arbitrary")]
+#[stability(ALPHA)]
+impl<'a> arbitrary::Arbitrary<'a> for Entropy {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.bytes(u.len())?.to_vec()))
+    }
+}
+
+#[stability(ALPHA)]
+impl From<Entropy> for FuzzRng {
+    fn from(entropy: Entropy) -> Self {
+        Self::new(entropy.0)
+    }
+}
+
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<Entropy> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(entropy: Entropy) -> Self {
+        Box::new(FuzzRng::from(entropy))
+    }
+}
+
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<FuzzRng> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(rng: FuzzRng) -> Self {
+        Box::new(rng)
+    }
 }
 
 #[stability(ALPHA)]

@@ -14,8 +14,8 @@ use super::{
     super::{Error, variant::Variant},
     hash_with_namespace,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;

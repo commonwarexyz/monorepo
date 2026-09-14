@@ -2919,7 +2919,7 @@ impl PaymentHeadGateCase {
             Self::InvalidAnchor => {
                 let mut encoded = head.context.encode().to_vec();
                 encoded[0] ^= 1;
-                head.context = EpochContext::decode(Bytes::from(encoded)).unwrap();
+                head.context = EpochContext::decode(encoded).unwrap();
             }
             Self::MismatchedStateRoot => {
                 // A verifiable opening over a root that is not the certified

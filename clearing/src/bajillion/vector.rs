@@ -8,9 +8,9 @@ use crate::bajillion::{
     payment::{Amount, Epoch},
 };
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Sequential;

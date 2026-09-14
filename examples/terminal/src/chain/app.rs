@@ -134,6 +134,7 @@ where
     type Databases = Database<E>;
     type Provider = P;
     type Input = ();
+    type Captured = ();
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -251,30 +252,42 @@ where
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Replay of a certified block: only the deterministic timestamp
         // monotonicity is re-checked (inside execution), never the vote-time
         // drift bound.
-        execute(
-            batches,
-            block.height(),
-            block.timestamp,
-            &self.timing,
-            &self.native,
-            &block.transactions,
+        Some(
+            execute(
+                batches,
+                block.height(),
+                block.timestamp,
+                &self.timing,
+                &self.native,
+                &block.transactions,
+            )
+            .await
+            .expect("replay execution must read settlement state"),
         )
-        .await
-        .expect("replay execution must read settlement state")
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         SyncTarget::new(block.ops_root, block.range.clone())
     }
 
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
     async fn finalized(
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         let digest = block.digest();

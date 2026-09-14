@@ -1,9 +1,9 @@
 //! Block and database types for the glue-based settlement chain.
 
 use crate::chain::{state::Record, tx::SettlementTx, validator::MAX_MESSAGE_SIZE};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
@@ -18,7 +18,7 @@ use commonware_storage::{
     mmr,
     qmdb::{
         any::value::VariableEncoding,
-        current::ordered::{self, variable},
+        current::ordered::{proof::constant, variable},
         sync::Target,
     },
     translator::TwoCap,
@@ -86,11 +86,11 @@ pub(crate) type Database<E> = Shared<Qmdb<E>>;
 pub(crate) type SyncTarget = Target<mmr::Family, Digest>;
 
 /// Presence proof for one state key against the canonical root.
-pub(crate) type Proof = variable::KeyValueProof<mmr::Family, StateKey, Digest, CHUNK>;
+pub(crate) type Proof = constant::KeyValueProof<mmr::Family, StateKey, Digest, CHUNK>;
 
 /// Absence proof for one state key against the canonical root.
 pub(crate) type Exclusion =
-    ordered::ExclusionProof<mmr::Family, StateKey, VariableEncoding<Record>, Digest, CHUNK>;
+    constant::ExclusionProof<mmr::Family, StateKey, VariableEncoding<Record>, Digest, CHUNK>;
 
 /// Unmerkleized settlement batch.
 pub(crate) type Batch<E> = <Qmdb<E> as ManagedDb<E>>::Unmerkleized;

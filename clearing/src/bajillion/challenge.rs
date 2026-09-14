@@ -16,9 +16,10 @@ use crate::bajillion::{
     vector::{OutTipLookup, OutVector},
 };
 use alloc::{boxed::Box, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    Buf, Copying, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use thiserror::Error;
@@ -892,5 +893,5 @@ pub fn decode_bounded<P: PublicKey, D: Digest>(
     if bytes.len() > maximum_bytes {
         return Err(ChallengeError::TooLarge);
     }
-    Ok(Challenge::decode(bytes)?)
+    Ok(Challenge::decode(Copying(bytes))?)
 }

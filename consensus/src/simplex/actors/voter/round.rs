@@ -161,7 +161,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Records an ancestry view requested from the leader.
+    /// Records the ancestry view that proposal verification requested from the
+    /// leader. Returns `false` for a repeated request.
+    ///
+    /// Certification repair bypasses this latch so an untargeted request can
+    /// widen the resolver fetch.
     pub fn request(&mut self, view: View) -> bool {
         if self.last_ancestry_request == Some(view) {
             return false;
@@ -395,7 +399,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_nullify {
             return false;
         }
-        self.proposal.built(proposal);
+        self.proposal.record_verified(proposal);
         self.proposed_at = Some(now);
         self.leader_deadline = None;
         true
@@ -737,26 +741,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     "replaying notarize from another signer"
                 );
 
-                // Replaying our local notarize restores a verified proposal and
-                // the fact that we already voted. For leader-owned rounds, the
-                // proposal was built locally; follower rounds also journal local
-                // notarize votes over other leaders' proposals.
-                //
-                // A vote for the current view replays after the certificate for
-                // `v - 1` (journal replay is append-ordered), which seeds this
-                // round's leader. An optimistic vote replays with no leader set
-                // (the parent certificate did not exist when it was journaled),
-                // so a leader-owned optimistic round takes the `notarized`
-                // branch; the two branches restore the same slot state.
-                if self
-                    .leader
-                    .as_ref()
-                    .is_some_and(|leader| self.is_signer(leader.idx))
-                {
-                    self.proposal.built(notarize.proposal.clone());
-                } else {
-                    self.proposal.notarized(notarize.proposal.clone());
-                }
+                // Our journaled notarize records a locally verified proposal.
+                self.proposal.record_verified(notarize.proposal.clone());
                 self.broadcast_notarize = true;
             }
             Artifact::Nullify(nullify) => {
@@ -1309,7 +1295,7 @@ mod tests {
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
 
-        // Proposal should be restored as verified (we are the leader).
+        // Proposal should be restored as verified.
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);

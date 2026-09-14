@@ -121,7 +121,7 @@ where
             }
         }
     };
-    if mutated && let Ok(m) = P::decode_cfg(bytes.as_slice(), cfg) {
+    if mutated && let Ok(m) = P::decode_cfg(bytes, cfg) {
         *proof = m;
     }
 }

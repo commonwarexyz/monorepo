@@ -1091,6 +1091,160 @@ impl WithdrawalModel {
         };
         close.outputs[0] == Some(expected) && close.successor[0] == tail - expected
     }
+
+    /// Generates deterministic witnesses, followed by explicit retry probes.
+    /// Exhaustive safety checking is a separate test; this corpus retains only
+    /// named paths, including all twelve successor-tail arithmetic fixtures.
+    pub fn generated_traces() -> Vec<Trace> {
+        let mut traces = Vec::new();
+        for instance in Instance::all() {
+            let model = Self::new(instance);
+            let comprehensive = instance
+                == (Instance {
+                    primary: Withdrawal::Amount(4),
+                    debit: 0,
+                    credit: 5,
+                });
+            let available = model
+                .properties()
+                .into_iter()
+                .filter(|p| p.expectation == Expectation::Sometimes)
+                .map(|p| p.name)
+                .collect::<BTreeSet<_>>();
+            let names = if comprehensive {
+                REQUIRED_WITNESSES.into_iter().collect::<BTreeSet<_>>()
+            } else {
+                BTreeSet::from(["queued tail finalized"])
+            };
+            if comprehensive {
+                assert_eq!(
+                    available, names,
+                    "native corpus and witness properties differ"
+                );
+            } else {
+                assert!(
+                    names.is_subset(&available),
+                    "a required witness property is missing"
+                );
+            }
+            let checker = model
+                .checker()
+                .threads(1)
+                .finish_when(HasDiscoveries::AllOf(names.clone()))
+                .spawn_bfs()
+                .join();
+            for property in model
+                .properties()
+                .into_iter()
+                .filter(|p| p.expectation == Expectation::Always)
+            {
+                checker.assert_no_discovery(property.name);
+            }
+            for name in names {
+                let path = checker
+                    .discovery(name)
+                    .unwrap_or_else(|| panic!("missing witness {name}: {instance:?}"));
+                let mut state = path.last_state().clone();
+                let mut actions = path.into_actions();
+                let append = |action, state: &mut State, actions: &mut Vec<Action>| {
+                    *state = model.step(state, action).state;
+                    actions.push(action);
+                };
+                if name == "queued tail finalized"
+                    || name == "later receipt preserves original acknowledgement"
+                {
+                    append(Action::Apply(RequestId::A0), &mut state, &mut actions);
+                    append(Action::Restart, &mut state, &mut actions);
+                    append(Action::Apply(RequestId::A0), &mut state, &mut actions);
+                    append(Action::Queue(RequestId::A0), &mut state, &mut actions);
+                    let output = OutputId {
+                        epoch: 1,
+                        account: 0,
+                    };
+                    append(Action::Claim(output), &mut state, &mut actions);
+                    append(Action::Restart, &mut state, &mut actions);
+                    append(Action::Claim(output), &mut state, &mut actions);
+                    if state.released[1][0].is_some_and(|amount| amount > 0) {
+                        append(Action::Acknowledge(output), &mut state, &mut actions);
+                        append(Action::Restart, &mut state, &mut actions);
+                        append(Action::Acknowledge(output), &mut state, &mut actions);
+                    }
+                } else if name == "intake during active registration" {
+                    append(Action::Queue(RequestId::A0), &mut state, &mut actions);
+                } else if name == "queue after freeze requires rebuilt publication" {
+                    let stale = state
+                        .prepared
+                        .expect("witness retains publication material");
+                    assert_eq!(
+                        model.step(&state, Action::Publish(stale)).outcome,
+                        Outcome::Rejected
+                    );
+                    append(Action::Publish(stale), &mut state, &mut actions);
+                    append(Action::Freeze, &mut state, &mut actions);
+                    let rebuilt = state.prepared.expect("registration is rebuilt");
+                    assert_ne!(stale, rebuilt);
+                    assert_eq!(
+                        model.step(&state, Action::Publish(rebuilt)).outcome,
+                        Outcome::Accepted
+                    );
+                    append(Action::Publish(rebuilt), &mut state, &mut actions);
+                    append(Action::ObserveRegistration, &mut state, &mut actions);
+                } else {
+                    if name == "captured anchor excludes stale request"
+                        || name == "published registration survives lost response"
+                    {
+                        append(Action::Restart, &mut state, &mut actions);
+                    }
+                    if state.reconciliation.is_none() {
+                        append(Action::StartReconcile, &mut state, &mut actions);
+                    }
+                    while let Some(operation) = state.reconciliation {
+                        let action = if operation.reply.is_some() {
+                            Action::DeliverRead
+                        } else {
+                            Action::CaptureRead
+                        };
+                        append(action, &mut state, &mut actions);
+                    }
+                    if name == "captured status precedes root advance" {
+                        append(Action::StartReconcile, &mut state, &mut actions);
+                        while let Some(operation) = state.reconciliation {
+                            let action = if operation.reply.is_some() {
+                                Action::DeliverRead
+                            } else {
+                                Action::CaptureRead
+                            };
+                            append(action, &mut state, &mut actions);
+                        }
+                    }
+                    if name == "published registration survives lost response" {
+                        append(Action::ObserveRegistration, &mut state, &mut actions);
+                    }
+                    if state.anchors[1].is_none() && state.prepared.is_none() {
+                        let old = state
+                            .packets
+                            .iter()
+                            .find(|p| p.epoch == 1 && p.requests & !state.boundary() != 0)
+                            .copied();
+                        if let Some(packet) = old {
+                            append(Action::Publish(packet), &mut state, &mut actions);
+                        }
+                        append(Action::Freeze, &mut state, &mut actions);
+                        if let Some(packet) = state.prepared {
+                            append(Action::Publish(packet), &mut state, &mut actions);
+                            append(Action::ObserveRegistration, &mut state, &mut actions);
+                        }
+                    }
+                }
+                traces.push(Trace {
+                    instance,
+                    name,
+                    actions,
+                });
+            }
+        }
+        traces
+    }
 }
 
 impl Model for WithdrawalModel {
@@ -1289,162 +1443,6 @@ fn stale_released(state: &State, mixed: bool) -> bool {
                             && state.receipts[other.account()] == Some(other)
                     }))
         })
-}
-
-impl WithdrawalModel {
-    /// Generates deterministic witnesses, followed by explicit retry probes.
-    /// Exhaustive safety checking is a separate test; this corpus retains only
-    /// named paths, including all twelve successor-tail arithmetic fixtures.
-    pub fn generated_traces() -> Vec<Trace> {
-        let mut traces = Vec::new();
-        for instance in Instance::all() {
-            let model = Self::new(instance);
-            let comprehensive = instance
-                == (Instance {
-                    primary: Withdrawal::Amount(4),
-                    debit: 0,
-                    credit: 5,
-                });
-            let available = model
-                .properties()
-                .into_iter()
-                .filter(|p| p.expectation == Expectation::Sometimes)
-                .map(|p| p.name)
-                .collect::<BTreeSet<_>>();
-            let names = if comprehensive {
-                REQUIRED_WITNESSES.into_iter().collect::<BTreeSet<_>>()
-            } else {
-                BTreeSet::from(["queued tail finalized"])
-            };
-            if comprehensive {
-                assert_eq!(
-                    available, names,
-                    "native corpus and witness properties differ"
-                );
-            } else {
-                assert!(
-                    names.is_subset(&available),
-                    "a required witness property is missing"
-                );
-            }
-            let checker = model
-                .checker()
-                .threads(1)
-                .finish_when(HasDiscoveries::AllOf(names.clone()))
-                .spawn_bfs()
-                .join();
-            for property in model
-                .properties()
-                .into_iter()
-                .filter(|p| p.expectation == Expectation::Always)
-            {
-                checker.assert_no_discovery(property.name);
-            }
-            for name in names {
-                let path = checker
-                    .discovery(name)
-                    .unwrap_or_else(|| panic!("missing witness {name}: {instance:?}"));
-                let mut state = path.last_state().clone();
-                let mut actions = path.into_actions();
-                let append = |action, state: &mut State, actions: &mut Vec<Action>| {
-                    *state = model.step(state, action).state;
-                    actions.push(action);
-                };
-                if name == "queued tail finalized"
-                    || name == "later receipt preserves original acknowledgement"
-                {
-                    append(Action::Apply(RequestId::A0), &mut state, &mut actions);
-                    append(Action::Restart, &mut state, &mut actions);
-                    append(Action::Apply(RequestId::A0), &mut state, &mut actions);
-                    append(Action::Queue(RequestId::A0), &mut state, &mut actions);
-                    let output = OutputId {
-                        epoch: 1,
-                        account: 0,
-                    };
-                    append(Action::Claim(output), &mut state, &mut actions);
-                    append(Action::Restart, &mut state, &mut actions);
-                    append(Action::Claim(output), &mut state, &mut actions);
-                    if state.released[1][0].is_some_and(|amount| amount > 0) {
-                        append(Action::Acknowledge(output), &mut state, &mut actions);
-                        append(Action::Restart, &mut state, &mut actions);
-                        append(Action::Acknowledge(output), &mut state, &mut actions);
-                    }
-                } else if name == "intake during active registration" {
-                    append(Action::Queue(RequestId::A0), &mut state, &mut actions);
-                } else if name == "queue after freeze requires rebuilt publication" {
-                    let stale = state
-                        .prepared
-                        .expect("witness retains publication material");
-                    assert_eq!(
-                        model.step(&state, Action::Publish(stale)).outcome,
-                        Outcome::Rejected
-                    );
-                    append(Action::Publish(stale), &mut state, &mut actions);
-                    append(Action::Freeze, &mut state, &mut actions);
-                    let rebuilt = state.prepared.expect("registration is rebuilt");
-                    assert_ne!(stale, rebuilt);
-                    assert_eq!(
-                        model.step(&state, Action::Publish(rebuilt)).outcome,
-                        Outcome::Accepted
-                    );
-                    append(Action::Publish(rebuilt), &mut state, &mut actions);
-                    append(Action::ObserveRegistration, &mut state, &mut actions);
-                } else {
-                    if name == "captured anchor excludes stale request"
-                        || name == "published registration survives lost response"
-                    {
-                        append(Action::Restart, &mut state, &mut actions);
-                    }
-                    if state.reconciliation.is_none() {
-                        append(Action::StartReconcile, &mut state, &mut actions);
-                    }
-                    while let Some(operation) = state.reconciliation {
-                        let action = if operation.reply.is_some() {
-                            Action::DeliverRead
-                        } else {
-                            Action::CaptureRead
-                        };
-                        append(action, &mut state, &mut actions);
-                    }
-                    if name == "captured status precedes root advance" {
-                        append(Action::StartReconcile, &mut state, &mut actions);
-                        while let Some(operation) = state.reconciliation {
-                            let action = if operation.reply.is_some() {
-                                Action::DeliverRead
-                            } else {
-                                Action::CaptureRead
-                            };
-                            append(action, &mut state, &mut actions);
-                        }
-                    }
-                    if name == "published registration survives lost response" {
-                        append(Action::ObserveRegistration, &mut state, &mut actions);
-                    }
-                    if state.anchors[1].is_none() && state.prepared.is_none() {
-                        let old = state
-                            .packets
-                            .iter()
-                            .find(|p| p.epoch == 1 && p.requests & !state.boundary() != 0)
-                            .copied();
-                        if let Some(packet) = old {
-                            append(Action::Publish(packet), &mut state, &mut actions);
-                        }
-                        append(Action::Freeze, &mut state, &mut actions);
-                        if let Some(packet) = state.prepared {
-                            append(Action::Publish(packet), &mut state, &mut actions);
-                            append(Action::ObserveRegistration, &mut state, &mut actions);
-                        }
-                    }
-                }
-                traces.push(Trace {
-                    instance,
-                    name,
-                    actions,
-                });
-            }
-        }
-        traces
-    }
 }
 
 #[cfg(test)]

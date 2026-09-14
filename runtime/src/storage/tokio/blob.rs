@@ -1,4 +1,7 @@
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions};
+use crate::{
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    storage::hold::{Held, Hold},
+};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
@@ -49,7 +52,7 @@ impl Cache {
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    file: Arc<File>,
+    file: Arc<Held>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -59,17 +62,18 @@ pub struct Blob {
 }
 
 impl Blob {
-    pub fn new(
+    pub(crate) fn new(
         partition: String,
         name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        hold: Arc<Hold>,
     ) -> Self {
         Self {
             partition,
             name: name.into(),
-            file: Arc::new(file),
+            file: Held::new(file, hold),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),

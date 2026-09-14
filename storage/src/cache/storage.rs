@@ -1,11 +1,14 @@
-use super::{Config, Error};
+use super::Config;
 use crate::{
-    journal::segmented::variable::{Config as JConfig, Journal},
+    journal::{
+        Error,
+        segmented::variable::{Config as JConfig, Journal},
+    },
     rmap::RMap,
 };
-use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{Buf, CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
-    Buf, BufMut, Metrics, ReadOptions, Storage,
+    BufMut, Metrics, ReadOptions, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,7 +199,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         debug!(min, "pruning cache");
 
         // Prune journal
-        (self.journal, _) = self.journal.prune(min).await.map_err(Error::Journal)?;
+        (self.journal, _) = self.journal.prune(min).await?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
@@ -272,7 +275,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
     /// See [Cache::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await.map_err(Error::Journal)
+        self.journal.destroy().await
     }
 }
 

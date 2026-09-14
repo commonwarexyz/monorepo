@@ -1,9 +1,9 @@
 //! Native asset ownership and the bounded operator registry.
 
 use crate::protocol::{Account, Deployment, Key, MAX_GENESIS_ACCOUNTS, chain_id};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_clearing::bajillion::qmdb::StateRoot;
-use commonware_codec::{EncodeSize, Error, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt as _, Write};
 use commonware_cryptography::{ed25519, sha256::Digest};
 use std::collections::BTreeSet;
 

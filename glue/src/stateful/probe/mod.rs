@@ -131,9 +131,11 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
     use commonware_actor::Feedback;
-    use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_codec::{
+        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+    };
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{
@@ -604,7 +606,6 @@ mod test {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        initial: Duration::from_secs(1),
                         timeout: Duration::from_secs(2),
                         fetch_retry_timeout: Duration::from_millis(100),
                         priority_requests: false,
@@ -631,7 +632,7 @@ mod test {
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: Start::Genesis(genesis.clone()),
+                    start: Start::Genesis(genesis.clone().into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),

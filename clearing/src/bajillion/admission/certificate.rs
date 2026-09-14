@@ -1,8 +1,8 @@
 //! Exact-cardinality BLS12-381 commitment certificates over clearing headers.
 
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Hasher, bls12381::primitives::group::G2};
 use commonware_utils::{
     N3f1, Participant,
@@ -166,9 +166,9 @@ pub mod bls12381 {
     use super::{Committee, Error, HEADER_NAMESPACE};
     use crate::bajillion::transition::Header;
     use alloc::{collections::BTreeSet, vec::Vec};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
     use commonware_codec::{
-        Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
+        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
     };
     use commonware_cryptography::{
         Digest,
@@ -385,7 +385,7 @@ mod tests {
     use super::{Committee, Error, bls12381};
     use crate::bajillion::transition::Header;
     use bytes::Bytes;
-    use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, types::lazy::Lazy};
+    use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeSize, types::lazy::Lazy};
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::primitives::{
@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn test_header(label: &[u8]) -> Header<Sha256Digest> {
-        Header::decode(Sha256::hash(&[label]).as_ref()).unwrap()
+        Header::decode(Copying(Sha256::hash(&[label]).as_ref())).unwrap()
     }
 
     fn schemes(committee: &Committee, keys: Vec<Private>) -> Vec<bls12381::Scheme> {

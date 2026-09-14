@@ -95,7 +95,7 @@ where
     ///
     /// Additional observations of the same proposal are ignored here.
     /// Conflicting proposals are handled separately as equivocation.
-    fn verified(&mut self, proposal: Proposal<D>) {
+    pub fn record_verified(&mut self, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
@@ -112,16 +112,6 @@ where
         self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
-    }
-
-    /// Records a proposal built locally by this participant.
-    pub fn built(&mut self, proposal: Proposal<D>) {
-        self.verified(proposal);
-    }
-
-    /// Records a proposal we verified and voted for, but did not build locally.
-    pub fn notarized(&mut self, proposal: Proposal<D>) {
-        self.verified(proposal);
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -218,7 +208,7 @@ mod tests {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(7), View::new(3));
         let proposal = Proposal::new(round, View::new(2), Sha256Digest::from([1u8; 32]));
-        slot.built(proposal);
+        slot.record_verified(proposal);
         assert!(!slot.should_build());
     }
 
@@ -229,7 +219,7 @@ mod tests {
 
         let round = Rnd::new(Epoch::new(9), View::new(1));
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([2u8; 32]));
-        slot.built(proposal.clone());
+        slot.record_verified(proposal.clone());
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -241,27 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn records_and_prevents_duplicate_build() {
-        let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(Epoch::new(1), View::new(2));
-        let proposal = Proposal::new(round, View::new(1), Sha256Digest::from([10u8; 32]));
-
-        slot.built(proposal.clone());
-
-        assert_eq!(slot.proposal(), Some(&proposal));
-        assert_eq!(slot.status(), Status::Verified);
-        assert!(!slot.should_build());
-        assert!(!slot.request_verify());
-    }
-
-    #[test]
     fn replay_allows_existing_proposal() {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(17), View::new(6));
         let proposal = Proposal::new(round, View::new(5), Sha256Digest::from([11u8; 32]));
 
-        slot.built(proposal.clone());
-        slot.built(proposal.clone());
+        slot.record_verified(proposal.clone());
+        slot.record_verified(proposal.clone());
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
@@ -328,7 +304,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.built(honest);
+        slot.record_verified(honest);
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }

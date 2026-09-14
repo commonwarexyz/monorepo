@@ -42,14 +42,15 @@ use crate::{
     protocol::{Key, WithdrawalWitness},
     rpc::{self, ACCEPT_RETRY_DELAY, error_response},
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, ChangeOpening, HigherEntryLookup},
     qmdb::{Absence, StateOpening},
     transition::{BatchId, CloseContext, Header, RootBundle},
 };
 use commonware_codec::{
-    Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
+    Write,
 };
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},

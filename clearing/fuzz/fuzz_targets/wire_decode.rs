@@ -22,7 +22,7 @@ use commonware_clearing::bajillion::{
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
+use commonware_codec::{Copying, Decode, Encode, EncodeSize, RangeCfg, Read};
 use commonware_cryptography::{Hasher, Sha256, Signer, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use commonware_runtime::{Runner as _, deterministic};
@@ -41,18 +41,18 @@ fn roundtrip<T>(bytes: &[u8], cfg: &<T as Read>::Cfg)
 where
     T: Decode + Encode + Debug + Eq,
 {
-    let Ok(value) = T::decode_cfg(bytes, cfg) else {
+    let Ok(value) = T::decode_cfg(Copying(bytes), cfg) else {
         return;
     };
 
     let encoded = value.encode();
     assert_eq!(encoded.len(), value.encode_size());
     if !encoded.is_empty() {
-        assert!(T::decode_cfg(&encoded[..encoded.len() - 1], cfg).is_err());
+        assert!(T::decode_cfg(Copying(&encoded[..encoded.len() - 1]), cfg).is_err());
     }
     let mut trailing = encoded.to_vec();
     trailing.push(0);
-    assert!(T::decode_cfg(trailing.as_slice(), cfg).is_err());
+    assert!(T::decode_cfg(trailing, cfg).is_err());
     let decoded = T::decode_cfg(encoded, cfg).expect("encoded value must remain decodable");
     assert_eq!(decoded, value);
 }

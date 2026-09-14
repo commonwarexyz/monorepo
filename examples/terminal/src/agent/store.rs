@@ -22,7 +22,6 @@ use crate::{
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
-use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
@@ -30,7 +29,7 @@ use commonware_clearing::bajillion::{
     transition::BatchId,
     vector::{OutEntry, OutVector},
 };
-use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
+use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_cryptography_curve25519::signing::Signature;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
@@ -913,9 +912,8 @@ impl Store {
         // Fold to the terminal receipt per edge: the highest (cumulative, count) endpoint.
         let mut held = Vec::<HeldEntry>::new();
         for (payer, cumulative, count, encoded) in rows {
-            let payer = Key::decode(payer.as_slice()).context("decode held payer")?;
-            let receipt =
-                Receipt::decode(encoded.as_slice()).context("decode held incoming receipt")?;
+            let payer = Key::decode(payer).context("decode held payer")?;
+            let receipt = Receipt::decode(encoded).context("decode held incoming receipt")?;
             match held.last_mut() {
                 Some(last) if last.payer == payer => {
                     if (cumulative, count) > (last.cumulative, last.count) {
@@ -1329,10 +1327,9 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
     );
 
     Ok(Binding {
-        account: Key::decode(encoded_account.as_slice()).context("decode agent account")?,
-        deployment: Digest::decode(encoded_deployment.as_slice())
-            .context("decode agent deployment")?,
-        operator: Key::decode(encoded_operator.as_slice()).context("decode agent operator")?,
+        account: Key::decode(encoded_account).context("decode agent account")?,
+        deployment: Digest::decode(encoded_deployment).context("decode agent deployment")?,
+        operator: Key::decode(encoded_operator).context("decode agent operator")?,
     })
 }
 
@@ -1456,11 +1453,10 @@ fn read_receipt_state(connection: &Connection, account: &Key, operator: &Key) ->
         return Ok(0);
     };
     let stored_endpoint = from_sql_u64(stored_endpoint, "retained cumulative debit")?;
-    let recovery_root =
-        StateRoot::decode(encoded_root.as_slice()).context("decode receipt recovery root")?;
+    let recovery_root = StateRoot::decode(encoded_root).context("decode receipt recovery root")?;
     read_recovery_opening(connection, &recovery_root, account)?
         .context("receipt recovery opening is missing")?;
-    let authorization = SendAuthorization::decode(encoded_authorization.as_slice())
+    let authorization = SendAuthorization::decode(encoded_authorization)
         .context("decode retained authorization")?;
     ensure!(
         authorization.body().payer() == account,
@@ -1476,8 +1472,7 @@ fn read_receipt_state(connection: &Connection, account: &Key, operator: &Key) ->
     match (encoded, stored_receipts) {
         (Some(encoded), Some(stored_receipts)) => {
             let stored_receipts = from_sql_u64(stored_receipts, "retained receipt count")?;
-            let acceptance =
-                Acceptance::decode(encoded.as_slice()).context("decode retained acceptance")?;
+            let acceptance = Acceptance::decode(encoded).context("decode retained acceptance")?;
             validate_acceptance(&acceptance, account, operator)
                 .context("verify retained acceptance")?;
             ensure!(
@@ -1527,13 +1522,13 @@ fn read_context_cache(
         rows.next()?.is_none(),
         "agent database has extra context rows"
     );
-    let context = PaymentContext::decode(encoded_context.as_slice())
-        .context("decode cached payment context")?;
+    let context =
+        PaymentContext::decode(encoded_context).context("decode cached payment context")?;
     ensure!(
         context.operator() == operator,
         "cached payment context has an unexpected operator"
     );
-    let root = StateRoot::decode(encoded_root.as_slice()).context("decode cached floor root")?;
+    let root = StateRoot::decode(encoded_root).context("decode cached floor root")?;
     read_recovery_opening(connection, &root, account)?
         .context("cached context floor opening is missing")?;
     Ok(Some(ContextCache {
@@ -1575,12 +1570,11 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
         rows.next()?.is_none(),
         "agent database has multiple pending payments"
     );
-    let recovery_root =
-        StateRoot::decode(encoded_root.as_slice()).context("decode pending recovery root")?;
+    let recovery_root = StateRoot::decode(encoded_root).context("decode pending recovery root")?;
     read_recovery_opening(connection, &recovery_root, account)?
         .context("pending recovery opening is missing")?;
     Ok(Some(PendingPayment {
-        authorization: SendAuthorization::decode(encoded_authorization.as_slice())
+        authorization: SendAuthorization::decode(encoded_authorization)
             .context("decode pending authorization")?,
         entries: decode_entries(encoded_entries.as_slice())?,
         recovery_root,
@@ -1611,8 +1605,8 @@ fn read_pending_transfer(
         return Ok(None);
     };
     let encoded = read_fixed_blob(row, 0, 1, TRANSFER_REQUEST_BYTES, "pending native transfer")?;
-    let request = NativeTransferRequest::decode(bytes::Bytes::from(encoded))
-        .context("decode pending native transfer")?;
+    let request =
+        NativeTransferRequest::decode(encoded).context("decode pending native transfer")?;
     validate_transfer(&request, account)?;
     Ok(Some(request))
 }
@@ -1637,8 +1631,7 @@ fn read_pending_deposit(connection: &Connection, account: &Key) -> Result<Option
         rows.next()?.is_none(),
         "agent database has multiple pending deposits"
     );
-    let event = DepositRequest::decode(bytes::Bytes::from(encoded))
-        .context("decode pending deposit event")?;
+    let event = DepositRequest::decode(encoded).context("decode pending deposit event")?;
     validate_deposit(&event, account)?;
     Ok(Some(event))
 }
@@ -1670,7 +1663,7 @@ fn read_pending_claim(
         MAX_PENDING_CLAIM_BYTES,
         "pending withdrawal evidence",
     )?
-    .map(|encoded| operator_rpc::WithdrawalEvidenceResponse::decode(encoded.as_slice()))
+    .map(operator_rpc::WithdrawalEvidenceResponse::decode)
     .transpose()?;
     if let Some(evidence) = &evidence {
         validate_withdrawal_evidence(connection, evidence, account)?;
@@ -1678,7 +1671,7 @@ fn read_pending_claim(
     let request =
         read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
             .map(|encoded| {
-                SignedWithdrawal::decode_cfg(encoded.as_slice(), &(..=MAX_DESTINATION_BYTES).into())
+                SignedWithdrawal::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())
             })
             .transpose()?;
     if let Some(request) = &request {
@@ -1796,7 +1789,7 @@ fn read_recovery_opening(
     let Some(encoded) = encoded else {
         return Ok(None);
     };
-    let opening = StateOpening::decode_cfg(Bytes::from(encoded), &MAX_STATE_PROOF_DIGESTS)
+    let opening = StateOpening::decode_cfg(encoded, &MAX_STATE_PROOF_DIGESTS)
         .context("decode state opening")?;
     validate_recovery_opening(root, &opening, account)?;
     Ok(Some(opening))
@@ -1873,7 +1866,7 @@ fn encode_entries(entries: &[Entry]) -> Result<Vec<u8>> {
 }
 
 fn decode_entries(encoded: &[u8]) -> Result<Vec<Entry>> {
-    Vec::<Entry>::decode_cfg(encoded, &(RangeCfg::new(1..=MAX_ENTRIES), ()))
+    Vec::<Entry>::decode_cfg(Copying(encoded), &(RangeCfg::new(1..=MAX_ENTRIES), ()))
         .context("decode delta entries")
 }
 
@@ -1919,7 +1912,7 @@ fn read_vector_state(
         .into_iter()
         .map(|(recipient, cumulative, count)| {
             Ok(OutEntry {
-                recipient: Key::decode(recipient.as_slice()).context("decode vector recipient")?,
+                recipient: Key::decode(recipient).context("decode vector recipient")?,
                 cumulative: from_sql_u64(cumulative, "vector cumulative")?,
                 count: from_sql_u64(count, "vector count")?,
             })
@@ -2077,7 +2070,7 @@ fn stage_payment_transaction(
     ensure!(
         context_debit(
             &transaction,
-            SendAuthorization::<Key, Digest>::decode(encoded_authorization)?.body()
+            SendAuthorization::<Key, Digest>::decode(Copying(encoded_authorization))?.body()
         )? == previous_debit,
         "agent debit changed before payment staging"
     );
@@ -2117,7 +2110,7 @@ fn conclude_payment_transaction(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .with_context(|| format!("begin {operation}"))?;
-    let authorization = SendAuthorization::<Key, Digest>::decode(encoded_authorization)?;
+    let authorization = SendAuthorization::<Key, Digest>::decode(Copying(encoded_authorization))?;
     let body = authorization.body();
     if let Some(previous_debit) = previous_debit {
         ensure!(

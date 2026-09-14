@@ -8,8 +8,8 @@ use crate::bajillion::{
     state::{AccountChange, AccountRow, SettlementOutput},
     vector::OutTipLookup,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{BatchVerifier, PublicKey, Verifier};
 use commonware_cryptography_curve25519::signing::Signature;
 use commonware_parallel::Strategy;
@@ -224,7 +224,7 @@ fn outgoing_vectors_follow_bytes_for_construction_decoding_and_lookup() {
     EPOCH.write(&mut encoded);
     keys[0].0.write(&mut encoded);
     descending.write(&mut encoded);
-    assert!(OutVector::<ReverseKey>::decode(Bytes::from(encoded)).is_err());
+    assert!(OutVector::<ReverseKey>::decode(encoded).is_err());
     let duplicate = vec![entries[0].clone(), entries[0].clone()];
     assert!(OutVector::new(EPOCH, keys[0].0.clone(), duplicate).is_err());
 }

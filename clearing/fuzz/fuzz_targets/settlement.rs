@@ -2818,9 +2818,8 @@ fn malformed_withdrawal_claim(claim: &TestWithdrawalClaim) -> TestWithdrawalClai
         .expect("a destination encoding contains its payload");
     let mut encoded = claim.encode().to_vec();
     encoded[payload_offset] ^= 1;
-    let malformed =
-        TestWithdrawalClaim::decode_cfg(encoded.as_slice(), &(..=MAX_DESTINATION_BYTES).into())
-            .expect("mutating a destination byte preserves claim structure");
+    let malformed = TestWithdrawalClaim::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())
+        .expect("mutating a destination byte preserves claim structure");
     assert_eq!(malformed.position(), claim.position());
     assert_ne!(malformed.output(), claim.output());
     malformed

@@ -19,7 +19,7 @@ use commonware_clearing::bajillion::{
     transition::{BatchId, EpochContext, Header, RootBundle, WithdrawalClaim},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, FixedSize, RangeCfg};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{
@@ -861,8 +861,7 @@ impl Store {
                 Ok(StagedDeposit {
                     epoch: from_sql_u64(epoch, "deposit epoch")?,
                     id: *id,
-                    account: Key::decode(account.as_slice())
-                        .context("decode staged deposit account")?,
+                    account: Key::decode(account).context("decode staged deposit account")?,
                     amount: from_sql_u64(amount, "deposit amount")?,
                 })
             })
@@ -889,7 +888,7 @@ impl Store {
             .optional()?
             .map(|(epoch, applied_amount, encoded)| {
                 let request = SignedWithdrawal::<Key, Digest>::decode_cfg(
-                    encoded.as_slice(),
+                    encoded,
                     &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 )
                 .context("decode staged withdrawal")?;
@@ -927,7 +926,7 @@ impl Store {
             .optional()?
             .map(|(epoch, applied_amount, encoded)| {
                 let stored = SignedWithdrawal::<Key, Digest>::decode_cfg(
-                    encoded.as_slice(),
+                    encoded,
                     &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 )
                 .context("decode staged withdrawal")?;
@@ -1223,7 +1222,7 @@ impl Store {
         let acks = acks
             .into_iter()
             .map(|(ack, seq, debit, payer)| {
-                let ack = Ack::decode(ack.as_slice()).context("decode stored acknowledgment")?;
+                let ack = Ack::decode(ack).context("decode stored acknowledgment")?;
                 ensure!(
                     ack.body().epoch() == epoch
                         && ack.body().seq() == seq
@@ -1249,18 +1248,18 @@ impl Store {
                 let opening = read_bounded_blob(row, 9, 10, MAX_OPENING_BYTES, "entry opening")?;
                 Ok(StoredEntry {
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
-                    payer: Key::decode(payer.as_slice()).map_err(|error| {
+                    payer: Key::decode(payer).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry payer: {error}"))
                     })?,
                     seq: from_sql_u64(row.get(3)?, "batch sequence").map_err(to_sqlite_error)?,
-                    recipient: Key::decode(recipient.as_slice()).map_err(|error| {
+                    recipient: Key::decode(recipient).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
                     amount: from_sql_u64(row.get(6)?, "entry amount").map_err(to_sqlite_error)?,
                     cumulative: from_sql_u64(row.get(7)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
                     count: from_sql_u64(row.get(8)?, "entry count").map_err(to_sqlite_error)?,
-                    opening: Opening::decode(opening.as_slice()).map_err(|error| {
+                    opening: Opening::decode(opening).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
                 })
@@ -1276,11 +1275,11 @@ impl Store {
                 let payer = read_fixed_blob(row, 0, 1, Key::SIZE, "edge payer")?;
                 let recipient = read_fixed_blob(row, 2, 3, Key::SIZE, "edge recipient")?;
                 Ok(StoredEdge {
-                    payer: Key::decode(payer.as_slice()).map_err(|error| {
+                    payer: Key::decode(payer).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode edge payer: {error}"))
                     })?,
                     entry: OutEntry {
-                        recipient: Key::decode(recipient.as_slice()).map_err(|error| {
+                        recipient: Key::decode(recipient).map_err(|error| {
                             to_sqlite_error(anyhow::anyhow!("decode edge recipient: {error}"))
                         })?,
                         cumulative: from_sql_u64(row.get(4)?, "edge cumulative")
@@ -1311,10 +1310,10 @@ impl Store {
                     let event_id = read_fixed_blob(row, 0, 1, Digest::SIZE, "deposit id")?;
                     let account = read_fixed_blob(row, 2, 3, Key::SIZE, "deposit account")?;
                     Ok(DepositEvent {
-                        id: Digest::decode(event_id.as_slice()).map_err(|error| {
+                        id: Digest::decode(event_id).map_err(|error| {
                             to_sqlite_error(anyhow::anyhow!("decode deposit id: {error}"))
                         })?,
-                        account: Key::decode(account.as_slice()).map_err(|error| {
+                        account: Key::decode(account).map_err(|error| {
                             to_sqlite_error(anyhow::anyhow!("decode deposit account: {error}"))
                         })?,
                         amount: from_sql_u64(row.get(4)?, "deposit amount")
@@ -1344,7 +1343,7 @@ impl Store {
                 let encoded =
                     read_bounded_blob(row, 1, 2, MAX_WITHDRAWAL_BYTES, "encoded withdrawal")?;
                 let request = SignedWithdrawal::<Key, Digest>::decode_cfg(
-                    encoded.as_slice(),
+                    encoded,
                     &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 )
                 .map_err(|error| {
@@ -1599,12 +1598,11 @@ impl Store {
                 Ok(IncomingPayment {
                     sequence,
                     receipt: Receipt {
-                        ack: Ack::decode(ack.as_slice()).context("decode stored acknowledgment")?,
+                        ack: Ack::decode(ack).context("decode stored acknowledgment")?,
                         recipient: receiver.clone(),
                         cumulative,
                         count,
-                        opening: Opening::decode(opening.as_slice())
-                            .context("decode stored entry opening")?,
+                        opening: Opening::decode(opening).context("decode stored entry opening")?,
                     },
                 })
             })
@@ -2051,7 +2049,7 @@ impl Store {
                     [predecessor],
                     |row| row.get(0),
                 )?;
-                let roots = RootBundle::<Digest>::decode(roots.as_slice())
+                let roots = RootBundle::<Digest>::decode(roots)
                     .map_err(|_| CloseRejected("predecessor settlement roots are malformed"))?;
                 if roots.successor != *result.context.predecessor_root() {
                     return Err(CloseRejected(
@@ -2141,16 +2139,17 @@ impl Store {
             )
             .optional()?
             .context("there is no finalized withdrawal claim for this account")?;
+        let (epoch, position, encoded_claim) = encoded;
         let claim = WithdrawalClaim::<Digest>::decode_cfg(
-            encoded.2.as_slice(),
+            encoded_claim,
             &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
         )
         .context("decode withdrawal claim")?;
         ensure!(
-            claim.position() == encoded.1,
+            claim.position() == position,
             "stored withdrawal claim has the wrong position"
         );
-        Ok((encoded.0, claim))
+        Ok((epoch, claim))
     }
 
     pub(crate) fn acknowledge_withdrawal_claim(
@@ -2261,8 +2260,8 @@ impl Store {
         let Some((epoch, encoded)) = stored else {
             return Ok(None);
         };
-        let roots = RootBundle::<Digest>::decode(encoded.as_slice())
-            .context("decode latest settlement roots")?;
+        let roots =
+            RootBundle::<Digest>::decode(encoded).context("decode latest settlement roots")?;
         Ok(Some((
             from_sql_u64(epoch, "settlement epoch")?,
             roots.successor,
@@ -2362,8 +2361,8 @@ impl Store {
                         ))
                     },
                 )?;
-                let header = Header::<Digest>::decode(stored.0.as_slice())
-                    .context("decode finalized close header")?;
+                let header =
+                    Header::<Digest>::decode(stored.0).context("decode finalized close header")?;
                 Ok(StoredCloseOutcome::Finished(StoredCloseFinished {
                     header,
                     rows: usize::try_from(from_sql_u64(stored.1, "close row count")?)
@@ -2645,7 +2644,7 @@ fn find_accepted_batch(
     let Some((epoch, encoded)) = stored_ack else {
         return Ok(None);
     };
-    let ack = Ack::decode(encoded.as_slice()).context("decode stored acknowledgment")?;
+    let ack = Ack::decode(encoded).context("decode stored acknowledgment")?;
     if ack.body() != body {
         return Ok(None);
     }
@@ -2716,14 +2715,14 @@ fn batch_entries(
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
                     payer: payer.clone(),
                     seq,
-                    recipient: Key::decode(recipient.as_slice()).map_err(|error| {
+                    recipient: Key::decode(recipient).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
                     amount: from_sql_u64(row.get(3)?, "entry amount").map_err(to_sqlite_error)?,
                     cumulative: from_sql_u64(row.get(4)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
                     count: from_sql_u64(row.get(5)?, "entry count").map_err(to_sqlite_error)?,
-                    opening: Opening::decode(opening.as_slice()).map_err(|error| {
+                    opening: Opening::decode(opening).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
                 })
@@ -2762,7 +2761,7 @@ fn out_entries_for(connection: &Connection, epoch: i64, payer: &Key) -> Result<V
         .query_map(params![epoch, payer.as_ref()], |row| {
             let recipient = read_fixed_blob(row, 0, 1, Key::SIZE, "edge recipient")?;
             Ok(OutEntry {
-                recipient: Key::decode(recipient.as_slice()).map_err(|error| {
+                recipient: Key::decode(recipient).map_err(|error| {
                     to_sqlite_error(anyhow::anyhow!("decode edge recipient: {error}"))
                 })?,
                 cumulative: from_sql_u64(row.get(2)?, "edge cumulative")
@@ -2778,7 +2777,7 @@ fn read_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccount> {
     let key = read_fixed_blob(row, 1, 2, Key::SIZE, "account key")?;
     Ok(StoredAccount {
         name: row.get(0)?,
-        key: Key::decode(key.as_slice())
+        key: Key::decode(key)
             .map_err(|error| to_sqlite_error(anyhow::anyhow!("decode account key: {error}")))?,
         predecessor: from_sql_u64(row.get(3)?, "predecessor balance").map_err(to_sqlite_error)?,
         current: from_sql_u64(row.get(4)?, "current balance").map_err(to_sqlite_error)?,
@@ -2826,7 +2825,7 @@ fn effective_account(
                 from_sql_u64(row.get(0)?, "account state epoch").map_err(to_sqlite_error)?,
                 StoredAccount {
                     name: row.get(1)?,
-                    key: Key::decode(key.as_slice()).map_err(|error| {
+                    key: Key::decode(key).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode account key: {error}"))
                     })?,
                     predecessor,
@@ -2907,7 +2906,7 @@ fn pending_withdrawals(connection: &Connection, epoch: u64) -> Result<Vec<(Store
         .into_iter()
         .map(|encoded| {
             let request = SignedWithdrawal::<Key, Digest>::decode_cfg(
-                encoded.as_slice(),
+                encoded,
                 &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
             )
             .context("decode pending withdrawal")?;
@@ -3166,9 +3165,7 @@ fn stored_result(connection: &Connection, epoch: u64) -> Result<Option<Settlemen
         )
         .optional()?;
     encoded
-        .map(|bytes| {
-            SettlementResult::decode(bytes.as_slice()).context("decode retained close result")
-        })
+        .map(|bytes| SettlementResult::decode(bytes).context("decode retained close result"))
         .transpose()
 }
 
@@ -3224,7 +3221,7 @@ fn record_result(
 }
 
 fn decode_payment_context(encoded: &[u8]) -> Result<EpochPaymentContext> {
-    EpochPaymentContext::decode(encoded).context("decode stored payment context")
+    EpochPaymentContext::decode(Copying(encoded)).context("decode stored payment context")
 }
 
 fn checked_sql_add(left: u64, right: u64, field: &str) -> Result<u64> {

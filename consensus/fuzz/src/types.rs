@@ -14,6 +14,8 @@ pub enum Message {
 
 pub struct Notarization {
     pub payload: Sha256Digest,
+    /// View of the notarized proposal's parent.
+    pub parent: u64,
     /// None for threshold schemes where count is not exposed.
     pub signature_count: Option<usize>,
 }

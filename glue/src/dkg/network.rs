@@ -19,8 +19,7 @@
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
-use bytes::Buf;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{

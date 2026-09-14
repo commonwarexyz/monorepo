@@ -19,9 +19,9 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf as _, BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
     BatchVerifier, Digest, Hasher, PublicKey,

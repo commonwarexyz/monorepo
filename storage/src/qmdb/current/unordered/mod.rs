@@ -9,6 +9,7 @@
 
 pub mod db;
 pub mod fixed;
+pub mod proof;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
 pub mod variable;
@@ -17,7 +18,7 @@ pub mod variable;
 pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.
 
-    use super::db;
+    use super::{db, proof::constant};
     use crate::{
         index::unordered::Index,
         journal::contiguous::{Contiguous as _, Mutable},
@@ -233,7 +234,7 @@ pub mod tests {
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
             let (range_proof, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
-            let proof_inactive = db::KeyValueProof {
+            let proof_inactive = constant::KeyValueProof {
                 loc: op_loc,
                 chunk: chunks[0],
                 range_proof,

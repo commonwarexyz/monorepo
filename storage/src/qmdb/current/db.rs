@@ -23,12 +23,12 @@ use crate::{
         current::{
             batch::BitmapBatch,
             grafting,
-            proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
+            proof::{OpsRootWitness, RangeProof, RangeProofSpec, constant::OperationProof},
         },
         operation::Floored as _,
     },
 };
-use commonware_codec::{Codec, CodecShared, DecodeExt};
+use commonware_codec::{Codec, CodecShared, Copying, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -40,6 +40,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{
+    Widen,
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
@@ -464,7 +465,7 @@ where
     pub fn sync_boundary(&self) -> Location<F> {
         sync_boundary::<F, N>(
             *self.any.inactivity_floor_loc / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *self.any.last_commit_loc + 1,
+            *self.any.log.size(),
         )
     }
 
@@ -621,7 +622,7 @@ where
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.any.last_commit_loc + 1;
+        let current_size = *self.any.log.size();
         // No-op short-circuit. Avoids the post-rewind grafted-tree rebuild and the validation
         // and journal-read overhead below. Validation runs after this on the non-no-op path.
         if rewind_size == current_size {
@@ -879,30 +880,29 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     Some((last_chunk, next_bit))
 }
 
-/// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
+/// Return the graftable chunk count, enforcing the pending and pruning invariants.
 ///
-/// Returns [`Error::DataCorrupted`] if `bitmap` and `ops_leaves` imply more than one
+/// Returns [`Error::DataCorrupted`] if `complete` and `ops_leaves` imply more than one
 /// pending chunk, or if pruning has advanced past the graftable chunk boundary.
-fn graftable_chunk_window<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
-    bitmap: &B,
+pub(super) fn graftable_chunk_window<F: merkle::Graftable>(
     ops_leaves: Location<F>,
+    complete: u64,
+    pruned: u64,
     grafting_height: u32,
-) -> Result<(u64, u64), Error<F>> {
-    let complete = bitmap.complete_chunks() as u64;
+) -> Result<u64, Error<F>> {
     let graftable = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height).min(complete);
     let pending = complete - graftable;
     if pending > 1 {
         return Err(Error::DataCorrupted("multiple pending bitmap chunks"));
     }
 
-    let pruned = bitmap.pruned_chunks() as u64;
     if pruned > graftable {
         return Err(Error::DataCorrupted(
             "pruned chunks exceed graftable chunks",
         ));
     }
 
-    Ok((complete, graftable))
+    Ok(graftable)
 }
 
 /// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
@@ -922,8 +922,13 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
     ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<Option<[u8; N]>, Error<F>> {
-    let (complete, graftable) =
-        graftable_chunk_window::<F, B, N>(bitmap, ops_leaves, grafting_height)?;
+    let complete = Widen::widen(bitmap.complete_chunks());
+    let graftable = graftable_chunk_window(
+        ops_leaves,
+        complete,
+        Widen::widen(bitmap.pruned_chunks()),
+        grafting_height,
+    )?;
     if complete - graftable != 1 {
         return Ok(None);
     }
@@ -1086,8 +1091,12 @@ pub(super) async fn compute_grafted_root<
 
     // Validate bitmap invariants (pending <= 1, pruned <= graftable).
     let grafting_height = grafting::height::<N>();
-    let (_complete_chunks, _graftable_chunks) =
-        graftable_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
+    graftable_chunk_window(
+        ops_leaves,
+        Widen::widen(status.complete_chunks()),
+        Widen::widen(status.pruned_chunks()),
+        grafting_height,
+    )?;
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
@@ -1274,7 +1283,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
                     "missing pinned node in grafted tree metadata",
                 ));
             };
-            let digest = D::decode(bytes.as_ref())
+            let digest = D::decode(Copying(bytes))
                 .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
             pinned.push(digest);
         }
@@ -1500,6 +1509,35 @@ mod tests {
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// `operations()` on a current batch must cover exactly the batch's own applied range
+    /// in the ops log.
+    #[test_traced]
+    fn test_operations_match_applied_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("operations-match-applied-range", &ctx),
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 8).await;
+
+            let mut batch = db.new_batch();
+            for idx in 0..4u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (start, ops) = merkleized.operations();
+            let (db, range) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(start, range.start);
+            assert_eq!(*start + ops.len() as u64, *range.end);
+            db.destroy().await.unwrap();
+        });
     }
 
     /// State committed via an awaited start_sync handle is recovered on reopen, including the

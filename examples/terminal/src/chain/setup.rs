@@ -770,7 +770,7 @@ pub async fn register_operator(
     let node = OperatorConfig::load(&args.node_dir)?;
     let raw: String = read_json(&args.node_dir.join("registration.json"))?;
     let bytes = from_hex(&raw).context("invalid registration encoding")?;
-    let request = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &())?;
+    let request = RegisterDeploymentRequest::decode_cfg(bytes, &())?;
     let chain_id = genesis.native.chain_id();
     anyhow::ensure!(
         request.verify(&chain_id)
@@ -1168,7 +1168,7 @@ mod hex_digest {
     ) -> Result<Digest, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        Digest::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        Digest::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1188,7 +1188,7 @@ mod hex_private_key {
     ) -> Result<PrivateKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PrivateKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        PrivateKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1208,7 +1208,7 @@ mod hex_public_key {
     ) -> Result<PublicKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PublicKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        PublicKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1234,7 +1234,7 @@ mod hex_public_keys {
             .into_iter()
             .map(|raw| {
                 let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-                PublicKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+                PublicKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
             })
             .collect()
     }
@@ -1256,7 +1256,7 @@ mod hex_share {
     ) -> Result<Share, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        Share::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        Share::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1277,7 +1277,7 @@ mod hex_state_root {
     ) -> Result<StateRoot<Digest>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        StateRoot::decode(bytes.as_slice()).map_err(D::Error::custom)
+        StateRoot::decode(bytes).map_err(D::Error::custom)
     }
 }
 
@@ -1297,7 +1297,7 @@ mod hex_clearing {
     ) -> Result<ClearingKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        ClearingKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        ClearingKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1317,7 +1317,7 @@ mod hex_clearing_signer {
     ) -> Result<ClearingSigner, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        ClearingSigner::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        ClearingSigner::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1332,7 +1332,7 @@ mod hex_clearing_public {
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Key, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        Key::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        Key::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1352,7 +1352,7 @@ mod hex_committee_key {
     ) -> Result<ClearingPublic, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        ClearingPublic::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        ClearingPublic::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1372,7 +1372,7 @@ mod hex_operator_ack {
     ) -> Result<OperatorKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        OperatorKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+        OperatorKey::decode_cfg(bytes, &()).map_err(D::Error::custom)
     }
 }
 
@@ -1392,7 +1392,7 @@ mod hex_genesis {
     ) -> Result<Identity, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        Identity::decode_cfg(bytes.as_slice(), &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
+        Identity::decode_cfg(bytes, &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
             .map_err(D::Error::custom)
     }
 }
@@ -1750,7 +1750,7 @@ mod tests {
         .unwrap();
         let encoded: String = read_json(&joining.join("registration.json")).unwrap();
         let bytes = from_hex(&encoded).unwrap();
-        let registration = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &()).unwrap();
+        let registration = RegisterDeploymentRequest::decode_cfg(bytes, &()).unwrap();
         let operator = OperatorConfig::load(&joining).unwrap();
         assert!(registration.verify(&genesis.native.chain_id()));
         assert_eq!(registration.deployment_id(), operator.deployment);

@@ -6,8 +6,10 @@
 //! use a read-only native view over retained operations.
 //! Constructing that view can require work proportional to the historical active log window.
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::Spawner;
@@ -37,10 +39,15 @@ pub type Balance = NonZeroU64;
 /// Account-sorted writes, with absence represented by deletion.
 pub type Mutations = Vec<(AccountKey, Option<Balance>)>;
 /// Current membership proof for a balance under an MMB root.
-pub type Membership<D> = ordered::fixed::KeyValueProof<mmb::Family, AccountKey, D, 32>;
+pub type Membership<D> = ordered::proof::constant::KeyValueProof<mmb::Family, AccountKey, D, 32>;
 /// Current ordered absence proof under an MMB root.
-pub type Absence<D> =
-    ordered::ExclusionProof<mmb::Family, AccountKey, FixedEncoding<Balance>, D, 32>;
+pub type Absence<D> = ordered::proof::constant::ExclusionProof<
+    mmb::Family,
+    AccountKey,
+    FixedEncoding<Balance>,
+    D,
+    32,
+>;
 type BalanceDb<E, H, S> = Db<mmb::Family, E, AccountKey, Balance, H, EightCap, 32, S>;
 type Batch<D, S> =
     MerkleizedBatch<mmb::Family, D, Update<AccountKey, FixedEncoding<Balance>>, 32, S>;
@@ -625,7 +632,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
+    use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, Signer as _, ed25519, sha256::Digest as ShaDigest};
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -656,6 +663,7 @@ mod tests {
                 metadata_partition: format!("{prefix}-balances-merkle-meta"),
                 items_per_blob: NZU64!(256),
                 write_buffer: NZUsize!(4096),
+                replay_buffer: NZUsize!(4096),
                 strategy: Sequential,
                 page_cache: cache.clone(),
             },
@@ -663,6 +671,7 @@ mod tests {
                 partition: format!("{prefix}-balances-operations"),
                 items_per_blob: NZU64!(256),
                 write_buffer: NZUsize!(4096),
+                replay_buffer: NZUsize!(4096),
                 page_cache: cache,
             },
             grafted_metadata_partition: format!("{prefix}-balances-grafts"),
@@ -879,7 +888,7 @@ mod tests {
     #[test]
     fn proof_codecs_bind_account_value_root_and_positive_balance() {
         deterministic::Runner::default().start(|context| async move {
-            let secret = ed25519::PrivateKey::decode(&[7u8; 32][..]).unwrap();
+            let secret = ed25519::PrivateKey::decode(Copying(&[7u8; 32])).unwrap();
             let account = secret.public_key();
             let account_bytes = account_key(&account).unwrap();
             let state = TestState::init(
@@ -902,14 +911,11 @@ mod tests {
             );
             let mut zero = encoded.to_vec();
             zero[32..40].fill(0);
-            assert!(
-                StateOpening::<ed25519::PublicKey, ShaDigest>::decode_cfg(zero.as_slice(), &128)
-                    .is_err()
-            );
+            assert!(StateOpening::<ed25519::PublicKey, ShaDigest>::decode_cfg(zero, &128).is_err());
             for len in [0, 31, 39, encoded.len() - 1] {
                 assert!(
                     StateOpening::<ed25519::PublicKey, ShaDigest>::decode_cfg(
-                        &encoded[..len],
+                        Copying(&encoded[..len]),
                         &128
                     )
                     .is_err()
@@ -918,11 +924,7 @@ mod tests {
             let mut trailing = encoded.to_vec();
             trailing.push(0);
             assert!(
-                StateOpening::<ed25519::PublicKey, ShaDigest>::decode_cfg(
-                    trailing.as_slice(),
-                    &128
-                )
-                .is_err()
+                StateOpening::<ed25519::PublicKey, ShaDigest>::decode_cfg(trailing, &128).is_err()
             );
             assert!(
                 decoded
@@ -932,7 +934,7 @@ mod tests {
             let mut changed = decoded.clone();
             changed.balance = balance(51);
             assert!(changed.verify::<Sha256>(&state.root()).is_err());
-            let other = ed25519::PrivateKey::decode(&[8u8; 32][..])
+            let other = ed25519::PrivateKey::decode(Copying(&[8u8; 32]))
                 .unwrap()
                 .public_key();
             changed = decoded;

@@ -38,8 +38,8 @@
 //! to prevent accidental type misuse.
 
 use crate::{Epochable, Viewable};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -149,7 +149,7 @@ impl From<Epoch> for U64 {
 
 /// Represents a sequential position in a chain or sequence.
 ///
-/// Height is a monotonically increasing counter.
+/// Height is a monotonically increasing counter. Height zero is the genesis block.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Height(u64);
@@ -740,6 +740,9 @@ impl EpochInfo {
 }
 
 /// Mechanism for determining epoch boundaries.
+///
+/// Genesis is not produced by any epoch, so every epoch must contain at least one
+/// height above [`Height::zero`].
 pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns the information about an epoch containing the given block height.
     ///
@@ -758,11 +761,18 @@ pub trait Epocher: Clone + Send + Sync + 'static {
 }
 
 /// Implementation of [`Epocher`] for fixed epoch lengths.
+///
+/// Epoch `e` spans heights `e * length..(e + 1) * length`, so epoch zero includes
+/// genesis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedEpocher(u64);
 
 impl FixedEpocher {
     /// Creates a new fixed epoch strategy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `length` is one, since epoch zero would contain only genesis.
     ///
     /// # Example
     /// ```rust
@@ -771,6 +781,7 @@ impl FixedEpocher {
     /// let strategy = FixedEpocher::new(NZU64!(60_480));
     /// ```
     pub const fn new(length: NonZeroU64) -> Self {
+        assert!(length.get() > 1, "epoch length must exceed one");
         Self(length.get())
     }
 
@@ -1008,7 +1019,7 @@ commonware_macros::stability_scope!(ALPHA {
             }
 
             fn field<T: ReadExt + FixedSize>(&self, offset: usize) -> T {
-                T::read(&mut &self.0[offset..offset + T::SIZE])
+                T::read(&mut commonware_codec::Copying(&self.0[offset..offset + T::SIZE]))
                     .expect("fields are validated on decode and typed construction")
             }
 
@@ -1020,7 +1031,7 @@ commonware_macros::stability_scope!(ALPHA {
             ) -> Result<(), commonware_codec::Error> {
                 let field_end = offset + T::SIZE;
                 let padding_end = offset + COMMITMENT_DIGEST_SIZE;
-                T::read(&mut &bytes[offset..field_end])
+                T::read(&mut commonware_codec::Copying(&bytes[offset..field_end]))
                     .map_err(|_| commonware_codec::Error::Invalid("Commitment", reason))?;
                 if bytes[field_end..padding_end].iter().any(|byte| *byte != 0) {
                     return Err(commonware_codec::Error::Invalid(
@@ -1088,7 +1099,7 @@ commonware_macros::stability_scope!(ALPHA {
             type Cfg = ();
 
             fn read_cfg(
-                buf: &mut impl bytes::Buf,
+                buf: &mut impl commonware_codec::Buf,
                 _cfg: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 const { Self::assert_layout() };
@@ -1109,7 +1120,7 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::CONTEXT_OFFSET,
                     "invalid context digest",
                 )?;
-                let mut cursor = &arr[Self::CONFIG_OFFSET..];
+                let mut cursor = commonware_codec::Copying(&arr[Self::CONFIG_OFFSET..]);
                 CodingConfig::read(&mut cursor).map_err(|_| {
                     commonware_codec::Error::Invalid("Commitment", "invalid embedded CodingConfig")
                 })?;
@@ -2150,6 +2161,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "epoch length must exceed one")]
+    fn test_fixed_epocher_rejects_length_one() {
+        let _ = FixedEpocher::new(NZU64!(1));
+    }
+
+    #[test]
     fn test_fixed_epocher_overflow() {
         // Test that containing() returns None when last() would overflow
         let epocher = FixedEpocher::new(NZU64!(100));
@@ -2196,8 +2213,8 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
 
-        // Test with epoch length 1 (every height is its own epoch)
-        let epocher = FixedEpocher::new(NZU64!(1));
+        // Test with the smallest epoch length (the final epoch ends exactly at u64::MAX)
+        let epocher = FixedEpocher::new(NZU64!(2));
         let result = epocher.containing(Height::new(u64::MAX));
         assert!(result.is_some());
         assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
@@ -2258,7 +2275,7 @@ mod tests {
             type Cfg = ();
 
             fn read_cfg(
-                _: &mut impl bytes::Buf,
+                _: &mut impl commonware_codec::Buf,
                 _: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 Err(commonware_codec::Error::Invalid(
@@ -2384,7 +2401,7 @@ mod tests {
         ] {
             let mut malformed = encoded.to_vec();
             malformed[offset] = 1;
-            assert!(CrcCommitment::decode(malformed.as_ref()).is_err());
+            assert!(CrcCommitment::decode(malformed).is_err());
         }
     }
 

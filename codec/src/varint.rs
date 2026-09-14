@@ -29,8 +29,8 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use bytes::{Buf, BufMut};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, Write};
+use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
@@ -376,12 +376,17 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
         return;
     }
 
+    // Stage the encoded bytes on the stack so the buffer receives a single bulk write.
+    let mut bytes = [0u8; MAX_U128_VARINT_SIZE];
+    let mut len = 0;
     let mut val = value;
     while val >= continuation_threshold {
-        buf.put_u8((val.as_u8()) | CONTINUATION_BIT_MASK);
+        bytes[len] = val.as_u8() | CONTINUATION_BIT_MASK;
+        len += 1;
         val >>= 7;
     }
-    buf.put_u8(val.as_u8());
+    bytes[len] = val.as_u8();
+    buf.put_slice(&bytes[..=len]);
 }
 
 /// Decodes an unsigned integer from a varint.
@@ -390,13 +395,20 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
 fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
+    // Fast path for single-byte values.
+    let mut byte = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
+    if byte & CONTINUATION_BIT_MASK == 0 {
+        return Ok(T::from(byte));
+    }
+
+    // The decoder enforces canonical encodings and rejects overflow for multi-byte values,
+    // starting with the byte already read.
     let mut decoder = Decoder::<T>::new();
     loop {
-        // Read the next byte.
-        let byte = u8::read(buf)?;
         if let Some(value) = decoder.feed(byte)? {
             return Ok(value);
         }
+        byte = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
     }
 }
 
@@ -426,8 +438,16 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode, error::Error};
-    use bytes::Bytes;
+    use crate::{Copying, DecodeExt, Encode, error::Error};
+    use bytes::{Buf as _, Bytes};
+
+    #[test]
+    fn test_fragmented_varint() {
+        let mut buf = Bytes::from_static(&[0x80]).chain(Bytes::from_static(&[0x01, 0x07]));
+        assert_eq!(read::<u32>(&mut buf).unwrap(), 128);
+        assert_eq!(read::<u32>(&mut buf).unwrap(), 7);
+        assert_eq!(buf.remaining(), 0);
+    }
 
     #[test]
     fn test_end_of_buffer() {
@@ -508,10 +528,10 @@ mod tests {
             assert_eq!(buf.len(), size(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf);
             let decoded: T = read(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // UInt wrapper
             let encoded = UInt(value).encode();
@@ -563,10 +583,10 @@ mod tests {
             assert_eq!(buf.len(), size_signed(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf);
             let decoded: T = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // SInt wrapper
             let encoded = SInt(value).encode();
@@ -671,11 +691,11 @@ mod tests {
             );
 
             // Verify we can decode it back correctly
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf);
             let decoded: i16 = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value, "Decode mismatch for value {value}");
             assert!(
-                slice.is_empty(),
+                slice.0.is_empty(),
                 "Buffer not fully consumed for value {value}",
             );
         }

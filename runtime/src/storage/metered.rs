@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
@@ -92,8 +92,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
@@ -246,23 +246,34 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPool, BufferPoolConfig, IoBufMut, Storage as _,
+        Blob, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
         mocks::RecordingContext,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
+    use rstest::rstest;
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
-    #[tokio::test]
-    async fn test_metered_storage() {
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
-        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_metered_storage<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let mut registry = crate::telemetry::metrics::Registry::default();
+            let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+            let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
-        run_storage_tests(storage).await;
+            run_storage_tests(context, storage).await;
+        });
     }
 
     #[tokio::test]
@@ -309,7 +320,11 @@ mod tests {
 
         // Reopen with a disjoint version range
         let result = storage
-            .open_versioned("partition", b"test_blob", 7..=7)
+            .open_versioned(
+                "partition",
+                b"test_blob",
+                BlobVersion::new(7)..=BlobVersion::new(7),
+            )
             .await;
         assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
         assert_eq!(

@@ -2,10 +2,10 @@
 
 use crate::merkle::{Family, Location};
 use commonware_codec::{
-    CodecShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, CodecShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
     util::ensure_zeros,
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use core::{fmt::Debug, hash::Hash, ops::Deref};
 
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys

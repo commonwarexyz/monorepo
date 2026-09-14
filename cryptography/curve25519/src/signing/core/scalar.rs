@@ -13,7 +13,7 @@ const L: [u64; 4] = [
 ];
 
 /// `floor(2^512 / L)`, the Barrett reduction constant for reducing a 512-bit value modulo `L`
-/// (see [`barrett_reduce`]). `L` is just over `2^252`, so this is just over `2^260`, five
+/// (see [`barrett_reduce`]). `L` is just over `2^252`, so this is just under `2^260`, five
 /// little-endian 64-bit limbs.
 const MU: [u64; 5] = [
     0xed9ce5a30a2c131b,
@@ -24,8 +24,8 @@ const MU: [u64; 5] = [
 ];
 
 /// An integer modulo `L`, always canonically reduced (`< L`).
-#[derive(Copy, Clone, Debug, Zeroize)]
-pub struct Scalar(pub [u64; 4]);
+#[derive(Copy, Clone, Zeroize)]
+pub struct Scalar([u64; 4]);
 
 /// Returns `true` if `a < b`, comparing as 256-bit unsigned integers (little-endian limbs).
 fn limbs_lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
@@ -87,50 +87,22 @@ fn limbs_sub5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
     limbs_sub_with_borrow(a, b).0
 }
 
-/// Returns the full 512-bit product `a * b` as eight little-endian 64-bit limbs, via the standard
+/// Returns the full product `a * b` as little-endian 64-bit limbs, via the standard
 /// schoolbook multiply-accumulate-with-carry ("Comba") method.
-fn limbs_mul_wide(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
-    let mut t = [0u64; 8];
-    for i in 0..4 {
+fn limbs_mul_wide<const A: usize, const B: usize, const OUT: usize>(
+    a: &[u64; A],
+    b: &[u64; B],
+) -> [u64; OUT] {
+    const { assert!(OUT == A + B) };
+    let mut t = [0u64; OUT];
+    for i in 0..A {
         let mut carry = 0u128;
-        for j in 0..4 {
+        for j in 0..B {
             let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
             t[i + j] = sum as u64;
             carry = sum >> 64;
         }
-        t[i + 4] = carry as u64;
-    }
-    t
-}
-
-/// Returns the full product `a * b` as ten little-endian 64-bit limbs, via the same
-/// schoolbook method as [`limbs_mul_wide`].
-fn mul5x5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 10] {
-    let mut t = [0u64; 10];
-    for i in 0..5 {
-        let mut carry = 0u128;
-        for j in 0..5 {
-            let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
-            t[i + j] = sum as u64;
-            carry = sum >> 64;
-        }
-        t[i + 5] = carry as u64;
-    }
-    t
-}
-
-/// Returns the full product `a * b` as nine little-endian 64-bit limbs, via the same schoolbook
-/// method as [`limbs_mul_wide`].
-fn mul5x4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 9] {
-    let mut t = [0u64; 9];
-    for i in 0..5 {
-        let mut carry = 0u128;
-        for j in 0..4 {
-            let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
-            t[i + j] = sum as u64;
-            carry = sum >> 64;
-        }
-        t[i + 4] = carry as u64;
+        t[i + B] = carry as u64;
     }
     t
 }
@@ -145,11 +117,11 @@ fn mul5x4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 9] {
 /// at most two trial subtractions of `L` remain to reach the canonical residue.
 fn barrett_reduce(x: [u64; 8]) -> Scalar {
     let q1: [u64; 5] = x[3..8].try_into().expect("slice has 5 elements");
-    let q2 = mul5x5(&q1, &MU);
+    let q2 = limbs_mul_wide::<5, 5, 10>(&q1, &MU);
     let q3: [u64; 5] = q2[5..10].try_into().expect("slice has 5 elements");
 
     let r1: [u64; 5] = x[0..5].try_into().expect("slice has 5 elements");
-    let r2: [u64; 5] = mul5x4(&q3, &L)[0..5]
+    let r2: [u64; 5] = limbs_mul_wide::<5, 4, 9>(&q3, &L)[0..5]
         .try_into()
         .expect("slice has 5 elements");
     let mut r = limbs_sub5(&r1, &r2);
@@ -168,11 +140,7 @@ impl Scalar {
 
     /// Returns the additive inverse modulo `L`.
     pub fn neg_mod_l(&self) -> Self {
-        if self.0 == Self::ZERO.0 {
-            *self
-        } else {
-            Self(limbs_sub(&L, &self.0))
-        }
+        Self(limbs_conditional_sub(&limbs_sub(&L, &self.0), &L))
     }
 
     /// Interprets `bytes` as a little-endian integer and rejects it unless it is already the
@@ -389,7 +357,7 @@ mod tests {
                 let a: Scalar = u.arbitrary()?;
                 let b: Scalar = u.arbitrary()?;
 
-                let wide = super::limbs_mul_wide(&a.0, &b.0);
+                let wide: [u64; 8] = super::limbs_mul_wide(&a.0, &b.0);
                 let mut bytes = [0u8; 64];
                 for (i, limb) in wide.iter().enumerate() {
                     bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
@@ -402,46 +370,118 @@ mod tests {
     }
 
     #[test]
+    fn neg_mod_l_is_canonical_additive_inverse() {
+        for scalar in [
+            Scalar::ZERO,
+            Scalar::from_u128(1),
+            Scalar(limbs_sub(&L, &[1, 0, 0, 0])),
+        ] {
+            let negative = scalar.neg_mod_l();
+            assert!(limbs_lt(&negative.0, &L));
+            assert_eq!(scalar.add_mod_l(&negative).0, Scalar::ZERO.0);
+            assert_eq!(negative.neg_mod_l().0, scalar.0);
+        }
+
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let scalar: Scalar = u.arbitrary()?;
+                let negative = scalar.neg_mod_l();
+                assert!(limbs_lt(&negative.0, &L));
+                assert_eq!(scalar.add_mod_l(&negative).0, Scalar::ZERO.0);
+                assert_eq!(negative.neg_mod_l().0, scalar.0);
+                Ok(())
+            });
+    }
+
+    #[test]
     fn signed_digits_reconstruct_value() {
-        const WIDTH: u32 = 6;
-        const N: usize = 256usize.div_ceil(WIDTH as usize) + 1;
+        const N: usize = 256usize.div_ceil(6) + 1;
 
         Builder::default()
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
                 let s: Scalar = u.arbitrary()?;
-                let digits = s.signed_digits::<N>(WIDTH);
-
-                let base = Scalar::from_u128(1u128 << WIDTH);
-                let mut reconstructed = Scalar::ZERO;
-                let mut power = Scalar::from_u128(1);
-                for &digit in &digits {
-                    let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
-                    let term = power.mul_mod_l(&magnitude);
-                    let term = if digit < 0 { term.neg_mod_l() } else { term };
-                    reconstructed = reconstructed.add_mod_l(&term);
-                    power = power.mul_mod_l(&base);
+                for width in 6..=10 {
+                    let digits = s.signed_digits::<N>(width);
+                    let base = Scalar::from_u128(1u128 << width);
+                    let mut reconstructed = Scalar::ZERO;
+                    let mut power = Scalar::from_u128(1);
+                    for &digit in &digits {
+                        let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
+                        let term = power.mul_mod_l(&magnitude);
+                        let term = if digit < 0 { term.neg_mod_l() } else { term };
+                        reconstructed = reconstructed.add_mod_l(&term);
+                        power = power.mul_mod_l(&base);
+                    }
+                    assert_eq!(reconstructed.0, s.0, "width={width}");
                 }
-
-                assert_eq!(reconstructed.0, s.0);
                 Ok(())
             });
     }
 
     #[test]
     fn signed_digits_are_in_range() {
-        const WIDTH: u32 = 6;
-        const N: usize = 256usize.div_ceil(WIDTH as usize) + 1;
-        let half = 1i32 << (WIDTH - 1);
+        const N: usize = 256usize.div_ceil(6) + 1;
 
         Builder::default()
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
                 let s: Scalar = u.arbitrary()?;
-                for digit in s.signed_digits::<N>(WIDTH) {
-                    assert!((-half..half).contains(&digit));
+                for width in 6..=10 {
+                    let half = 1i32 << (width - 1);
+                    let digits = s.signed_digits::<N>(width);
+                    for digit in digits {
+                        assert!((-half..half).contains(&digit));
+                    }
+                    let windows = 256usize.div_ceil(width as usize) + 1;
+                    assert!(digits[windows..].iter().all(|&digit| digit == 0));
+                }
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn canonical_decoding_at_order_boundary() {
+        for (limbs, valid) in [
+            ([0; 4], true),
+            (limbs_sub(&L, &[1, 0, 0, 0]), true),
+            (L, false),
+            (super::limbs_add(&L, &[1, 0, 0, 0]), false),
+            ([u64::MAX; 4], false),
+        ] {
+            let bytes = Scalar(limbs).to_bytes();
+            let decoded = Scalar::from_canonical_bytes(&bytes);
+            assert_eq!(decoded.is_some(), valid);
+            if let Some(decoded) = decoded {
+                assert_eq!(decoded.to_bytes(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn windows_match_bits_across_limb_boundaries() {
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let scalar: Scalar = u.arbitrary()?;
+                let bytes = scalar.to_bytes();
+                for width in 6..=10 {
+                    for index in 0..=256usize.div_ceil(width as usize) {
+                        let mut expected = 0;
+                        for offset in 0..width as usize {
+                            let bit = index * width as usize + offset;
+                            if bit < 256 {
+                                expected |=
+                                    usize::from((bytes[bit / 8] >> (bit % 8)) & 1) << offset;
+                            }
+                        }
+                        assert_eq!(scalar.window(index, width), expected);
+                    }
                 }
                 Ok(())
             });

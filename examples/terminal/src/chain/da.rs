@@ -24,7 +24,7 @@ use crate::{
     rpc,
 };
 use anyhow::{Context as _, Result, ensure};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, UnreliablePolicy, UnreliableReceiver, UnreliableSender};
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381, seal},
@@ -36,8 +36,8 @@ use commonware_clearing::bajillion::{
     },
 };
 use commonware_codec::{
-    DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
-    Write,
+    Buf, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher as _, Sha256, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
@@ -371,6 +371,7 @@ pub(crate) async fn store<E: StorageContext>(
         context,
         prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{prefix}-metadata"),
             key_partition: format!("{prefix}-key"),
             key_page_cache: cache,
             value_partition: format!("{prefix}-value"),
@@ -816,7 +817,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let ballot = record.ballot(proposal, vote);
         let batch = record.header.batch_id::<Sha256>().into_digest();
         let archive = lane.votes.take().expect("vote archive owner");
-        let archive = archive.put_sync(dealing.epoch, batch, record).await?;
+        let archive = archive.put_sync(dealing.epoch, batch, &record).await?;
         ensure!(
             archive.has(Identifier::Key(&batch)).await?,
             "vote evidence was not retained"
@@ -1026,7 +1027,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 archive.get(Identifier::Index(epoch)).await?.is_none(),
                 "conflicting canonical epoch"
             );
-            let archive = archive.put_sync(epoch, batch, record).await?;
+            let archive = archive.put_sync(epoch, batch, &record).await?;
             ensure!(
                 archive.has(Identifier::Key(&batch)).await?,
                 "canonical evidence was not retained"
@@ -1926,7 +1927,7 @@ mod tests {
                 .put_sync(
                     0,
                     record_a.header.batch_id::<Sha256>().into_digest(),
-                    record_a.clone(),
+                    &record_a,
                 )
                 .await
                 .unwrap();
@@ -2055,7 +2056,7 @@ mod tests {
             .put_sync(
                 0,
                 record_b.header.batch_id::<Sha256>().into_digest(),
-                record_b.clone(),
+                &record_b,
             )
             .await
             .unwrap();
@@ -2120,7 +2121,7 @@ mod tests {
             .put_sync(
                 0,
                 record_b.header.batch_id::<Sha256>().into_digest(),
-                already_applied,
+                &already_applied,
             )
             .await
             .unwrap();
@@ -2143,7 +2144,7 @@ mod tests {
             .put_sync(
                 0,
                 wrong_size.header.batch_id::<Sha256>().into_digest(),
-                wrong_size,
+                &wrong_size,
             )
             .await
             .unwrap();

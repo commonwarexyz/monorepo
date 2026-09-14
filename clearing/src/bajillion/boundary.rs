@@ -2,9 +2,9 @@
 
 use crate::bajillion::commitment::{self, VectorKind, VectorRoot};
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use commonware_parallel::Sequential;
@@ -773,7 +773,7 @@ mod arbitrary_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, DecodeExt as _, Encode};
+    use commonware_codec::{Copying, Decode, DecodeExt as _, Encode};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
         SigningKey, StrictVerifyingKey as VerifyingKey,
@@ -814,7 +814,7 @@ mod tests {
             .to_vec();
         encoded[..VerifyingKey::SIZE].fill(0);
         encoded[0] = 1;
-        assert!(TestWithdrawal::decode_cfg(encoded.as_slice(), &(..=32).into()).is_err());
+        assert!(TestWithdrawal::decode_cfg(encoded, &(..=32).into()).is_err());
     }
 
     #[test]
@@ -961,28 +961,28 @@ mod tests {
         );
         assert_eq!(WithdrawalAction::Close.encode().as_ref(), &[2]);
         assert_eq!(
-            WithdrawalAction::decode([2].as_slice()).unwrap(),
+            WithdrawalAction::decode(Copying(&[2])).unwrap(),
             WithdrawalAction::Close
         );
 
         assert!(matches!(
-            WithdrawalAction::decode([0].as_slice()),
+            WithdrawalAction::decode(Copying(&[0])),
             Err(CodecError::InvalidEnum(0))
         ));
         assert!(matches!(
-            WithdrawalAction::decode([3].as_slice()),
+            WithdrawalAction::decode(Copying(&[3])),
             Err(CodecError::InvalidEnum(3))
         ));
         assert!(matches!(
-            WithdrawalAction::decode([1].as_slice()),
+            WithdrawalAction::decode(Copying(&[1])),
             Err(CodecError::EndOfBuffer)
         ));
         assert!(matches!(
-            WithdrawalAction::decode([1, 0, 0, 0, 0, 0, 0, 0, 0].as_slice()),
+            WithdrawalAction::decode(Copying(&[1, 0, 0, 0, 0, 0, 0, 0, 0])),
             Err(CodecError::Invalid("NonZeroU64", _))
         ));
         assert!(matches!(
-            WithdrawalAction::decode([2, 0].as_slice()),
+            WithdrawalAction::decode(Copying(&[2, 0])),
             Err(CodecError::ExtraData(1))
         ));
     }

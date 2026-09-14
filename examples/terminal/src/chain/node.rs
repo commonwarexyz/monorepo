@@ -104,6 +104,7 @@ use std::{
     net::SocketAddr,
     num::NonZeroUsize,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -958,7 +959,6 @@ pub(crate) async fn start(
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -984,6 +984,7 @@ pub(crate) async fn start(
     // Prunable archives backing marshal.
     let archive_config = |name: &str| prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{partition_prefix}-{name}-metadata"),
         key_partition: format!("{partition_prefix}-{name}-key"),
         key_page_cache: page_cache.clone(),
         value_partition: format!("{partition_prefix}-{name}-value"),
@@ -1024,7 +1025,7 @@ pub(crate) async fn start(
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone()),
+            start: plan.marshal_start(Arc::new(genesis_block.clone())),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),

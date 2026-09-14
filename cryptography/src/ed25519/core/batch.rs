@@ -44,7 +44,6 @@ use ahash::RandomState;
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::union_unique;
 use core::iter::once;
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as B,
@@ -67,16 +66,14 @@ fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
 
 /// A batch verification context.
 #[derive(Default)]
-pub struct Verifier {
-    /// Signature data queued for verification, in insertion order. Payloads
-    /// are copied (instead of hashed at queue time) so the SHA-512 challenge
-    /// computation for every signature is deferred to [`Verifier::verify`],
-    /// where it runs under the caller's [`Strategy`] instead of serially at
-    /// queue time.
-    signatures: Vec<(VerificationKey, Vec<u8>, Signature)>,
+pub struct Verifier<P> {
+    /// Signature data queued in insertion order. Payloads remain available for
+    /// SHA-512 challenge computation under the caller's [`Strategy`] during
+    /// [`Verifier::verify`].
+    signatures: Vec<(VerificationKey, P, Signature)>,
 }
 
-impl Verifier {
+impl<P: AsRef<[u8]> + Sync> Verifier<P> {
     /// Construct a batch verifier with space for `capacity` queued signatures.
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -84,20 +81,8 @@ impl Verifier {
         }
     }
 
-    /// Queue a `(key, signature)` pair for verification of `message` under
-    /// `namespace`.
-    pub fn queue(
-        &mut self,
-        vk: VerificationKey,
-        sig: Signature,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-    ) {
-        let payload = namespace.map_or_else(
-            || message.to_vec(),
-            |namespace| union_unique(namespace, message),
-        );
-
+    /// Queues a signature over the supplied payload.
+    pub fn queue(&mut self, vk: VerificationKey, sig: Signature, payload: P) {
         self.signatures.push((vk, payload, sig));
     }
 
@@ -167,7 +152,7 @@ impl Verifier {
     /// split evenly across shards, and keys crafted to share a first byte
     /// just forfeit the grouping, costing no more than the unpartitioned
     /// order.
-    fn partition(signatures: &[(VerificationKey, Vec<u8>, Signature)]) -> Vec<usize> {
+    fn partition(signatures: &[(VerificationKey, P, Signature)]) -> Vec<usize> {
         let mut counts = [0; 256];
         for (vk, _, _) in signatures {
             counts[vk.as_bytes()[0] as usize] += 1;
@@ -191,10 +176,13 @@ impl Verifier {
     /// randomizer for each signature from `seed`.
     #[allow(non_snake_case)]
     fn verify_shard<'a>(
-        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
+        items: impl Iterator<Item = &'a (VerificationKey, P, Signature)>,
         n: usize,
         seed: Summary,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        P: 'a,
+    {
         let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
 
         // The batch verification equation is
@@ -240,7 +228,7 @@ impl Verifier {
                 Sha512::default()
                     .chain(&sig.R_bytes[..])
                     .chain(vk.as_bytes())
-                    .chain(payload),
+                    .chain(payload.as_ref()),
             );
             let R = CompressedEdwardsY(sig.R_bytes)
                 .decompress()
@@ -276,6 +264,7 @@ impl Verifier {
 #[cfg(test)]
 mod tests {
     use super::{super::SigningKey, *};
+    use bytes::Bytes;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{NZUsize, test_rng};
     use rand::RngExt as _;
@@ -300,23 +289,28 @@ mod tests {
     }
 
     /// Queue `items` and verify them with `strategy`.
-    fn verify_with(
+    fn verify_with<P: AsRef<[u8]> + Sync + From<Vec<u8>>>(
         items: &[(VerificationKey, Signature, [u8; 32])],
         strategy: &impl Strategy,
     ) -> bool {
-        let mut verifier = Verifier::default();
+        let mut verifier = Verifier::new(items.len());
         for (vk, sig, msg) in items {
-            verifier.queue(*vk, *sig, None, msg);
+            verifier.queue(*vk, *sig, P::from(msg.to_vec()));
         }
         verifier.verify(test_rng(), strategy).is_ok()
     }
 
-    /// Verify `items` with both the sequential and a parallel strategy,
-    /// asserting the outcomes agree, and return the outcome.
+    /// Verify owned and shared payloads with sequential and parallel strategies.
     fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
-        let sequential = verify_with(items, &Sequential);
-        let parallel = verify_with(items, &Rayon::new(NZUsize!(4)).unwrap());
-        assert_eq!(sequential, parallel);
+        let sequential = verify_with::<Vec<u8>>(items, &Sequential);
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        for verified in [
+            verify_with::<Bytes>(items, &Sequential),
+            verify_with::<Vec<u8>>(items, &parallel),
+            verify_with::<Bytes>(items, &parallel),
+        ] {
+            assert_eq!(sequential, verified);
+        }
         sequential
     }
 
@@ -345,24 +339,5 @@ mod tests {
 
         items[5].2[0] ^= 1;
         assert!(!verify(&items));
-    }
-
-    #[test]
-    fn test_deferred_framing_matches_union_unique() {
-        // A signature over union_unique(ns, msg) must verify when queued as
-        // (ns, msg), pinning the deferred framing to union_unique's format.
-        let mut rng = test_rng();
-        let sk = SigningKey::new(&mut rng);
-        let namespace = b"namespace";
-        let msg = b"message";
-        let sig = sk.sign(&union_unique(namespace, msg));
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(namespace), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_ok());
-
-        // A different namespace must fail.
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(b"other"), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_err());
     }
 }

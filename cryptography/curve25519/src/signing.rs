@@ -13,8 +13,9 @@
 //! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria.
 //! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
 //! verifies individually. Because batch verification checks a randomized linear combination, an
-//! invalid batch may be accepted with probability about `2^-128`. See [this post] for why these
-//! criteria matter.
+//! invalid batch may be accepted with probability about `2^-128`, provided each verification
+//! call draws a fresh seed from an RNG unpredictable to whoever assembled the batch. See
+//! [this post] for why these criteria matter.
 //! [`StrictVerifyingKey`] additionally requires a canonical, non-identity point in the prime-order
 //! subgroup, making it suitable for identities whose signatures must demonstrate secret-key
 //! knowledge.
@@ -33,8 +34,8 @@ use ::core::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -78,6 +79,8 @@ fn prime_order_products(backend: impl Backend, points: [GAffine; LANES]) -> [G; 
 /// An Ed25519 signing key.
 ///
 /// Secret material is zeroized when the key is dropped.
+/// Serialization writes the raw secret seed, so callers must protect the encoded bytes as
+/// secret key material.
 #[derive(ZeroizeOnDrop)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
@@ -102,7 +105,6 @@ impl Clone for SigningKey {
     }
 }
 
-// Private methods.
 impl SigningKey {
     fn from_seed(seed: [u8; 32]) -> Self {
         let seed = Zeroizing::new(seed);
@@ -178,6 +180,43 @@ impl SigningKey {
         bytes[32..].copy_from_slice(&s_bytes);
         Signature { bytes }
     }
+
+    /// The verifying key associated with this signing key.
+    ///
+    /// Signatures produced by this signing key can be verified using this public key.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.verifying_key.clone()
+    }
+
+    /// The strict identity key associated with this signing key.
+    pub fn strict_verifying_key(&self) -> StrictVerifyingKey {
+        StrictVerifyingKey {
+            zip215: self.verifying_key.clone(),
+        }
+    }
+
+    /// Signs a namespaced message using deterministic Ed25519.
+    ///
+    /// The namespace is committed to the signature to prevent its reuse in another context.
+    /// Signing is deterministic per [RFC 8032]: the nonce is derived from the key and the
+    /// message, so signing the same message twice yields the same signature and no randomness
+    /// is consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
+    ///
+    /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
+    pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
+        let msg = union_unique(namespace, msg);
+        self.sign_message(&msg)
+    }
+
+    /// Signs an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn sign_raw(&self, msg: &[u8]) -> Signature {
+        self.sign_message(msg)
+    }
 }
 
 impl Random for SigningKey {
@@ -215,43 +254,12 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
     }
 }
 
-// Public methods.
-impl SigningKey {
-    /// The verifying key associated with this signing key.
-    ///
-    /// Signatures produced by this signing key can be verified using this public key.
-    pub fn verifying_key(&self) -> VerifyingKey {
-        self.verifying_key.clone()
-    }
-
-    /// The strict identity key associated with this signing key.
-    pub fn strict_verifying_key(&self) -> StrictVerifyingKey {
-        StrictVerifyingKey {
-            zip215: self.verifying_key.clone(),
-        }
-    }
-
-    /// Signs a namespaced message using deterministic Ed25519.
-    ///
-    /// The namespace is committed to the signature to prevent its reuse in another context.
-    /// Signing is deterministic per [RFC 8032]: the nonce is derived from the key and the
-    /// message, so signing the same message twice yields the same signature and no randomness
-    /// is consumed.
-    ///
-    /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
-    pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
-        let msg = union_unique(namespace, msg);
-        self.sign_message(&msg)
-    }
-
-    /// Signs an unframed message for raw Ed25519 test-vector checks.
-    #[cfg(test)]
-    pub(crate) fn sign_raw(&self, msg: &[u8]) -> Signature {
-        self.sign_message(msg)
-    }
-}
-
 /// A public key used to check signatures.
+///
+/// Decoding accepts any 32 bytes and defers point validation until signature verification.
+/// Encodings that do not represent a curve point can never verify a signature.
+/// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
+/// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
 #[derive(Clone)]
 pub struct VerifyingKey {
     /// The encoded point.
@@ -372,12 +380,13 @@ impl VerifyingKey {
             .mul_by_cofactor()
             .is_identity()
     }
-}
 
-// Public methods.
-impl VerifyingKey {
     /// Verifies `sig` over the namespaced message, per the [module's validation
     /// criteria](self).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
     #[must_use]
     pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
         let msg = union_unique(namespace, msg);
@@ -576,6 +585,9 @@ impl commonware_cryptography::Signature for Signature {}
 /// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
 /// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
 /// admit a signature that verifies for any message.
+///
+/// Decoding accepts any 64 bytes. Point decoding and scalar canonicality are checked during
+/// verification. Equality, ordering, and hashing compare the original encoding.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature {
     bytes: [u8; 64],
@@ -657,6 +669,9 @@ pub struct BatchVerifier {
 
 impl BatchVerifier {
     /// Creates a verifier with space for `capacity` signatures.
+    ///
+    /// `capacity` is a trusted allocation hint. Bound externally supplied counts before passing
+    /// them here.
     pub fn new(capacity: usize) -> Self {
         Self {
             items: Vec::with_capacity(capacity),
@@ -664,6 +679,10 @@ impl BatchVerifier {
     }
 
     /// Queues a signature for verification over the namespaced message.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
     pub fn add(
         &mut self,
         namespace: &[u8],
@@ -678,6 +697,21 @@ impl BatchVerifier {
         });
     }
 
+    /// Queues an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn add_raw(
+        &mut self,
+        message: &[u8],
+        public_key: &VerifyingKey,
+        signature: &Signature,
+    ) {
+        self.items.push(BatchItem {
+            message: message.to_vec(),
+            public_key: public_key.bytes,
+            signature: core::Signature::from_bytes(signature.bytes),
+        });
+    }
+
     /// Checks all the signatures in the batch.
     ///
     /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
@@ -685,6 +719,9 @@ impl BatchVerifier {
     /// under the [module's validation criteria](self). Because this checks a randomized linear
     /// combination, an invalid batch may be accepted when the random weights make the combined
     /// equation hold, an event of negligible probability (about `2^-128`).
+    ///
+    /// This bound requires an RNG unpredictable to whoever assembled the batch. A predictable
+    /// `rng` lets an attacker construct an invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self
@@ -725,8 +762,8 @@ mod tests {
         prime_order_product, prime_order_products,
     };
     use crate::curve::{Backend, G, GAffine, LANES, WithBackend, test_backend, with_backend};
-    use bytes::Buf;
-    use commonware_codec::{DecodeExt, Encode, Read};
+    use bytes::Buf as _;
+    use commonware_codec::{Copying, DecodeExt, Encode, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use rand_core::Rng;
@@ -808,8 +845,8 @@ mod tests {
                 .iter()
                 .flat_map(|key| key.as_ref().iter().copied())
                 .collect();
-            let decoded =
-                StrictVerifyingKey::read_vec(&mut encoded.as_slice(), count, &()).unwrap();
+            let mut input = Copying(&encoded);
+            let decoded = StrictVerifyingKey::read_vec(&mut input, count, &()).unwrap();
             assert_eq!(decoded, expected);
             let mut batch = BatchVerifier::new(count);
             for (i, key) in decoded.iter().enumerate() {
@@ -839,17 +876,14 @@ mod tests {
         for bytes in identity_encodings() {
             let accepted = strict_point(&bytes).is_some();
             assert_eq!(
-                StrictVerifyingKey::decode(bytes.as_slice()).is_ok(),
+                StrictVerifyingKey::decode(Copying(&bytes)).is_ok(),
                 accepted
             );
             for position in 0..15 {
                 let mut encodings = [valid; 15];
                 encodings[position] = bytes;
-                let decoded = StrictVerifyingKey::read_vec(
-                    &mut encodings.as_flattened(),
-                    encodings.len(),
-                    &(),
-                );
+                let mut input = Copying(encodings.as_flattened());
+                let decoded = StrictVerifyingKey::read_vec(&mut input, encodings.len(), &());
                 assert_eq!(
                     decoded.is_ok(),
                     accepted,
@@ -875,10 +909,8 @@ mod tests {
             let mut encodings = [valid.to_bytes(); 15];
             encodings[left_index] = left.to_bytes();
             encodings[right_index] = right.to_bytes();
-            assert!(
-                StrictVerifyingKey::read_vec(&mut encodings.as_flattened(), encodings.len(), &(),)
-                    .is_err()
-            );
+            let mut input = Copying(encodings.as_flattened());
+            assert!(StrictVerifyingKey::read_vec(&mut input, encodings.len(), &()).is_err());
         }
     }
 
@@ -887,7 +919,7 @@ mod tests {
         let key = SigningKey::from_seed([91; 32]).strict_verifying_key();
         let encoded: Vec<_> = (0..9).flat_map(|_| key.as_ref().iter().copied()).collect();
         for split in 0..=encoded.len() {
-            let mut reader = encoded[..split].chain(&encoded[split..]);
+            let mut reader = Copying(&encoded[..split]).chain(Copying(&encoded[split..]));
             assert_eq!(
                 StrictVerifyingKey::read_vec(&mut reader, 9, &()).unwrap(),
                 vec![key.clone(); 9]
@@ -895,25 +927,27 @@ mod tests {
             assert_eq!(reader.remaining(), 0);
         }
         for length in 0..encoded.len() {
-            assert!(StrictVerifyingKey::read_vec(&mut &encoded[..length], 9, &()).is_err());
+            let mut reader = Copying(&encoded[..length]);
+            assert!(StrictVerifyingKey::read_vec(&mut reader, 9, &()).is_err());
         }
         for count in [10, usize::MAX / 32, usize::MAX] {
-            assert!(StrictVerifyingKey::read_vec(&mut encoded.as_slice(), count, &()).is_err());
+            let mut reader = Copying(&encoded);
+            assert!(StrictVerifyingKey::read_vec(&mut reader, count, &()).is_err());
         }
         let mut with_trailing = encoded;
         with_trailing.push(42);
-        let mut reader = with_trailing.as_slice();
+        let mut reader = Copying(&with_trailing);
         assert!(
             StrictVerifyingKey::read_vec(&mut reader, 0, &())
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(reader, with_trailing);
+        assert_eq!(reader.0, with_trailing);
         assert_eq!(
             StrictVerifyingKey::read_vec(&mut reader, 9, &()).unwrap(),
             vec![key; 9]
         );
-        assert_eq!(reader, [42]);
+        assert_eq!(reader.0, [42]);
     }
 
     #[test]
@@ -933,12 +967,14 @@ mod tests {
             let expected = strict_point(bytes).is_some();
             let mut group = [valid; LANES];
             group[3] = *bytes;
+            let mut portable_input = Copying(group.as_flattened());
             let portable = ReadStrictKeys {
-                buf: &mut group.as_flattened(),
+                buf: &mut portable_input,
                 len: LANES,
             }
             .call(test_backend());
-            let native = StrictVerifyingKey::read_vec(&mut group.as_flattened(), LANES, &());
+            let mut native_input = Copying(group.as_flattened());
+            let native = StrictVerifyingKey::read_vec(&mut native_input, LANES, &());
             assert_eq!(native.is_ok(), expected);
             assert_eq!(portable.ok(), native.ok());
         }
@@ -1065,12 +1101,12 @@ mod tests {
         ];
 
         for point in torsion {
-            assert!(StrictVerifyingKey::decode(point.to_bytes().as_slice()).is_err());
+            assert!(StrictVerifyingKey::decode(Copying(&point.to_bytes())).is_err());
         }
         for prime_point in prime_points {
             for (i, torsion_point) in torsion.into_iter().enumerate() {
                 let bytes = prime_point.add(torsion_point).to_bytes();
-                assert_eq!(StrictVerifyingKey::decode(bytes.as_slice()).is_ok(), i == 0);
+                assert_eq!(StrictVerifyingKey::decode(Copying(&bytes)).is_ok(), i == 0);
             }
         }
     }
@@ -1093,7 +1129,7 @@ mod tests {
             order_four_negative,
             order_two_negative_zero,
         ] {
-            assert!(StrictVerifyingKey::decode(bytes.as_slice()).is_err());
+            assert!(StrictVerifyingKey::decode(Copying(&bytes)).is_err());
         }
 
         for offset in 0..19 {
@@ -1101,7 +1137,7 @@ mod tests {
             bytes[0] = 0xed + offset;
             for sign in [0, 0x80] {
                 bytes[31] = 0x7f | sign;
-                assert!(StrictVerifyingKey::decode(bytes.as_slice()).is_err());
+                assert!(StrictVerifyingKey::decode(Copying(&bytes)).is_err());
             }
         }
 
@@ -1113,17 +1149,17 @@ mod tests {
             })
             .find(|bytes| GAffine::decompress(bytes).is_none())
             .unwrap();
-        assert!(StrictVerifyingKey::decode(off_curve.as_slice()).is_err());
+        assert!(StrictVerifyingKey::decode(Copying(&off_curve)).is_err());
 
         let valid = SigningKey::from_seed([8; 32])
             .strict_verifying_key()
             .encode();
         for len in 0..valid.len() {
-            assert!(StrictVerifyingKey::decode(&valid[..len]).is_err());
+            assert!(StrictVerifyingKey::decode(Copying(&valid[..len])).is_err());
         }
         let mut trailing = valid.to_vec();
         trailing.push(0);
-        assert!(StrictVerifyingKey::decode(trailing.as_slice()).is_err());
+        assert!(StrictVerifyingKey::decode(trailing).is_err());
     }
 
     #[test]

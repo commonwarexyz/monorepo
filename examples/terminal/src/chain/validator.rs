@@ -58,6 +58,7 @@ use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, ordered::Set};
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 use tracing::error;
@@ -142,6 +143,7 @@ pub(crate) fn db_config(
             metadata_partition: format!("{prefix}-chain-mmr-metadata"),
             items_per_blob: NZU64!(4_096),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -152,6 +154,7 @@ pub(crate) fn db_config(
             codec_config: ((), ()),
             page_cache,
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
         translator: TwoCap,
@@ -299,7 +302,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -325,6 +327,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     // Prunable archives backing marshal.
     let archive_config = |name: &str| prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{partition_prefix}-{name}-metadata"),
         key_partition: format!("{partition_prefix}-{name}-key"),
         key_page_cache: page_cache.clone(),
         value_partition: format!("{partition_prefix}-{name}-value"),
@@ -366,7 +369,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone()),
+            start: plan.marshal_start(Arc::new(genesis_block.clone())),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),

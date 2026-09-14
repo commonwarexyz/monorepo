@@ -7,11 +7,43 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub use rng::{FuzzRng, ScriptedRng, TestRng, test_rng};
+    pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
+    /// Lossless integer conversions that std provides no [From] impl for
+    /// (for example `NonZeroU16` or `usize` into `u64`).
+    pub trait Widen<T> {
+        /// Convert without loss.
+        fn widen(self) -> T;
+    }
+
+    macro_rules! impl_widen {
+        ($($nz:ty => $($t:ty),+);+ $(;)?) => {$($(
+            impl Widen<$t> for $nz {
+                #[inline]
+                fn widen(self) -> $t {
+                    <$t>::from(self.get())
+                }
+            }
+        )+)+};
+    }
+    impl_widen!(
+        core::num::NonZeroU8 => u16, u32, u64, u128, usize;
+        core::num::NonZeroU16 => u32, u64, u128, usize;
+        core::num::NonZeroU32 => u64, u128;
+        core::num::NonZeroU64 => u128;
+    );
+
+    impl Widen<u64> for usize {
+        #[inline]
+        fn widen(self) -> u64 {
+            const { assert!(Self::BITS <= u64::BITS) };
+            self as u64
+        }
+    }
 
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
@@ -34,8 +66,9 @@ commonware_macros::stability_scope!(BETA {
     pub use probability::Probability;
     pub mod range;
 
-    use bytes::Buf;
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
+    use commonware_codec::{
+        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+    };
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///

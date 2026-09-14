@@ -193,6 +193,7 @@ pub(crate) mod test {
                 metadata_partition: format!("mmr-metadata-{seed}"),
                 items_per_blob: NZU64!(12), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -200,6 +201,7 @@ pub(crate) mod test {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(14), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,

@@ -70,9 +70,10 @@ pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
+    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+    types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};

@@ -10,8 +10,9 @@
 //! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
 //!
 //! In addition to the shared harness-based suite, this module contains focused tests for
-//! `current`-specific sync behavior: overlay-state authentication (canonical-root check), pruned
-//! MMB round-trip, and target-update regression coverage.
+//! `current`-specific sync behavior: pruned MMB round-trip (canonical-root reconstruction across
+//! a pruned chunk boundary) and `local_pinned_nodes` returning `None` for targets starting below
+//! the local lower bound.
 
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},
@@ -464,9 +465,9 @@ mod harnesses {
 /// same canonical root, reopens cleanly, and returns the expected value.
 ///
 /// The target DB commits the same key 100 times, forcing the inactivity floor past a full
-/// 256-bit chunk boundary. Without overlay-state in the sync protocol, the receiver
-/// re-derives `pruned_chunks` from `range.start / chunk_bits` and builds a grafted tree
-/// whose pinned nodes don't match the sender's. The canonical roots diverge.
+/// 256-bit chunk boundary. The receiver derives `pruned_chunks` from `range.start` and must
+/// source the grafted pinned nodes for that region from the ops tree (zero-chunk identity).
+/// If those nodes do not match the sender's, the canonical roots diverge.
 #[test_traced("INFO")]
 fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
     let executor = deterministic::Runner::default();
@@ -523,9 +524,10 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
         let target_db = std::sync::Arc::new(target_db);
-        // Supply the trusted canonical root so `build_db`'s authentication check actually
-        // runs: this is the success-path coverage for the overlay-state authentication
-        // anchor. A bad-root rejection path test belongs with the focused sync tests.
+
+        // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
+        // the canonical root without authenticating it, so the assertions below compare it
+        // against `verification_root`.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),

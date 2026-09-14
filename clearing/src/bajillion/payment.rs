@@ -11,9 +11,9 @@ use crate::bajillion::{
 };
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 #[cfg(feature = "std")]
 use commonware_cryptography::BatchVerifier;

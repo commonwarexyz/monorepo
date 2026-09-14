@@ -170,7 +170,7 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
         );
         assert_eq!(
             fixture.marshal.get_block(registered.height).await,
-            Some(registered.clone())
+            Some(Arc::new(registered.clone()))
         );
         assert!(
             fixture

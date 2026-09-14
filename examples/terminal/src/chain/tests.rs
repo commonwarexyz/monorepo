@@ -158,6 +158,7 @@ fn config(
             metadata_partition: format!("{prefix}-chain-mmr-metadata"),
             items_per_blob: NZU64!(11),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -168,6 +169,7 @@ fn config(
             codec_config: ((), ()),
             page_cache,
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
         translator: TwoCap,
@@ -3749,7 +3751,6 @@ impl EngineDefinition for Engine {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -3775,6 +3776,7 @@ impl EngineDefinition for Engine {
         // Prunable archives backing marshal.
         let archive_config = |name: &str| prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
             key_partition: format!("{partition_prefix}-{name}-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{partition_prefix}-{name}-value"),
@@ -3819,7 +3821,7 @@ impl EngineDefinition for Engine {
                 marshal::Config {
                     provider: provider.clone(),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: plan.marshal_start(genesis_block.clone()),
+                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -4711,7 +4713,6 @@ impl EngineDefinition for Distributed {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -4737,6 +4738,7 @@ impl EngineDefinition for Distributed {
         // Prunable archives backing marshal.
         let archive_config = |name: &str| prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
             key_partition: format!("{partition_prefix}-{name}-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{partition_prefix}-{name}-value"),
@@ -4782,7 +4784,7 @@ impl EngineDefinition for Distributed {
                 marshal::Config {
                     provider: provider.clone(),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: plan.marshal_start(genesis_block.clone()),
+                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -6072,7 +6074,7 @@ fn invalid_registration_arms_reject_and_recover() {
         };
         let mut raw = corrupted.signature.encode().to_vec();
         raw[0] ^= 1;
-        corrupted.signature = Signature::decode(raw.as_slice()).unwrap();
+        corrupted.signature = Signature::decode(raw).unwrap();
         let corrupted = SettlementTx::RegisterEpoch(corrupted);
         seal(&db, 1, std::slice::from_ref(&corrupted)).await;
         assert_eq!(read(&db, &registration_key(&deployment())).await, None);
@@ -6617,7 +6619,6 @@ impl EngineDefinition for Walkthrough {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -6643,6 +6644,7 @@ impl EngineDefinition for Walkthrough {
         // Prunable archives backing marshal.
         let archive_config = |name: &str| prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
             key_partition: format!("{partition_prefix}-{name}-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{partition_prefix}-{name}-value"),
@@ -6685,7 +6687,7 @@ impl EngineDefinition for Walkthrough {
                 marshal::Config {
                     provider: provider.clone(),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: plan.marshal_start(genesis_block.clone()),
+                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),

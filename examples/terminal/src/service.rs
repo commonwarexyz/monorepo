@@ -400,7 +400,7 @@ pub(crate) fn run_agent(
         let selected = if deployment.len() == 64 {
             let bytes =
                 commonware_formatting::from_hex(&deployment).context("invalid deployment hex")?;
-            commonware_cryptography::sha256::Digest::decode(bytes::Bytes::from(bytes))
+            commonware_cryptography::sha256::Digest::decode(bytes)
                 .context("invalid deployment digest")?
         } else {
             let index: usize = deployment
@@ -440,8 +440,8 @@ pub(crate) fn run_agent(
         if let Some((to, amount)) = transfer {
             let bytes =
                 commonware_formatting::from_hex(&to).context("invalid native recipient hex")?;
-            let recipient = crate::protocol::Key::decode(bytes::Bytes::from(bytes))
-                .context("invalid native recipient key")?;
+            let recipient =
+                crate::protocol::Key::decode(bytes).context("invalid native recipient key")?;
             let receipt = agent
                 .transfer_native(&context, &mut chain, recipient, amount)
                 .await?;

@@ -329,7 +329,6 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    initial: Duration::from_millis(100),
                     timeout: Duration::from_millis(200),
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
@@ -366,7 +365,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis),
+                    start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
@@ -497,7 +496,7 @@ mod tests {
         context: &deterministic::Context,
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
-    ) -> mocks::TestBlock {
+    ) -> Arc<mocks::TestBlock> {
         for _ in 0..50 {
             if let Some(block) = marshal.get_block(height).await {
                 return block;
@@ -732,7 +731,7 @@ mod tests {
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                         epocher: FixedEpocher::new(NZU64!(2)),
-                        start: MarshalStart::Genesis(genesis),
+                        start: MarshalStart::Genesis(genesis.into()),
                         partition_prefix: partition_prefix.clone(),
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
@@ -951,7 +950,6 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    initial: Duration::from_millis(100),
                     timeout: Duration::from_millis(200),
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
@@ -988,7 +986,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis),
+                    start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),

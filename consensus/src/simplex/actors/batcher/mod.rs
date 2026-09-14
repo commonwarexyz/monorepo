@@ -370,6 +370,12 @@ mod tests {
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
+        }
     }
 
     #[derive(Clone)]
@@ -381,6 +387,12 @@ mod tests {
         fn block(&mut self, peer: Self::PublicKey) -> Feedback {
             self.0.lock().push(peer);
             Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
         }
     }
 

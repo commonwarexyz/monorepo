@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
@@ -189,7 +189,7 @@ where
 /// Returns a contiguous buffer of `k` padded shards and the shard length.
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
+fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
     let data_len = data.remaining();
     let shard_len = canonical_shard_len(data_len, k);
@@ -313,7 +313,7 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
-    data: impl Buf,
+    data: impl bytes::Buf,
     strategy: &S,
 ) -> Result<Encoding<H::Digest>, Error> {
     // Validate parameters
@@ -1151,7 +1151,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     fn encode(
         config: &Config,
-        data: impl Buf,
+        data: impl bytes::Buf,
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         encode::<H, _>(
@@ -1202,6 +1202,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Buf as _;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;

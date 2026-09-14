@@ -18,12 +18,12 @@ use crate::{
     protocol::Timing,
 };
 use anyhow::Context as _;
-use bytes::{Buf, Bytes};
+use bytes::{Buf as _, Bytes};
 use commonware_actor::{
     Feedback,
     mailbox::{self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender},
 };
-use commonware_codec::{Decode as _, Encode as _, EncodeSize as _, ReadExt as _};
+use commonware_codec::{Buf, Decode as _, Encode as _, EncodeSize as _, ReadExt as _};
 use commonware_consensus::{Reporter, marshal::Update};
 use commonware_cryptography::{Hasher as _, Sha256, ed25519, sha256::Digest};
 use commonware_macros::select;

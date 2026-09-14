@@ -29,7 +29,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{DecodeExt, Write};
+use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
@@ -116,6 +116,9 @@ pub struct Config<S: Strategy> {
 
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
+
+    /// Buffer size for sequential reads during recovery.
+    pub replay_buffer: NonZeroUsize,
 
     /// Strategy used to parallelize batch operations.
     pub strategy: S,
@@ -212,7 +215,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ) -> Result<D, Error<F>> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
             debug!(?pos, "read node from metadata");
-            let digest = D::decode(bytes.as_ref());
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(
                     ?pos,
@@ -274,6 +277,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
         let mut journal =
             Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
@@ -467,6 +471,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
             write_buffer: cfg.config.write_buffer,
+            replay_buffer: cfg.config.replay_buffer,
             page_cache: cfg.config.page_cache.clone(),
         };
 
@@ -1004,43 +1009,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         Ok(self)
     }
-}
 
-/// The [`Readable`] implementation for the full structure operates only on the in-memory
-/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
-/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
-impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.size()
-    }
-
-    fn get_node(&self, pos: Position<F>) -> Option<D> {
-        self.mem.get_node(pos)
-    }
-}
-
-impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
-    for Merkle<F, E, D, S>
-{
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.size()
-    }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
-        Self::get_node(self, position).await
-    }
-
-    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        Self::get_nodes(self, positions).await
-    }
-}
-
-impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///
@@ -1152,6 +1121,40 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 }
 
+/// The [`Readable`] implementation for the full structure operates only on the in-memory
+/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
+/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
+impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
+    type Family = F;
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
+        self.mem.get_node(pos)
+    }
+}
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
+    for Merkle<F, E, D, S>
+{
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        Self::get_node(self, position).await
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        Self::get_nodes(self, positions).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1194,7 @@ mod tests {
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -1788,6 +1792,7 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1855,6 +1860,7 @@ mod tests {
             metadata_partition: "unpruned-metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: cfg_pruned.page_cache.clone(),
         };
@@ -2214,6 +2220,7 @@ mod tests {
                 metadata_partition: "ref-metadata-pruned".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2278,6 +2285,7 @@ mod tests {
                 metadata_partition: "server-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2307,6 +2315,7 @@ mod tests {
                 metadata_partition: "client-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2933,6 +2942,7 @@ mod tests {
             items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache.clone(),
             write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
         let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
             .await
@@ -3042,6 +3052,7 @@ mod tests {
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
+            replay_buffer: NZUsize!(64),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
@@ -3643,6 +3654,7 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )

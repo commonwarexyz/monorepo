@@ -608,8 +608,7 @@ fn decoded_context_cannot_change_limits_or_deadlines_behind_the_signed_anchor() 
         ] {
             let mut altered = encoded.to_vec();
             altered[offset + 7] ^= 1;
-            let context =
-                CloseContext::<VerifyingKey, ShaDigest>::decode(Bytes::from(altered)).unwrap();
+            let context = CloseContext::<VerifyingKey, ShaDigest>::decode(altered).unwrap();
             assert_eq!(context.payment(), fixture.context.payment());
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
                 &context,

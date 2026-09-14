@@ -4,8 +4,10 @@ use crate::bajillion::{
     commitment::VectorRoot,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 
 const CHANGE_VALUE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_VALUE";

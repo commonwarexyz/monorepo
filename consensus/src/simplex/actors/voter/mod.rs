@@ -2827,11 +2827,8 @@ mod tests {
                 }
             }
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Finalization(finalization) if finalization.view() == View::new(1)
@@ -2841,11 +2838,8 @@ mod tests {
                 build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
             mailbox.resolved(Certificate::Nullification(nullification.clone()));
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Nullification(received) if received == nullification
@@ -2876,11 +2870,8 @@ mod tests {
             }
 
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Nullification(received) if received == nullification
@@ -4020,6 +4011,7 @@ mod tests {
                 )
             };
             let (_, notarization_1) = build_notarization(&schemes, &proposal(1, 0), quorum);
+            let (_, notarization_2) = build_notarization(&schemes, &proposal(2, 1), quorum);
             let (_, notarization_3) = build_notarization(&schemes, &proposal(3, 2), quorum);
 
             // Deliver notarization(1) and wait for the voter to certify it and
@@ -4033,12 +4025,10 @@ mod tests {
             }
             while resolver_receiver.recv().now_or_never().flatten().is_some() {}
 
-            // Deliver notarization(3), skipping notarization(2): the voter
-            // observed the certificate broadcast for view 3 but missed the one
-            // for view 2. Certifying view 3 requires view 2's exact-view
-            // certificate, so the voter must fetch it. The certificate update
-            // must reach the resolver first: it opens unrestricted background
-            // repair that a later leader target cannot narrow.
+            // Deliver notarization(3) without notarization(2). The voter saw
+            // the certificate for view 3 but missed the one for view 2.
+            // Certifying view 3 requires the exact certificate for view 2, so
+            // the voter asks any validator for it.
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
@@ -4062,12 +4052,51 @@ mod tests {
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
-                        assert!(target.is_some(), "certification repair should retain leader affinity");
+                        assert!(target.is_none());
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(20)) => {
                         panic!("voter never requested the missed notarization");
                     },
+                }
+            }
+
+            // Deliver the fetched parent. The voter must certify the parent
+            // before the child and then resume finalize voting.
+            while batcher_receiver.recv().now_or_never().flatten().is_some() {}
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            let mut certified = Vec::new();
+            let mut finalized = Vec::new();
+            loop {
+                select! {
+                    message = resolver_receiver.recv() => match message.unwrap() {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == View::new(2) || view == View::new(3) =>
+                        {
+                            assert!(success);
+                            certified.push(view);
+                        }
+                        MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Certified { .. }
+                        | MailboxMessage::Resolve { .. } => {}
+                    },
+                    message = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && (vote.view() == View::new(2) || vote.view() == View::new(3))
+                        {
+                            finalized.push(vote.view());
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(20)) => {
+                        panic!(
+                            "recovery stalled: certified={certified:?}, finalized={finalized:?}"
+                        );
+                    },
+                }
+                if certified == [View::new(2), View::new(3)]
+                    && finalized.contains(&View::new(3))
+                {
+                    break;
                 }
             }
         });
@@ -5675,7 +5704,7 @@ mod tests {
     /// When the voter is the leader of a view and builds its own proposal, it
     /// must not subsequently ask the automaton to verify that same proposal.
     ///
-    /// This is guarded by `Slot::built` (which sets `status = Verified` and
+    /// This is guarded by `Slot::record_verified` (which sets `status = Verified` and
     /// `requested_verify = true`) and by `Round::verify_ready` short-circuiting
     /// for leader-owned views. This test asserts the end-to-end invariant on
     /// the live path (no restart): after calling `automaton.propose`, the voter
@@ -10143,6 +10172,10 @@ mod tests {
                 !certified_before_sync,
                 "resolver observed certification before the section sync completed"
             );
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter observed certification before the section sync completed"
+            );
 
             let mut finalize_constructed = false;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
@@ -10224,6 +10257,15 @@ mod tests {
                     },
                 }
             }
+            assert_eq!(
+                reporter
+                    .certifications
+                    .lock()
+                    .get(&target_view)
+                    .map(|certification| &certification.proposal),
+                Some(&proposal),
+                "reporter should receive successful certification"
+            );
 
             // The durable finalize should be broadcast, without another section sync.
             let deadline = context.current() + Duration::from_secs(5);
@@ -10363,6 +10405,15 @@ mod tests {
                 .and_then(|payloads| payloads.get(&proposal.payload))
                 .expect("coalesced finalize should replay after restart");
             assert!(signers.contains(&me));
+            assert_eq!(
+                replay_reporter
+                    .certifications
+                    .lock()
+                    .get(&target_view)
+                    .map(|certification| &certification.proposal),
+                Some(&proposal),
+                "reporter should receive replayed successful certification"
+            );
         });
     }
 
@@ -10517,6 +10568,10 @@ mod tests {
                     },
                 }
             }
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter should not receive failed certification"
+            );
 
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
@@ -10546,7 +10601,7 @@ mod tests {
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter,
+                reporter: reporter.clone(),
                 partition,
                 epoch,
                 floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
@@ -10616,6 +10671,10 @@ mod tests {
             assert!(
                 replayed_certified,
                 "resolver should receive Certified(false) during replay for view {target_view}"
+            );
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter should not receive replayed failed certification"
             );
         });
     }

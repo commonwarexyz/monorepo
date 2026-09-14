@@ -2,7 +2,7 @@ use super::*;
 use crate::chain::validator::{INGRESS_BYTES, INGRESS_CAPACITY, INGRESS_LEASE};
 use commonware_consensus::{Reporter as _, simplex::types::Activity};
 use commonware_p2p::utils::mocks::inert_channel;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Permits a finite run of empty proposals without borrowing retained ingress entries.
 #[derive(Clone)]
@@ -100,7 +100,6 @@ impl ReadFixture {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(leader.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -111,6 +110,7 @@ impl ReadFixture {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let archive_config = |name: &str| prunable::Config {
             translator: TwoCap,
+            metadata_partition: format!("{prefix}-{name}-metadata"),
             key_partition: format!("{prefix}-{name}-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{prefix}-{name}-value"),
@@ -146,7 +146,7 @@ impl ReadFixture {
             marshal::Config {
                 provider: ConstantProvider::new(scheme.clone()),
                 epocher: FixedEpocher::new(NZU64!(1_000)),
-                start: plan.marshal_start(parent.clone()),
+                start: plan.marshal_start(Arc::new(parent.clone())),
                 partition_prefix: prefix.into(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),

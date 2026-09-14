@@ -50,15 +50,12 @@ struct CacheConfig {
 
 #[derive(Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     config: CacheConfig,
     operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, libfuzzer_sys::arbitrary::Error> {
-        let seed = u64::arbitrary(u)?;
-
         let items_per_blob =
             (u16::arbitrary(u)? as u64 % MAX_ITEMS_PER_BLOB).max(MIN_ITEMS_PER_BLOB);
         let write_buffer = (u16::arbitrary(u)? as usize % MAX_WRITE_BUFFER).max(MIN_WRITE_BUFFER);
@@ -116,16 +113,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(op);
         }
 
-        Ok(FuzzInput {
-            seed,
-            config,
-            operations,
-        })
+        Ok(FuzzInput { config, operations })
     }
 }
 
 fn fuzz(input: FuzzInput) {
-    let executor = deterministic::Runner::seeded(input.seed);
+    let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = Config {
             partition: "fuzz-cache".into(),

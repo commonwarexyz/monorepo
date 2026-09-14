@@ -27,8 +27,8 @@
 //! `< pruned_below`. The [`Read`] impl validates this on decode.
 
 use super::Bitmap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 
 /// Number of values per container. Pruning aligns to multiples of this value.

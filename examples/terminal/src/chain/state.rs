@@ -55,7 +55,7 @@ use crate::{
         verify_chain_registration_signature,
     },
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
     challenge::{ChallengeKind, Verdict},
@@ -68,7 +68,7 @@ use commonware_clearing::bajillion::{
     transition::{BatchId, RootBundle, WithdrawalOutput},
 };
 use commonware_codec::{
-    Decode, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
+    Buf, Decode, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
     ReadExt as _, Write,
 };
 use commonware_consensus::types::Height;

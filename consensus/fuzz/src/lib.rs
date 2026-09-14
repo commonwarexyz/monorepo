@@ -450,7 +450,7 @@ where
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
@@ -531,7 +531,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
@@ -584,10 +584,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
+                    let Ok(msg) =
+                        Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
+                    else {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
@@ -611,10 +610,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 move |(sender, message): &(_, IoBuf)| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
+                    let Ok(msg) =
+                        Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
+                    else {
                         return SplitTarget::None;
                     };
                     twins::view_route(msg.view(), term_length, sender, participants.as_ref())

@@ -4,7 +4,7 @@ use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::SigningKey;
 use commonware_runtime::{Runner as _, Supervisor as _};
-use commonware_storage::qmdb::current::ordered::ExclusionProof;
+use commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof;
 use std::num::NonZeroU64;
 
 async fn report(label: &str, state: &BenchState, head: StateHead<Digest>, key: &AccountKey) {

@@ -3,6 +3,7 @@
 //! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
 //! used by both fixed and variable ordered QMDB implementations.
 
+use super::proof::constant::{ExclusionProof, KeyValueProof};
 use crate::{
     Context,
     index::Ordered as OrderedIndex,
@@ -14,88 +15,13 @@ use crate::{
             ValueEncoding,
             ordered::{Operation, Update},
         },
-        current::proof::OperationProof,
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_codec::Codec;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
-
-/// Proof information for verifying a key has a particular value in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
-    pub proof: OperationProof<F, D, N>,
-    pub next_key: K,
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
-    /// Verify that `key` currently has `value` under `root`.
-    pub fn verify<H: Hasher<Digest = D>, V: ValueEncoding>(
-        &self,
-        key: K,
-        value: V::Value,
-        root: &D,
-    ) -> bool
-    where
-        Operation<F, K, V>: Codec,
-    {
-        let op = Operation::<F, K, V>::Update(Update {
-            key,
-            value,
-            next_key: self.next_key.clone(),
-        });
-        self.proof.verify::<H, _>(op, root)
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.next_key.write(buf);
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
-    for KeyValueProof<F, K, D, N>
-{
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.next_key.encode_size()
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the Merkle digest cap forwarded to the embedded operation
-    /// proof and the read configuration for the key type.
-    type Cfg = (usize, <K as Read>::Cfg);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_digests, key_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-        let next_key = K::read_cfg(buf, key_cfg)?;
-        Ok(Self { proof, next_key })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
-    for KeyValueProof<F, K, D, N>
-where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            proof: u.arbitrary()?,
-            next_key: u.arbitrary()?,
-        })
-    }
-}
 
 /// The generic Db type for ordered Current QMDB variants.
 ///
@@ -157,7 +83,7 @@ where
     /// provided `root`.
     pub fn verify_exclusion_proof(
         key: &K,
-        proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
+        proof: &ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         proof.verify::<H>(key, root)
@@ -209,7 +135,7 @@ where
     pub async fn exclusion_proof(
         &self,
         key: &K,
-    ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
+    ) -> Result<ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
@@ -217,23 +143,24 @@ where
                     return Err(Error::<F>::KeyExists);
                 }
                 let op_proof = self.operation_proof(loc).await?;
-                Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
+                Ok(ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
                 // variant requires the CommitFloor's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
-                let op = self.any.log.read(*self.any.last_commit_loc).await?;
+                let last_commit_loc = self.any.log.size() - 1;
+                let op = self.any.log.read(*last_commit_loc).await?;
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
                 assert_eq!(
-                    floor, self.any.last_commit_loc,
+                    floor, last_commit_loc,
                     "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
-                    self.any.last_commit_loc, floor
+                    last_commit_loc, floor
                 );
-                let op_proof = self.operation_proof(self.any.last_commit_loc).await?;
-                Ok(super::ExclusionProof::Commit(op_proof, value))
+                let op_proof = self.operation_proof(last_commit_loc).await?;
+                Ok(ExclusionProof::Commit(op_proof, value))
             }
         }
     }

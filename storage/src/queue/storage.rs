@@ -38,6 +38,9 @@ pub struct Config<C> {
 
     /// Write buffer size for each section.
     pub write_buffer: NonZeroUsize,
+
+    /// Buffer size for sequential reads during recovery.
+    pub replay_buffer: NonZeroUsize,
 }
 
 /// A durable, at-least-once delivery queue with per-item acknowledgment.
@@ -123,6 +126,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
                 codec_config: cfg.codec_config,
                 page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
+                replay_buffer: cfg.replay_buffer,
             },
         )
         .await?;
@@ -394,6 +398,7 @@ mod tests {
             codec_config: ((0..).into(), ()),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
+            replay_buffer: NZUsize!(4096),
         }
     }
 

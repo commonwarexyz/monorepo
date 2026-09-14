@@ -9,8 +9,10 @@ use crate::bajillion::{
     vector::{OutEntry, OutVector},
 };
 use alloc::vec::Vec;
-use bytes::{Buf, Bytes, BytesMut};
-use commonware_codec::{Error as CodecError, RangeCfg, Read, ReadExt, Write, varint::UInt};
+use bytes::{Buf as _, Bytes, BytesMut};
+use commonware_codec::{
+    Copying, Error as CodecError, RangeCfg, Read, ReadExt, Write, varint::UInt,
+};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 
@@ -68,8 +70,9 @@ pub fn decode_with_strategy<P: PublicKey, D: Digest>(
     let mut skeleton = strategy.try_fold(
         keys.chunks(64 * P::SIZE),
         Vec::new,
-        |mut rows, mut bytes| {
+        |mut rows, bytes| {
             let count = bytes.len() / P::SIZE;
+            let mut bytes = Copying(bytes);
             for account in P::read_vec(&mut bytes, count, &())? {
                 rows.push((account, None));
             }

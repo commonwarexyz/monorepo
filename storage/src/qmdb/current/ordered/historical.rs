@@ -1,6 +1,6 @@
 //! Read-only views of retained ordered Current QMDB commits.
 
-use super::{ExclusionProof, db::KeyValueProof};
+use super::proof::constant::{ExclusionProof, KeyValueProof};
 use crate::{
     Context,
     index::Ordered as OrderedIndex,
@@ -12,7 +12,7 @@ use crate::{
             ValueEncoding,
             ordered::{Operation, Update},
         },
-        current::{db::rebuild_grafted_tree, grafting, proof::OperationProof},
+        current::{db::rebuild_grafted_tree, grafting, proof::constant::OperationProof},
         operation::Key,
     },
 };

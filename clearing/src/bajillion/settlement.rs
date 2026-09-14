@@ -37,9 +37,9 @@ use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use core::{
@@ -304,10 +304,10 @@ impl<P: PublicKey> PackedDeposits<P> {
     }
 
     fn decode(&self, maximum: usize) -> Result<DepositBatch<P>, SettlementError> {
-        let mut encoded = self.encoded.as_ref();
+        let mut encoded = commonware_codec::Copying(self.encoded.as_ref());
         let deposits = DepositBatch::read_cfg(&mut encoded, &RangeCfg::new(..=maximum))
             .map_err(|_| SettlementError::DepositWitness)?;
-        if !encoded.is_empty() {
+        if !encoded.0.is_empty() {
             return Err(SettlementError::DepositWitness);
         }
         Ok(deposits)
@@ -374,11 +374,11 @@ impl<P: PublicKey, D: Digest> PackedWithdrawals<P, D> {
         let Some(entry) = self.find(account) else {
             return Ok(None);
         };
-        let mut encoded = &self.encoded[entry.start..entry.end];
+        let mut encoded = commonware_codec::Copying(&self.encoded[entry.start..entry.end]);
         let request =
             SignedWithdrawal::read_cfg(&mut encoded, &RangeCfg::new(..=maximum_destination_bytes))
                 .map_err(|_| SettlementError::WithdrawalWitness)?;
-        if !encoded.is_empty() {
+        if !encoded.0.is_empty() {
             return Err(SettlementError::WithdrawalWitness);
         }
         Ok(Some(request))
@@ -2926,7 +2926,7 @@ mod tests {
         },
         vector::{OutEntry, OutVector},
     };
-    use commonware_codec::{Decode, DecodeExt, Error as CodecError, FixedSize, ReadExt};
+    use commonware_codec::{Copying, Decode, DecodeExt, Error as CodecError, FixedSize, ReadExt};
     use commonware_cryptography::{
         Sha256, Signer as _,
         bls12381::primitives::{
@@ -3202,7 +3202,12 @@ mod tests {
             }
             balances
                 .into_iter()
-                .map(|(key, value)| (VerifyingKey::decode(key.as_ref()).unwrap(), value.get()))
+                .map(|(key, value)| {
+                    (
+                        VerifyingKey::decode(Copying(key.as_ref())).unwrap(),
+                        value.get(),
+                    )
+                })
                 .collect()
         }
 
@@ -4008,7 +4013,7 @@ mod tests {
     impl Read for ReverseOrderKey {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
             Ok(Self(<[u8; 2]>::read(buf)?))
         }
     }
@@ -4197,7 +4202,7 @@ mod tests {
         );
         let mut encoded = valid.encode().to_vec();
         encoded[0] ^= 1;
-        let inconsistent = TestContext::decode(Bytes::from(encoded)).unwrap();
+        let inconsistent = TestContext::decode(encoded).unwrap();
         assert!(!inconsistent.epoch_context().verify_anchor::<Sha256>());
         let before = fixture.chain.encode();
         assert!(matches!(
@@ -7933,8 +7938,7 @@ mod tests {
             .expect("the encoded claim contains its destination");
         malformed[destination_offset] ^= 1;
         let malformed =
-            WithdrawalClaim::<ShaDigest>::decode_cfg(malformed.as_slice(), &(..=usize::MAX).into())
-                .unwrap();
+            WithdrawalClaim::<ShaDigest>::decode_cfg(malformed, &(..=usize::MAX).into()).unwrap();
         assert_eq!(malformed.position(), claims[1].position());
         let claimable_before = fixture.chain.claimable_balance();
         let batch_before = fixture.chain.claimable_batches.get(&batch_id).unwrap();

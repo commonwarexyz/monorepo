@@ -29,15 +29,10 @@ fn current_membership_and_absence_bind_root_key_and_positive_balance() {
         }
         let mut trailing = encoded.to_vec();
         trailing.push(0);
-        assert!(
-            StateOpening::<VerifyingKey, ShaDigest>::decode_cfg(Bytes::from(trailing), &128)
-                .is_err()
-        );
+        assert!(StateOpening::<VerifyingKey, ShaDigest>::decode_cfg(trailing, &128).is_err());
         let mut zero = encoded.to_vec();
         zero[32..40].fill(0);
-        assert!(
-            StateOpening::<VerifyingKey, ShaDigest>::decode_cfg(Bytes::from(zero), &128).is_err()
-        );
+        assert!(StateOpening::<VerifyingKey, ShaDigest>::decode_cfg(zero, &128).is_err());
         let mut wrong = opening.clone();
         wrong.balance = NonZeroU64::new(101).unwrap();
         assert!(wrong.verify::<Sha256>(&state.root()).is_err());

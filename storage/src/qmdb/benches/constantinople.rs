@@ -142,6 +142,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const CHURN_BATCHES: u64 = 4;
 
 struct Args {
@@ -346,6 +347,7 @@ fn main() {
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
@@ -354,6 +356,7 @@ fn main() {
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: pc,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
@@ -414,6 +417,7 @@ fn main() {
                         codec_config: ((), ()),
                         page_cache: pc_var,
                         write_buffer: WRITE_BUFFER,
+                        replay_buffer: REPLAY_BUFFER,
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),

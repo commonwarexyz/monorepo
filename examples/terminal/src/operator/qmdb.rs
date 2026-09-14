@@ -6,7 +6,6 @@ use super::{
 };
 use crate::protocol::{Account, Key, Protocol, state_config};
 use anyhow::{Context as _, Result, ensure};
-use bytes::Bytes;
 use commonware_clearing::bajillion::{
     qmdb::{Config, Mutations, PreparedState, State, StateOpening, StateRoot, account_key},
     settlement::Genesis,
@@ -522,7 +521,7 @@ fn checkpoint(connection: &Connection, epoch: u64) -> Result<(StateRoot<Digest>,
         )
         .context("the predecessor balance root is not available yet")?;
     Ok((
-        StateRoot::decode(Bytes::from(bytes)).context("decode retained balance root")?,
+        StateRoot::decode(bytes).context("decode retained balance root")?,
         u64::try_from(operations).context("negative balance checkpoint operation count")?,
     ))
 }
@@ -578,6 +577,7 @@ mod tests {
         operator::store::Store,
         protocol::{Ack, INITIAL_BALANCE, SettlementResult, identities, wallets},
     };
+    use bytes::Bytes;
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
         qmdb::AccountKey,

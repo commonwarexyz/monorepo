@@ -10,7 +10,7 @@ use crate::{
     rpc,
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 #[cfg(test)]
 use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
@@ -23,7 +23,8 @@ use commonware_clearing::bajillion::{
     vector::OutEntry,
 };
 use commonware_codec::{
-    DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
+    Write,
 };
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network};
@@ -1547,7 +1548,7 @@ mod tests {
         .encode()
         .to_vec();
         trailing_response.push(0xff);
-        assert!(StatusResponse::decode(trailing_response.as_slice()).is_err());
+        assert!(StatusResponse::decode(trailing_response).is_err());
     }
 
     #[test]

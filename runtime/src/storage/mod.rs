@@ -3,6 +3,14 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::{BlobVersion, Error};
+    use std::{
+        fs::File,
+        io::{Read as _, Seek as _, SeekFrom},
+        ops::RangeInclusive,
+        path::Path,
+    };
+
     /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
     /// but did not `fsync` are crash-durable before any storage structure reads.
     ///
@@ -12,16 +20,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///   crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8. A missing `dir` is treated as success.
+    /// >= 5.8.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 use std::os::fd::AsRawFd;
-                let file = match std::fs::File::open(dir) {
-                    Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                    Err(e) => return Err(e),
-                };
+                let file = std::fs::File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
@@ -43,6 +47,43 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
         }
     }
+
+    /// Syncs a directory to ensure directory entry changes are durable.
+    /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
+    pub(crate) fn sync_dir(path: &Path) -> Result<(), Error> {
+        let dir = File::open(path).map_err(|e| {
+            Error::BlobOpenFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e.into(),
+            )
+        })?;
+        dir.sync_all().map_err(|e| {
+            Error::BlobSyncFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e.into(),
+            )
+        })
+    }
+
+    /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
+    pub(crate) fn resolve_header(
+        file: &mut File,
+        raw_len: u64,
+        layouts: &RangeInclusive<Layout>,
+        versions: &RangeInclusive<BlobVersion>,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
+        let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
+        header::resolve(&raw, raw_len, layouts, versions, partition, name)
+    }
+
+    pub(crate) mod hold;
 });
 
 stability_scope!(ALPHA {
@@ -50,17 +91,18 @@ stability_scope!(ALPHA {
     pub mod faulty;
     pub mod memory;
 });
-stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
 });
-stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
     pub mod metered;
 
     mod header;
-    pub(crate) use header::{Header, Layout};
+    pub(crate) use crate::BlobLayout as Layout;
+    pub(crate) use header::Header;
 
     /// Validate that a partition name contains only allowed characters.
     ///
@@ -80,13 +122,15 @@ stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
-        Blob, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage, WriteOptions,
+        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner, Storage,
+        WriteOptions,
     };
     use futures::FutureExt;
 
     /// Runs the full suite of tests on the provided storage implementation.
-    pub(crate) async fn run_storage_tests<S>(storage: S)
+    pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
     where
         S: Storage + Send + Sync + 'static,
         S::Blob: Send + Sync,
@@ -101,7 +145,7 @@ pub(crate) mod tests {
         test_recreate_generations(&storage).await;
         test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
-        test_concurrent_access(&storage).await;
+        test_concurrent_access(context, &storage).await;
         test_large_data(&storage).await;
         test_overwrite_data(&storage).await;
         test_read_beyond_bound(&storage).await;
@@ -498,7 +542,7 @@ pub(crate) mod tests {
     }
 
     /// Test concurrent access to the same blob.
-    async fn test_concurrent_access<S>(storage: &S)
+    async fn test_concurrent_access<S>(context: impl Spawner, storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
@@ -511,18 +555,17 @@ pub(crate) mod tests {
             .unwrap();
 
         // Read and write concurrently
-        let write_task = tokio::spawn({
+        let write_task = context.child("write").spawn({
             let blob = blob.clone();
-            async move {
+            |_| async move {
                 blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
                     .await
                     .unwrap();
             }
         });
 
-        let read_task = tokio::spawn({
-            let blob = blob.clone();
-            async move { blob.read_at(0, 16, ReadOptions::default()).await.unwrap() }
+        let read_task = context.child("read").spawn(move |_| async move {
+            blob.read_at(0, 16, ReadOptions::default()).await.unwrap()
         });
 
         write_task.await.unwrap();
@@ -1111,29 +1154,41 @@ pub(crate) mod tests {
     {
         // Create a blob with version 1
         let (blob, _, blob_version) = storage
-            .open_versioned("test_version_mismatch", b"blob", 1..=1)
+            .open_versioned(
+                "test_version_mismatch",
+                b"blob",
+                BlobVersion::new(1)..=BlobVersion::new(1),
+            )
             .await
             .unwrap();
-        assert_eq!(blob_version, 1);
+        assert_eq!(blob_version, BlobVersion::new(1));
         blob.sync().await.unwrap();
         drop(blob);
 
         // Reopen with a range that includes version 1
         let (_, _, blob_version) = storage
-            .open_versioned("test_version_mismatch", b"blob", 0..=2)
+            .open_versioned(
+                "test_version_mismatch",
+                b"blob",
+                BlobVersion::new(0)..=BlobVersion::new(2),
+            )
             .await
             .unwrap();
-        assert_eq!(blob_version, 1);
+        assert_eq!(blob_version, BlobVersion::new(1));
 
         // Try to open with version range that excludes version 1
         let result = storage
-            .open_versioned("test_version_mismatch", b"blob", 2..=3)
+            .open_versioned(
+                "test_version_mismatch",
+                b"blob",
+                BlobVersion::new(2)..=BlobVersion::new(3),
+            )
             .await;
         assert!(
             matches!(
                 result,
                 Err(crate::Error::BlobVersionMismatch { expected, found })
-                if expected == (2..=3) && found == 1
+                if expected == (BlobVersion::new(2)..=BlobVersion::new(3)) && found == BlobVersion::new(1)
             ),
             "Expected BlobVersionMismatch error"
         );
@@ -1147,7 +1202,11 @@ pub(crate) mod tests {
     {
         // Create an aligned blob and write/read through logical offsets.
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned(
+                "test_aligned_layout",
+                b"blob",
+                BlobVersion::new(0)..=BlobVersion::new(0),
+            )
             .await
             .unwrap();
         assert_eq!(size, 0);
@@ -1165,7 +1224,11 @@ pub(crate) mod tests {
 
         // Reopen honors the recorded layout and logical size.
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned(
+                "test_aligned_layout",
+                b"blob",
+                BlobVersion::new(0)..=BlobVersion::new(0),
+            )
             .await
             .unwrap();
         assert_eq!(size, 11);
@@ -1181,7 +1244,11 @@ pub(crate) mod tests {
         blob.sync().await.unwrap();
         drop(blob);
         let (blob, size, _) = storage
-            .open_versioned("test_aligned_layout", b"blob", 0..=0)
+            .open_versioned(
+                "test_aligned_layout",
+                b"blob",
+                BlobVersion::new(0)..=BlobVersion::new(0),
+            )
             .await
             .unwrap();
         assert_eq!(size, 5);

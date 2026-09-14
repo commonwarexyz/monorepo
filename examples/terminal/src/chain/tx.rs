@@ -40,7 +40,7 @@ use crate::{
         Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, SettlementResult,
     },
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
     admission::bls12381::Certificate,
     boundary::{SignedWithdrawal, WithdrawalBatch},
@@ -49,7 +49,7 @@ use commonware_clearing::bajillion::{
     transition::{BatchId, Header, OperatorKey, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey};

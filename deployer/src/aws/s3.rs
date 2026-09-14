@@ -1,6 +1,9 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::aws::{Error, InstanceConfig, deployer_directory};
+use crate::aws::{
+    Error, InstanceConfig, deployer_directory,
+    utils::{MAX_SDK_ATTEMPTS, SDK_INITIAL_BACKOFF, SDK_MAX_BACKOFF},
+};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -104,9 +107,9 @@ pub const WGET: &str = "wget -q --tries=10 --retry-connrefused --retry-on-http-e
 /// Creates an S3 client for the specified AWS region
 pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(u32::MAX)
-        .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30))
+        .with_max_attempts(MAX_SDK_ATTEMPTS)
+        .with_initial_backoff(SDK_INITIAL_BACKOFF)
+        .with_max_backoff(SDK_MAX_BACKOFF)
         .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
     let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)

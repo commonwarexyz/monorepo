@@ -5,8 +5,10 @@
 //! [`commonware_storage::bmt`].
 
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::bmt;

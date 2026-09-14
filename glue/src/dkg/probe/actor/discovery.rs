@@ -8,9 +8,8 @@ use crate::{
     },
     stateful::probe::sample::Sample,
 };
-use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode as _, Error as CodecError, Read};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -559,7 +558,7 @@ where
             return None;
         }
 
-        let block = V::into_inner(block);
+        let block = V::into_shared(block);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             return None;
         };
@@ -604,7 +603,7 @@ fn authenticate_boundary_block<V: Variant>(
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
-    use bytes::{Buf, BufMut};
+    use bytes::{BufMut, Bytes};
     use commonware_codec::{EncodeSize, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
@@ -625,7 +624,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::non_empty;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_DISCOVERY_TEST";
 
@@ -714,7 +713,7 @@ mod tests {
     }
 
     fn decode_finalization_response<S, V>(
-        message: &[u8],
+        message: Bytes,
         verifier: &S,
     ) -> Finalization<S, V::Commitment>
     where
@@ -732,7 +731,7 @@ mod tests {
         }
     }
 
-    fn split_block_response<'a, S, V>(message: &'a [u8], verifier: &S) -> (Epoch, &'a [u8])
+    fn split_block_response<S, V>(message: Bytes, verifier: &S) -> (Epoch, Bytes)
     where
         S: Scheme<V::Commitment>,
         V: Variant,
@@ -761,7 +760,7 @@ mod tests {
     fn coding_block(
         leader: mocks::TestPublicKey,
         participants: u16,
-    ) -> CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256> {
+    ) -> Arc<CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256>> {
         let parent = Sha256::hash(&[b"parent"]);
         let context = CodingContext {
             round: Round::new(Epoch::zero(), View::new(1)),
@@ -777,11 +776,11 @@ mod tests {
             ),
         };
         let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
-        CodedBlock::new(
+        Arc::new(CodedBlock::new(
             block,
             coding_config_for_participants(participants),
             &Sequential,
-        )
+        ))
     }
 
     #[test]
@@ -825,12 +824,11 @@ mod tests {
             let message = wire::Message::<TestThresholdScheme, TestCodingVariant>::BoundaryResponse(
                 finalization,
             )
-            .encode()
-            .to_vec();
+            .encode();
             let finalization = decode_finalization_response::<
                 TestThresholdScheme,
                 TestCodingVariant,
-            >(&message, &verifier);
+            >(message, &verifier);
             let authenticated = finalization.verify(&mut context, &verifier, &Sequential);
 
             assert!(!authenticated);
@@ -855,32 +853,30 @@ mod tests {
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
             >::BoundaryResponse(finalization)
-            .encode()
-            .to_vec();
+            .encode();
             let finalization = decode_finalization_response::<
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
-            >(&finalization_message, &fixture.schemes[0]);
+            >(finalization_message, &fixture.schemes[0]);
             let authenticated = finalization.verify(&mut context, &fixture.schemes[0], &Sequential);
             assert!(authenticated);
             let commitment = finalization.proposal.payload;
             let block_message =
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::zero(),
-                    block: block.clone(),
+                    block: block.clone().into(),
                 }
-                .encode()
-                .to_vec();
+                .encode();
             let (epoch, body) = split_block_response::<
                 mocks::TestScheme,
                 mocks::TestMarshalVariant,
-            >(&block_message, &fixture.schemes[0]);
+            >(block_message, &fixture.schemes[0]);
             assert_eq!(epoch, Epoch::zero());
             let decoded =
                 authenticate_boundary_block::<mocks::TestMarshalVariant>(&(), commitment, body)
                     .expect("standard block authenticated");
 
-            assert_eq!(decoded, block);
+            assert_eq!(decoded.as_ref(), &block);
         });
     }
 
@@ -910,10 +906,9 @@ mod tests {
                 wire::Message::<mocks::TestScheme, TestCodingVariant>::BoundaryResponse(
                     finalization,
                 )
-                .encode()
-                .to_vec();
+                .encode();
             let finalization = decode_finalization_response::<mocks::TestScheme, TestCodingVariant>(
-                &finalization_message,
+                finalization_message,
                 &fixture.schemes[0],
             );
             let authenticated = finalization.verify(&mut context, &fixture.schemes[0], &Sequential);
@@ -923,10 +918,9 @@ mod tests {
                     epoch: Epoch::zero(),
                     block,
                 }
-                .encode()
-                .to_vec();
+                .encode();
             let (epoch, body) = split_block_response::<mocks::TestScheme, TestCodingVariant>(
-                &block_message,
+                block_message,
                 &fixture.schemes[0],
             );
             assert_eq!(epoch, Epoch::zero());
@@ -936,6 +930,9 @@ mod tests {
 
             assert_eq!(decoded.height(), Height::new(1));
             assert_eq!(TestCodingVariant::commitment(&decoded), payload);
+
+            // The finalized payload fixes the root, so the probe decodes without re-encoding.
+            assert!(decoded.shard(0).is_none());
         });
     }
 
@@ -969,12 +966,11 @@ mod tests {
                 TestThresholdScheme,
                 TestCodingVariant,
             >::BoundaryResponse(finalization)
-            .encode()
-            .to_vec();
+            .encode();
             let finalization = decode_finalization_response::<
                 TestThresholdScheme,
                 TestCodingVariant,
-            >(&finalization_message, &verifier);
+            >(finalization_message, &verifier);
             let authenticated = finalization.verify(&mut context, &verifier, &Sequential);
             assert!(authenticated);
             let block_message = wire::Message::<
@@ -984,12 +980,11 @@ mod tests {
                 epoch: Epoch::zero(),
                 block,
             }
-            .encode()
-            .to_vec();
+            .encode();
             let (epoch, body) = split_block_response::<
                 TestThresholdScheme,
                 TestCodingVariant,
-            >(&block_message, &verifier);
+            >(block_message, &verifier);
             assert_eq!(epoch, Epoch::zero());
             let commitment = finalization.proposal.payload;
             let decoded = authenticate_boundary_block::<TestCodingVariant>(&(), commitment, body)
@@ -997,6 +992,9 @@ mod tests {
 
             assert_eq!(decoded.height(), Height::new(1));
             assert_eq!(TestCodingVariant::commitment(&decoded), payload);
+
+            // The finalized payload fixes the root, so the probe decodes without re-encoding.
+            assert!(decoded.shard(0).is_none());
         });
     }
 }

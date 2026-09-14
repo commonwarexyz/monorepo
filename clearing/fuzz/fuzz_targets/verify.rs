@@ -26,7 +26,7 @@ use commonware_clearing::bajillion::{
     },
     vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::{Decode, Encode, EncodeSize};
+use commonware_codec::{Copying, Decode, Encode, EncodeSize};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
@@ -1153,7 +1153,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     );
     assert!(
         StateOpening::<VerifyingKey, Digest>::decode_cfg(
-            &proof_bytes[..proof_bytes.len() - 1],
+            Copying(&proof_bytes[..proof_bytes.len() - 1]),
             &MAX_PROOF_DIGESTS
         )
         .is_err()

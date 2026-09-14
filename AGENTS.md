@@ -9,6 +9,8 @@ Commonware is a Rust workspace of high-performance distributed-systems primitive
 - Protocol primitives must remain runtime-agnostic. Do not introduce direct `tokio` usage outside runtime-owning code, runtime utilities, command-line paths, benches, or tests. Use the traits in `runtime/src/lib.rs` instead.
 - Use `commonware_macros::select!` for concurrent operations. Async trait methods return `impl Future<Output = Result<T, Error>> + Send`; add `Send + 'static` bounds where required.
 - Implement core mechanisms and algorithms inside the workspace rather than adding a dependency for them. On hot paths, prefer `Bytes`, cheap `Arc` clones, and static dispatch over allocations and dynamic dispatch.
+- Use `commonware_codec::Buf` for generic readers of serialized values and their decoding helpers, including fixed-size reads and length or padding validation. Use `Input` at input-conversion entry points, then preserve codec `Buf` internally. Decode owned buffers by value. Use `Copying` at the call site for intentionally borrowed decoding. Retained byte fields decoded through it allocate and copy.
+- Use `bytes::Buf` for raw buffer implementations and byte-stream inputs to I/O, encoding, or hashing. Import it as `Buf as _` when its cursor methods must be in scope alongside codec `Buf`.
 - Namespace strings must be globally unique and have the form `_COMMONWARE_<CRATE>_<OPERATION>`. Changing one is a breaking change.
 - Keep unsafe code minimal, prefer safe abstractions, and document every unsafe block with `// SAFETY:`.
 

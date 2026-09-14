@@ -8,9 +8,9 @@
 //! Normal execution has three stages:
 //! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
-//! 3. Finalization: apply the sealed batch via [`ManagedDb::apply`], then
-//!    start persisting applied state via [`ManagedDb::finalize`], observing
-//!    durability via [`Barrier`].
+//! 3. Finalization applies the sealed batch via [`ManagedDb::apply`]. It then requests durability
+//!    via [`ManagedDb::finalize`] and observes completion through [`Barrier`]. A barrier covers the
+//!    state applied before it was requested. Later batches may be applied while it is pending.
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -193,7 +193,8 @@ impl<DB> Shared<DB> {
 /// Unlike [`Shared`], this handle cannot acquire a write slot, construct or
 /// apply batches, finalize database state, prune, or rewind. Applications
 /// receive readers in
-/// [`Application::finalized`](super::Application::finalized) so observing
+/// [`Application::capture`](super::Application::capture)
+/// and [`Application::finalized`](super::Application::finalized) so observing
 /// finalized state cannot invalidate concurrent speculative batches.
 ///
 /// ```compile_fail
@@ -2151,6 +2152,7 @@ mod tests {
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache(context),
             }
@@ -2162,6 +2164,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache(context),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             }
         }
 
@@ -2177,6 +2180,7 @@ mod tests {
                 codec_config,
                 page_cache: page_cache(context),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             }
         }
 
@@ -2246,7 +2250,6 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 log: fixed_journal_config(context, suffix),
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
             }
         }
@@ -2259,7 +2262,6 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 log: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
             }
         }

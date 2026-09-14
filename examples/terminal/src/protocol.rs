@@ -1,7 +1,7 @@
 //! Concrete protocol wiring for the operator.
 
 use anyhow::{Context, Result, ensure};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
     admission::{Committee, Vote, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
@@ -1011,6 +1011,7 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
             metadata_partition: format!("{prefix}-metadata"),
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(65536),
+            replay_buffer: NZUsize!(65536),
             strategy,
             page_cache: page_cache.clone(),
         },
@@ -1019,6 +1020,7 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
             items_per_blob: NZU64!(4096),
             page_cache,
             write_buffer: NZUsize!(65536),
+            replay_buffer: NZUsize!(65536),
         },
         grafted_metadata_partition: format!("{prefix}-grafted"),
         translator: EightCap,

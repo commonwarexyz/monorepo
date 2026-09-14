@@ -1,8 +1,10 @@
 //! Native, one-request/one-response framing for the terminal roles.
 
 use anyhow::{Context as _, bail};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{
+    Buf, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+};
 #[cfg(test)]
 use commonware_runtime::Listener;
 use commonware_runtime::{Clock, Network, Sink, Stream};

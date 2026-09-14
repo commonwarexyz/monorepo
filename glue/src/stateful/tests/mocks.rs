@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input, Proposed,
     db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     convert::Infallible,
@@ -275,8 +275,22 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TestApp;
+#[derive(Clone, Default)]
+pub(crate) struct TestApp {
+    finalization_hooks: Option<Arc<AtomicUsize>>,
+}
+
+impl TestApp {
+    pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
+        let hooks: Arc<AtomicUsize> = Arc::default();
+        (
+            Self {
+                finalization_hooks: Some(hooks.clone()),
+            },
+            hooks,
+        )
+    }
+}
 
 impl<
     E: rand_core::Rng
@@ -291,6 +305,7 @@ impl<
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -326,8 +341,32 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(TestMerkleized)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 

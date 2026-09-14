@@ -331,11 +331,8 @@ where
 
         for handoff in handoffs {
             match handoff {
-                FinalizedHandoff::Covered(block, acknowledgement)
-                | FinalizedHandoff::Reflected(block, acknowledgement) => {
-                    processor
-                        .notify_finalized(self.context.as_present(), block.as_ref())
-                        .await;
+                FinalizedHandoff::Covered(_, acknowledgement)
+                | FinalizedHandoff::Reflected(_, acknowledgement) => {
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
@@ -435,7 +432,11 @@ mod tests {
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
-    use std::{collections::VecDeque, sync::Arc, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
 
     fn pending(block: TestBlock) -> PendingFinalization<Arc<TestBlock>> {
         let (acknowledgement, _waiter) = Exact::handle();
@@ -563,7 +564,7 @@ mod tests {
                 syncing: Syncing {
                     context: ContextCell::new(syncing_context.child("syncing")),
                     mailbox,
-                    application: TestApp,
+                    application: TestApp::default(),
                     provider: (),
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
@@ -617,7 +618,7 @@ mod tests {
                 syncing: Syncing {
                     context: ContextCell::new(syncing_context.child("syncing")),
                     mailbox,
-                    application: TestApp,
+                    application: TestApp::default(),
                     provider: (),
                     marshal,
                     sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
@@ -712,6 +713,35 @@ mod tests {
     }
 
     #[test]
+    fn transition_skips_hooks_for_reflected_handoffs() {
+        deterministic::Runner::default().start(|context| async move {
+            let (application, hooks) = TestApp::observe_finalization();
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            harness.syncing.application = application;
+
+            let (covered_acknowledgement, covered_waiter) = Exact::handle();
+            let (reflected_acknowledgement, reflected_waiter) = Exact::handle();
+            harness
+                .syncing
+                .transition([
+                    FinalizedHandoff::Covered(
+                        Arc::new(TestBlock::new(6, 8)),
+                        covered_acknowledgement,
+                    ),
+                    FinalizedHandoff::Reflected(
+                        Arc::new(TestBlock::new(7, 9)),
+                        reflected_acknowledgement,
+                    ),
+                ])
+                .await;
+
+            assert!(covered_waiter.await.is_ok());
+            assert!(reflected_waiter.await.is_ok());
+            assert_eq!(hooks.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
     fn transition_coalesces_handoff_durability_before_completion() {
         deterministic::Runner::default().start(|context| async move {
             // Gate the sync-complete metadata write and the handoff flush independently.
@@ -738,6 +768,8 @@ mod tests {
                 .as_mut()
                 .expect("harness must contain a sync artifact")
                 .databases = Shared::new("test", TestDb::gated(control.clone()));
+            let (application, hooks) = TestApp::observe_finalization();
+            harness.syncing.application = application;
 
             // Completion metadata must not be written until the handoff batch is durable.
             pending.arm();
@@ -796,6 +828,11 @@ mod tests {
             assert!(first_waiter.await.is_ok());
             assert!(second_waiter.await.is_ok());
             assert_eq!(control.pruned.lock().as_slice(), &[8]);
+            assert_eq!(
+                hooks.load(Ordering::SeqCst),
+                4,
+                "both applied handoff blocks must run capture and finalized",
+            );
 
             // The completed height is durable: reopen the metadata partition.
             let reopened =
