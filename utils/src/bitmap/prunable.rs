@@ -409,7 +409,7 @@ impl<const N: usize> Write for Prunable<N> {
 }
 
 impl<const N: usize> Read for Prunable<N> {
-    // Accepted range for the length of the unpruned portion of the bitmap.
+    /// Accepted range for the retained (unpruned) bits, not [Self::len], which includes pruned bits.
     type Cfg = RangeCfg<u64>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
@@ -1131,6 +1131,36 @@ mod tests {
         // Should fail with insufficient max_len
         let result = Prunable::<4>::read_cfg(&mut encoded, &(..=5).into());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_range_bounds_retained_bits() {
+        // 100 bits with the first two chunks (64 bits) pruned leaves 36 retained bits.
+        let mut original: Prunable<4> = Prunable::new();
+        for i in 0..100 {
+            original.push(i % 3 == 0);
+        }
+        original.prune_to_bit(64);
+        let mut encoded = original.encode();
+
+        let decoded = Prunable::<4>::read_cfg(&mut encoded.clone(), &RangeCfg::exact(36)).unwrap();
+        assert_eq!(decoded.len(), 100);
+        assert_eq!(decoded.pruned_bits(), 64);
+        let result = Prunable::<4>::read_cfg(&mut encoded.clone(), &RangeCfg::exact(100));
+        assert!(matches!(result, Err(CodecError::InvalidLength(36))));
+        let result = Prunable::<4>::read_cfg(&mut encoded, &(37..).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(36))));
+
+        // Pruning every chunk leaves zero retained bits.
+        let mut original: Prunable<4> = Prunable::new();
+        for _ in 0..96 {
+            original.push(true);
+        }
+        original.prune_to_bit(96);
+        let mut encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &RangeCfg::exact(0)).unwrap();
+        assert_eq!(decoded.len(), 96);
+        assert_eq!(decoded.pruned_bits(), 96);
     }
 
     #[test]

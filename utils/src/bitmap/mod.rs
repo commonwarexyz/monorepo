@@ -870,7 +870,7 @@ impl<const N: usize> Write for BitMap<N> {
 }
 
 impl<const N: usize> Read for BitMap<N> {
-    // Accepted range for the bitmap length in bits.
+    /// Accepted range for the decoded length in bits.
     type Cfg = RangeCfg<u64>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {

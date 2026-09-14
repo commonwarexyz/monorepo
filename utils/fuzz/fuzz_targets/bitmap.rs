@@ -447,7 +447,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Codec(bools) => {
-                let v = BitMap::from(&bools);
+                let v = BitMap::from(&bools[..bools.len().min(MAX_SIZE)]);
 
                 let encoded_size = v.encode_size();
                 assert!(encoded_size > 0);
@@ -457,11 +457,11 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = bytes::Bytes::from(buf);
-                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(..=MAX_SIZE as u64).into()) {
-                    assert_eq!(decoded.len(), v.len());
-                    for i in 0..decoded.len() {
-                        assert_eq!(decoded.get(i), v.get(i));
-                    }
+                let decoded = BitMap::read_cfg(&mut cursor, &(..=MAX_SIZE as u64).into())
+                    .expect("roundtrip within MAX_SIZE must decode");
+                assert_eq!(decoded.len(), v.len());
+                for i in 0..decoded.len() {
+                    assert_eq!(decoded.get(i), v.get(i));
                 }
             }
 
