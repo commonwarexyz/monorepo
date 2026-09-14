@@ -11,7 +11,8 @@ const ACCOUNT_RECORD = KEY + 8;
 
 // Validators reconstruct the roots and withdrawal total bound by this header.
 const METADATA = 32;
-const MAX_VECTOR_LENGTH = 1 << 24;
+const MAX_ACCOUNTS = 1e9;
+const MAX_VALIDATORS = 1024;
 
 function byteSize(parts) {
   return Object.values(parts).reduce((total, bytes) => total + bytes, 0);
@@ -36,7 +37,7 @@ function indexBytes(start, end) {
 }
 
 function maxDegree(N) {
-  return Math.min(1024, N - 1, Math.floor(MAX_VECTOR_LENGTH / N));
+  return Math.min(1024, N - 1);
 }
 
 // Each sender signs one sequence-1 batch with one unit payment per recipient.
@@ -67,6 +68,7 @@ function sig3(x) {
 }
 
 function bytesText(b) {
+  if (b >= 1e15) return `${(b / 1e15).toPrecision(3)} PB`;
   if (b >= 1e12) return `${(b / 1e12).toPrecision(3)} TB`;
   if (b >= 1e9) return `${(b / 1e9).toPrecision(3)} GB`;
   if (b >= 1e6) return `${(b / 1e6).toPrecision(3)} MB`;
@@ -228,9 +230,9 @@ function mount(root) {
 
   const controls = el('div', { class: 'clearing-calculator-controls' });
   panel.append(controls);
-  const sN = slider(controls, 'clearing-calc-n', 'Live accounts', 'Includes accounts with no activity.', 3, Math.log10(MAX_VECTOR_LENGTH), 0.01, 6);
-  const sK = slider(controls, 'clearing-calc-k', 'Recipients per account', 'Average over all live accounts.', -3, Math.log10(maxDegree(1e6)), 0.005, 0);
-  const sV = slider(controls, 'clearing-calc-v', 'Validators', 'Each receives the same complete update.', 0.602, 3.011, 0.005, 2);
+  const sN = slider(controls, 'clearing-calc-n', 'Live accounts', 'Includes accounts with no activity.', 3, Math.log10(MAX_ACCOUNTS), 0.01, 6);
+  const sK = slider(controls, 'clearing-calc-k', 'Recipients per account', 'Average over all live accounts.', -3, Math.log10(maxDegree(1e6)), 'any', 0);
+  const sV = slider(controls, 'clearing-calc-v', 'Validators', 'Each receives the same complete update.', Math.log10(4), Math.log10(MAX_VALIDATORS), 'any', 2);
 
   const activity = el('div', { class: 'clearing-calculator-activity' });
   const pairs = el('span');
@@ -274,14 +276,14 @@ function mount(root) {
   };
 
   function draw() {
-    const N = Math.min(MAX_VECTOR_LENGTH, sig3(Math.pow(10, parseFloat(sN.input.value))));
+    const N = Math.min(MAX_ACCOUNTS, sig3(Math.pow(10, parseFloat(sN.input.value))));
     const kMax = maxDegree(N);
     sK.input.max = Math.log10(kMax);
     const validators = curV();
     const sc = scenario(N, Math.pow(10, parseFloat(sK.input.value)));
     const K = sc.E / N;
     sN.out.textContent = count(N);
-    sK.out.textContent = Number(K.toPrecision(3));
+    sK.out.textContent = Number.isInteger(K) ? K : Number(K.toPrecision(3));
     sV.out.textContent = count(validators);
     for (const s of [sN, sK, sV]) s.input.setAttribute('aria-valuetext', s.out.textContent);
 
@@ -290,12 +292,12 @@ function mount(root) {
     const total = validators * payload;
     const state = ACCOUNT_RECORD * N;
     oDealing.textContent = bytesText(payload);
-    scope.textContent = 'Modeled keyed encoding; excludes certificates and other traffic.';
+    scope.textContent = 'Data sent to each validator for one close.';
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
     oEgress.textContent = `(${bytesText(total)} total egress)`;
     oState.textContent = `Full state records: ${bytesText(state)}`;
-    canvas.setAttribute('aria-label', `Modeled keyed update size sent to each validator as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))} recipients, the operator sends ${bytesText(payload)} per validator, with total egress of ${bytesText(total)} per close. A dotted reference line shows all live account records, ${bytesText(state)} at ${ACCOUNT_RECORD} bytes each, excluding database overhead and retained evidence. Both axes use logarithmic scales.`);
+    canvas.setAttribute('aria-label', `Modeled keyed update size sent to each validator as recipients per live account increase. At the selected average of ${sK.out.textContent} recipients, the operator sends ${bytesText(payload)} per validator, with total egress of ${bytesText(total)} per close. A dotted reference line shows all live account records, ${bytesText(state)} at ${ACCOUNT_RECORD} bytes each, excluding database overhead and retained evidence. Both axes use logarithmic scales.`);
 
     const components = [
       ['Accounts and sequences', parts.rows],

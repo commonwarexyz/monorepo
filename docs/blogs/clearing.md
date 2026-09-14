@@ -178,14 +178,14 @@ Accounts are named by public key, and payment entries refer to those accounts by
 
 Validators derive the same candidate QMDB batch from their prior state and apply it once the close is admitted. QMDB updates its authenticated state without rebuilding the tree over every live account. Validators already hold the prior state, so the operator needs no separate state-change proof.
 
-The payer vectors are the common source of truth for both sides of every payment. Validators build a BMT of the epoch's account activity, retaining terminal payment positions and settlement outputs for challenges and claims. This evidence includes accounts whose balances stay unchanged. A 32-byte commitment binds the activity BMT, withdrawal-output BMT, and QMDB state root to the epoch, predecessor, and withdrawal total.
+Validators build a binary Merkle tree (BMT) of account activity so receipts can be checked against the close, even when payments leave an account's balance unchanged. Each record binds the account's final payment totals and any withdrawal. A 32-byte commitment binds this activity tree, the withdrawal tree, and the QMDB state root to the epoch, prior state, and withdrawal total.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified close binds QMDB balances, account activity, and withdrawal outputs. Each payer's payment BMT is nested in its activity record. The running example expands account c: its balance is 26, its terminal debit is 11, and its payment tree contains b with amount 4 and count 1 and d with amount 7 and count 1. Withdrawal leaves show the destination and amount format used when withdrawals are requested.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified commitment binds the balance, activity, and withdrawal roots. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested; the withdrawal panel shows the destination and amount a claim would prove.">
 ```
 
 ::: {.image-caption}
-Figure 3: The close binds the three resulting roots. Each payer's payment tree is nested in its activity record, which remains present even when its payments leave the balance unchanged.
+Figure 3: The certified commitment links the three roots. Expanding $c$'s activity record shows its final payment totals for $b$ and $d$.
 :::
 
 The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
@@ -489,7 +489,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ::: {.image-caption}
 Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic; certificates, transport, and other messages are excluded.
 
-Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals.
+Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::
 
 ## A Bajillion Payments, One Settlement
