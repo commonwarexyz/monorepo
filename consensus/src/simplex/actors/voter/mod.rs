@@ -115,7 +115,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
-    type OptimisticRequests = Arc<Mutex<Vec<(View, PublicKey)>>>;
+    type OptimisticRequests = Arc<Mutex<Vec<View>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     async fn start_test_network_with_peers<I>(
@@ -212,7 +212,7 @@ mod tests {
         certify_latency_ms: f64,
         /// Views and parents supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
-        /// Views and outgoing leaders supplied with handoff proposal requests.
+        /// Views supplied with handoff proposal requests.
         optimistic_requests: Option<OptimisticRequests>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
@@ -303,10 +303,8 @@ mod tests {
             }));
         }
         if let Some(optimistic_requests) = optimistic_requests {
-            actor.set_handoff_propose_observer(Box::new(move |context, outgoing_leader| {
-                optimistic_requests
-                    .lock()
-                    .push((context.view(), outgoing_leader));
+            actor.set_handoff_propose_observer(Box::new(move |context| {
+                optimistic_requests.lock().push(context.view());
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -3873,13 +3871,10 @@ mod tests {
             })
             .await;
             wait_for_request(&context, &optimistic_requests, View::new(2), |request| {
-                request.0
+                *request
             })
             .await;
-            assert_eq!(
-                optimistic_requests.lock().as_slice(),
-                &[(View::new(2), participants[0].clone())]
-            );
+            assert_eq!(optimistic_requests.lock().as_slice(), &[View::new(2)]);
             assert_eq!(
                 propose_requests
                     .lock()

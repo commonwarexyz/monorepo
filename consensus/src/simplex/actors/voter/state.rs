@@ -87,21 +87,23 @@ pub(super) enum ProposalRequest<D: Digest, P: PublicKey> {
     /// The parent is already certified or no cross-term handoff is involved.
     Regular(Context<D, P>),
     /// A term-start proposal may be pipelined over an uncertified outgoing proposal.
-    Handoff {
-        context: Context<D, P>,
-        outgoing_leader: P,
-    },
+    Handoff(Context<D, P>),
 }
 
 impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
-    /// Splits the request into its proposal context and optional handoff leader.
-    pub(super) fn into_parts(self) -> (Context<D, P>, Option<P>) {
+    /// Returns the proposal context.
+    pub(super) const fn context(&self) -> &Context<D, P> {
         match self {
-            Self::Regular(context) => (context, None),
-            Self::Handoff {
-                context,
-                outgoing_leader,
-            } => (context, Some(outgoing_leader)),
+            Self::Regular(context) | Self::Handoff(context) => context,
+        }
+    }
+
+    /// Splits the request into its proposal context and handoff status.
+    #[cfg(test)]
+    pub(super) fn into_parts(self) -> (Context<D, P>, bool) {
+        match self {
+            Self::Regular(context) => (context, false),
+            Self::Handoff(context) => (context, true),
         }
     }
 }
@@ -921,7 +923,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns a request for the lowest locally admissible tracked view ready
-    /// to propose, including the outgoing leader for a pipelined handoff.
+    /// to propose, distinguishing pipelined handoffs from ordinary proposals.
     pub(super) fn try_propose(&mut self) -> Option<ProposalRequest<D, S::PublicKey>> {
         // Nothing above the next term start is admissible (see
         // [`Self::admits_outbound`]), so bound the scan rather than walking every
@@ -971,14 +973,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             }
             self.deferred_handoffs.remove(&view);
 
-            let outgoing_leader = is_handoff.then(|| {
-                self.views
-                    .get(&parent_view)
-                    .and_then(Round::leader)
-                    .expect("pipelined handoff parent must have a leader")
-                    .key
-            });
-
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -991,12 +985,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 leader: leader.key,
                 parent: (parent_view, parent_payload),
             };
-            return Some(match outgoing_leader {
-                Some(outgoing_leader) => ProposalRequest::Handoff {
-                    context,
-                    outgoing_leader,
-                },
-                None => ProposalRequest::Regular(context),
+            return Some(if is_handoff {
+                ProposalRequest::Handoff(context)
+            } else {
+                ProposalRequest::Regular(context)
             });
         }
         None
@@ -7338,15 +7330,47 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_handoff_does_not_require_recovered_parent_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 0, 9, handoff_terms());
+
+            // Enter the outgoing term without reconstructing any of its rounds.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            // A bare notarization for the outgoing tip elects the incoming
+            // leader, but does not reveal the outgoing leader.
+            let tip = fetch_proposal(10, 9, 110);
+            let notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.leader_index(View::new(10)), None);
+            assert_eq!(state.leader_index(View::new(11)), Some(Participant::new(0)));
+
+            let (handoff, is_handoff) = state
+                .try_propose()
+                .expect("recovered tip should allow a handoff")
+                .into_parts();
+            assert!(is_handoff);
+            assert_eq!(handoff.round.view(), View::new(11));
+            assert_eq!(handoff.parent, (View::new(10), tip.payload));
+        });
+    }
+
+    #[test]
     fn pipelined_handoff_application_can_defer() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    participants,
-                    schemes,
-                    verifier,
-                    ..
+                    schemes, verifier, ..
                 },
                 mut state,
             ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms(), 0);
@@ -7355,9 +7379,9 @@ mod tests {
             let handoff = state
                 .try_propose()
                 .expect("application should receive the handoff opportunity");
-            let (handoff, outgoing_leader) = handoff.into_parts();
+            let (handoff, is_handoff) = handoff.into_parts();
             assert_eq!(handoff.parent, (View::new(5), tip.payload));
-            assert_eq!(outgoing_leader, Some(participants[2].clone()));
+            assert!(is_handoff);
             state.defer_handoff(&handoff);
 
             // Deferral suppresses repeated handoff requests for this parent.
@@ -7370,11 +7394,11 @@ mod tests {
             let request = state
                 .try_propose()
                 .expect("term-start proposal should follow certification");
-            let (ctx, outgoing_leader) = request.into_parts();
+            let (ctx, is_handoff) = request.into_parts();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(state.current_view(), View::new(6));
-            assert!(outgoing_leader.is_none());
+            assert!(!is_handoff);
         });
     }
 

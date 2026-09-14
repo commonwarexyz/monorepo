@@ -1,7 +1,7 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{CertificateFetch, Config as StateConfig, State, Verify},
+    state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
 };
 use crate::{
     CertifiableAutomaton, HandoffProposal, LATENCY, Relay, Reporter, Viewable,
@@ -401,7 +401,8 @@ impl<
         &mut self,
     ) -> Option<Request<Context<D, S::PublicKey>, ProposalReceiver<D>>> {
         // Check if we are ready to propose
-        let (context, outgoing_leader) = self.state.try_propose()?.into_parts();
+        let request = self.state.try_propose()?;
+        let context = request.context();
 
         // Request proposal from application
         let span = info_span!(
@@ -410,24 +411,25 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = if let Some(outgoing_leader) = outgoing_leader {
-            let receiver = async {
-                debug!(round = ?context.round, "requested handoff proposal from automaton");
-                self.automaton
-                    .propose_handoff(context.clone(), outgoing_leader)
-                    .await
+        let (context, receiver) = match request {
+            ProposalRequest::Handoff(context) => {
+                let receiver = async {
+                    debug!(round = ?context.round, "requested handoff proposal from automaton");
+                    self.automaton.propose_handoff(context.clone()).await
+                }
+                .instrument(span.clone())
+                .await;
+                (context, ProposalReceiver::Handoff(receiver))
             }
-            .instrument(span.clone())
-            .await;
-            ProposalReceiver::Handoff(receiver)
-        } else {
-            let receiver = async {
-                debug!(round = ?context.round, "requested proposal from automaton");
-                self.automaton.propose(context.clone()).await
+            ProposalRequest::Regular(context) => {
+                let receiver = async {
+                    debug!(round = ?context.round, "requested proposal from automaton");
+                    self.automaton.propose(context.clone()).await
+                }
+                .instrument(span.clone())
+                .await;
+                (context, ProposalReceiver::Ready(receiver))
             }
-            .instrument(span.clone())
-            .await;
-            ProposalReceiver::Ready(receiver)
         };
         Some(Request(context, span, receiver))
     }
