@@ -115,7 +115,7 @@ enum ProposalResponse<D> {
 }
 
 enum ProposalReceiver<D> {
-    Ready(oneshot::Receiver<D>),
+    Regular(oneshot::Receiver<D>),
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
 }
 
@@ -133,7 +133,7 @@ impl<D> Future for ProposalReceiver<D> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            Self::Ready(receiver) => Pin::new(receiver)
+            Self::Regular(receiver) => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.map(ProposalResponse::Proposed)),
             Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
@@ -426,7 +426,7 @@ impl<
                 }
                 .instrument(span.clone())
                 .await;
-                (context, ProposalReceiver::Ready(receiver))
+                (context, ProposalReceiver::Regular(receiver))
             }
         };
         Some(Request(context, span, receiver))
