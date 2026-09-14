@@ -197,6 +197,11 @@ macro_rules! roundtrip_single {
             crate::reed_solomon::engine::NoSimd::new,
             &cfg,
         );
+
+        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
+            crate::reed_solomon::engine::DefaultEngine::new,
+            &cfg,
+        );
     };
 }
 
@@ -207,74 +212,14 @@ macro_rules! roundtrip_two_rounds {
     (
         $Rate: ident,
         $explicit_reset: expr,
-        (
-            $original_count_a: expr,
-            $recovery_count_a: expr,
-            $shard_bytes_a: expr,
-            $recovery_hash_a: expr,
-            $decoder_original_a: expr,
-            $decoder_recovery_a: expr,
-            $seed_a: expr $(,)?
-        ),
-        (
-            $original_count_b: expr,
-            $recovery_count_b: expr,
-            $shard_bytes_b: expr,
-            $recovery_hash_b: expr,
-            $decoder_original_b: expr,
-            $decoder_recovery_b: expr,
-            $seed_b: expr $(,)?
-        ) $(,)?
+        $round_a: tt,
+        $round_b: tt $(,)?
     ) => {
-        use crate::reed_solomon::engine::{Naive, NoSimd};
+        use crate::reed_solomon::engine::{DefaultEngine, Naive, NoSimd};
 
-        roundtrip_two_rounds_inner!(
-            $Rate,
-            Naive,
-            $explicit_reset,
-            (
-                $original_count_a,
-                $recovery_count_a,
-                $shard_bytes_a,
-                $recovery_hash_a,
-                $decoder_original_a,
-                $decoder_recovery_a,
-                $seed_a,
-            ),
-            (
-                $original_count_b,
-                $recovery_count_b,
-                $shard_bytes_b,
-                $recovery_hash_b,
-                $decoder_original_b,
-                $decoder_recovery_b,
-                $seed_b,
-            ),
-        );
-
-        roundtrip_two_rounds_inner!(
-            $Rate,
-            NoSimd,
-            $explicit_reset,
-            (
-                $original_count_a,
-                $recovery_count_a,
-                $shard_bytes_a,
-                $recovery_hash_a,
-                $decoder_original_a,
-                $decoder_recovery_a,
-                $seed_a,
-            ),
-            (
-                $original_count_b,
-                $recovery_count_b,
-                $shard_bytes_b,
-                $recovery_hash_b,
-                $decoder_original_b,
-                $decoder_recovery_b,
-                $seed_b,
-            ),
-        );
+        roundtrip_two_rounds_inner!($Rate, Naive, $explicit_reset, $round_a, $round_b);
+        roundtrip_two_rounds_inner!($Rate, NoSimd, $explicit_reset, $round_a, $round_b);
+        roundtrip_two_rounds_inner!($Rate, DefaultEngine, $explicit_reset, $round_a, $round_b);
     };
 }
 

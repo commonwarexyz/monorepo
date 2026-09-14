@@ -10,7 +10,8 @@
 //! | [`Log`]      | 128 kiB | yes              | yes              | all                |
 //! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
-//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Avx2` `Ssse3`     |
+//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Avx512` `Ssse3` |
+//! | `MulGfni`    | 8 MiB   | yes              | yes              | `Avx512` with GFNI |
 //! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
@@ -46,15 +47,34 @@ pub type Exp = [GfElement; GF_ORDER];
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Log = [GfElement; GF_ORDER];
 
-/// Used by `Avx2` and `Ssse3` engines for multiplications.
+/// Nibble multiplication tables for SIMD engines.
 pub type Mul128 = [Multiply128lutT; GF_ORDER];
 
-/// Elements of the Mul128 table
+/// GFNI affine matrices for all field multipliers.
+#[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
+pub(crate) type MulGfni = [MultiplyGfni; GF_ORDER];
+
+/// Ready-to-load affine operands for one field multiplier.
+///
+/// Multiplication is a 16 x 16 binary linear map, split into four 8 x 8 maps between
+/// the input and output byte halves. Each map is repeated across four 64-bit lanes.
+#[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
+#[derive(Clone, Debug)]
+pub(crate) struct MultiplyGfni {
+    /// Direct terms: `A` maps low input to low output, and `D` maps high input to high output.
+    pub(crate) direct: [u64; 8],
+    /// Cross terms: `B` maps high input to low output, and `C` maps low input to high output.
+    pub(crate) cross: [u64; 8],
+}
+
+/// Multiplication lookup bytes for the four nibbles of a field element.
+///
+/// Each `u128` stores 16 bytes in native byte order, indexed by the nibble value.
 #[derive(Clone, Debug)]
 pub struct Multiply128lutT {
-    /// Lower half of `GfElements`
+    /// Low product bytes for each nibble position.
     pub lo: [u128; 4],
-    /// Upper half of `GfElements`
+    /// High product bytes for each nibble position.
     pub hi: [u128; 4],
 }
 
@@ -144,6 +164,21 @@ pub fn get_mul128() -> &'static Mul128 {
     }
 }
 
+/// Lazily initialized GFNI affine multiplication table.
+#[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
+pub(crate) fn get_mul_gfni() -> &'static MulGfni {
+    #[cfg(feature = "std")]
+    {
+        static MUL_GFNI: LazyLock<Box<MulGfni>> = LazyLock::new(initialize_mul_gfni);
+        &MUL_GFNI
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        static MUL_GFNI: OnceBox<MulGfni> = OnceBox::new();
+        MUL_GFNI.get_or_init(initialize_mul_gfni)
+    }
+}
+
 /// Lazily initialized skew table used in FFT and IFFT operations.
 pub fn get_skew() -> &'static Skew {
     #[cfg(feature = "std")]
@@ -161,7 +196,7 @@ pub fn get_skew() -> &'static Skew {
 // ======================================================================
 // FUNCTIONS - PUBLIC - math
 
-/// Calculates `x * log_m` using [`Exp`] and [`Log`] tables.
+/// Multiply `x` by `exp[log_m]` using [`Exp`] and [`Log`] tables.
 #[inline(always)]
 pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
     if x == 0 {
@@ -273,12 +308,46 @@ fn initialize_mul128() -> Box<Mul128> {
                 prod_lo[x] = prod as u8;
                 prod_hi[x] = (prod >> 8) as u8;
             }
-            mul128[log_m as usize].lo[i] = u128::from_le_bytes(prod_lo);
-            mul128[log_m as usize].hi[i] = u128::from_le_bytes(prod_hi);
+            mul128[log_m as usize].lo[i] = u128::from_ne_bytes(prod_lo);
+            mul128[log_m as usize].hi[i] = u128::from_ne_bytes(prod_hi);
         }
     }
 
     mul128.into_boxed_slice().try_into().unwrap()
+}
+
+#[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
+fn initialize_mul_gfni() -> Box<MulGfni> {
+    let exp = &get_exp_log().exp;
+    let log = &get_exp_log().log;
+    let mut table = vec![
+        MultiplyGfni {
+            direct: [0; 8],
+            cross: [0; 8],
+        };
+        GF_ORDER
+    ];
+
+    for log_m in 0..=GF_MODULUS {
+        let mut rows = [[0u8; 8]; 4];
+        for input_bit in 0..16 {
+            let product = mul(1u16 << input_bit, log_m, exp, log);
+            for output_bit in 0..16 {
+                let block = (output_bit / 8) * 2 + input_bit / 8;
+                rows[block][output_bit % 8] |=
+                    (((product >> output_bit) & 1) as u8) << (input_bit % 8);
+            }
+        }
+
+        // GF2P8AFFINEQB reads row i from byte 7-i of each 64-bit matrix.
+        let [a, b, c, d] = rows.map(u64::from_be_bytes);
+        table[log_m as usize] = MultiplyGfni {
+            direct: [a, a, a, a, d, d, d, d],
+            cross: [b, b, b, b, c, c, c, c],
+        };
+    }
+
+    table.into_boxed_slice().try_into().unwrap()
 }
 
 fn initialize_skew() -> Box<Skew> {
@@ -320,4 +389,58 @@ fn initialize_skew() -> Box<Skew> {
     }
 
     skew
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mul128_byte_layout() {
+        let scalar = get_mul16();
+        for (vector, scalar) in get_mul128().iter().zip(scalar.iter()) {
+            for ((lo, hi), products) in vector.lo.iter().zip(&vector.hi).zip(scalar) {
+                let lo = lo.to_ne_bytes();
+                let hi = hi.to_ne_bytes();
+                for (index, product) in products.iter().enumerate() {
+                    assert_eq!(lo[index], *product as u8);
+                    assert_eq!(hi[index], (product >> 8) as u8);
+                }
+            }
+        }
+    }
+
+    fn affine(matrix: u64, input: u8) -> u8 {
+        let matrix = matrix.to_le_bytes();
+        let mut output = 0;
+        for output_bit in 0..8 {
+            output |= ((matrix[7 - output_bit] & input).count_ones() as u8 & 1) << output_bit;
+        }
+        output
+    }
+
+    #[test]
+    fn mul_gfni_matrix_semantics() {
+        let exp_log = get_exp_log();
+        for (log_m, matrices) in get_mul_gfni().iter().enumerate() {
+            for input_bit in 0..16 {
+                let input = 1u16 << input_bit;
+                let input_lo = input as u8;
+                let input_hi = (input >> 8) as u8;
+                let output_lo =
+                    affine(matrices.direct[0], input_lo) ^ affine(matrices.cross[0], input_hi);
+                let output_hi =
+                    affine(matrices.cross[4], input_lo) ^ affine(matrices.direct[4], input_hi);
+                let actual = output_lo as u16 | (output_hi as u16) << 8;
+                let expected = mul(input, log_m as GfElement, &exp_log.exp, &exp_log.log);
+                assert_eq!(actual, expected, "log_m={log_m} input_bit={input_bit}");
+            }
+        }
+
+        for log_m in [0, GF_MODULUS as usize] {
+            let identity = &get_mul_gfni()[log_m];
+            assert_eq!(identity.direct, [0x0102_0408_1020_4080; 8]);
+            assert_eq!(identity.cross, [0; 8]);
+        }
+    }
 }
