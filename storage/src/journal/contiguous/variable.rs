@@ -7,9 +7,11 @@
 //!
 //! Data blobs follow the same rollover pipeline as the fixed journal: filling the tail seals it
 //! and starts its fsync after awaiting the previous rollover's fsync, so only the tail and its
-//! predecessor can ever hold non-durable data. Recovery forward-validates those two blobs for
-//! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
-//! offsets journal only advances after the data it indexes is durable.
+//! predecessor can ever hold non-durable data. The offsets journal's recovery watermark only
+//! advances after the data it indexes is durable, so every frame below it is proven. Recovery
+//! forward-validates those two blobs for interior fsync holes and replays frames to rebuild
+//! offsets only above that proven prefix; a journal whose watermark covers its size reopens
+//! without reading its frames or writing.
 
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
@@ -35,7 +37,7 @@ use bytes::{Bytes, BytesMut};
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBuf, IoBufMut, ReadOptions,
     buffer::paged::{CacheRef, Replay, Writer},
 };
 use futures::{
@@ -43,6 +45,7 @@ use futures::{
     future::{try_join, try_join_all},
 };
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -114,13 +117,20 @@ struct FrameScanner<'a, B: RBlob, V: Codec> {
 }
 
 impl<'a, B: RBlob, V: CodecShared> FrameScanner<'a, B, V> {
-    const fn new(replay: Replay<B>, codec_config: &'a V::Cfg, compressed: bool) -> Self {
-        Self {
+    /// Scan from byte `offset`, which must begin a frame or end the blob's frames.
+    fn new(
+        mut replay: Replay<B>,
+        offset: u64,
+        codec_config: &'a V::Cfg,
+        compressed: bool,
+    ) -> Result<Self, Error> {
+        replay.seek_to(offset)?;
+        Ok(Self {
             replay,
-            offset: 0,
+            offset,
             codec_config,
             compressed,
-        }
+        })
     }
 
     /// Advance to the next frame.
@@ -1086,10 +1096,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
         let mut pending = partition.open_all().await?;
 
-        // Acknowledged floor: every position below it was covered by a completed data fsync
-        // (the pruning boundary covers a watermark gone stale after a prune).
+        // Acknowledged floor: every position below it was covered by a completed data fsync and
+        // indexed by a durable offsets entry (the pruning boundary covers a watermark gone stale
+        // after a prune). Its blob is proven up to `proven` bytes, so validation, repair, and
+        // offsets rebuild all start there, and it must retain at least `required` bytes to
+        // still hold its acknowledged frames.
         let floor = offsets.recovery_watermark().max(offsets.pruning_boundary());
         let floor_blob = position_to_blob(floor, items_per_blob);
+        let (proven, required) =
+            Self::proven_end(&offsets, &pending, floor, items_per_blob).await?;
 
         // Check the two newest blobs for interior holes. Only they can hold non-durable data
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
@@ -1098,35 +1113,32 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // hole.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
-            // Blobs wholly below the floor's blob are covered by a completed fsync, so
-            // in-model holes are impossible there. Later damage surfaces lazily at read, except
-            // in the blob `align` replays to rebuild offsets, where it fails init loudly.
-            // Above the floor, truncate to the last well-formed page (replay in `align` repairs
-            // a mid-frame cut like torn trailing junk).
+            // Blobs wholly below the floor's blob, and the floor blob's verified acknowledged
+            // prefix, are covered by a completed fsync, so in-model holes are impossible there.
+            // Later damage surfaces lazily at read. Above the floor, truncate to the last
+            // well-formed page (replay in `align` repairs a mid-frame cut like torn trailing
+            // junk).
             if blob < floor_blob {
                 continue;
             }
-
-            // The floor's blob is scanned from the front: offset rebuild replays it from its
-            // start regardless, and a torn acknowledged page is clearer as corruption here.
+            let (proven, required) = if blob == floor_blob {
+                (proven, required)
+            } else {
+                (0, 0)
+            };
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
             let valid = writer
-                .recoverable_prefix_len(0, cfg.replay_buffer, ReadOptions::default())
+                .recoverable_prefix_len(proven, cfg.replay_buffer, ReadOptions::default())
                 .await?;
             let size = writer.size();
             if valid == size {
                 continue;
             }
 
-            // The floor's blob must retain its acknowledged prefix: a cut at or below the last
-            // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
-            // below the offsets pruning boundary acknowledges nothing here.
-            if blob == floor_blob
-                && floor > blob_first_position(blob, items_per_blob)?
-                && floor > offsets.pruning_boundary()
-                && valid <= offsets.read(floor - 1).await?
-            {
+            // A well-formed prefix shorter than the acknowledged frames lost acknowledged data,
+            // so it is never truncated away: the scan clamps to the pages physically present, so
+            // an unverifiable prefix or torn acknowledged pages both surface here.
+            if valid < required {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
                      of size {size}"
@@ -1143,6 +1155,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             &mut pending,
             Box::new(offsets),
             items_per_blob,
+            (floor, proven),
             cfg.replay_buffer,
             &cfg.codec_config,
             cfg.compression.is_some(),
@@ -1675,16 +1688,79 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(self)
     }
 
-    /// Scan every frame in `writer`, returning the item count and valid prefix.
+    /// Return the byte offset one past position `last`'s frame in `writer` when the offsets
+    /// journal indexes it and the frame header lies within the blob, or `None` when that cheap
+    /// structural evidence is missing and the blob must be scanned instead.
+    async fn indexed_frame_end(
+        offsets: &fixed::Inner<E, u64>,
+        writer: &Writer<E::Blob>,
+        last: u64,
+    ) -> Result<Option<u64>, Error> {
+        let offset = match offsets.read(last).await {
+            Ok(offset) => offset,
+            Err(Error::ItemOutOfRange(_) | Error::ItemPruned(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let (header, available) = match writer
+            .read_up_to(
+                offset,
+                MAX_U32_VARINT_SIZE,
+                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
+            )
+            .await
+        {
+            Ok(read) => read,
+            Err(RError::BlobInsufficientLength | RError::OffsetOverflow) => return Ok(None),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
+        let Ok((end, _)) = find_frame(&mut Copying(&header.as_ref()[..available]), offset) else {
+            return Ok(None);
+        };
+        Ok((end <= writer.size()).then_some(end))
+    }
+
+    /// Return `(proven, required)` for `floor`'s blob. `proven` is the byte offset one past its
+    /// last frame below `floor` when the offsets journal and one frame header verify it, else
+    /// zero so the blob is scanned in full and the ordinary consistency checks report any damage.
+    /// `required` is the byte length the blob must retain to still hold its acknowledged frames:
+    /// the verified prefix, or one byte past the last acknowledged frame's start when the prefix
+    /// cannot be verified. Both are zero when the floor acknowledges nothing in the blob (a floor
+    /// at the blob boundary or at a mid-blob pruning boundary) or the blob is absent.
+    async fn proven_end(
+        offsets: &fixed::Inner<E, u64>,
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        floor: u64,
+        items_per_blob: u64,
+    ) -> Result<(u64, u64), Error> {
+        let floor_blob = position_to_blob(floor, items_per_blob);
+        let blob_start =
+            blob_first_position(floor_blob, items_per_blob)?.max(offsets.pruning_boundary());
+        let Some(writer) = pending.get(&floor_blob) else {
+            return Ok((0, 0));
+        };
+        if floor <= blob_start {
+            return Ok((0, 0));
+        }
+        match Self::indexed_frame_end(offsets, writer, floor - 1).await? {
+            Some(end) => Ok((end, end)),
+            None => Ok((0, offsets.read(floor - 1).await?.saturating_add(1))),
+        }
+    }
+
+    /// Scan the frames in `writer` from byte `offset`, which begins the frame at in-blob item
+    /// index `items`, returning the item count and valid prefix.
     async fn scan_blob(
         writer: &mut Writer<E::Blob>,
+        offset: u64,
+        items: u64,
         buffer: NonZeroUsize,
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<BlobScan, Error> {
         let replay = writer.replay(buffer, ReadOptions::default()).await?;
-        let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
-        let mut items = 0u64;
+        let mut scanner =
+            FrameScanner::<E::Blob, V>::new(replay, offset, codec_config, compressed)?;
+        let mut items = items;
         loop {
             match scanner.next().await? {
                 Frame::Item { .. } => items += 1,
@@ -1703,27 +1779,60 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// previous run and left them in an inconsistent state.
     ///
     /// The data blobs are the source of truth. This function replays them as needed to verify or
-    /// rebuild the offsets suffix, then fixes any mismatches. Final blob-index contiguity is
-    /// enforced by [Writable::recover]. Repairs mutate `pending` in place.
+    /// rebuild the offsets suffix, then fixes any mismatches. Frames below the acknowledged
+    /// `floor` are proven: its blob is scanned only past its first `proven` bytes, and an older
+    /// blob whose last indexed frame ends at its size is taken as full without a scan. Final
+    /// blob-index contiguity is enforced by [Writable::recover]. Repairs mutate `pending` in
+    /// place and are made durable together with the rebuilt offsets; an already-aligned journal
+    /// is left untouched.
     ///
     /// Returns the recovered bounds (`pruning_boundary..size`).
+    #[allow(clippy::too_many_arguments)]
     async fn align(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
         mut offsets: Box<fixed::Inner<E, u64>>,
         items_per_blob: u64,
+        (floor, proven): (u64, u64),
         buffer: NonZeroUsize,
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<(Box<fixed::Inner<E, u64>>, Range<u64>), Error> {
         // Find the newest item-bearing blob, truncating torn trailing bytes along the way (the
         // first invalid frame is the end of the journal).
+        let floor_blob = position_to_blob(floor, items_per_blob);
         let scanned: Vec<u64> = pending.keys().rev().copied().collect();
         let mut items_in_newest = 0;
         let mut newest_blob = None;
+        let mut repaired = false;
         for &blob in &scanned {
             let writer = pending.get_mut(&blob).expect("blob came from pending");
-            let scan = Self::scan_blob(writer, buffer, codec_config, compressed).await?;
+            let blob_start =
+                blob_first_position(blob, items_per_blob)?.max(offsets.pruning_boundary());
+            let blob_end = super::blob_end_position(blob, items_per_blob, u64::MAX);
+            let full = blob < floor_blob
+                && blob_start < blob_end
+                && Self::indexed_frame_end(&offsets, writer, blob_end - 1).await?
+                    == Some(writer.size());
+            let scan = if full {
+                BlobScan {
+                    items: blob_end - blob_start,
+                    valid_size: writer.size(),
+                    torn: false,
+                }
+            } else if blob == floor_blob && proven > 0 {
+                Self::scan_blob(
+                    writer,
+                    proven,
+                    floor - blob_start,
+                    buffer,
+                    codec_config,
+                    compressed,
+                )
+                .await?
+            } else {
+                Self::scan_blob(writer, 0, 0, buffer, codec_config, compressed).await?
+            };
             if scan.items > items_per_blob {
                 return Err(Error::Corruption(format!(
                     "blob {blob} has too many items: expected at most {items_per_blob}, got {}",
@@ -1738,6 +1847,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 );
                 writer.resize(scan.valid_size).await?;
                 writer.sync().await?;
+                repaired = true;
             }
             if scan.items > 0 {
                 items_in_newest = scan.items;
@@ -1761,6 +1871,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             warn!(blob, "crash repair: removing empty trailing data blob");
             pending.remove(&blob);
             partition.remove(blob).await?;
+            repaired = true;
         }
 
         let Some(newest_blob) = newest_blob else {
@@ -1785,13 +1896,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
             let offsets_start_blob = position_to_blob(offsets_bounds.start, items_per_blob);
             match offsets_start_blob.cmp(&oldest_blob) {
-                std::cmp::Ordering::Less => {
+                Ordering::Less => {
                     warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
                     let (pruned, _) = offsets.prune(data_oldest_pos).await?;
                     offsets = pruned;
+                    repaired = true;
                 }
-                std::cmp::Ordering::Equal => {}
-                std::cmp::Ordering::Greater => {
+                Ordering::Equal => {}
+                Ordering::Greater => {
                     // Prune always removes data before offsets, so offsets should never be
                     // ahead by a blob.
                     return Err(Error::Corruption(format!(
@@ -1814,19 +1926,26 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let data_sync_start =
             Self::recovery_anchor(&offsets, &offsets_bounds, retained_data_end_bound)?;
 
-        // Rebuild the offsets suffix by replaying data from there.
-        let data_size;
-        (offsets, data_size) = Self::rebuild_offsets_from_anchor(
+        // Rebuild the offsets suffix by replaying data from there. The anchor is the floor
+        // whenever it lies within the floor's blob, so its proven byte offset applies.
+        let anchor_offset = if position_to_blob(data_sync_start, items_per_blob) == floor_blob {
+            proven
+        } else {
+            0
+        };
+        let (data_size, rebuilt);
+        (offsets, data_size, rebuilt) = Self::rebuild_offsets_from_anchor(
             partition,
             pending,
             offsets,
             items_per_blob,
-            data_sync_start,
+            (data_sync_start, anchor_offset),
             buffer,
             codec_config,
             compressed,
         )
         .await?;
+        repaired |= rebuilt;
 
         // Final invariant checks. These hold by construction after alignment, but the inputs are
         // recovered from disk, so a violation means corruption rather than a logic bug.
@@ -1858,8 +1977,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Rebuilt offsets are about to become durable. First make the data they point at durable
         // too; on real filesystems, init may have adopted bytes that were readable but not synced.
-        Self::sync_data_range(pending, data_sync_start, data_size, items_per_blob).await?;
-        let offsets = offsets.sync().await?;
+        // An untouched journal already proved everything it holds, so it needs neither.
+        if repaired {
+            Self::sync_data_range(pending, data_sync_start, data_size, items_per_blob).await?;
+            offsets = offsets.sync().await?;
+        }
         Ok((offsets, pruning_boundary..data_size))
     }
 
@@ -1969,22 +2091,23 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(())
     }
 
-    /// Rebuild the offsets suffix by replaying the data blobs from a recovery anchor.
+    /// Rebuild the offsets suffix by replaying the data blobs from a recovery anchor: position
+    /// `anchor`, whose frame begins at byte `anchor_offset` of its blob.
     ///
     /// Returns corruption if the data does not reach the anchor. If replay finds a short blob
     /// after the anchor, recovery truncates newer blobs and returns the contiguous data-backed
-    /// size.
+    /// size. The final flag reports whether the offsets journal or data blobs were mutated.
     #[allow(clippy::too_many_arguments)]
     async fn rebuild_offsets_from_anchor(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
         mut offsets: Box<fixed::Inner<E, u64>>,
         items_per_blob: u64,
-        anchor: u64,
+        (anchor, anchor_offset): (u64, u64),
         buffer: NonZeroUsize,
         codec_config: &V::Cfg,
         compressed: bool,
-    ) -> Result<(Box<fixed::Inner<E, u64>>, u64), Error> {
+    ) -> Result<(Box<fixed::Inner<E, u64>>, u64, bool), Error> {
         assert!(
             !pending.is_empty(),
             "rebuild_offsets called with no data blobs"
@@ -2007,18 +2130,24 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Err(data_too_short());
         }
 
+        let mut changed = false;
         if offsets_bounds.end > anchor {
             offsets = offsets.rewind(anchor).await?;
+            changed = true;
         }
 
+        // Walk blobs from the anchor's blob upward, appending an offsets entry per frame after
+        // the already-indexed prefix of the first blob. A proven `anchor_offset` seeks past that
+        // prefix; otherwise its frames are scanned and skipped.
         let start_blob = position_to_blob(anchor, items_per_blob);
         let first_position = offsets_bounds
             .start
             .max(blob_first_position(start_blob, items_per_blob)?);
-
-        // Walk blobs from the anchor's blob upward, skipping the already-indexed prefix of the
-        // first blob, appending an offsets entry per frame after it.
-        let mut skip = anchor - first_position;
+        let mut skip = if anchor_offset > 0 {
+            0
+        } else {
+            anchor - first_position
+        };
         let mut size = anchor;
         let mut blob = start_blob;
         loop {
@@ -2035,12 +2164,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                         size, "crash repair: truncating data after missing blob"
                     );
                     Self::remove_blobs_after(partition, pending, blob).await?;
+                    changed = true;
                 }
-                return Ok((offsets, size));
+                return Ok((offsets, size, changed));
             };
 
+            let offset = if blob == start_blob { anchor_offset } else { 0 };
             let replay = writer.replay(buffer, ReadOptions::default()).await?;
-            let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
+            let mut scanner =
+                FrameScanner::<E::Blob, V>::new(replay, offset, codec_config, compressed)?;
             let blob_end_pos = super::blob_end_position(blob, items_per_blob, u64::MAX);
 
             let end = loop {
@@ -2067,6 +2199,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                         } else {
                             offsets.append(&offset).await?;
                             size += 1;
+                            changed = true;
                         }
                     }
                     Frame::End { valid_size, torn } => break Some((valid_size, torn)),
@@ -2087,14 +2220,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                     );
                     writer.resize(valid_size).await?;
                     writer.sync().await?;
+                    changed = true;
                 }
                 // A short blob ends the contiguous data-backed prefix: any newer blobs are
                 // unreachable and removed.
                 if pending.keys().next_back().is_some_and(|&n| n > blob) {
                     warn!(blob, size, "crash repair: truncating data after short blob");
                     Self::remove_blobs_after(partition, pending, blob).await?;
+                    changed = true;
                 }
-                return Ok((offsets, size));
+                return Ok((offsets, size, changed));
             }
 
             blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
@@ -2182,6 +2317,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The data blobs are the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data blobs.
+    ///
+    /// Recovery skips durable prefixes when their indexed boundaries can be verified, falling
+    /// back to replay otherwise. An intact, fully synced journal reopens without repair writes.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
@@ -2375,6 +2513,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
+    }
+
+    /// Remove a closed journal's data, offsets, and checkpoint partitions without opening or
+    /// recovering it. `partition` is the base name from [Config::partition]. Missing partitions
+    /// are ignored, so an interrupted removal can be retried before the name is reused.
+    ///
+    /// The caller must exclusively own the namespace and must not hold the journal open.
+    ///
+    /// # Crash Safety
+    ///
+    /// Removal is not atomic. Retry it after an interruption before reusing the namespace; a
+    /// partially removed journal must not be reopened with [Self::init].
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn destroy_partition(context: &E, partition: &str) -> Result<(), Error> {
+        Partition::<E>::remove_all(context, &format!("{partition}{DATA_SUFFIX}")).await?;
+        fixed::destroy_partition(context, &format!("{partition}{OFFSETS_SUFFIX}")).await
     }
 }
 
@@ -2596,6 +2750,7 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
+    use rstest::rstest;
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -5172,10 +5327,10 @@ mod tests {
         });
     }
 
-    /// A torn page below a mid-blob watermark is rejected without truncating the blob's
-    /// acknowledged prefix, and retries fail identically.
+    /// A torn page below a mid-blob watermark is acknowledged damage: recovery adopts the proven
+    /// prefix without re-reading or truncating it, and the damage surfaces at read time.
     #[test_traced]
-    fn test_variable_recovery_rejects_torn_page_below_mid_blob_watermark() {
+    fn test_variable_recovery_adopts_torn_page_below_mid_blob_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config::<()> {
@@ -5203,17 +5358,32 @@ mod tests {
                 .await
                 .unwrap();
 
+            // The watermark proves the frames ending at byte 180, so recovery never re-reads
+            // them: the journal is adopted unchanged (on retry too) and the damage surfaces as
+            // read errors on the affected items while the rest stay readable.
             for child in ["second", "retry"] {
-                let result = Journal::<_, u64>::init(context.child(child), cfg.clone()).await;
-                assert!(matches!(result, Err(Error::Corruption(_))));
+                let journal = Journal::<_, u64>::init(context.child(child), cfg.clone())
+                    .await
+                    .expect("acknowledged damage must not fail recovery");
+                assert_eq!(journal.bounds(), 0..20);
+                let (_, size_after) = context
+                    .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    size_after, size_before,
+                    "adoption must preserve the evidence"
+                );
+                let mut damaged = 0;
+                for i in 0..20u64 {
+                    match journal.read(i).await {
+                        Ok(item) => assert_eq!(item, i * 100),
+                        Err(_) => damaged += 1,
+                    }
+                }
+                assert!(damaged > 0, "the torn page must surface as read errors");
+                assert_eq!(journal.read(19).await.unwrap(), 1900);
             }
-
-            // The rejection must not truncate the blob's acknowledged prefix.
-            let (_, size_after) = context
-                .open(&cfg.data_partition(), &0u64.to_be_bytes())
-                .await
-                .unwrap();
-            assert_eq!(size_after, size_before);
         });
     }
 
@@ -5720,7 +5890,7 @@ mod tests {
                 &mut pending,
                 Box::new(offsets),
                 10,
-                2,
+                (2, 0),
                 NZUsize!(1024),
                 &(),
                 false,
@@ -8623,6 +8793,299 @@ mod tests {
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Configuration for one 1 KiB-item journal whose reopen cost is measured in bytes read.
+    fn measured_cfg(
+        context: &deterministic::Context,
+        partition: &str,
+        items_per_section: u64,
+    ) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(items_per_section),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, SMALL_PAGE_SIZE, NZUsize!(16)),
+            write_buffer: NZUsize!(4096),
+            replay_buffer: NZUsize!(4096),
+        }
+    }
+
+    /// Storage bytes read, writes, and syncs recorded so far.
+    fn storage_io(context: &deterministic::Context) -> (u64, u64, u64) {
+        let encoded = context.encode();
+        (
+            counter(&encoded, "storage_read_bytes"),
+            counter(&encoded, "storage_writes"),
+            counter(&encoded, "storage_syncs"),
+        )
+    }
+
+    /// A journal whose recovery watermark covers its size reopens from its checkpoint, blob
+    /// tails, and one frame header: no frame is replayed and nothing is written or synced.
+    #[test_traced]
+    fn test_variable_init_reopens_synced_journal_without_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = measured_cfg(&context, "init-synced-no-replay", 1024);
+            let mut journal =
+                Journal::<_, FixedBytes<1024>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for i in 0..32u8 {
+                (journal, _) = journal.append(&FixedBytes::new([i; 1024])).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+
+            let (read, writes, syncs) = storage_io(&context);
+            let journal = Journal::<_, FixedBytes<1024>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let (read_after, writes_after, syncs_after) = storage_io(&context);
+            assert_eq!(journal.bounds(), 0..32);
+            assert_eq!(
+                writes_after, writes,
+                "a proven journal must not be repaired"
+            );
+            assert_eq!(
+                syncs_after, syncs,
+                "a proven journal has nothing to make durable"
+            );
+            let read = read_after - read;
+            assert!(
+                read < 16 * 1024,
+                "reopening a 32 KiB journal read {read} bytes"
+            );
+            assert_eq!(journal.read(31).await.unwrap(), FixedBytes::new([31; 1024]));
+        });
+    }
+
+    /// Only frames above the watermark are replayed on reopen, after which the recovered size is
+    /// recorded as the watermark so the next reopen replays nothing.
+    #[test_traced]
+    fn test_variable_init_replays_only_unproven_suffix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = measured_cfg(&context, "init-unproven-suffix", 1024);
+            let mut journal =
+                Journal::<_, FixedBytes<1024>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for i in 0..32u8 {
+                (journal, _) = journal.append(&FixedBytes::new([i; 1024])).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            // Durable data beyond the watermark, whose offsets were never made durable.
+            for i in 32..40u8 {
+                (journal, _) = journal.append(&FixedBytes::new([i; 1024])).await.unwrap();
+            }
+            drop(journal.commit().await.unwrap());
+
+            let (read, _, syncs) = storage_io(&context);
+            let journal =
+                Journal::<_, FixedBytes<1024>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            let (read_after, _, syncs_after) = storage_io(&context);
+            assert_eq!(journal.bounds(), 0..40);
+            let read = read_after - read;
+            assert!(
+                (8 * 1024..32 * 1024).contains(&read),
+                "recovering an 8 KiB suffix of a 40 KiB journal read {read} bytes"
+            );
+            assert!(
+                syncs_after > syncs,
+                "the recovered size must become durable"
+            );
+            for i in 0..40u8 {
+                assert_eq!(
+                    journal.read(u64::from(i)).await.unwrap(),
+                    FixedBytes::new([i; 1024])
+                );
+            }
+            drop(journal);
+
+            let (_, writes, syncs) = storage_io(&context);
+            drop(
+                Journal::<_, FixedBytes<1024>>::init(context.child("third"), cfg)
+                    .await
+                    .unwrap(),
+            );
+            let (_, writes_after, syncs_after) = storage_io(&context);
+            assert_eq!(writes_after, writes);
+            assert_eq!(syncs_after, syncs);
+        });
+    }
+
+    /// When the newest blob is empty, full blobs below the watermark are adopted from one indexed
+    /// frame header each rather than scanned.
+    #[test_traced]
+    fn test_variable_init_adopts_full_older_blobs_without_scan() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = measured_cfg(&context, "init-full-older-blobs", 4);
+            let mut journal =
+                Journal::<_, FixedBytes<1024>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for i in 0..12u8 {
+                (journal, _) = journal.append(&FixedBytes::new([i; 1024])).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            assert_eq!(context.scan(&cfg.data_partition()).await.unwrap().len(), 4);
+
+            let (read, writes, _) = storage_io(&context);
+            let journal = Journal::<_, FixedBytes<1024>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let (read_after, writes_after, _) = storage_io(&context);
+            assert_eq!(journal.bounds(), 0..12);
+            assert_eq!(writes_after, writes);
+            let read = read_after - read;
+            assert!(
+                read < 6 * 1024,
+                "reopening a 12 KiB journal read {read} bytes"
+            );
+            for i in 0..12u8 {
+                assert_eq!(
+                    journal.read(u64::from(i)).await.unwrap(),
+                    FixedBytes::new([i; 1024])
+                );
+            }
+        });
+    }
+
+    /// `destroy_partition` removes every partition of a closed journal without opening it, also
+    /// after an interrupted removal already deleted some of them, and is idempotent.
+    #[rstest]
+    fn test_variable_destroy_partition_without_recovery(#[values(false, true)] interrupted: bool) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "destroy-partition".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+
+            let offsets = cfg.offsets_partition();
+            let partitions = [
+                cfg.data_partition(),
+                format!("{offsets}-blobs"),
+                format!("{offsets}-metadata"),
+            ];
+            for partition in &partitions {
+                assert!(!context.scan(partition).await.unwrap().is_empty());
+            }
+            if interrupted {
+                context.remove(&partitions[0], None).await.unwrap();
+            }
+
+            let reads = counter(&context.encode(), "storage_reads");
+            Journal::<_, u64>::destroy_partition(&context, &cfg.partition)
+                .await
+                .unwrap();
+            assert_eq!(
+                counter(&context.encode(), "storage_reads"),
+                reads,
+                "removal must not open or replay the journal"
+            );
+            for partition in &partitions {
+                assert!(matches!(
+                    context.scan(partition).await,
+                    Err(commonware_runtime::Error::PartitionMissing(_))
+                ));
+            }
+            Journal::<_, u64>::destroy_partition(&context, &cfg.partition)
+                .await
+                .unwrap();
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..0);
+        });
+    }
+
+    /// A blob that lost its last acknowledged frame cannot prove its prefix, so recovery scans it
+    /// in full; a torn page inside that prefix is then damage to acknowledged data and must be
+    /// rejected without truncating the evidence, never repaired into an empty journal.
+    #[rstest]
+    fn test_variable_recovery_rejects_torn_prefix_of_shortened_acknowledged_blob(
+        #[values(0, 1)] torn_page: u64,
+    ) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: format!("variable-torn-short-acknowledged-{torn_page}"),
+                items_per_section: NZU64!(40),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..30u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            // The watermark (30) sits mid-blob: 30 9-byte frames end at byte 270 in page 4.
+            journal.sync().await.unwrap();
+
+            // Cut the blob to three whole physical pages (192 logical bytes, 21 whole frames), so
+            // the last acknowledged frame is gone, then tear an interior page of the surviving
+            // prefix (the paged writer only repairs a torn final page on open).
+            let physical_page_size = 64 + 12;
+            let (blob, size) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(size > 3 * physical_page_size);
+            blob.resize(3 * physical_page_size).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+            corrupt_page(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                torn_page,
+                64,
+            )
+            .await;
+            let (_, size_before) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            for child in ["second", "retry"] {
+                let result = Journal::<_, u64>::init(context.child(child), cfg.clone()).await;
+                assert!(
+                    matches!(result, Err(Error::Corruption(_))),
+                    "acknowledged data loss was not rejected: {result:?}"
+                );
+                let (_, size_after) = context
+                    .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    size_after, size_before,
+                    "rejection must not truncate the acknowledged evidence"
+                );
+            }
         });
     }
 }

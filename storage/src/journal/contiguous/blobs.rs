@@ -119,6 +119,13 @@ impl<E: Context> Partition<E> {
         }
     }
 
+    /// Remove both partitions [Self::select] may choose for `prefix`, without listing them.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn remove_prefix(context: &E, prefix: &str) -> Result<(), Error> {
+        Self::remove_all(context, prefix).await?;
+        Self::remove_all(context, &format!("{prefix}-blobs")).await
+    }
+
     /// Select the blob partition for `prefix` using legacy-first compatibility rules: the
     /// legacy partition (`prefix` itself) if it contains data, otherwise `{prefix}-blobs`.
     /// Both containing data is corruption.
