@@ -22,8 +22,10 @@ use super::{
         certificate_forwarder, certificate_router, resolver_forwarder, resolver_router,
         shared_router, vote_forwarder, vote_router,
     },
-    runner::{self, CorrectEngine, Outcome, RunReport},
-    stack::{EngineChannels, EngineConfig, register_channels, round_robin, spawn_engine},
+    runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
+    stack::{
+        EngineChannels, EngineConfig, SYNC_CONFIG, register_channels, round_robin, spawn_engine,
+    },
 };
 use commonware_consensus::{
     marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
@@ -159,7 +161,7 @@ where
                 &context,
                 &cluster,
                 index,
-                elector.clone(),
+                NodeConfig::new(elector.clone(), None),
                 node.clone(),
             )
             .await,
@@ -237,6 +239,8 @@ where
         .1
         .split_with(node_context.child("database_split"), shared_router());
 
+    // No node discovers or serves a floor in this driver, so the compromised
+    // identity's probe channel goes unused rather than split.
     let primary_channels = EngineChannels {
         vote: (vote_primary, vote_rx_primary),
         certificate: (certificate_primary, certificate_rx_primary),
@@ -244,6 +248,7 @@ where
         backfill: (backfill_primary, backfill_rx_primary),
         broadcast: (broadcast_primary, broadcast_rx_primary),
         database: (raw.database.0.clone(), database_rx_primary),
+        probe: None,
     };
     let secondary_channels = EngineChannels {
         vote: (vote_secondary, vote_rx_secondary),
@@ -252,6 +257,7 @@ where
         backfill: (backfill_secondary, backfill_rx_secondary),
         broadcast: (broadcast_secondary, broadcast_rx_secondary),
         database: (raw.database.0, database_rx_secondary),
+        probe: None,
     };
 
     drop(spawn_engine::<B, M, _, _, _, _, _, _, _>(
@@ -268,6 +274,9 @@ where
                 observations[compromised].clone(),
             ),
             observations: observations[compromised].clone(),
+            prune: None,
+            sync: SYNC_CONFIG,
+            state_sync: false,
         },
         primary_channels,
     ));
@@ -291,6 +300,9 @@ where
                 schedule,
             ),
             observations: observations[SECONDARY_ENGINE].clone(),
+            prune: None,
+            sync: SYNC_CONFIG,
+            state_sync: false,
         },
         secondary_channels,
     ));
@@ -312,7 +324,14 @@ where
     };
 
     // Measurement point. Both halves of the compromised identity are excluded.
-    runner::measure(target, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(
+        target,
+        outcome,
+        &correct,
+        &observations,
+        &cluster.genesis,
+        None,
+    )
 }
 
 #[cfg(test)]

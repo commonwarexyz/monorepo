@@ -12,6 +12,8 @@ stateful-all = [
 	"stateful-cert-mock-restarts-db",
 	"stateful-cert-mock-twins",
 	"stateful-cert-mock-twins-coding",
+	"stateful-cert-mock-state-sync",
+	"stateful-db-sync",
 	"stateful-probe",
 ]
 mocks = [
@@ -24,6 +26,8 @@ stateful-cert-mock-restarts = [ "mocks" ]
 stateful-cert-mock-restarts-db = [ "mocks" ]
 stateful-cert-mock-twins = [ "mocks" ]
 stateful-cert-mock-twins-coding = [ "mocks", "dep:commonware-coding" ]
+stateful-cert-mock-state-sync = [ "mocks" ]
+stateful-db-sync = [ "mocks" ]
 stateful-probe = [ "mocks" ]
 
 [package.metadata]
@@ -83,6 +87,22 @@ bench = false
 name = "stateful_cert_mock_restarts_db"
 path = "fuzz_targets/stateful_cert_mock_restarts_db.rs"
 required-features = [ "stateful-cert-mock-restarts-db" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_state_sync"
+path = "fuzz_targets/stateful_cert_mock_state_sync.rs"
+required-features = [ "stateful-cert-mock-state-sync" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_db_sync"
+path = "fuzz_targets/stateful_db_sync.rs"
+required-features = [ "stateful-db-sync" ]
 test = false
 doc = false
 bench = false

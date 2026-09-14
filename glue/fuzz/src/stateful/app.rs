@@ -25,7 +25,7 @@ use super::{
     backend::{
         Backend, Batches, Databases, MerkleizedBatches, Readers, StateCommitment, Transition,
     },
-    invariants::EngineObservations,
+    invariants::{Applied, EngineObservations},
     marshal::Marshal,
 };
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -324,9 +324,17 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         // skipped-block path taken when a finalized floor is attached) would
         // record a later height's root here and trip the intra-node arm of I2;
         // no node attaches a floor, so that path is never entered.
-        let root = B::canonical_root(&*readers.read().await);
-        self.observations
-            .record_state(block.height(), block.context.round.view(), root);
+        let (root, oldest_retained) = {
+            let db = readers.read().await;
+            (B::canonical_root(&db), B::oldest_retained(&db))
+        };
+        self.observations.record_applied(Applied {
+            height: block.height(),
+            view: block.context.round.view(),
+            root,
+            prune_floor: B::prune_floor(&block.commitment),
+            oldest_retained,
+        });
     }
 }
 

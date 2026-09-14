@@ -43,6 +43,12 @@
 //! - `restarts` is the environment driver: four correct engines, crashed and
 //!   restarted on a schedule.
 //! - `db_restarts` runs the restart driver over every database backend.
+//! - `db_sync` drives a database set through state sync, pruning, replay,
+//!   and rewind with no consensus above it, against peers that are
+//!   sometimes slow and sometimes serve a divergent history.
+//! - `state_sync` is the late-joiner driver: three correct engines run from
+//!   genesis, a fourth joins later through peer state sync, and restarts may
+//!   interrupt the sync or follow its completion.
 //! - `probe` drives the real `Probe` actors through their public boundaries
 //!   under an adversarial event program and checks floor provenance.
 //! - `invariants` records what each engine delivered, committed, and verified,
@@ -55,6 +61,8 @@ mod app;
 mod backend;
 #[cfg(feature = "stateful-cert-mock-restarts-db")]
 mod db_restarts;
+#[cfg(feature = "stateful-db-sync")]
+mod db_sync;
 mod input;
 mod invariants;
 mod marshal;
@@ -72,6 +80,8 @@ mod probe;
 mod restarts;
 mod runner;
 mod stack;
+#[cfg(feature = "stateful-cert-mock-state-sync")]
+mod state_sync;
 #[cfg(any(
     feature = "stateful-cert-mock-twins",
     feature = "stateful-cert-mock-twins-coding"
@@ -83,9 +93,12 @@ use commonware_cryptography::{ed25519, sha256};
 use commonware_utils::{NZU16, NZU64, NZUsize};
 #[cfg(feature = "stateful-cert-mock-restarts-db")]
 pub use db_restarts::{fuzz_stateful_cert_mock_restarts_db, run_stateful_db_restarts};
+#[cfg(feature = "stateful-db-sync")]
+pub use db_sync::{DbSyncReport, SyncOutcome, fuzz_stateful_db_sync, run_stateful_db_sync};
 pub use input::{
-    DatabaseKind, ProbeEvent, StatefulDbRestartsFuzzInput, StatefulProbeFuzzInput,
-    StatefulRestartsFuzzInput, StatefulTwinsFuzzInput,
+    DatabaseKind, PeerControls, ProbeEvent, PruneControls, SetShape, StatefulDbRestartsFuzzInput,
+    StatefulDbSyncFuzzInput, StatefulProbeFuzzInput, StatefulRestartsFuzzInput,
+    StatefulStateSyncFuzzInput, StatefulTwinsFuzzInput, SyncControls,
 };
 pub use invariants::Counts;
 use marshal::Marshal;
@@ -97,6 +110,8 @@ pub use probe::{ProbeReport, fuzz_stateful_probe, run_stateful_probe};
 ))]
 pub use restarts::{fuzz_stateful_cert_mock_restarts, run_stateful_restarts};
 pub use runner::{Outcome, RunReport};
+#[cfg(feature = "stateful-cert-mock-state-sync")]
+pub use state_sync::{fuzz_stateful_cert_mock_state_sync, run_stateful_state_sync};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
@@ -138,6 +153,53 @@ pub(crate) const MAX_REQUIRED_HEIGHTS: u8 = 10;
 
 /// Longest leader term a run may draw.
 pub(crate) const MAX_TERM_LENGTH: u32 = 4;
+
+/// Most finalized blocks between pruning attempts a restart run may draw.
+pub(crate) const MAX_MAINTENANCE_INTERVAL: u8 = 8;
+
+/// Most finalized blocks a restart run may retain beyond the acknowledgement
+/// window before pruning.
+pub(crate) const MAX_RETAINED_BLOCKS: u8 = 6;
+
+/// Most heights the state-sync target's serving nodes apply before the
+/// joiner starts.
+pub(crate) const MAX_JOIN_AFTER: u8 = 6;
+
+/// The unit of the state-sync target's joiner crash delay.
+pub(crate) const JOINER_CRASH_STEP: Duration = Duration::from_millis(10);
+
+/// Most crash-delay steps the state-sync target's joiner may be given.
+pub(crate) const MAX_JOINER_CRASH_STEPS: u8 = 40;
+
+/// Most heights the database-set target's serving set applies before the
+/// sync starts.
+pub(crate) const MAX_SERVED_HEIGHTS: u8 = 8;
+
+/// Most heights the database-set target's serving set applies while the sync
+/// runs.
+pub(crate) const MAX_EXTRA_HEIGHTS: u8 = 6;
+
+/// Most heights the database-set target's serving set applies after the
+/// sync converges.
+pub(crate) const MAX_POST_HEIGHTS: u8 = 4;
+
+/// Largest fetch or apply batch the database-set target syncs in.
+pub(crate) const MAX_SYNC_BATCH: u64 = 16;
+
+/// Answers in a peer's schedule before it repeats.
+pub(crate) const PEER_SCHEDULE_LEN: usize = 32;
+
+/// How long a delayed peer answer waits.
+pub(crate) const PEER_DELAY: Duration = Duration::from_millis(50);
+
+/// The unit of the tape-driven pause before each height served during a
+/// sync.
+pub(crate) const TIP_UPDATE_DELAY: Duration = Duration::from_millis(100);
+
+/// Bound on the simulated duration of a database-set sync. Unlike the
+/// cluster targets, reaching it is a failure: the peers answer honestly
+/// eventually and the history is finite, so the coordinator must converge.
+pub(crate) const SYNC_RUN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Bound on the simulated duration of a run. The run normally ends when
 /// every correct node has delivered its required suffix heights; this bound

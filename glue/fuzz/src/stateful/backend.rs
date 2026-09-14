@@ -19,8 +19,10 @@ use super::{Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE};
     test,
     feature = "stateful-cert-mock-restarts",
     feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-cert-mock-state-sync",
     feature = "stateful-cert-mock-twins",
     feature = "stateful-cert-mock-twins-coding",
+    feature = "stateful-db-sync",
     feature = "stateful-probe"
 ))]
 pub(super) use any_backend::Any;
@@ -43,11 +45,20 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{NZU64, non_empty_range, range::NonEmptyRange};
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 pub(super) use current_backend::Current;
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 pub(super) use immutable_backend::{ImmutableCompact, ImmutableStandard};
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 pub(super) use keyless_backend::{KeylessCompact, KeylessStandard};
 use std::{fmt::Debug, future::Future, num::NonZeroU64};
 
@@ -175,6 +186,7 @@ impl Read for StateCommitment {
 }
 
 /// The inputs one block's execution is a pure function of.
+#[derive(Clone, Debug)]
 pub(super) struct Transition {
     /// The view of the block being executed.
     pub(super) view: View,
@@ -188,6 +200,14 @@ pub(super) struct Transition {
 }
 
 impl Transition {
+    /// The same block under a different state transition.
+    pub(super) fn with_bump(&self, bump: u64) -> Self {
+        Self {
+            bump,
+            ..self.clone()
+        }
+    }
+
     /// A key no valid finalized history writes twice: it names the block's
     /// view, parent, and height, all of which are unique along a chain.
     fn fresh_key(&self) -> Digest {
@@ -246,6 +266,46 @@ pub(super) trait Backend: Clone + Send + Sync + 'static {
 
     /// The canonical root of the applied database, the observable I2 compares.
     fn canonical_root(db: &Self::Db) -> Digest;
+
+    /// The oldest operation location the applied database still retains, or
+    /// `None` for an adapter that keeps no operation history to observe.
+    fn oldest_retained(db: &Self::Db) -> Option<u64>;
+
+    /// The location pruning to this commitment's sync target retains from,
+    /// or `None` for an adapter whose retention is not observable.
+    fn prune_floor(commitment: &StateCommitment) -> Option<u64>;
+}
+
+/// The retention observables of a journaled adapter: its operation log's
+/// lower bound, and the sync target's range start pruning retains from.
+macro_rules! journaled_retention {
+    () => {
+        fn oldest_retained(db: &Self::Db) -> Option<u64> {
+            Some(db.bounds().start.as_u64())
+        }
+
+        fn prune_floor(commitment: &StateCommitment) -> Option<u64> {
+            Some(commitment.range.start().as_u64())
+        }
+    };
+}
+
+/// The retention observables of a compact adapter, which keeps only Merkle
+/// peaks and witnesses and exposes no operation history.
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
+macro_rules! compact_retention {
+    () => {
+        fn oldest_retained(_db: &Self::Db) -> Option<u64> {
+            None
+        }
+
+        fn prune_floor(_commitment: &StateCommitment) -> Option<u64> {
+            None
+        }
+    };
 }
 
 pub(super) fn u64_to_digest(value: u64) -> Digest {
@@ -364,10 +424,15 @@ mod any_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        journaled_retention!();
     }
 }
 
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 mod current_backend {
     //! The `current` adapter: the keyed workload over a grafted QMDB whose
     //! canonical root is distinct from the operations root state sync uses.
@@ -463,10 +528,15 @@ mod current_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        journaled_retention!();
     }
 }
 
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 mod immutable_backend {
     //! The immutable adapters: fresh-key inserts only, over the journaled and
     //! the compact database.
@@ -527,6 +597,8 @@ mod immutable_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        journaled_retention!();
     }
 
     /// The compact immutable adapter, which retains only the current Merkle
@@ -580,10 +652,15 @@ mod immutable_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        compact_retention!();
     }
 }
 
-#[cfg(feature = "stateful-cert-mock-restarts-db")]
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-db-sync"
+))]
 mod keyless_backend {
     //! The keyless adapters: appends only, over the journaled and the compact
     //! database.
@@ -640,6 +717,8 @@ mod keyless_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        journaled_retention!();
     }
 
     /// The compact keyless adapter, which retains only the current Merkle
@@ -692,10 +771,18 @@ mod keyless_backend {
         fn canonical_root(db: &Self::Db) -> Digest {
             db.root()
         }
+
+        compact_retention!();
     }
 }
 
-#[cfg(all(test, feature = "stateful-cert-mock-restarts-db"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "stateful-cert-mock-restarts-db",
+        feature = "stateful-db-sync"
+    )
+))]
 mod tests {
     use super::*;
     use crate::stateful::{PAGE_CACHE_SIZE, PAGE_SIZE};

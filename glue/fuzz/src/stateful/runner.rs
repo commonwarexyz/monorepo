@@ -13,15 +13,18 @@ use super::{
     NAMESPACE, NUM_IDENTITIES, PublicKey, RESTART_DOWNTIME, Scheme,
     app::{Block, CorrectApp},
     backend::Backend,
-    invariants::{self, Counts, EngineObservations},
+    invariants::{self, Counts, EngineObservations, RetentionWindow},
     marshal::Marshal,
-    stack::{ElectorConfig, EngineConfig, register_channels, spawn_engine},
+    stack::{
+        ElectorConfig, EngineConfig, MAX_PENDING_ACKS, SYNC_CONFIG, register_channels, spawn_engine,
+    },
 };
 use commonware_consensus::{
     marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
     types::View,
 };
 use commonware_cryptography::Digestible;
+use commonware_glue::stateful::{PruneConfig, db::SyncEngineConfig};
 use commonware_p2p::simulated::{
     Config as NetworkConfig, Link, Network as SimulatedNetwork, Oracle,
 };
@@ -98,6 +101,10 @@ impl RunReport {
                 chain_heights: 0,
                 state_comparisons: 0,
                 verdict_comparisons: 0,
+                retention_checks: 0,
+                prunes: 0,
+                sync_starts: 0,
+                synced_nodes: 0,
                 restarts: 0,
             },
         }
@@ -114,7 +121,8 @@ impl fmt::Display for RunReport {
         write!(
             f,
             "[{}] database={} marshal={} outcome={} correct_nodes={} chain_heights={} \
-             state_comparisons={} verdict_comparisons={} restarts={}{}",
+             state_comparisons={} verdict_comparisons={} retention_checks={} prunes={} \
+             sync_starts={} synced_nodes={} restarts={}{}",
             self.target,
             self.database,
             self.marshal,
@@ -123,6 +131,10 @@ impl fmt::Display for RunReport {
             self.counts.chain_heights,
             self.counts.state_comparisons,
             self.counts.verdict_comparisons,
+            self.counts.retention_checks,
+            self.counts.prunes,
+            self.counts.sync_starts,
+            self.counts.synced_nodes,
             self.counts.restarts,
             if self.measured() {
                 ""
@@ -241,14 +253,39 @@ pub(super) async fn setup<B: Backend, M: Marshal>(
     }
 }
 
+/// What a correct node runs with, kept across its restarts.
+#[derive(Clone)]
+pub(super) struct NodeConfig<EC> {
+    pub(super) elector: EC,
+    /// Periodic marshal and database pruning, or none.
+    pub(super) prune: Option<PruneConfig>,
+    /// Sync engine tuning.
+    pub(super) sync: SyncEngineConfig,
+    /// Request peer state sync at every start. The startup plan honours the
+    /// request only until a sync completes.
+    pub(super) state_sync: bool,
+}
+
+impl<EC> NodeConfig<EC> {
+    /// A node that never state syncs, with pruning `prune`.
+    pub(super) const fn new(elector: EC, prune: Option<PruneConfig>) -> Self {
+        Self {
+            elector,
+            prune,
+            sync: SYNC_CONFIG,
+            state_sync: false,
+        }
+    }
+}
+
 /// One correct identity's engine, retained so a restart can rebuild it on the
 /// same storage partitions under the same key.
 pub(super) struct CorrectEngine<B: Backend, M: Marshal, EC> {
     pub(super) engine: usize,
     identity: PublicKey,
     scheme: Scheme,
-    elector: EC,
     partition: String,
+    config: NodeConfig<EC>,
     pub(super) observations: EngineObservations,
     handle: Handle<()>,
     backend: PhantomData<(B, M)>,
@@ -266,7 +303,7 @@ where
         context: &deterministic::Context,
         cluster: &Cluster<M>,
         engine: usize,
-        elector: EC,
+        config: NodeConfig<EC>,
         observations: EngineObservations,
     ) -> Self {
         let identity = cluster.participants[engine].clone();
@@ -278,8 +315,8 @@ where
             engine,
             &identity,
             &scheme,
-            &elector,
             &partition,
+            &config,
             &observations,
         )
         .await;
@@ -287,8 +324,8 @@ where
             engine,
             identity,
             scheme,
-            elector,
             partition,
+            config,
             observations,
             handle,
             backend: PhantomData,
@@ -315,8 +352,8 @@ where
             self.engine,
             &self.identity,
             &self.scheme,
-            &self.elector,
             &self.partition,
+            &self.config,
             &self.observations,
         )
         .await;
@@ -331,8 +368,8 @@ async fn spawn<B, M, EC>(
     engine: usize,
     identity: &PublicKey,
     scheme: &Scheme,
-    elector: &EC,
     partition: &str,
+    config: &NodeConfig<EC>,
     observations: &EngineObservations,
 ) -> Handle<()>
 where
@@ -348,14 +385,31 @@ where
         EngineConfig {
             identity: identity.clone(),
             scheme: scheme.clone(),
-            elector: elector.clone(),
+            elector: config.elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: partition.to_string(),
             application: CorrectApp::<B, M>::new(cluster.genesis.clone(), observations.clone()),
             observations: observations.clone(),
+            prune: config.prune,
+            sync: config.sync,
+            state_sync: config.state_sync,
         },
         channels,
     )
+}
+
+/// The retention window a run's pruning configuration commits to, judged
+/// against the genesis commitment's floor for the heights below it.
+pub(super) fn retention_window<B: Backend, M: Marshal>(
+    prune: Option<PruneConfig>,
+    genesis: &Block<M>,
+) -> RetentionWindow {
+    RetentionWindow {
+        heights: prune.map_or(u64::MAX, |config| {
+            (MAX_PENDING_ACKS.get() + config.retained_qmdb_blocks) as u64
+        }),
+        initial_floor: B::prune_floor(&genesis.commitment),
+    }
 }
 
 /// Draw a restart schedule from the tape.
@@ -425,16 +479,24 @@ pub(super) fn measure<B: Backend, M: Marshal, EC>(
     nodes: &[CorrectEngine<B, M, EC>],
     observations: &[EngineObservations],
     genesis: &Block<M>,
+    prune: Option<PruneConfig>,
 ) -> RunReport {
     let correct: Vec<(usize, &EngineObservations)> = nodes
         .iter()
         .map(|node| (node.engine, &node.observations))
         .collect();
+    let (retention_checks, prunes) =
+        invariants::check_retention(&correct, retention_window::<B, M>(prune, genesis));
+    let (sync_starts, synced_nodes) = invariants::check_state_sync(&correct);
     let counts = Counts {
         correct_nodes: correct.len(),
         chain_heights: invariants::check_chain_of_blocks(&correct, genesis.digest()),
         state_comparisons: invariants::check_state_agreement(&correct),
         verdict_comparisons: invariants::check_verdict_agreement(&correct),
+        retention_checks,
+        prunes,
+        sync_starts,
+        synced_nodes,
         restarts: observations.iter().map(EngineObservations::restarts).sum(),
     };
     RunReport {

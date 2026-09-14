@@ -44,7 +44,7 @@ pub fn run_stateful_db_restarts(input: StatefulDbRestartsFuzzInput) -> RunReport
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::NUM_IDENTITIES;
+    use crate::stateful::{NUM_IDENTITIES, input::PruneControls};
     use commonware_consensus::types::TermLength;
     use commonware_utils::NZU32;
 
@@ -66,6 +66,11 @@ mod tests {
             required_heights,
             term_length: TermLength::new(NZU32!(term_length)),
             restarts,
+            prune: Some(PruneControls {
+                maintenance_interval: 1,
+                retained_marshal_blocks: 1,
+                retained_qmdb_blocks: 0,
+            }),
             raw_bytes: tape(seed),
         }
     }

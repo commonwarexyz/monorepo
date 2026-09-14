@@ -20,7 +20,17 @@
 //! verification on the consensus side of the boundary; the stateful actor,
 //! which is the system under test, is reached exactly as before.
 
-use super::{Ctx, Digest, EPOCH_LENGTH, MAILBOX_SIZE, PublicKey, Scheme, app::Block};
+#[cfg(any(
+    test,
+    feature = "stateful-cert-mock-restarts",
+    feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-cert-mock-state-sync",
+    feature = "stateful-cert-mock-twins",
+    feature = "stateful-cert-mock-twins-coding",
+    feature = "stateful-probe"
+))]
+use super::MAILBOX_SIZE;
+use super::{Ctx, Digest, EPOCH_LENGTH, PublicKey, Scheme, app::Block};
 use commonware_actor::Feedback;
 use commonware_codec::Read;
 use commonware_consensus::{
@@ -261,6 +271,7 @@ fn epocher() -> commonware_consensus::types::FixedEpocher {
     test,
     feature = "stateful-cert-mock-restarts",
     feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-cert-mock-state-sync",
     feature = "stateful-cert-mock-twins",
     feature = "stateful-probe"
 ))]
@@ -269,6 +280,7 @@ pub(super) use standard::Standard;
     test,
     feature = "stateful-cert-mock-restarts",
     feature = "stateful-cert-mock-restarts-db",
+    feature = "stateful-cert-mock-state-sync",
     feature = "stateful-cert-mock-twins",
     feature = "stateful-probe"
 ))]

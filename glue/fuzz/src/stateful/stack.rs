@@ -9,12 +9,19 @@
 //! and the wrapper Simplex drives; the stateful actor's mailbox is erased
 //! before it reaches that wrapper, so everything above the stateful actor is
 //! monomorphized once per variant rather than once per backend.
+//!
+//! An engine may request peer state sync at startup. The startup plan decides
+//! whether that request is honoured: a fresh node discovers a finalized floor
+//! through its probe and syncs from it, an interrupted sync resumes from its
+//! persisted floor, and a node whose sync completed ignores the request and
+//! recovers through marshal instead. Every engine serves floors to probing
+//! peers once its marshal is attached.
 
 use super::{
     Ctx, EPOCH_LENGTH, IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, PublicKey, Scheme,
     app::Block,
     backend::{Backend, Databases},
-    invariants::{EngineObservations, ObservingReporter},
+    invariants::{EngineObservations, ObservingReporter, Startup},
     marshal::{ErasedApplication, ErasedReporter, Marshal},
 };
 use commonware_consensus::{
@@ -34,8 +41,9 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Sha256, certificate::ConstantProvider};
 use commonware_glue::stateful::{
-    Application, Config as StatefulConfig, Stateful as StatefulActor, SyncPlan,
+    Application, Config as StatefulConfig, PruneConfig, Stateful as StatefulActor, SyncPlan,
     db::{SyncEngineConfig, p2p as qmdb_resolver},
+    probe::{Config as ProbeConfig, Probe},
 };
 use commonware_p2p::{
     Receiver as ReceiverTrait, Sender as SenderTrait,
@@ -46,7 +54,7 @@ use commonware_runtime::{
     Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{archive::prunable, mmr, translator::TwoCap};
-use commonware_utils::{NZU64, NZUsize};
+use commonware_utils::{NZDuration, NZU64, NZUsize};
 use std::{
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
@@ -55,7 +63,7 @@ use std::{
 /// Rate limit applied to every simulated channel.
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-/// Channel ids. Each identity registers all six; the compromised identity's
+/// Channel ids. Each identity registers all seven; the compromised identity's
 /// are split before they reach an engine.
 pub(super) const CHANNEL_VOTE: u64 = 0;
 pub(super) const CHANNEL_CERTIFICATE: u64 = 1;
@@ -63,6 +71,7 @@ pub(super) const CHANNEL_SIMPLEX_RESOLVER: u64 = 2;
 pub(super) const CHANNEL_BACKFILL: u64 = 3;
 pub(super) const CHANNEL_BROADCAST: u64 = 4;
 pub(super) const CHANNEL_DATABASE: u64 = 5;
+pub(super) const CHANNEL_PROBE: u64 = 6;
 
 const LEADER_TIMEOUT: Duration = Duration::from_millis(250);
 const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -71,8 +80,13 @@ const FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 const SKIP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLVER_TIMEOUT: Duration = Duration::from_millis(500);
 const RESOLVER_RETRY: Duration = Duration::from_millis(100);
+const PROBE_RETRY: Duration = Duration::from_millis(500);
 const VIEW_RETENTION: ViewDelta = ViewDelta::new(10);
-const MAX_PENDING_ACKS: std::num::NonZeroUsize = NZUsize!(2);
+
+/// Finalized blocks marshal may hold unacknowledged. Pruning retains this
+/// many blocks plus one behind the newest finalized height before any
+/// configured retention.
+pub(super) const MAX_PENDING_ACKS: std::num::NonZeroUsize = NZUsize!(2);
 
 /// How long a stable leader may stall before its term is abandoned.
 const TERM_STALL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -98,9 +112,10 @@ pub(super) fn round_robin(term_length: TermLength) -> RoundRobin<Sha256> {
     }
 }
 
-/// State-sync tuning. No node attaches a finalized floor, so the sync engines
-/// are never entered; the configuration is still required to build the actor.
-const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
+/// State-sync tuning for the drivers whose nodes never attach a finalized
+/// floor: the sync engines are never entered there, but the configuration is
+/// still required to build the actor.
+pub(super) const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
     fetch_batch_size: NZU64!(16),
     apply_batch_size: NZU64!(64),
     max_outstanding_requests: 8,
@@ -145,7 +160,8 @@ pub(super) type WholeChannels = EngineChannels<
     Sender<PublicKey, deterministic::Context>,
 >;
 
-/// The six channel endpoints one engine owns.
+/// The channel endpoints one engine owns. An engine without a probe channel
+/// neither discovers nor serves finalized floors.
 pub(super) struct EngineChannels<VS, CS, RS, BS, FS> {
     pub(super) vote: (VS, Receiver<PublicKey>),
     pub(super) certificate: (CS, Receiver<PublicKey>),
@@ -153,6 +169,7 @@ pub(super) struct EngineChannels<VS, CS, RS, BS, FS> {
     pub(super) broadcast: (BS, Receiver<PublicKey>),
     pub(super) backfill: (FS, Receiver<PublicKey>),
     pub(super) database: Endpoint,
+    pub(super) probe: Option<Endpoint>,
 }
 
 /// Everything one engine needs, so a restart can rebuild it unchanged.
@@ -164,6 +181,12 @@ pub(super) struct EngineConfig<M: Marshal, A, EC> {
     pub(super) partition_prefix: String,
     pub(super) application: A,
     pub(super) observations: EngineObservations,
+    /// Periodic marshal and database pruning, or none.
+    pub(super) prune: Option<PruneConfig>,
+    /// Sync engine tuning.
+    pub(super) sync: SyncEngineConfig,
+    /// Request peer state sync at startup. Requires a probe channel.
+    pub(super) state_sync: bool,
 }
 
 /// Spawn one engine as a supervised task.
@@ -234,6 +257,9 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
         partition_prefix,
         application,
         observations,
+        prune,
+        sync,
+        state_sync,
     } = config;
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
     let db_config = B::config(&partition_prefix, page_cache.clone());
@@ -278,10 +304,46 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
     .await
     .expect("failed to initialize blocks archive");
 
-    // No finalized floor is ever attached, so startup is marshal reconciliation
-    // and peer state sync is never entered.
+    // The startup plan decides between marshal reconciliation and peer state
+    // sync. A node that syncs discovers its floor through its probe first.
     let startup = context.child("stateful_startup");
-    let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+    let mut plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+    let should_state_sync = plan.should_state_sync(state_sync);
+    assert!(
+        !should_state_sync || channels.probe.is_some(),
+        "an engine requesting state sync must own a probe channel"
+    );
+    let probe = channels.probe.map(|channel| {
+        let (probe, mailbox) = Probe::<_, _, _, M::Variant, _, _, _>::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: provider.clone(),
+            strategy: Sequential,
+            capacity: MAILBOX_SIZE,
+            blocker: oracle.control(identity.clone()),
+            minimum_epoch: Epoch::zero(),
+            retry_timeout: NZDuration!(PROBE_RETRY),
+        });
+        probe.start(channel);
+        mailbox
+    });
+    let mut floor_round = None;
+    if should_state_sync {
+        let floor = probe
+            .as_ref()
+            .expect("checked above")
+            .subscribe()
+            .await
+            .expect("probe stopped before a floor was discovered");
+        floor_round = Some(floor.round());
+        plan = plan.with_floor(floor);
+    }
+    observations.note_startup(Startup {
+        requested: state_sync,
+        should_sync: should_state_sync,
+        resumed: plan.requires_state_sync_floor(),
+        sync_height: plan.sync_height(),
+        floor_round: plan.floor().map(|floor| floor.round()).or(floor_round),
+    });
 
     let (marshal_actor, marshal_mailbox, floor) =
         MarshalActor::<_, M::Variant, _, _, _, _, _>::init(
@@ -308,8 +370,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
         )
         .await;
 
-    // Database sync resolver. It never fetches because no node state syncs, but
-    // the stateful actor requires one and it serves peers once attached.
+    // Database sync resolver: fetches during state sync and serves peers once
+    // the stateful actor attaches the database.
     let (database_resolver, database_sync) =
         qmdb_resolver::Actor::<_, PublicKey, _, _, mmr::Family, B::Db>::new(
             context.child("database_resolver"),
@@ -338,8 +400,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             mailbox_size: MAILBOX_SIZE,
             plan,
             resolvers: database_sync,
-            sync_config: SYNC_CONFIG,
-            prune_config: None,
+            sync_config: sync,
+            prune_config: prune,
         },
     );
 
@@ -358,6 +420,11 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
         buffer,
         resolver,
     );
+    // A syncing node consumed its floor above; every node serves floors from
+    // here on.
+    if let Some(probe) = probe {
+        probe.attach(marshal_mailbox.clone());
+    }
     stateful_actor.start();
 
     let engine = simplex::Engine::new(
@@ -400,7 +467,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
     std::future::pending::<()>().await
 }
 
-/// Register one identity's six channels.
+/// Register one identity's seven channels.
 pub(super) async fn register_channels(
     oracle: &Oracle<PublicKey, deterministic::Context>,
     identity: &PublicKey,
@@ -419,6 +486,7 @@ pub(super) async fn register_channels(
         backfill: register(CHANNEL_BACKFILL).await,
         broadcast: register(CHANNEL_BROADCAST).await,
         database: register(CHANNEL_DATABASE).await,
+        probe: register(CHANNEL_PROBE).await,
     }
 }
 
@@ -430,6 +498,7 @@ pub(super) struct RawChannels {
     pub(super) backfill: Endpoint,
     pub(super) broadcast: Endpoint,
     pub(super) database: Endpoint,
+    pub(super) probe: Endpoint,
 }
 
 impl RawChannels {
@@ -442,6 +511,7 @@ impl RawChannels {
             backfill: self.backfill,
             broadcast: self.broadcast,
             database: self.database,
+            probe: Some(self.probe),
         }
     }
 }

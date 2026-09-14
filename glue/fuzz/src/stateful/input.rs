@@ -6,13 +6,16 @@
 //! never printed in `Debug` output.
 
 use super::{
-    MAX_ADVANCE_STEPS, MAX_MINIMUM_EPOCH, MAX_PROBE_EVENTS, MAX_RAW_PAYLOAD, MAX_REQUIRED_HEIGHTS,
-    MAX_SOURCE_HEIGHT, MAX_TERM_LENGTH, NUM_SOURCES, app::FaultArming,
+    MAX_ADVANCE_STEPS, MAX_EXTRA_HEIGHTS, MAX_JOIN_AFTER, MAX_JOINER_CRASH_STEPS,
+    MAX_MAINTENANCE_INTERVAL, MAX_MINIMUM_EPOCH, MAX_POST_HEIGHTS, MAX_PROBE_EVENTS,
+    MAX_RAW_PAYLOAD, MAX_REQUIRED_HEIGHTS, MAX_RETAINED_BLOCKS, MAX_SERVED_HEIGHTS,
+    MAX_SOURCE_HEIGHT, MAX_SYNC_BATCH, MAX_TERM_LENGTH, NUM_SOURCES, app::FaultArming,
 };
 use arbitrary::Arbitrary;
 use commonware_consensus::types::TermLength;
-use commonware_utils::NZU32;
-use std::fmt;
+use commonware_glue::stateful::PruneConfig;
+use commonware_utils::{NZU32, NZU64, NZUsize};
+use std::{fmt, num::NonZeroU64};
 
 /// Largest tape a run consumes.
 const MAX_RAW_BYTES: usize = 32_768;
@@ -122,6 +125,47 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
     }
 }
 
+/// The periodic pruning every node in a restart run performs.
+///
+/// The stateful actor prunes marshal and QMDB history behind its
+/// acknowledgement window; the retention windows here are what it keeps
+/// beyond that. QMDB retention never exceeds marshal retention, which the
+/// actor asserts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PruneControls {
+    /// Finalized blocks between pruning attempts.
+    pub maintenance_interval: u8,
+    /// Finalized blocks retained in marshal beyond the acknowledgement window.
+    pub retained_marshal_blocks: u8,
+    /// Finalized blocks' worth of operations retained in QMDB beyond the
+    /// acknowledgement window, at most `retained_marshal_blocks`.
+    pub retained_qmdb_blocks: u8,
+}
+
+impl PruneControls {
+    /// The actor configuration these controls name.
+    pub fn config(self) -> PruneConfig {
+        PruneConfig {
+            maintenance_interval: NZUsize!(usize::from(self.maintenance_interval)),
+            retained_marshal_blocks: usize::from(self.retained_marshal_blocks),
+            retained_qmdb_blocks: usize::from(self.retained_qmdb_blocks),
+        }
+    }
+}
+
+impl Arbitrary<'_> for PruneControls {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let maintenance_interval = u.int_in_range(1..=MAX_MAINTENANCE_INTERVAL)?;
+        let retained_marshal_blocks = u.int_in_range(0..=MAX_RETAINED_BLOCKS)?;
+        let retained_qmdb_blocks = u.int_in_range(0..=retained_marshal_blocks)?;
+        Ok(Self {
+            maintenance_interval,
+            retained_marshal_blocks,
+            retained_qmdb_blocks,
+        })
+    }
+}
+
 /// One run of the stateful restart target.
 ///
 /// Every identity is correct here; the only fault is environmental.
@@ -133,6 +177,8 @@ pub struct StatefulRestartsFuzzInput {
     pub term_length: TermLength,
     /// Number of scheduled crash/restart events over correct identities.
     pub restarts: u8,
+    /// Periodic pruning, or none.
+    pub prune: Option<PruneControls>,
     /// Byte tape seeding the deterministic runtime and the restart schedule.
     pub raw_bytes: Vec<u8>,
 }
@@ -143,33 +189,61 @@ impl fmt::Debug for StatefulRestartsFuzzInput {
             .field("required_heights", &self.required_heights)
             .field("term_length", &self.term_length)
             .field("restarts", &self.restarts)
+            .field("prune", &self.prune)
             .field("raw_bytes_len", &self.raw_bytes.len())
             .finish()
     }
 }
 
-impl StatefulRestartsFuzzInput {
+/// The bounded controls decoded before a restart run's byte tape.
+pub(super) struct RestartControls {
+    pub(super) required_heights: u8,
+    pub(super) term_length: TermLength,
+    pub(super) restarts: u8,
+    pub(super) prune: Option<PruneControls>,
+}
+
+impl RestartControls {
     /// Draw the restart controls, which the database-adapter target shares.
-    fn controls(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<(u8, TermLength, u8)> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let required_heights = u.int_in_range(1..=MAX_REQUIRED_HEIGHTS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
 
         // A run with no restart exercises nothing this target exists for, so the
         // schedule always has at least one event.
         let restarts = u.int_in_range(1..=MAX_RESTARTS)?;
-        Ok((required_heights, term_length, restarts))
+
+        // Pruning stays on unless the input turns it off, so the prune path
+        // keeps its reach as the surrounding axes mutate.
+        let prune = if u.int_in_range(0..=7)? == 7 {
+            None
+        } else {
+            Some(u.arbitrary()?)
+        };
+        Ok(Self {
+            required_heights,
+            term_length,
+            restarts,
+            prune,
+        })
     }
 }
 
 impl Arbitrary<'_> for StatefulRestartsFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let (required_heights, term_length, restarts) = Self::controls(u)?;
+        let RestartControls {
+            required_heights,
+            term_length,
+            restarts,
+            prune,
+        } = RestartControls::arbitrary(u)?;
         let raw_bytes = tape(u)?;
 
         Ok(Self {
             required_heights,
             term_length,
             restarts,
+            prune,
             raw_bytes,
         })
     }
@@ -224,6 +298,8 @@ pub struct StatefulDbRestartsFuzzInput {
     pub term_length: TermLength,
     /// Number of scheduled crash/restart events over correct identities.
     pub restarts: u8,
+    /// Periodic pruning, or none.
+    pub prune: Option<PruneControls>,
     /// Byte tape seeding the deterministic runtime and the restart schedule.
     pub raw_bytes: Vec<u8>,
 }
@@ -237,6 +313,7 @@ impl StatefulDbRestartsFuzzInput {
                 required_heights: self.required_heights,
                 term_length: self.term_length,
                 restarts: self.restarts,
+                prune: self.prune,
                 raw_bytes: self.raw_bytes,
             },
         )
@@ -250,6 +327,7 @@ impl fmt::Debug for StatefulDbRestartsFuzzInput {
             .field("required_heights", &self.required_heights)
             .field("term_length", &self.term_length)
             .field("restarts", &self.restarts)
+            .field("prune", &self.prune)
             .field("raw_bytes_len", &self.raw_bytes.len())
             .finish()
     }
@@ -258,7 +336,12 @@ impl fmt::Debug for StatefulDbRestartsFuzzInput {
 impl Arbitrary<'_> for StatefulDbRestartsFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let database = u.arbitrary()?;
-        let (required_heights, term_length, restarts) = StatefulRestartsFuzzInput::controls(u)?;
+        let RestartControls {
+            required_heights,
+            term_length,
+            restarts,
+            prune,
+        } = RestartControls::arbitrary(u)?;
         let raw_bytes = tape(u)?;
 
         Ok(Self {
@@ -266,6 +349,217 @@ impl Arbitrary<'_> for StatefulDbRestartsFuzzInput {
             required_heights,
             term_length,
             restarts,
+            prune,
+            raw_bytes,
+        })
+    }
+}
+
+/// One run of the state-sync target: three serving nodes, a late joiner
+/// that peer syncs, and restarts over all of them.
+#[derive(Clone)]
+pub struct StatefulStateSyncFuzzInput {
+    /// Heights each node, the joiner included, must apply before the run
+    /// ends.
+    pub required_heights: u8,
+    /// Leader term length.
+    pub term_length: TermLength,
+    /// Heights the serving nodes apply before the joiner starts.
+    pub join_after: u8,
+    /// Operations the joiner fetches and applies per sync step.
+    pub sync_batch: NonZeroU64,
+    /// Crash the joiner this many steps of
+    /// [`JOINER_CRASH_STEP`](super::JOINER_CRASH_STEP) after it starts,
+    /// before the general restart schedule, so a sync in flight is
+    /// interrupted and must resume.
+    pub joiner_crash: Option<u8>,
+    /// Number of scheduled crash/restart events over every node.
+    pub restarts: u8,
+    /// Periodic pruning on every node, or none.
+    pub prune: Option<PruneControls>,
+    /// Byte tape seeding the deterministic runtime and the restart schedule.
+    pub raw_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for StatefulStateSyncFuzzInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatefulStateSyncFuzzInput")
+            .field("required_heights", &self.required_heights)
+            .field("term_length", &self.term_length)
+            .field("join_after", &self.join_after)
+            .field("sync_batch", &self.sync_batch)
+            .field("joiner_crash", &self.joiner_crash)
+            .field("restarts", &self.restarts)
+            .field("prune", &self.prune)
+            .field("raw_bytes_len", &self.raw_bytes.len())
+            .finish()
+    }
+}
+
+impl Arbitrary<'_> for StatefulStateSyncFuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let required_heights = u.int_in_range(1..=MAX_REQUIRED_HEIGHTS)?;
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
+        let join_after = u.int_in_range(1..=MAX_JOIN_AFTER)?;
+        let sync_batch = NZU64!(u.int_in_range(1..=MAX_SYNC_BATCH)?);
+        let joiner_crash = if u.arbitrary()? {
+            Some(u.int_in_range(0..=MAX_JOINER_CRASH_STEPS)?)
+        } else {
+            None
+        };
+        let restarts = u.int_in_range(0..=MAX_RESTARTS)?;
+
+        // Pruning competes with serving the joiner, so half the runs prune.
+        let prune = if u.arbitrary()? {
+            Some(u.arbitrary()?)
+        } else {
+            None
+        };
+        let raw_bytes = tape(u)?;
+        Ok(Self {
+            required_heights,
+            term_length,
+            join_after,
+            sync_batch,
+            joiner_crash,
+            restarts,
+            prune,
+            raw_bytes,
+        })
+    }
+}
+
+/// One shape of database set the database-set target can sync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetShape {
+    /// A single database of one adapter class.
+    Single(DatabaseKind),
+    /// An `any` database beside a compact immutable one.
+    Pair,
+    /// A `current` database beside a journaled and a compact keyless one.
+    Triple,
+}
+
+impl SetShape {
+    /// Every shape, in selector order.
+    pub const ALL: [Self; 8] = [
+        Self::Single(DatabaseKind::Any),
+        Self::Single(DatabaseKind::Current),
+        Self::Single(DatabaseKind::ImmutableStandard),
+        Self::Single(DatabaseKind::ImmutableCompact),
+        Self::Single(DatabaseKind::KeylessStandard),
+        Self::Single(DatabaseKind::KeylessCompact),
+        Self::Pair,
+        Self::Triple,
+    ];
+}
+
+impl Arbitrary<'_> for SetShape {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let selector = u.int_in_range(0..=Self::ALL.len() - 1)?;
+        Ok(Self::ALL[selector])
+    }
+}
+
+/// The sync engine tuning a database-set run syncs under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncControls {
+    /// Operations fetched per request.
+    pub fetch_batch_size: NonZeroU64,
+    /// Operations applied per local step.
+    pub apply_batch_size: NonZeroU64,
+    /// Outstanding requests at once.
+    pub max_outstanding_requests: u8,
+    /// Capacity of the per-database target-update channels and of the tip
+    /// update channel feeding the coordinator.
+    pub update_channel_size: u8,
+    /// Historical roots retained for proof verification across target
+    /// updates.
+    pub max_retained_roots: u8,
+}
+
+impl Arbitrary<'_> for SyncControls {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            fetch_batch_size: NZU64!(u.int_in_range(1..=MAX_SYNC_BATCH)?),
+            apply_batch_size: NZU64!(u.int_in_range(1..=MAX_SYNC_BATCH)?),
+            max_outstanding_requests: u.int_in_range(1..=4)?,
+            update_channel_size: u.int_in_range(1..=4)?,
+            max_retained_roots: u.int_in_range(1..=8)?,
+        })
+    }
+}
+
+/// How the peers of a database-set run answer, as densities out of eight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerControls {
+    /// Answers served from the divergent set.
+    pub divergent: u8,
+    /// Answers served after a delay.
+    pub delayed: u8,
+}
+
+impl Arbitrary<'_> for PeerControls {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            divergent: u.int_in_range(0..=4)?,
+            delayed: u.int_in_range(0..=4)?,
+        })
+    }
+}
+
+/// One run of the database-set target: a state sync of one set shape from a
+/// serving set, followed by pruning, replay, and rewind of the result.
+#[derive(Clone)]
+pub struct StatefulDbSyncFuzzInput {
+    /// The set shape to sync.
+    pub shape: SetShape,
+    /// Heights the serving set applies before the sync starts.
+    pub served_heights: u8,
+    /// Heights the serving set applies while the sync runs.
+    pub extra_heights: u8,
+    /// Heights the serving set applies after the sync converges, for the
+    /// synced set to reproduce.
+    pub post_heights: u8,
+    /// Sync engine tuning.
+    pub sync: SyncControls,
+    /// Peer answer densities.
+    pub peer: PeerControls,
+    /// Byte tape seeding the deterministic runtime, the peer schedule, and
+    /// the tip update schedule.
+    pub raw_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for StatefulDbSyncFuzzInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatefulDbSyncFuzzInput")
+            .field("shape", &self.shape)
+            .field("served_heights", &self.served_heights)
+            .field("extra_heights", &self.extra_heights)
+            .field("post_heights", &self.post_heights)
+            .field("sync", &self.sync)
+            .field("peer", &self.peer)
+            .field("raw_bytes_len", &self.raw_bytes.len())
+            .finish()
+    }
+}
+
+impl Arbitrary<'_> for StatefulDbSyncFuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let shape = u.arbitrary()?;
+        let served_heights = u.int_in_range(1..=MAX_SERVED_HEIGHTS)?;
+        let extra_heights = u.int_in_range(0..=MAX_EXTRA_HEIGHTS)?;
+        let post_heights = u.int_in_range(0..=MAX_POST_HEIGHTS)?;
+        let sync = u.arbitrary()?;
+        let peer = u.arbitrary()?;
+        let raw_bytes = tape(u)?;
+        Ok(Self {
+            shape,
+            served_heights,
+            extra_heights,
+            post_heights,
+            sync,
+            peer,
             raw_bytes,
         })
     }

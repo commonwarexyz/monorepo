@@ -13,10 +13,10 @@
 use super::{
     NUM_IDENTITIES, RUN_TIMEOUT,
     backend::{Any, Backend},
-    input::StatefulRestartsFuzzInput,
+    input::{PruneControls, StatefulRestartsFuzzInput},
     invariants::EngineObservations,
     marshal::Standard,
-    runner::{self, CorrectEngine, Outcome, RunReport},
+    runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
     stack::round_robin,
 };
 use commonware_consensus::types::View;
@@ -64,6 +64,7 @@ async fn run<B: Backend>(
 ) -> RunReport {
     let cluster = runner::setup::<B, Standard>(&mut context).await;
     let elector = round_robin(input.term_length);
+    let prune = input.prune.map(PruneControls::config);
 
     let observations: Vec<EngineObservations> = (0..NUM_IDENTITIES as usize)
         .map(|_| EngineObservations::new())
@@ -75,7 +76,7 @@ async fn run<B: Backend>(
                 &context,
                 &cluster,
                 index,
-                elector.clone(),
+                NodeConfig::new(elector.clone(), prune),
                 node.clone(),
             )
             .await,
@@ -110,7 +111,14 @@ async fn run<B: Backend>(
         }
     };
 
-    runner::measure(target, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(
+        target,
+        outcome,
+        &correct,
+        &observations,
+        &cluster.genesis,
+        prune,
+    )
 }
 
 #[cfg(test)]
@@ -125,6 +133,14 @@ mod tests {
             .collect()
     }
 
+    /// Prune every height, retaining nothing beyond the acknowledgement
+    /// window, so pruning runs as early and as often as the actor allows.
+    const AGGRESSIVE_PRUNE: PruneControls = PruneControls {
+        maintenance_interval: 1,
+        retained_marshal_blocks: 0,
+        retained_qmdb_blocks: 0,
+    };
+
     fn input(
         required_heights: u8,
         term_length: u32,
@@ -135,6 +151,7 @@ mod tests {
             required_heights,
             term_length: TermLength::new(NZU32!(term_length)),
             restarts,
+            prune: Some(AGGRESSIVE_PRUNE),
             raw_bytes: tape(seed),
         }
     }
@@ -176,6 +193,28 @@ mod tests {
     #[test]
     fn deeper_suffix_holds_invariants() {
         measured(input(6, 2, 2, 13));
+    }
+
+    /// Pruning visibly runs under the aggressive configuration and stays
+    /// inside the retention window across restarts (I9).
+    #[test]
+    fn pruning_runs_within_the_retention_window() {
+        let report = measured(input(8, 1, 2, 17));
+        assert!(
+            report.counts.prunes > 0,
+            "pruning never ran under the aggressive configuration: {report}"
+        );
+    }
+
+    /// A run with pruning disabled checks retention against an unbounded
+    /// window and observes no prune.
+    #[test]
+    fn disabled_pruning_retains_everything() {
+        let mut input = input(4, 1, 1, 19);
+        input.prune = None;
+        let report = measured(input);
+        assert_eq!(report.counts.prunes, 0, "{report}");
+        assert!(report.counts.retention_checks > 0, "{report}");
     }
 
     /// I6: a replayed input fails, or passes, identically.
