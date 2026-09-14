@@ -1,4 +1,7 @@
-//! Ratatui presentation for one independently owned agent wallet.
+//! Interactive wallet and scripted payment walkthrough.
+
+mod dashboard;
+mod walkthrough;
 
 use crate::{
     agent::{Agent, PaymentOutcome, WithdrawalOutcome},
@@ -32,14 +35,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
-};
+use dashboard::render;
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     collections::VecDeque,
     io::Stdout,
@@ -118,10 +115,8 @@ pub(crate) struct UiState {
 impl UiState {
     fn new() -> Self {
         let mut activity = VecDeque::new();
-        activity.push_back(
-            "Ready: deposit or withdraw before paying; a close finalizes after its challenge window."
-                .to_string(),
-        );
+        activity
+            .push_back("Pay to get a receipt. Close the epoch to settle the payments.".to_string());
         Self {
             receiver: 1,
             amount: DEFAULT_AMOUNT,
@@ -276,8 +271,8 @@ pub(crate) async fn run_with_io<E: Env>(
                     .await
                 {
                     Ok(PaymentOutcome::Accepted(payment)) => state.log(format!(
-                        "epoch {} payment #{} to {receiver}: {}",
-                        payment.epoch, payment.sequence, payment.total
+                        "Paid {} to {receiver}; receipt saved (epoch {})",
+                        payment.total, payment.epoch
                     )),
                     Ok(PaymentOutcome::CommittedUnheld { epoch, total }) => state.log(format!(
                         "epoch {epoch} payment for {total} committed in a finalized close; receipts unheld"
@@ -428,7 +423,7 @@ pub(crate) async fn run_with_io<E: Env>(
                         state.pending_closes.push_back(close.epoch);
                     }
                     state.log(format!(
-                        "epoch {} cut{}; successor payments resume after settlement finalization",
+                        "Closing epoch {}{}; waiting for certification and finality",
                         close.epoch,
                         if close.queued { " and queued" } else { "" }
                     ));
@@ -516,14 +511,10 @@ async fn refresh<E: Env>(
             Ok(PollCloseResponse::Finished(close)) => {
                 state.pending_closes.pop_front();
                 state.log(format!(
-                    "epoch {} finalized {}: {} rows, {} dealing bytes, prepare {}us, deal {}us, seal {}us",
+                    "Finalized epoch {} / account records: {} / {:.1} KB per validator",
                     close.epoch,
-                    String::from_utf8_lossy(&close.header),
                     close.rows,
-                    close.dealing_bytes,
-                    close.prepare_micros,
-                    close.deal_micros,
-                    close.seal_micros
+                    close.dealing_bytes as f64 / 1_000.0
                 ));
             }
             Ok(PollCloseResponse::Failed { epoch, error }) => {
@@ -542,145 +533,6 @@ async fn refresh<E: Env>(
     state.balance = agent.balance(network, chain, operator).await.ok();
 
     Ok(())
-}
-
-fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(7),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(frame.area());
-
-    let incoming = agent.incoming();
-    let reconciled = agent
-        .last_reconciled_epoch()
-        .map_or_else(|| "none".to_string(), |epoch| format!("epoch {epoch}"));
-    let title = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(
-                " Bajillion Agent ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(
-                "{}  operator balance {}  native {}  {} retained receipt(s)",
-                agent.name(),
-                state
-                    .balance
-                    .map_or_else(|| "?".to_string(), |value| value.to_string()),
-                state.native_balance.map_or_else(|| "?".to_string(), |value| value.to_string()),
-                agent.receipt_count()
-            )),
-        ]),
-        Line::raw(format!(
-            "Receiver ledger: verified incoming {} across {} pair(s) | last reconciled {reconciled}",
-            incoming.total, incoming.count
-        )),
-    ])
-    .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(title, sections[0]);
-
-    let operator = state.operator.map_or_else(
-        || "operator unavailable".to_string(),
-        |status| {
-            format!(
-                "Operator epoch {} | {}/{} live accounts | {} recent payments | close {}{}",
-                status.epoch,
-                status.present_accounts,
-                status.accounts,
-                status.recent_payments,
-                if status.close_in_progress {
-                    "active"
-                } else {
-                    "idle"
-                },
-                if status.faulted { " | FENCED" } else { "" }
-            )
-        },
-    );
-    let settlement = state.settlement.as_ref().map_or_else(
-        || "settlement unavailable".to_string(),
-        |status| {
-            format!(
-                "Settlement custody {} | claimable {} | height {} | state {}...{}",
-                status.custody,
-                status.claimable,
-                status.height,
-                status
-                    .state_root
-                    .digest
-                    .as_ref()
-                    .iter()
-                    .take(4)
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-                if status.hard_faulted {
-                    " | HARD FAULT"
-                } else {
-                    ""
-                }
-            )
-        },
-    );
-    let staged = if state.staged.is_empty() {
-        "Batch: empty".to_string()
-    } else {
-        let entries = state
-            .staged
-            .iter()
-            .map(|(receiver, amount)| format!("{} {amount}", agent.receiver_name(*receiver)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("Batch: {entries}")
-    };
-    let controls = Paragraph::new(vec![
-        Line::raw(operator),
-        Line::raw(settlement),
-        Line::raw(format!(
-            "Receiver: {} | amount {}",
-            agent.receiver_name(state.receiver),
-            state.amount
-        )),
-        Line::raw(staged),
-        Line::raw(
-            "p pay  R retry saved payment  a stage  b pay batch  d deposit  t fund operator  r refund deposit  w withdraw  f Close  x escalate  c claim withdrawal  h recover state  s cut epoch",
-        ),
-        Line::raw("Left/Right receiver  +/- amount  PgUp/PgDn +/-10"),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Roles and actions"),
-    );
-    frame.render_widget(controls, sections[1]);
-
-    let activity = Paragraph::new(
-        state
-            .activity
-            .iter()
-            .rev()
-            .map(|message| Line::raw(message.clone()))
-            .collect::<Vec<_>>(),
-    )
-    .wrap(Wrap { trim: true })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Activity (newest first)"),
-    );
-    frame.render_widget(activity, sections[2]);
-
-    let footer = Paragraph::new(
-        "The agent signs locally; the SQLite operator issues receipts; the settlement chain owns custody and claims. q or Esc quits.",
-    )
-    .style(Style::default().fg(Color::DarkGray))
-    .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(footer, sections[3]);
 }
 
 /// Unwraps a receipts-held acceptance, which every scripted payment expects.
@@ -727,7 +579,10 @@ async fn close_epoch<E: Env>(
 ) -> Result<u64> {
     let close = operator_rpc::start_close(network, operator, epoch).await?;
     ensure!(close.epoch == epoch, "operator started another close epoch");
-    println!("epoch {} cut and closing asynchronously", close.epoch);
+    walkthrough::event(
+        "Closing",
+        format_args!("epoch {epoch}; waiting for certification and finality..."),
+    );
     loop {
         match agent.poll_close(network, operator, close.epoch).await? {
             PollCloseResponse::NoEvent => network.sleep(Duration::from_millis(10)).await,
@@ -736,13 +591,13 @@ async fn close_epoch<E: Env>(
                     finished.epoch == epoch,
                     "operator finished another close epoch"
                 );
-                println!(
-                    "epoch {} finalized {} rows: dealings sealed and voted by the validator committee over the DA channel (prepare={}us deal={}us seal={}us)",
-                    finished.epoch,
-                    finished.rows,
-                    finished.prepare_micros,
-                    finished.deal_micros,
-                    finished.seal_micros
+                walkthrough::event(
+                    "Finalized",
+                    format_args!(
+                        "epoch {epoch} / account records: {} / {:.1} KB per validator",
+                        finished.rows,
+                        finished.dealing_bytes as f64 / 1_000.0
+                    ),
                 );
                 return Ok(close.epoch);
             }
@@ -812,9 +667,9 @@ async fn complete_pending_withdrawal<E: Env>(
             .expect("a failed claim retry leaves its error")
             .context("complete the interrupted withdrawal claim"));
     };
-    println!(
-        "claimed the interrupted withdrawal {} against the certified release record",
-        release.amount
+    walkthrough::event(
+        "Resumed",
+        format_args!("claimed a saved withdrawal of {}", release.amount),
     );
     Ok(())
 }
@@ -827,6 +682,15 @@ pub(crate) async fn scripted<E: Env>(
     mut agent: Agent,
     mut eve: Agent,
 ) -> Result<()> {
+    walkthrough::banner();
+    walkthrough::event("Wallet", agent.name());
+    walkthrough::event("Operator", operator);
+    walkthrough::step(
+        1,
+        "FUND THE WALLET",
+        "Fund your operator balance from the settlement chain.",
+    );
+
     // A saved claim can precede delivery of its authorization. Resolve that intent
     // before starting another withdrawal in this walkthrough.
     complete_pending_withdrawal(network, operator, &mut chain, &mut agent).await?;
@@ -843,11 +707,14 @@ pub(crate) async fn scripted<E: Env>(
     let native_start = chain
         .native_balance(network, chain.genesis().native.chain_id(), agent.account())
         .await?;
-    println!("certified native balance before deposit: {native_start}");
+    walkthrough::event(
+        "Before",
+        format_args!("{native_start} onchain / {start} with the operator"),
+    );
     let deposit = agent.deposit(network, &mut chain, 20).await?;
-    println!(
-        "deposited {}: chain custody proven by a certified read; no operator report",
-        deposit.amount
+    walkthrough::event(
+        "Deposit",
+        format_args!("{} moved into chain custody", deposit.amount),
     );
 
     // The withdrawal signs the finalized root containing this deposit. Wait for
@@ -861,9 +728,9 @@ pub(crate) async fn scripted<E: Env>(
     )
     .await?;
     close_epoch(network, operator, &mut agent, deposit_epoch).await?;
-    println!(
-        "deposit finalized in epoch {deposit_epoch}: verified balance {}",
-        start + deposit.amount
+    walkthrough::event(
+        "Balance",
+        format_args!("{} available with the operator", start + deposit.amount),
     );
     let mut withdrawal = None;
     for _ in 0..EFFECT_ATTEMPTS {
@@ -885,7 +752,16 @@ pub(crate) async fn scripted<E: Env>(
     }
     let withdrawal = withdrawal
         .context("the signed withdrawal remains unresolved; retry keeps the saved request")?;
-    println!("epoch {} carried withdrawal 3", withdrawal);
+    walkthrough::event(
+        "Withdrawal",
+        format_args!("3 queued for epoch {withdrawal}; claim after finality"),
+    );
+
+    walkthrough::step(
+        2,
+        "PAY SEVERAL RECIPIENTS",
+        "The operator returns receipts before settlement.",
+    );
 
     // An interrupted run can also lose a staged payment's response. Resubmit
     // the exact staged bytes here, after this run's deposit and withdrawal:
@@ -897,19 +773,20 @@ pub(crate) async fn scripted<E: Env>(
         .context("resume the interrupted payment")?
     {
         match outcome {
-            PaymentOutcome::Accepted(payment) => println!(
-                "resumed the interrupted payment #{} to acceptance",
-                payment.sequence
+            PaymentOutcome::Accepted(payment) => walkthrough::event(
+                "Resumed",
+                format_args!("saved payment #{} accepted", payment.sequence),
             ),
-            PaymentOutcome::CommittedUnheld { epoch, total } => println!(
-                "resumed interrupted payment for {total} proven committed in epoch {epoch}"
+            PaymentOutcome::CommittedUnheld { epoch, total } => walkthrough::event(
+                "Resumed",
+                format_args!("saved payment of {total} already committed in epoch {epoch}"),
             ),
         }
     }
     let payment = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 5)]).await?;
-    println!(
-        "epoch {} accepted payment #{}: the context matches a certified anchor read",
-        payment.epoch, payment.sequence
+    walkthrough::event(
+        agent.name(),
+        format_args!("-> Bob     5 / receipt saved / epoch {}", payment.epoch),
     );
 
     // The payer-signed acknowledgment body digest is the receipt_id reference a receiver
@@ -918,12 +795,12 @@ pub(crate) async fn scripted<E: Env>(
     let payer_account = agent.account();
     let batch =
         scripted_payment(network, operator, &mut chain, &mut agent, &[(2, 2), (3, 1)]).await?;
-    println!(
-        "epoch {} accepted batch #{} paying {} across {} receivers",
-        batch.epoch,
-        batch.sequence,
-        batch.total,
-        batch.acceptance.entries.len()
+    walkthrough::event(
+        agent.name(),
+        format_args!(
+            "-> Carol   2 + Dave 1 / one signed batch / epoch {}",
+            batch.epoch
+        ),
     );
     let eve_receiver = agent.receiver_count() - 1;
     complete_pending_withdrawal(network, operator, &mut chain, &mut eve).await?;
@@ -945,9 +822,9 @@ pub(crate) async fn scripted<E: Env>(
         &[(eve_receiver, 2)],
     )
     .await?;
-    println!(
-        "epoch {} accepted payment #{} to fresh virtual receiver Eve",
-        eve_payment.epoch, eve_payment.sequence
+    walkthrough::event(
+        agent.name(),
+        format_args!("-> Eve     2 / receipt saved / epoch {}", eve_payment.epoch),
     );
     let eve_receipt_id = Sha256::hash(&[eve_payment.acceptance.ack.body().encode().as_ref()]);
 
@@ -962,25 +839,24 @@ pub(crate) async fn scripted<E: Env>(
     receiver
         .intake_incoming(network, &mut chain, operator)
         .await?;
-    let ledger = receiver.incoming();
-    println!(
-        "receiver {} durably holds verified incoming {} across {} pair(s), anchored to the chain-registered context by a certified read",
-        receiver.name(),
-        ledger.total,
-        ledger.count
-    );
     ensure!(
         receiver.has_receipt(&payer_account, &receipt_id)?,
         "receiver holds no evidence for the accepted batch"
     );
-    println!("receiver durably holds this batch's verified receipt");
+    walkthrough::event("Bob", "verified and saved the payment receipt");
 
     eve.intake_incoming(network, &mut chain, operator).await?;
     ensure!(
         eve.has_receipt(&payer_account, &eve_receipt_id)?,
         "Eve holds no evidence for the accepted payment"
     );
-    println!("Eve durably holds the fresh virtual payment receipt");
+    walkthrough::event("Eve", "verified and saved the payment receipt");
+
+    walkthrough::step(
+        3,
+        "SETTLE THE PAYMENTS",
+        "Validators check the close; the chain waits out its challenge window.",
+    );
 
     let work_epoch = withdrawal
         .max(payment.epoch)
@@ -990,9 +866,9 @@ pub(crate) async fn scripted<E: Env>(
     let release = agent
         .claim_withdrawal(network, &mut chain, operator)
         .await?;
-    println!(
-        "claimed withdrawal {} against the certified release record",
-        release.amount
+    walkthrough::event(
+        "Claimed",
+        format_args!("{} returned to {} onchain", release.amount, agent.name()),
     );
 
     // Reconcile the held receipts against finalized activity while the epoch's
@@ -1003,11 +879,7 @@ pub(crate) async fn scripted<E: Env>(
             || receiver.last_reconciled_epoch() == Some(payment.epoch),
         "the receiver receipt_id epoch has not reconciled"
     );
-    for epoch in &summary.reconciled {
-        println!(
-            "receiver reconciled epoch {epoch} against the certified admitted roots: every held credit is evidence-backed"
-        );
-    }
+    walkthrough::event("Bob", "receipt matches the finalized close");
     let _ = std::fs::remove_file(&receiver_database);
     for suffix in ["-wal", "-shm"] {
         let mut path = receiver_database.clone().into_os_string();
@@ -1035,7 +907,16 @@ pub(crate) async fn scripted<E: Env>(
         eve_balance == Some(eve_expected),
         "Eve's fresh receipt did not become a virtual successor balance"
     );
-    println!("Eve's fresh receipt finalized as virtual balance {eve_expected}");
+    walkthrough::event(
+        "Eve",
+        format_args!("receipt matches the close / operator balance {eve_expected}"),
+    );
+
+    walkthrough::step(
+        4,
+        "WITHDRAW THE NEW BALANCE",
+        "Eve chooses when to move her received funds onchain.",
+    );
 
     let mut eve_withdrawal = None;
     for _ in 0..EFFECT_ATTEMPTS {
@@ -1057,12 +938,18 @@ pub(crate) async fn scripted<E: Env>(
     }
     let eve_withdrawal = eve_withdrawal
         .context("Eve's explicit withdrawal remains unresolved; retry keeps the saved request")?;
-    println!("epoch {eve_withdrawal} carried Eve's explicit withdrawal 2");
+    walkthrough::event(
+        "Eve",
+        format_args!("withdrawal of 2 queued for epoch {eve_withdrawal}"),
+    );
 
     let successor = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 1)]).await?;
-    println!(
-        "epoch {} accepted successor payment #{} after epoch {} finalized",
-        successor.epoch, successor.sequence, closed
+    walkthrough::event(
+        agent.name(),
+        format_args!(
+            "-> Bob     1 / epoch {} follows finalized epoch {closed}",
+            successor.epoch
+        ),
     );
     // The successor payment registered the next epoch's payment context, so
     // close that epoch too, inside its admission runway: an activated context
@@ -1080,9 +967,9 @@ pub(crate) async fn scripted<E: Env>(
         eve_release.amount == 2,
         "Eve's certified withdrawal release has the wrong amount"
     );
-    println!(
-        "claimed Eve's explicit withdrawal {} against the certified release record",
-        eve_release.amount
+    walkthrough::event(
+        "Claimed",
+        format_args!("{} returned to Eve onchain", eve_release.amount),
     );
 
     // Every close completes only on its certified finalization, which
@@ -1098,7 +985,10 @@ pub(crate) async fn scripted<E: Env>(
         network.sleep(Duration::from_millis(100)).await;
     }
     ensure!(retired, "a live registration outlived the walkthrough");
-    println!("certified read proves no live registration remains: the deployment idles safely");
+    walkthrough::event(
+        "Complete",
+        "all live closes finalized; no pending epoch deadlines",
+    );
 
     Ok(())
 }
@@ -1114,8 +1004,14 @@ pub(crate) async fn scripted<E: Env>(
 /// certified through the light client. This mirrors what a receiver's reconciliation does
 /// on the wire against the live deployment.
 pub(crate) fn fraud_arc() -> Result<()> {
-    println!(
-        "fraud: this arc alone is a throwaway in-process single-validator chain with locally simulated close certification, while its deposit, registration, admission, challenge, and readbacks are real transactions and certified reads"
+    walkthrough::step(
+        5,
+        "PROVE AN OMITTED PAYMENT",
+        "Isolated simulation / one validator / simulated close certification.",
+    );
+    walkthrough::event(
+        "Scope",
+        "This example leaves your live operator and balances untouched.",
     );
 
     deterministic::Runner::default().start(|context| async move {
@@ -1222,10 +1118,7 @@ pub(crate) fn fraud_arc() -> Result<()> {
                 &fraud.receiver,
             )
             .context("resolve the omitted committed entry")?;
-        println!(
-            "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted receiver, which holds an operator-signed receipt for {}",
-            fraud.held_credit
-        );
+        walkthrough::event("Mismatch", format_args!("receipt promises {} / close records {committed}", fraud.held_credit));
         let batch_id = fraud.result.header.batch_id::<Sha256>();
         let admit = SettlementTx::Admit(AdmitRequest::from(&fraud.result));
         chain.deliver(&context, &admit).await?;
@@ -1285,7 +1178,7 @@ pub(crate) fn fraud_arc() -> Result<()> {
             ),
             "the certified fault record does not name the proven challenge"
         );
-        println!("fraud: HigherAckEntry proven; the omitting close is invalidated");
+        walkthrough::event("Challenge", "receipt proves the omission in one chain transaction");
         let status = chain.status(&context).await?;
         ensure!(
             status.hard_faulted,
@@ -1300,7 +1193,8 @@ pub(crate) fn fraud_arc() -> Result<()> {
             ),
             "the harness status diverged from the certified read"
         );
-        println!("fraud: settlement is hard-faulted, so the fraudulent operator is fenced");
+        walkthrough::event("Verified", "close invalidated; the simulated operator cannot continue");
+        println!("\n  Walkthrough complete. Payments, settlement, withdrawals, and receipt enforcement verified.\n");
         Ok(())
     })
 }

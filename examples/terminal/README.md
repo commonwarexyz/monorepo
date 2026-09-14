@@ -335,71 +335,62 @@ keep independent balance and evidence ownership.
 
 ## Run
 
-Four validators, two operators, and any number of wallet agents run as separate processes on one
-machine. Start them in this order, each in its own terminal (or under a multiplexer such as
-`mprocs`). Build once first so the four validators do not compile concurrently:
+Install [mprocs 0.9.6 or newer](https://github.com/pvolok/dekit/blob/v0.9.6/README.md#installation), then
+build, generate a fresh demo, and open its process list:
 
 ```bash
 cargo build --release -p commonware-terminal
-```
-
-| Role | Process | Default addresses |
-|---|---|---|
-| validators | `terminal-chain validator` | p2p `127.0.0.1:3000` to `3003`, query servers `3200` to `3203` |
-| operators | `terminal-operator` | p2p `127.0.0.1:3400` and `3401`, RPC `--bind` (use `7001` and `7002`) |
-| agents | `terminal-agent` | no listener, dial the operator RPC and the validator query servers |
-
-**1. Set up.** Writes `./data/validator-0` to `./data/validator-3` and `./data/operator-0` and
-`./data/operator-1`, each with its keys plus the shared `network.json` and `genesis.json`. The
-validator count is fixed at four by the clearing committee, so keep the default `--peers 4`.
-`--operators` chooses how many operators (one deployment each), and every other flag only moves
-ports or the host (`terminal-chain setup --help`).
-
-```bash
 cargo run --release -p commonware-terminal --bin terminal-chain -- setup
+mprocs --config ./data/mprocs.yaml
 ```
 
-**2. Start the four validators.** They form the consensus network, execute one settlement
-machine per deployment, seal dealings, and answer certified reads and evidence requests on their
-query servers.
+Setup creates four validators, two operators, and a named **Walkthrough** pane per
+operator. Validators and operators start automatically; operators wait for their
+verified registration while catching up. Wait for **Operator ready** in the operator
+panes, then select **Walkthrough 0** in the process list and press `s`.
+Use Ctrl-a to switch between the process list and output. In the process list,
+`z` zooms the selected output and `q` stops the demo. **Walkthrough 1** runs the same flow on the other deployment.
+Walkthrough panes stay stopped until you start them. Each follows five stages:
+fund, pay, settle, withdraw, and an isolated challenge.
+Validator panes show each finalized block's height, short hash, and transaction count.
+Empty blocks keep advancing the chain's settlement deadlines between payments.
+
+The generated `data/mprocs.yaml` uses the binaries alongside the running
+`terminal-chain`, including when Cargo redirects its target directory. Config,
+storage, and database paths are absolute, so you can launch it from another directory.
+Every operator owns its own `operator.sqlite`, `alice.sqlite`, and Eve's
+wallet database beneath `data/operator-<index>`. Setup refuses a non-empty directory;
+use `--node-dir` for a separate demo. `--operators` selects the deployment count;
+`--base-port`, `--base-query-port`, `--operator-port`, `--operator-rpc-port`, and
+`--host` set the generated addresses. The validator count must remain four.
+
+| Role | Default addresses |
+|---|---|
+| Validators | P2P `127.0.0.1:3000` to `3003`, query `3200` to `3203` |
+| Operators | P2P `127.0.0.1:3400` and `3401`, RPC `7001` and `7002` |
+| Wallets | Connect to an operator RPC and the validator query servers |
+
+**Interactive wallets.** To explore manually, use the other generated launcher:
 
 ```bash
-mprocs "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-0" \
-       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-1" \
-       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-2" \
-       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-3"
+mprocs --config ./data/mprocs-wallets.yaml
 ```
 
-**3. Start the operators.** Each joins the validators' network as a secondary, so start them after
-the validators. Give each its own RPC address and SQLite database:
+Wait for **Operator ready**, then select **Alice 0**, **Bob 0**, or **Eve 0** and
+press `s` to open that wallet. Ctrl-a moves focus into the wallet, where its keys
+control payments and withdrawals. Switch back to the process list to visit another
+wallet or watch blocks finalize. Alice and Bob start with balances; Eve starts
+without one and can receive a payment to create it.
 
-```bash
-cargo run --release -p commonware-terminal --bin terminal-operator -- \
-  --node-dir ./data/operator-0 --bind 127.0.0.1:7001 \
-  --database terminal-operator-0.sqlite
-cargo run --release -p commonware-terminal --bin terminal-operator -- \
-  --node-dir ./data/operator-1 --bind 127.0.0.1:7002 \
-  --database terminal-operator-1.sqlite
-```
+In Alice's wallet, `p` sends the selected amount to Bob. Switch to Bob to see the
+receipt arrive. The operator closes epochs automatically; `s` requests a close
+immediately. A withdrawal requires two actions: `w` requests it, then `c` claims
+it after the carrying epoch finalizes.
 
-**4. Start wallet agents.** `--identity` picks the wallet (`0` Alice, `1` Bob, `2` Carol, `3` Dave,
-`4` Eve, who starts without a virtual balance), `--operator` names the operator's RPC address,
-and `--deployment` selects its genesis index or full registered deployment ID.
-`--query` takes one or more validator query servers; one suffices and more give failover.
-The defaults are operator `127.0.0.1:7001`, deployment `0`, identity `0`, and the genesis at
-`data/validator-0/genesis.json`, so the smallest command is the first one below. Run Alice and
-Bob on the same deployment to watch a payment land on the receiving side, and a wallet on
-deployment `1` to see the second operator's independent ledger:
-
-```bash
-cargo run --release -p commonware-terminal --bin terminal-agent -- --query 127.0.0.1:3200
-cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 1 \
-  --query 127.0.0.1:3200 --query 127.0.0.1:3201
-cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0 \
-  --operator 127.0.0.1:7002 --deployment 1 \
-  --genesis data/validator-0/genesis.json \
-  --query 127.0.0.1:3200 --query 127.0.0.1:3201
-```
+Run one launcher at a time. Both configurations reuse the same services and wallet
+databases, so let a walkthrough finish and stop its launcher before switching modes.
+Wallets with the same suffix use the same operator; **Alice 1**, **Bob 1**, and
+**Eve 1** belong to the other deployment.
 
 **Keys in the agent UI.** Left and Right select the receiver, `+` and `-` change the amount by
 one and PageUp and PageDown by ten, and `q` or Esc quits. `p` pays the selected receiver the
@@ -411,18 +402,20 @@ starts the epoch close, `c` claims a finalized withdrawal, `r`
 refunds an expired pending deposit, and `h` runs hard-fault recovery. The activity feed logs
 every enforcement event as it happens.
 
-**Reset.** Every role is durable. To start over, stop everything and delete the chain's `./data`
-directory (validator and operator storage), every `terminal-operator-*.sqlite`, and every
-`terminal-agent-*.sqlite`, or pass fresh paths. Wallet and sealed-dealing layouts change on
-this branch without migration, so a reset is also required after pulling a new revision.
+**Reset.** Stop every process before removing the generated `data` directory or
+creating a fresh demo with `--node-dir`. All launcher-managed state lives under that
+directory. Also remove any wallet or operator databases you created elsewhere.
+Wallet and sealed-dealing layouts change on this branch without migration, so a
+reset is required after pulling a new revision.
 
-**Walkthrough without a terminal UI.** With the validators and operators running, the scripted
-walkthrough drives the whole arc on operator-0 and deployment 0 (pass `--operator
-127.0.0.1:7002 --deployment 1` for the other operator) and exits when it completes:
+**Walkthrough without mprocs.** With services running and interactive Alice and Eve
+wallets stopped, run the same walkthrough directly:
 
 ```bash
 cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted \
-  --query 127.0.0.1:3200 --query 127.0.0.1:3201
+  --operator 127.0.0.1:7001 --deployment 0 \
+  --genesis ./data/validator-0/genesis.json --query 127.0.0.1:3200 \
+  --database ./data/operator-0/alice.sqlite
 ```
 
 The rest of this section explains what each role does with those inputs.
@@ -434,10 +427,9 @@ which every certified read is verified against, plus the chain creation timestam
 deployment list, and the chain-wide epoch timing policy applied to every deployment. The query
 addresses name the validators' certified query servers: one suffices, since recency rides the
 certified block timestamp, and extra addresses only give failover rotation past stale or
-unreachable validators. Every role
-is durable, so starting the demo over requires deleting the chain's `./data` directory
-(validator and operator storage), every `terminal-operator-*.sqlite`, and every
-`terminal-agent-*.sqlite` (or passing fresh paths) before starting again.
+unreachable validators. The generated launcher keeps durable state under the chosen
+data directory; explicit database paths in manual commands determine where those
+wallets retain their state.
 
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve`. The first
 four receive authenticated genesis allocations in every initial deployment. Every deployment's

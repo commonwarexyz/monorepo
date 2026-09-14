@@ -132,6 +132,8 @@ pub(crate) fn run_operator(
             start_close_driver(&context, chain.clone(), operator.clone(), genesis.timing());
         handles.push(driver_handle);
         let mut listener = context.bind(bind).await.context("bind operator RPC")?;
+        println!("Operator ready at {bind}");
+        println!("Ready to accept payments; epochs close automatically.");
 
         // The agent-facing RPC loop, supervised alongside the node actors.
         let timing = genesis.timing();
