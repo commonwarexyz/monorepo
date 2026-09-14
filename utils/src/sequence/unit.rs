@@ -1,6 +1,6 @@
 use crate::{Array, Span};
-use bytes::{Buf, BufMut};
-use commonware_codec::{FixedArray, FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, FixedArray, FixedSize, Read, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,

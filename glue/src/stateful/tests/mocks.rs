@@ -5,7 +5,7 @@ use crate::stateful::{
         UnmerkleizedOf, Writer,
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -15,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     cell::RefCell,

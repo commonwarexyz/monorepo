@@ -10,8 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
-    use bytes::Buf;
-    use commonware_codec::{Codec, FixedSize, Read, Write};
+    use commonware_codec::{Buf, Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
@@ -171,12 +170,14 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
+        /// The input is a stream of bytes and may borrow its storage.
+        ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
         #[allow(clippy::type_complexity)]
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
@@ -307,6 +308,8 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
+        /// The input is a stream of bytes and may borrow its storage.
+        ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
         ///
@@ -317,7 +320,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn encode(
             namespace: &[u8],
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
@@ -422,7 +425,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)

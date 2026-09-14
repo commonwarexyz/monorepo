@@ -26,7 +26,8 @@ use crate::{
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
-use commonware_codec::{Decode as _, Encode, EncodeSize, Read, Write};
+use bytes::Bytes;
+use commonware_codec::{Buf, Decode as _, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -37,7 +38,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
-    pub(crate) op_bytes: Vec<u8>,
+    pub(crate) op_bytes: Bytes,
     /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
@@ -62,8 +63,8 @@ impl<F: Family, D: Digest> Write for Witness<F, D> {
 impl<F: Family, D: Digest> Read for Witness<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let op_bytes = Bytes::read_cfg(buf, &(..).into())?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
@@ -81,7 +82,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            op_bytes: u.arbitrary()?,
+            op_bytes: u.arbitrary::<Vec<u8>>()?.into(),
             size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
@@ -423,7 +424,7 @@ impl<E: Context, F: Family, Op, D: Digest> Store<E, F, Op, D> {
             let inactivity_floor_loc = op
                 .has_floor()
                 .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-            let op_bytes = op.encode().to_vec();
+            let op_bytes = op.encode();
             Arc::new(tip_from_parts::<F, H, S, Op>(
                 merkle,
                 inactivity_floor_loc,
@@ -573,7 +574,7 @@ where
     let inactivity_floor_loc = op
         .has_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    let op_bytes = op.encode().to_vec();
+    let op_bytes = op.encode();
     let hasher = qmdb::hasher::<H>();
     merkle.append_leaf(&hasher, &op_bytes)?;
     let tip = tip_from_parts::<F, H, S, Op>(merkle, inactivity_floor_loc, op_bytes, op)?;
@@ -587,7 +588,7 @@ where
 fn tip_from_parts<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
-    op_bytes: Vec<u8>,
+    op_bytes: Bytes,
     op: Op,
 ) -> Result<Tip<F, Op, H::Digest>, Error<F>>
 where
@@ -689,12 +690,12 @@ where
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
     let last_commit_loc = size - 1;
-    let op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
+    let op = Op::decode_cfg(witness.op_bytes.clone(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
 
     // The tip serves the decoded op while proofs authenticate the persisted bytes, so the two
     // must be the same encoding.
-    if op.encode().as_ref() != witness.op_bytes.as_slice() {
+    if op.encode().as_ref() != &witness.op_bytes[..] {
         return Err(Error::DataCorrupted("non-canonical commit operation"));
     }
 
@@ -758,7 +759,7 @@ where
     let inactivity_floor_loc = initial_commit_op
         .has_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    let op_bytes = initial_commit_op.encode().to_vec();
+    let op_bytes = initial_commit_op.encode();
     let hasher = qmdb::hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &op_bytes);
@@ -812,7 +813,7 @@ pub(crate) mod tests {
     impl Read for PaddedCommit {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
             let value = u64::read_cfg(buf, &())?;
             if bytes::Buf::remaining(buf) > 0 {
                 u8::read_cfg(buf, &())?;
@@ -834,10 +835,8 @@ pub(crate) mod tests {
         let op = PaddedCommit(7);
         let mut op_bytes = op.encode().to_vec();
         op_bytes.push(0);
-        assert_eq!(
-            PaddedCommit::decode_cfg(op_bytes.as_slice(), &()).unwrap(),
-            op
-        );
+        let op_bytes = Bytes::from(op_bytes);
+        assert_eq!(PaddedCommit::decode_cfg(op_bytes.clone(), &()).unwrap(), op);
 
         let merkle = compact::Merkle::<mmr::Family, sha256::Digest, Sequential>::new(Sequential);
         let entry = Witness {
@@ -863,7 +862,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let op = PaddedCommit(7);
-        let op_bytes = op.encode().to_vec();
+        let op_bytes = op.encode();
 
         assert!(matches!(
             tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(
@@ -890,7 +889,7 @@ pub(crate) mod tests {
             tip_from_parts::<mmr::Family, Sha256, Sequential, PaddedCommit>(
                 &merkle,
                 Location::new(0),
-                PaddedCommit(8).encode().to_vec(),
+                PaddedCommit(8).encode(),
                 op,
             ),
             Err(Error::DataCorrupted("commit bytes do not match merkle tip"))
@@ -931,7 +930,7 @@ pub(crate) mod tests {
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
-        (entry.op_bytes, entry.size, entry.pinned_nodes)
+        (entry.op_bytes.to_vec(), entry.size, entry.pinned_nodes)
     }
 
     /// Append a witness entry without syncing it.
@@ -948,7 +947,7 @@ pub(crate) mod tests {
     {
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })
@@ -973,7 +972,7 @@ pub(crate) mod tests {
         let journal = journal.rewind(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })

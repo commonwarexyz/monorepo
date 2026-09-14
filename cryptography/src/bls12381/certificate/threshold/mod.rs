@@ -23,8 +23,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Faults, Participant,
@@ -416,7 +416,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             };
             let namespace = subject.namespace(self.namespace());
             let message = subject.message();
-            entries.push((namespace.to_vec(), message.to_vec(), *signature));
+            entries.push((namespace, message, *signature));
         }
 
         batch::verify_same_signer::<_, V, _>(
@@ -424,7 +424,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             self.identity(),
             non_empty![@entries
                 .iter()
-                .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))],
+                .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))],
             strategy,
         )
         .is_ok()
@@ -1204,7 +1204,7 @@ mod tests {
             })
             .collect();
         let malformed_signer = attestations[0].signer;
-        let mut malformed = &[0u8][..];
+        let mut malformed = Bytes::from_static(&[0u8]);
         attestations[0].signature = Lazy::deferred(&mut malformed, ());
 
         assert_eq!(

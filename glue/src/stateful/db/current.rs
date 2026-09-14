@@ -1438,11 +1438,7 @@ mod tests {
 
             let db = db.read().await;
             let proof = db.exclusion_proof(&missing).await.unwrap();
-            assert!(OrderedFixedDb::verify_exclusion_proof(
-                &missing,
-                &proof,
-                &db.root(),
-            ));
+            assert!(proof.verify::<Sha256>(&missing, &db.root()));
         });
     }
 
@@ -1555,11 +1551,7 @@ mod tests {
 
             let db = db.read().await;
             let proof = db.exclusion_proof(&missing).await.unwrap();
-            assert!(OrderedVariableDb::verify_exclusion_proof(
-                &missing,
-                &proof,
-                &db.root(),
-            ));
+            assert!(proof.verify::<Sha256>(&missing, &db.root()));
         });
     }
 

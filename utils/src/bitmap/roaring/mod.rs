@@ -75,8 +75,8 @@ mod prunable;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use container::Container;
 use core::ops::Range;
 pub use prunable::Prunable;

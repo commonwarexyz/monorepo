@@ -115,7 +115,7 @@ mod hex_private_key {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PrivateKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PrivateKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+        PrivateKey::decode(bytes).map_err(D::Error::custom)
     }
 }
 
@@ -130,7 +130,7 @@ mod hex_public_key {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PublicKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PublicKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+        PublicKey::decode(bytes).map_err(D::Error::custom)
     }
 }
 
@@ -154,7 +154,7 @@ mod hex_public_keys {
             .into_iter()
             .map(|raw| {
                 let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-                PublicKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+                PublicKey::decode(bytes).map_err(D::Error::custom)
             })
             .collect()
     }

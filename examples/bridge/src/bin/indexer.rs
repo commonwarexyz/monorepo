@@ -141,8 +141,8 @@ fn main() {
     executor.start(|context| async move {
         for network in networks {
             let network = from_hex(network).expect("Network not well-formed");
-            let public = <MinSig as Variant>::Public::decode(network.as_ref())
-                .expect("Network not well-formed");
+            let public =
+                <MinSig as Variant>::Public::decode(network).expect("Network not well-formed");
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,

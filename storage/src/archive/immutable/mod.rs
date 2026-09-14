@@ -68,7 +68,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive = archive.put(1, Sha256::hash(&[b"data"]), 10).await.unwrap();
+//!     archive = archive.put(1, Sha256::hash(&[b"data"]), &10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();
@@ -189,8 +189,8 @@ mod tests {
             // Add some data
             let key1 = Sha256::hash(&[b"key1"]);
             let key2 = Sha256::hash(&[b"key2"]);
-            archive = archive.put(1, key1, 2000).await.unwrap();
-            archive = archive.put(2, key2, 2001).await.unwrap();
+            archive = archive.put(1, key1, &2000).await.unwrap();
+            archive = archive.put(2, key2, &2001).await.unwrap();
 
             // Sync archive to save the checkpoint
             let archive = archive.sync().await.unwrap();
@@ -257,7 +257,7 @@ mod tests {
 
             // Write data after restart to confirm archive is functional
             let key = Sha256::hash(&[b"after-restart"]);
-            let archive = archive.put_sync(0, key, 42).await.unwrap();
+            let archive = archive.put_sync(0, key, &42).await.unwrap();
             drop(archive);
 
             // Third init to verify persistence

@@ -29,7 +29,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{DecodeExt, Write};
+use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
@@ -215,7 +215,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ) -> Result<D, Error<F>> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
             debug!(?pos, "read node from metadata");
-            let digest = D::decode(bytes.as_ref());
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(
                     ?pos,
@@ -998,44 +998,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         Ok(self)
     }
-}
 
-/// The [`Readable`] implementation for the full structure operates only on the in-memory
-/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
-/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
-impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.size()
-    }
-
-    fn get_node(&self, pos: Position<F>) -> Option<D> {
-        self.mem.get_node(pos)
-    }
-}
-
-impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage
-    for Merkle<F, E, D, S>
-{
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.size()
-    }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
-        Self::get_node(self, position).await
-    }
-
-    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        Self::get_nodes(self, positions).await
-    }
-}
-
-impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Capture an owned immutable [Snapshot] of the structure.
     pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, D>), Error<F>> {
         let flushed;
@@ -1152,6 +1115,41 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ) -> Result<Proof<F, D>, Error<F>> {
         self.historical_range_proof(hasher, self.leaves(), range, inactive_peaks)
             .await
+    }
+}
+
+/// The [`Readable`] implementation for the full structure operates only on the in-memory
+/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
+/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
+impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
+    type Family = F;
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
+        self.mem.get_node(pos)
+    }
+}
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage
+    for Merkle<F, E, D, S>
+{
+    type Family = F;
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        Self::get_node(self, position).await
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        Self::get_nodes(self, positions).await
     }
 }
 
