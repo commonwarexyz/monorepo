@@ -18,6 +18,9 @@
 //!     - Basic optimized engine without SIMD so that it works on all CPUs.
 //! - `Avx2`
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
+//! - `Avx512`
+//!     - Optimized engine that takes advantage of AVX-512F, AVX-512VL, and AVX-512BW.
+//!       Uses GFNI for field multiplication when available.
 //! - `Ssse3`
 //!     - Optimized engine that takes advantage of the x86(-64) SSSE3 SIMD instructions.
 //! - `Neon`
@@ -42,6 +45,10 @@
 )]
 mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    cpufeatures::new!(has_gfni, "gfni");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    cpufeatures::new!(has_avx512, "avx512f", "avx512vl", "avx512bw");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_ssse3, "ssse3");
@@ -49,7 +56,10 @@ mod cpu_features {
     cpufeatures::new!(has_neon, "neon");
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub(super) use self::{has_avx2::get as avx2, has_ssse3::get as ssse3};
+    pub(super) use self::{
+        has_avx2::get as avx2, has_avx512::get as avx512, has_gfni::get as gfni,
+        has_ssse3::get as ssse3,
+    };
     #[cfg(target_arch = "aarch64")]
     pub(super) use has_neon::get as neon;
 }
@@ -58,7 +68,7 @@ mod cpu_features {
 pub use self::engine_neon::Neon;
 pub(crate) use self::shards::Shards;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub use self::{engine_avx2::Avx2, engine_ssse3::Ssse3};
+pub use self::{engine_avx2::Avx2, engine_avx512::Avx512, engine_ssse3::Ssse3};
 pub use self::{
     engine_default::DefaultEngine, engine_naive::Naive, engine_nosimd::NoSimd, shards::ShardsRefMut,
 };
@@ -70,6 +80,8 @@ mod engine_nosimd;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod engine_avx2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod engine_avx512;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod engine_ssse3;
 
@@ -307,6 +319,8 @@ mod tests {
             (DefaultEngine::eval_poly, true),
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             (Avx2::eval_poly, cpu_features::avx2()),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            (Avx512::eval_poly, cpu_features::avx512()),
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             (Ssse3::eval_poly, cpu_features::ssse3()),
             #[cfg(target_arch = "aarch64")]

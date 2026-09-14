@@ -1,7 +1,7 @@
 #[cfg(target_arch = "aarch64")]
 use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use commonware_cryptography::reed_solomon::engine::{Avx2, Ssse3};
+use commonware_cryptography::reed_solomon::engine::{Avx2, Avx512, Ssse3};
 use commonware_cryptography::reed_solomon::{
     Decoder, Encoder, SHARD_CHUNK_BYTES,
     engine::{DefaultEngine, Engine, GF_ORDER, Naive, NoSimd, ShardsRefMut},
@@ -374,6 +374,12 @@ fn benchmarks_engine(c: &mut Criterion) {
         }
         if is_x86_feature_detected!("avx2") {
             benchmarks_engine_one(c, "avx2", Avx2::new());
+        }
+        if is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512vl")
+            && is_x86_feature_detected!("avx512bw")
+        {
+            benchmarks_engine_one(c, "avx512", Avx512::new());
         }
     }
 

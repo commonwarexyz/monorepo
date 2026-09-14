@@ -46,6 +46,7 @@
 //! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
 //! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
+//! - Supports AVX-512 with optional GFNI multiplication and runtime CPU feature checks.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd

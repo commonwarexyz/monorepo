@@ -3,7 +3,7 @@
 #[cfg(target_arch = "aarch64")]
 use super::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use super::engine::{Avx2, Ssse3};
+use super::engine::{Avx2, Avx512, Ssse3};
 use super::{
     Decoder,
     engine::{
@@ -17,15 +17,22 @@ const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 
 macro_rules! selected_engine {
     ($selector:expr, $runner:ident, $case_a:expr, $case_b:expr) => {{
-        match $selector % 4 {
+        match $selector % 5 {
             0 => $runner::<NoSimd>($case_a, $case_b, NoSimd::new),
             1 => $runner::<DefaultEngine>($case_a, $case_b, DefaultEngine::new),
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            2 if std::arch::is_x86_feature_detected!("avx2") => {
+            2 if std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+                && std::arch::is_x86_feature_detected!("avx512bw") =>
+            {
+                $runner::<Avx512>($case_a, $case_b, Avx512::new)
+            }
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            3 if std::arch::is_x86_feature_detected!("avx2") => {
                 $runner::<Avx2>($case_a, $case_b, Avx2::new)
             }
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            3 if std::arch::is_x86_feature_detected!("ssse3") => {
+            4 if std::arch::is_x86_feature_detected!("ssse3") => {
                 $runner::<Ssse3>($case_a, $case_b, Ssse3::new)
             }
             #[cfg(target_arch = "aarch64")]
@@ -159,6 +166,12 @@ fn candidate_engines() -> Vec<(&'static str, Box<dyn Engine>)> {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512vl")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            engines.push(("Avx512", Box::new(Avx512::new())));
+        }
         if std::arch::is_x86_feature_detected!("avx2") {
             engines.push(("Avx2", Box::new(Avx2::new())));
         }
@@ -639,6 +652,12 @@ mod tests {
             $runner::<DefaultEngine>($case_a, $case_b, DefaultEngine::new);
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
+                if std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                {
+                    $runner::<Avx512>($case_a, $case_b, Avx512::new);
+                }
                 if std::arch::is_x86_feature_detected!("avx2") {
                     $runner::<Avx2>($case_a, $case_b, Avx2::new);
                 }
@@ -758,6 +777,12 @@ mod tests {
             compare_eval_poly::<DefaultEngine>(&input, truncated_size);
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
+                if std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512vl")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                {
+                    compare_eval_poly::<Avx512>(&input, truncated_size);
+                }
                 if std::arch::is_x86_feature_detected!("avx2") {
                     compare_eval_poly::<Avx2>(&input, truncated_size);
                 }
