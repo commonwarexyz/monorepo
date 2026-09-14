@@ -13,6 +13,7 @@ use core::{
     fmt,
     hash::{Hash, Hasher as CoreHasher},
 };
+use std::sync::Arc;
 
 /// A bounded sequence of application commitments extending one voted position.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -90,8 +91,8 @@ impl<D: Digest> EncodeSize for Extension<D> {
 pub struct VoteBody<D: Digest> {
     round: Round,
     leader: D,
-    positions: Vec<Position>,
-    extensions: Vec<Extension<D>>,
+    positions: Arc<[Position]>,
+    extensions: Arc<[Extension<D>]>,
 }
 
 impl<D: Digest> VoteBody<D> {
@@ -109,8 +110,8 @@ impl<D: Digest> VoteBody<D> {
         let body = Self {
             round,
             leader,
-            positions,
-            extensions,
+            positions: positions.into(),
+            extensions: extensions.into(),
         };
         body.validate(limits)?;
         Ok(body)
@@ -249,8 +250,8 @@ impl<D: Digest> Write for VoteBody<D> {
         self.round.epoch().write(buf);
         self.round.view().write(buf);
         self.leader.write(buf);
-        self.positions.write(buf);
-        self.extensions.write(buf);
+        self.positions().write(buf);
+        self.extensions().write(buf);
     }
 }
 
@@ -282,8 +283,8 @@ impl<D: Digest> EncodeSize for VoteBody<D> {
         self.round.epoch().encode_size()
             + self.round.view().encode_size()
             + self.leader.encode_size()
-            + self.positions.encode_size()
-            + self.extensions.encode_size()
+            + self.positions().encode_size()
+            + self.extensions().encode_size()
     }
 }
 
@@ -761,5 +762,21 @@ mod tests {
         let decoded = VoteBody::<sha256::Digest>::decode_cfg(body.encode(), &limits).unwrap();
         assert_eq!(decoded, body);
         assert!(decoded.valid_for::<Sha256, _>(&leader));
+
+        let encoded_vectors = (
+            body.epoch(),
+            body.view(),
+            body.leader(),
+            body.positions().to_vec(),
+            body.extensions().to_vec(),
+        )
+            .encode();
+        assert_eq!(body.encode(), encoded_vectors);
+
+        let cloned = body.clone();
+        assert!(core::ptr::eq(body.positions(), cloned.positions()));
+        assert!(core::ptr::eq(body.extensions(), cloned.extensions()));
+        drop(body);
+        assert_eq!(cloned.encode(), decoded.encode());
     }
 }
