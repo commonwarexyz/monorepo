@@ -407,6 +407,9 @@ O’Grady</a></div>
         <p>The settlement chain holds pooled custody and the certified
         state root. Validators keep the account records and evidence
         available for challenges and recovery.</p>
+        <p>The operator can also keep a QMDB replica to serve current
+        and historical balance proofs directly. Preparing the dealing
+        does not depend on that replica.</p>
         <h2 id="certify-the-whole-close">Certify the Whole Close</h2>
         <p>A committee of <span class="math inline">n=3f+1</span>
         validators tolerates at most <span class="math inline">f</span>
@@ -495,8 +498,8 @@ O’Grady</a></div>
         Every account can authorize an exact withdrawal or an account
         close. Normally the operator includes that signed request in the
         next epoch’s boundary. A censored user can instead queue it
-        directly onchain between epoch registrations, a path the
-        settlement integration must keep live.</p>
+        directly onchain, even during an active epoch. The next
+        registration must include it.</p>
         <p>Once a withdrawal request is queued onchain or included in an
         admitted close, its carrying close must finalize before the
         signed deadline <span class="math inline">T_w</span> to avoid a

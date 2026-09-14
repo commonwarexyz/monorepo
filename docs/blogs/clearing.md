@@ -190,6 +190,8 @@ Figure 3: The certified commitment links the three roots. Expanding $c$'s activi
 
 The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
 
+The operator can also keep a QMDB replica to serve current and historical balance proofs directly. Preparing the dealing does not depend on that replica.
+
 ## Certify the Whole Close
 
 A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, retains its evidence, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
@@ -232,7 +234,7 @@ Certification has already checked the accounting and signed terminal positions b
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain between epoch registrations, a path the settlement integration must keep live.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain, even during an active epoch. The next registration must include it.
 
 Once a withdrawal request is queued onchain or included in an admitted close, its carrying close must finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
 

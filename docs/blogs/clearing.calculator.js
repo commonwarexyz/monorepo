@@ -9,8 +9,6 @@ const KEY = 32;
 const AGG = 48;
 const ACCOUNT_RECORD = KEY + 8;
 
-// Validators reconstruct the roots and withdrawal total bound by this header.
-const METADATA = 32;
 const MAX_ACCOUNTS = 1e9;
 const MAX_VALIDATORS = 1024;
 
@@ -57,7 +55,6 @@ function scenario(N, k) {
     signatures: S * SIG,
     entries: S * varint(perSender) + (A - S) + references + 2 * E,
     operator: 1 + (S > 0 ? AGG : 0),
-    metadata: METADATA,
   };
   return { E, A, parts };
 }
@@ -304,7 +301,6 @@ function mount(root) {
       ['Payer signatures', parts.signatures],
       ['Payment entries', parts.entries],
       ['Operator signature', parts.operator],
-      ['Commitment', parts.metadata],
     ];
     fillBreakdown(breakdown, payload, components);
 
