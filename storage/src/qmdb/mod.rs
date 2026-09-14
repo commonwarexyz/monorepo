@@ -577,6 +577,36 @@ where
 {
     let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
+        // Warm the cache with one coalesced bulk read of this batch's collision candidates before
+        // the serial apply below. This turns the scattered, one-at-a-time `find_update_op` probe
+        // reads into a single sorted `read_many`, converting random probe IOPS into a coalesced
+        // sweep. It only populates the cache (a location's key is immutable), so the apply is
+        // unchanged: a candidate not warmed here still falls back to its own read, and candidates
+        // first written within this batch are covered by the apply's own `cache.put`.
+        if let Some(cache) = cache.as_mut() {
+            let mut wanted: Vec<u64> = Vec::new();
+            for (key, _, _) in &batch {
+                if let Some(mut cursor) = index.get_mut(key) {
+                    while let Some(candidate) = cursor.next() {
+                        let position = **candidate;
+                        if cache.get(&position).is_none() {
+                            wanted.push(position);
+                        }
+                    }
+                }
+            }
+            if !wanted.is_empty() {
+                wanted.sort_unstable();
+                wanted.dedup();
+                let items = log.read_many(&wanted).await?;
+                for (position, item) in wanted.iter().zip(items) {
+                    if let Some(k) = item.key() {
+                        cache.put(*position, k.clone());
+                    }
+                }
+            }
+        }
+
         for (key, loc, is_delete) in batch {
             if is_delete {
                 if let Some(cursor) = index.get_mut(&key) {
