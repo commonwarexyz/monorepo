@@ -27,7 +27,7 @@ One payment or a bajillion, each account settles once.
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-Bajillion lets an API provider verify a receipt locally and serve the response before settlement. The payer gets that receipt in one round trip to its chosen operator, which can also send it directly to the provider to save a hop. The operator later nets payments across its accounts, without separate channels or funded routes. For example, suppose a payer $a$ has 100 and wants to pay 20 to $b$, who has 40.
+Bajillion lets an API provider verify a receipt locally and serve the response before settlement. The payer's chosen payment service, called an operator, returns a receipt in one round trip. The payer can forward the receipt to the API provider, or the operator can deliver it directly to save a hop. Settlement comes later, netting payments across accounts without separate channels or funded routes. For example, suppose a payer $a$ has 100 and wants to pay 20 to $b$, who has 40.
 
 ```{=html}
 <style>
@@ -473,8 +473,8 @@ Each sender signs one batch of unit payments. Recipients per account averages ov
 
 ## A Bajillion Payments, One Settlement
 
-An agent can pay for a million API requests without giving the settlement chain a million transactions to process. Each request proceeds on a receipt, while the operator nets the accumulated payments across accounts. Repeated payments between the same counterparties share settlement records, spreading their cost over more requests.
+An agent can pay for a million API requests without giving the settlement chain a million transactions to process. The agent gets a receipt from its payment operator and presents it to the API provider, which can serve the response before settlement. The operator nets payments across accounts, so repeated purchases between the same counterparties share settlement costs.
 
-Those receipts keep the operator accountable after the response arrives. Their holders can challenge a dishonest close, while onchain custody and retained account state give users a way to recover if the operator disappears.
+The receipt gives both the agent and the API provider evidence to challenge a dishonest close. Funds stay onchain, and validators keep the account state available for recovery if the operator disappears.
 
 The settlement chain only keeps the change.
