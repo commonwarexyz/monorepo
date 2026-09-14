@@ -323,27 +323,25 @@ impl ProposalLatency {
         view: View,
         staged: &Staged,
     ) {
+        // The voter reports starts and finality serially. Ordering removes only finalized
+        // starts, so pending height bounds remain valid after releasing the starts lock.
+        let oldest = {
+            let started = self.started.lock();
+            let mut oldest = BTreeMap::<ChainId, Height>::new();
+            for start in started.iter().filter(|start| !start.finalized) {
+                oldest
+                    .entry(start.block.chain())
+                    .and_modify(|height| *height = (*height).min(start.block.height()))
+                    .or_insert(start.block.height());
+            }
+            oldest
+        };
         let finalized = {
             let staged = staged.0.lock();
-            let mut finalized = BTreeSet::new();
-            for tip in blocks {
-                let mut cursor = *tip;
-                loop {
-                    finalized.insert(cursor);
-                    let Some(parent_height) = cursor.height().previous() else {
-                        break;
-                    };
-                    let Some(block) = staged.get(&cursor.digest()) else {
-                        break;
-                    };
-                    if block.reference != cursor {
-                        break;
-                    }
-                    cursor =
-                        BlockRef::new(cursor.chain(), parent_height, block.block.header().parent());
-                }
-            }
-            finalized
+            Self::finalized_ancestry(blocks, &oldest, |cursor| {
+                let block = staged.get(&cursor.digest())?;
+                (block.reference == cursor).then(|| block.block.header().parent())
+            })
         };
         let now = SystemTime::now();
         let mut started = self.started.lock();
@@ -377,6 +375,32 @@ impl ProposalLatency {
             }
         }
         started.retain(|start| !start.finalized || !start.ordered);
+    }
+
+    fn finalized_ancestry(
+        blocks: &[BlockRef<Sha256Digest>],
+        oldest: &BTreeMap<ChainId, Height>,
+        mut parent: impl FnMut(BlockRef<Sha256Digest>) -> Option<Sha256Digest>,
+    ) -> BTreeSet<BlockRef<Sha256Digest>> {
+        let mut finalized = BTreeSet::new();
+        for tip in blocks {
+            let Some(oldest) = oldest.get(&tip.chain()) else {
+                continue;
+            };
+            let mut cursor = *tip;
+            while cursor.height() >= *oldest {
+                finalized.insert(cursor);
+                if cursor.height() == *oldest {
+                    break;
+                }
+                let parent_height = cursor.height().previous().expect("above pending height");
+                let Some(digest) = parent(cursor) else {
+                    break;
+                };
+                cursor = BlockRef::new(cursor.chain(), parent_height, digest);
+            }
+        }
+        finalized
     }
 
     /// Records ordered delivery once, retaining the start until finality is also observed.
@@ -1275,6 +1299,42 @@ mod tests {
             assert!(metrics.contains("proposal_finalization_latency_count 3\n"));
             assert!(metrics.contains("proposal_ordering_latency_count 2\n"));
         });
+    }
+
+    #[test]
+    fn proposal_latency_bounds_ancestry_to_pending_heights() {
+        let chain = ChainId::new(0);
+        let reference = |chain, height| {
+            BlockRef::new(
+                chain,
+                Height::new(height),
+                Sha256::hash(&[&height.to_be_bytes()]),
+            )
+        };
+        let tip = reference(chain, 100);
+        let unrelated = reference(ChainId::new(1), 100);
+        let oldest = BTreeMap::from([(chain, Height::new(98))]);
+        let mut lookups = 0;
+        let finalized = ProposalLatency::finalized_ancestry(&[tip, unrelated], &oldest, |cursor| {
+            lookups += 1;
+            Some(reference(cursor.chain(), cursor.height().get() - 1).digest())
+        });
+        assert_eq!(lookups, 2);
+        assert_eq!(
+            finalized,
+            (98..=100).map(|height| reference(chain, height)).collect()
+        );
+        let finalized = ProposalLatency::finalized_ancestry(&[tip], &BTreeMap::new(), |_| {
+            panic!("no pending proposal needs ancestry")
+        });
+        assert!(finalized.is_empty());
+        let finalized =
+            ProposalLatency::finalized_ancestry(&[reference(chain, 97)], &oldest, |_| {
+                panic!("tip precedes every pending proposal")
+            });
+        assert!(finalized.is_empty());
+        let finalized = ProposalLatency::finalized_ancestry(&[tip], &oldest, |_| None);
+        assert_eq!(finalized, BTreeSet::from([tip]));
     }
 
     #[test]
