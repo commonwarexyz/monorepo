@@ -42,6 +42,7 @@ impl Engine for NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
@@ -53,6 +54,7 @@ impl Engine for NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 

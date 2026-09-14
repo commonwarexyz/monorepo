@@ -14,6 +14,8 @@ use core::{arch::aarch64::*, iter::zip};
 /// [`NoSimd`] but takes advantage of the Arm Neon SIMD instructions.
 ///
 /// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+///
+/// Construction and [`Engine::eval_poly`] panic if NEON is unavailable.
 #[derive(Clone, Copy)]
 pub struct Neon {
     mul128: &'static Mul128,
@@ -47,7 +49,9 @@ impl Engine for Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks NEON support, and the transform dimensions are valid.
         unsafe {
             self.fft_private_neon(data, pos, size, truncated_size, skew_delta);
         }
@@ -61,7 +65,9 @@ impl Engine for Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks NEON support, and the transform dimensions are valid.
         unsafe {
             self.ifft_private_neon(data, pos, size, truncated_size, skew_delta);
         }
@@ -75,7 +81,9 @@ impl Engine for Neon {
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        assert!(super::cpu_features::neon());
+
+        // SAFETY: The runtime feature check establishes NEON support.
         unsafe { Self::eval_poly_neon(erasures, truncated_size) }
     }
 }

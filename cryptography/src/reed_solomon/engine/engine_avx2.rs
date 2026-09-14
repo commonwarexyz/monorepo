@@ -18,6 +18,8 @@ use core::iter::zip;
 /// [`NoSimd`] but takes advantage of the x86 AVX2 SIMD instructions.
 ///
 /// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+///
+/// Construction and [`Engine::eval_poly`] panic if AVX2 is unavailable.
 #[derive(Clone, Copy)]
 pub struct Avx2 {
     mul128: &'static Mul128,
@@ -51,7 +53,9 @@ impl Engine for Avx2 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks AVX2 support, and the transform dimensions are valid.
         unsafe {
             self.fft_private_avx2(data, pos, size, truncated_size, skew_delta);
         }
@@ -65,7 +69,9 @@ impl Engine for Avx2 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks AVX2 support, and the transform dimensions are valid.
         unsafe {
             self.ifft_private_avx2(data, pos, size, truncated_size, skew_delta);
         }
@@ -79,7 +85,9 @@ impl Engine for Avx2 {
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        assert!(super::cpu_features::avx2());
+
+        // SAFETY: The runtime feature check establishes AVX2 support.
         unsafe { Self::eval_poly_avx2(erasures, truncated_size) }
     }
 }

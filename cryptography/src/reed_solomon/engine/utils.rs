@@ -16,8 +16,15 @@ use core::iter::zip;
 /// features enabled within an Engine's implementation of `eval_poly`.
 ///
 /// See `Avx2` for an example on how to do this.
+///
+/// Entries at and after `truncated_size` must be zero.
+///
+/// # Panics
+///
+/// If `truncated_size > GF_ORDER`.
 #[inline(always)]
 pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+    assert!(truncated_size <= GF_ORDER);
     let log_walsh = tables::get_log_walsh();
 
     fwht::fwht(erasures, truncated_size);
@@ -54,14 +61,14 @@ pub fn xor_within(data: &mut ShardsRefMut<'_>, x: usize, y: usize, count: usize)
 // ======================================================================
 // FUNCTIONS - CRATE - Galois field operations
 
-/// Some kind of addition.
+/// Addition modulo 65535, allowing both 0 and 65535 to represent zero.
 #[inline(always)]
 pub(crate) fn add_mod(x: GfElement, y: GfElement) -> GfElement {
     let sum = u32::from(x) + u32::from(y);
     (sum + (sum >> GF_BITS)) as GfElement
 }
 
-/// Some kind of subtraction.
+/// Subtraction modulo 65535, allowing both 0 and 65535 to represent zero.
 #[inline(always)]
 pub(crate) fn sub_mod(x: GfElement, y: GfElement) -> GfElement {
     let dif = u32::from(x).wrapping_sub(u32::from(y));
