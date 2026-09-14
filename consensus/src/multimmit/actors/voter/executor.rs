@@ -670,6 +670,7 @@ where
             Err(TaskError::ClassFull) => return Ok(Some(pending)),
             Err(error) => return Err(error.into()),
         };
+        let issued_at = self.context.current();
         let job = pending.job.id();
         if self.verification_tasks.contains_key(&job) {
             let _ = self.finish_task(permit, TaskTerminal::Cancelled)?;
@@ -680,11 +681,12 @@ where
         } else {
             &self.metrics.verification_wait_bulk
         };
-        wait.observe_between(pending.queued_at, self.context.current());
+        wait.observe_between(pending.queued_at, issued_at);
         self.verification_tasks.insert(job, (permit, pending.root));
         if self
             .batcher
             .enqueue(batcher::Message::Verify {
+                issued_at,
                 span: pending.span,
                 round: pending.round,
                 job: pending.job,

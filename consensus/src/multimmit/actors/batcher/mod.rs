@@ -105,6 +105,8 @@ pub struct Config<P: PublicKey, V: Variant, B, T, C> {
 pub enum Message<P: PublicKey, V: Variant, D: Digest> {
     /// Execute one exact machine-issued verification job.
     Verify {
+        /// When the voter reserved this job's execution permit.
+        issued_at: SystemTime,
         /// The caller's tracing span for this job.
         span: Span,
         /// The round that issued the job.

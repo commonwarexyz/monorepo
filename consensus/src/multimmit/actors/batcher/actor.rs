@@ -190,12 +190,15 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, T: Strategy> IngressReceiver<
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_verification_operation<E, P, O, T>(
     context: E,
     strategy: P,
     completion_span: Span,
     worker_span: Span,
     queue: Histogram,
+    issued_at: SystemTime,
+    dispatch: Histogram,
     operation: O,
 ) -> (Span, Result<T, VerificationTaskPanicked>)
 where
@@ -207,6 +210,7 @@ where
     let instrument = worker_span.clone();
     let operation = async move {
         let submitted = context.current();
+        dispatch.observe_between(issued_at, submitted);
         strategy
             .manual()
             .spawn(1, move |_| {
@@ -394,6 +398,7 @@ where
         span: Span,
         round: Round,
         job: VerifyJob<V, H::Digest>,
+        issued_at: SystemTime,
     ) -> impl Future<Output = VerifyResult<V, H::Digest>> + Send + 'static {
         let scheme = Arc::clone(&self.scheme);
         let kind = job
@@ -460,7 +465,16 @@ where
             timer.observe(&context);
             completion
         };
-        run_verification_operation(context, strategy, span, worker, queue, operation)
+        run_verification_operation(
+            context,
+            strategy,
+            span,
+            worker,
+            queue,
+            issued_at,
+            self.metrics.verification_dispatch_wait.clone(),
+            operation,
+        )
     }
 
     async fn run(
@@ -509,6 +523,7 @@ where
             Some(message) = self.mailbox.recv() else break => {
                 match message {
                     Message::Verify {
+                        issued_at,
                         span,
                         round,
                         job,
@@ -523,10 +538,10 @@ where
                         // availability jobs.
                         if job.view_critical() {
                             let strategy = self.critical_strategy.clone();
-                            jobs.push(self.verification(strategy, CRITICAL_POOL, span, round, job));
+                            jobs.push(self.verification(strategy, CRITICAL_POOL, span, round, job, issued_at));
                         } else {
                             let strategy = self.strategy.clone();
-                            jobs.push(self.verification(strategy, BULK_POOL, span, round, job));
+                            jobs.push(self.verification(strategy, BULK_POOL, span, round, job, issued_at));
                         }
                     }
                     Message::Block { peers } => {
@@ -1466,12 +1481,15 @@ mod tests {
     fn verification_queue_starts_at_submission_for_inline_execution() {
         deterministic::Runner::default().start(|context| async move {
             let queue = context.histogram("queue", "worker queue", [0.0, 1.0]);
+            let dispatch = context.histogram("dispatch", "dispatch wait", [0.0, 1.0]);
             let operation = run_verification_operation(
                 context.child("inline"),
                 Sequential,
                 Span::none(),
                 Span::none(),
                 queue.clone(),
+                context.current(),
+                dispatch.clone(),
                 |context, _| {
                     assert!(context.encode().contains("queue_count 1\n"));
                     7
@@ -1479,10 +1497,13 @@ mod tests {
             );
             context.sleep(std::time::Duration::from_millis(125)).await;
             assert!(context.encode().contains("queue_count 0\n"));
+            assert!(context.encode().contains("dispatch_count 0\n"));
             assert_eq!(operation.await.1.unwrap(), 7);
             let encoded = context.encode();
             assert!(encoded.contains("queue_count 1\n"), "{encoded}");
             assert!(encoded.contains("queue_sum 0.0\n"), "{encoded}");
+            assert!(encoded.contains("dispatch_count 1\n"), "{encoded}");
+            assert!(encoded.contains("dispatch_sum 0.125\n"), "{encoded}");
         });
     }
 
@@ -1495,6 +1516,8 @@ mod tests {
                 Span::none(),
                 Span::none(),
                 context.histogram("queue", "worker queue", [0.0, 1.0]),
+                context.current(),
+                context.histogram("dispatch", "dispatch wait", [0.0, 1.0]),
                 |_, _| rayon::current_thread_index().is_some(),
             )
             .await;
@@ -1522,6 +1545,8 @@ mod tests {
                         Span::none(),
                         Span::none(),
                         context.histogram("queue", "worker queue", [0.0, 1.0]),
+                        context.current(),
+                        context.histogram("dispatch", "dispatch wait", [0.0, 1.0]),
                         move |_, _| {
                             probe.block_cpu();
                         },
@@ -1551,6 +1576,8 @@ mod tests {
                 Span::none(),
                 Span::none(),
                 context.histogram("queue", "worker queue", [0.0, 1.0]),
+                context.current(),
+                context.histogram("dispatch", "dispatch wait", [0.0, 1.0]),
                 |_, _| -> () { panic!("worker panic") },
             )
             .await;

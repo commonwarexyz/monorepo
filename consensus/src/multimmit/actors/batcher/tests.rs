@@ -1099,6 +1099,7 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
                 harness
                     .mailbox
                     .enqueue(Message::Verify {
+                        issued_at: context.current(),
                         span: Span::none(),
                         round: Round::new(Epoch::new(33), View::new(1)),
                         job,
@@ -1191,6 +1192,7 @@ fn view_critical_and_bulk_jobs_run_on_their_own_pools() {
                 harness
                     .mailbox
                     .enqueue(Message::Verify {
+                        issued_at: context.current(),
                         span: Span::none(),
                         round,
                         job,
@@ -1219,6 +1221,7 @@ fn view_critical_and_bulk_jobs_run_on_their_own_pools() {
                 harness
                     .mailbox
                     .enqueue(Message::Verify {
+                        issued_at: context.current(),
                         span: Span::none(),
                         round,
                         job,
@@ -1306,6 +1309,7 @@ fn an_invalid_da_share_is_admitted_and_keeps_its_sender() {
                 harness
                     .mailbox
                     .enqueue(Message::Verify {
+                        issued_at: context.current(),
                         span: Span::none(),
                         round: Round::new(Epoch::new(52), View::new(1)),
                         job,

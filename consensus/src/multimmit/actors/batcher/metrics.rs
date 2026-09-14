@@ -56,6 +56,7 @@ pub(super) struct Metrics {
     pub ingress_dwell: Histogram,
     pub verify_latency: [histogram::Timed; 5],
     pub verify_queue: [Histogram; 5],
+    pub verification_dispatch_wait: Histogram,
     /// Transcript messages of one verified certificate.
     pub certificate_transcript_messages: Histogram,
     /// Cached verified votes supplied to one certificate verification, before transcript matching.
@@ -151,6 +152,11 @@ impl Metrics {
             certificate_known_messages,
             verify_latency,
             verify_queue,
+            verification_dispatch_wait: context.histogram(
+                "verification_dispatch_wait",
+                "time from voter permit reservation to verification executor submission",
+                histogram::Buckets::LOCAL,
+            ),
         }
     }
 }
