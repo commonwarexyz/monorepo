@@ -3,26 +3,66 @@
 use super::code::Impl;
 use commonware_math::algebra::Additive;
 
-/// A fixed number of equally sized shards, in one allocation.
+const WORK_ALIGN: usize = 64;
+
+/// A fixed number of equally sized shards, in one aligned allocation.
+///
+/// Each `len`-byte region uses the same byte layout as an external shard.
+/// Full stripes keep every shard aligned for native vector loads and stores.
 pub struct Shards {
-    pub data: Vec<u8>,
-    pub len: usize,
+    storage: Vec<u8>,
+    offset: usize,
+    count: usize,
+    size: usize,
+    len: usize,
 }
 
 impl Shards {
-    pub fn new(shards: usize, len: usize) -> Self {
+    pub fn new(count: usize, len: usize) -> Self {
+        let size = count.checked_mul(len).expect("workspace size overflow");
+        let allocated = size
+            .checked_add(WORK_ALIGN - 1)
+            .expect("workspace size overflow");
+        let storage = vec![0; allocated];
+        let offset = storage.as_ptr().align_offset(WORK_ALIGN);
         Self {
-            data: vec![0; shards * len],
+            storage,
+            offset,
+            count,
+            size,
             len,
         }
     }
 
+    /// Set the shard width within the original allocation. Contents are scratch space.
+    pub fn resize(&mut self, len: usize) {
+        let size = self
+            .count
+            .checked_mul(len)
+            .expect("workspace size overflow");
+        assert!(
+            size <= self.storage.len() - (WORK_ALIGN - 1),
+            "workspace capacity exceeded"
+        );
+        self.size = size;
+        self.len = len;
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.storage[self.offset..self.offset + self.size]
+    }
+
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.storage[self.offset..self.offset + self.size]
+    }
+
     pub fn shards(&self) -> impl Iterator<Item = &[u8]> {
-        self.data.chunks_exact(self.len)
+        self.data().chunks_exact(self.len)
     }
 
     pub fn shards_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
-        self.data.chunks_exact_mut(self.len)
+        let len = self.len;
+        self.data_mut().chunks_exact_mut(len)
     }
 
     /// Split shards `[r, r + 2 * dist)` into two halves of `dist` shards each.
@@ -31,10 +71,20 @@ impl Shards {
         r: usize,
         dist: usize,
     ) -> impl Iterator<Item = (&mut [u8], &mut [u8])> {
-        let (lo, hi) =
-            self.data[r * self.len..(r + 2 * dist) * self.len].split_at_mut(dist * self.len);
-        lo.chunks_exact_mut(self.len)
-            .zip(hi.chunks_exact_mut(self.len))
+        let len = self.len;
+        let (lo, hi) = self.data_mut()[r * len..(r + 2 * dist) * len].split_at_mut(dist * len);
+        lo.chunks_exact_mut(len).zip(hi.chunks_exact_mut(len))
+    }
+
+    /// Split shards `[r, r + 4 * dist)` into four equal contiguous quarters.
+    fn quarters_mut(&mut self, r: usize, dist: usize) -> [&mut [u8]; 4] {
+        let len = self.len;
+        let quarter = dist * len;
+        let data = &mut self.data_mut()[r * len..(r + 4 * dist) * len];
+        let (q0, rest) = data.split_at_mut(quarter);
+        let (q1, rest) = rest.split_at_mut(quarter);
+        let (q2, q3) = rest.split_at_mut(quarter);
+        [q0, q1, q2, q3]
     }
 }
 
@@ -90,20 +140,45 @@ impl<I: Impl> Transform<I> {
     ///
     /// Shards at or past `nonzero` must be zero.
     pub fn ifft(&self, work: &mut Shards, nonzero: usize, shift: usize) {
-        let m = work.data.len() / work.len;
+        let m = work.count;
         assert!(nonzero <= m);
 
         let mut dist = 1;
-        while dist < m {
-            // Blocks starting at or past nonzero are all zero, and each
-            // layer only mixes shards within a block, so they stay zero.
+        while 2 * dist < m {
+            // Groups starting at or past nonzero are all zero. A group whose
+            // right half is also known zero retains the pruned three-butterfly
+            // schedule; fully live groups fuse both layers.
+            for r in (0..nonzero).step_by(4 * dist) {
+                let coefficients = [
+                    self.skews[shift + r + dist],
+                    self.skews[shift + r + 3 * dist],
+                    self.skews[shift + r + 2 * dist],
+                ];
+                if r + 2 * dist < nonzero {
+                    let len = work.len;
+                    self.imp.ifft_butterfly_two_layers(
+                        work.quarters_mut(r, dist),
+                        len,
+                        coefficients,
+                    );
+                } else {
+                    for (x, y) in work.halves_mut(r, dist) {
+                        self.imp.ifft_butterfly(x, y, coefficients[0]);
+                    }
+                    for (x, y) in work.halves_mut(r, 2 * dist) {
+                        self.imp.ifft_butterfly(x, y, coefficients[2]);
+                    }
+                }
+            }
+            dist <<= 2;
+        }
+        if dist < m {
             for r in (0..nonzero).step_by(2 * dist) {
                 let c = self.skews[shift + r + dist];
                 for (x, y) in work.halves_mut(r, dist) {
                     self.imp.ifft_butterfly(x, y, c);
                 }
             }
-            dist <<= 1;
         }
     }
 
@@ -111,20 +186,211 @@ impl<I: Impl> Transform<I> {
     ///
     /// Only the first `needed` outputs are guaranteed to be computed.
     pub fn fft(&self, work: &mut Shards, needed: usize) {
-        let m = work.data.len() / work.len;
+        let m = work.count;
         assert!(needed <= m);
 
         let mut dist = m / 2;
-        while dist >= 1 {
-            // Outputs in a block depend only on inputs in that block, so
-            // blocks starting at or past `needed` can be skipped.
+        while dist > 1 {
+            let quarter = dist / 2;
+            // A group whose right half has no needed outputs retains the
+            // pruned three-butterfly schedule; fully needed groups fuse both
+            // layers in reverse order from the inverse transform.
             for r in (0..needed).step_by(2 * dist) {
-                let c = self.skews[r + dist];
-                for (x, y) in work.halves_mut(r, dist) {
+                let coefficients = [
+                    self.skews[r + quarter],
+                    self.skews[r + 3 * quarter],
+                    self.skews[r + dist],
+                ];
+                if r + dist < needed {
+                    let len = work.len;
+                    self.imp.fft_butterfly_two_layers(
+                        work.quarters_mut(r, quarter),
+                        len,
+                        coefficients,
+                    );
+                } else {
+                    for (x, y) in work.halves_mut(r, dist) {
+                        self.imp.fft_butterfly(x, y, coefficients[2]);
+                    }
+                    for (x, y) in work.halves_mut(r, quarter) {
+                        self.imp.fft_butterfly(x, y, coefficients[0]);
+                    }
+                }
+            }
+            dist >>= 2;
+        }
+        if dist == 1 {
+            for r in (0..needed).step_by(2) {
+                let c = self.skews[r + 1];
+                for (x, y) in work.halves_mut(r, 1) {
                     self.imp.fft_butterfly(x, y, c);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Shards, Transform, WORK_ALIGN};
+    use crate::ocelot::{Impl8, code::Impl, impl16::Impl16, kernel::portable::Portable};
+    use std::ops::Range;
+
+    #[derive(Clone, Copy)]
+    struct DefaultImpl<I>(I);
+
+    impl<I: Impl> Impl for DefaultImpl<I> {
+        type Element = I::Element;
+
+        const BITS: usize = I::BITS;
+        const STRIPE_ALIGN: usize = I::STRIPE_ALIGN;
+        const NAMESPACE: &'static [u8] = I::NAMESPACE;
+
+        fn basis() -> &'static [Self::Element] {
+            I::basis()
+        }
+
+        fn add_into(self, dst: &mut [u8], src: &[u8]) {
+            self.0.add_into(dst, src);
+        }
+
+        fn sub_into(self, dst: &mut [u8], src: &[u8]) {
+            self.0.sub_into(dst, src);
+        }
+
+        fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+            self.0.mul_add(dst, src, c);
+        }
+
+        fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+            self.0.mul_sub(dst, src, c);
+        }
+
+        fn checksum_range(
+            self,
+            shard: &[u8],
+            coefficients: &[u8],
+            range: Range<usize>,
+            out: &mut [u8],
+        ) {
+            self.0.checksum_range(shard, coefficients, range, out);
+        }
+
+        fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
+            self.0.fft_butterfly(x, y, c);
+        }
+
+        fn ifft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
+            self.0.ifft_butterfly(x, y, c);
+        }
+    }
+
+    fn copy(work: &Shards) -> Shards {
+        let mut copy = Shards::new(work.count, work.len);
+        copy.data_mut().copy_from_slice(work.data());
+        copy
+    }
+
+    fn fill(work: &mut Shards) {
+        for (i, byte) in work.data_mut().iter_mut().enumerate() {
+            *byte = (i.wrapping_mul(157) ^ i.rotate_left(3) ^ 0xa5) as u8;
+        }
+    }
+
+    fn ifft_unfused<I: Impl>(
+        transform: &Transform<I>,
+        work: &mut Shards,
+        nonzero: usize,
+        shift: usize,
+    ) {
+        let mut dist = 1;
+        while dist < work.count {
+            for r in (0..nonzero).step_by(2 * dist) {
+                let c = transform.skews[shift + r + dist];
+                for (x, y) in work.halves_mut(r, dist) {
+                    transform.imp.ifft_butterfly(x, y, c);
+                }
+            }
+            dist <<= 1;
+        }
+    }
+
+    fn fft_unfused<I: Impl>(transform: &Transform<I>, work: &mut Shards, needed: usize) {
+        let mut dist = work.count / 2;
+        while dist >= 1 {
+            for r in (0..needed).step_by(2 * dist) {
+                let c = transform.skews[r + dist];
+                for (x, y) in work.halves_mut(r, dist) {
+                    transform.imp.fft_butterfly(x, y, c);
                 }
             }
             dist >>= 1;
         }
+    }
+
+    fn compare_schedules<I: Impl>(imp: I, lengths: &[usize]) {
+        let transform = Transform::new(imp);
+        for &count in &[1, 2, 4, 8, 16] {
+            for &len in lengths {
+                let mut input = Shards::new(count, len);
+                fill(&mut input);
+
+                for nonzero in 0..=count {
+                    let mut input = copy(&input);
+                    for shard in input.shards_mut().skip(nonzero) {
+                        shard.fill(0);
+                    }
+                    for shift in [0, 1, I::ORDER - count] {
+                        let mut actual = copy(&input);
+                        let mut expected = copy(&input);
+                        transform.ifft(&mut actual, nonzero, shift);
+                        ifft_unfused(&transform, &mut expected, nonzero, shift);
+                        assert_eq!(
+                            actual.data(),
+                            expected.data(),
+                            "IFFT differs: count={count} len={len} nonzero={nonzero} shift={shift}"
+                        );
+                    }
+                }
+
+                for needed in 0..=count {
+                    let mut actual = copy(&input);
+                    let mut expected = copy(&input);
+                    transform.fft(&mut actual, needed);
+                    fft_unfused(&transform, &mut expected, needed);
+                    assert_eq!(
+                        actual.data(),
+                        expected.data(),
+                        "FFT differs: count={count} len={len} needed={needed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_keeps_alignment_and_shard_count() {
+        for count in [1, 3, 64] {
+            let mut work = Shards::new(count, 4096);
+            for len in [4096, 130, 2, 4096] {
+                work.resize(len);
+                assert!(work.data().as_ptr().align_offset(WORK_ALIGN) == 0);
+                assert_eq!(work.shards().count(), count);
+                for (index, shard) in work.shards_mut().enumerate() {
+                    assert_eq!(shard.len(), len);
+                    shard.fill(index as u8);
+                }
+                for (index, shard) in work.shards().enumerate() {
+                    assert!(shard.iter().all(|&byte| byte == index as u8));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paired_layers_match_unfused_schedule() {
+        compare_schedules(Impl8::new(Portable), &[1, 17, 65]);
+        compare_schedules(DefaultImpl(Impl8::new(Portable)), &[3]);
+        compare_schedules(Impl16::new(Portable), &[2, 126, 130]);
     }
 }
