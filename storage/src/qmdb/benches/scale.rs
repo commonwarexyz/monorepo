@@ -29,7 +29,7 @@
 //! -- so a uniform and a skewed database differ only in that distribution. It then prunes and syncs,
 //! reporting the total build time.
 //!
-//! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
+//! `init` reopens it (read-only) and times one `init` at the given init cache budget (`cache` bytes,
 //! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
 //! two insert workers, and larger values split between spawned decode and insert tasks while the
 //! init task merely forwards). It reports the replay-region size `R` (so a full-coverage cache is
@@ -142,7 +142,7 @@ fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=bytes, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
     );
 }
 
@@ -327,7 +327,7 @@ fn generate(
 }
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the selected index flavor
-/// at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
+/// at the given init cache budget (`cache` bytes; `0` = off) and worker count. Reports the
 /// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
 fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind) {
     if !db_dir_nonempty(folder) {
@@ -559,7 +559,7 @@ fn destroy(folder: &str) {
 /// database is empty/absent).
 fn time_init(
     cfg: &Config,
-    cache_size: Option<NonZeroUsize>,
+    cache_bytes: Option<NonZeroUsize>,
     concurrency: NonZeroUsize,
     index: IndexKind,
 ) -> (Duration, u64) {
@@ -576,7 +576,7 @@ fn time_init(
 
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
-        config.init_cache_size = cache_size;
+        config.init_cache_bytes = cache_bytes;
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {

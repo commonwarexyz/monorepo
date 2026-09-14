@@ -73,11 +73,11 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    cache::Clock,
     channel::mpsc,
 };
 use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
+use location_cache::LocationCache;
 use std::{collections::VecDeque, sync::Arc};
 use thiserror::Error;
 
@@ -90,6 +90,7 @@ mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
+mod location_cache;
 mod metrics;
 pub mod operation;
 pub mod store;
@@ -263,7 +264,7 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_bytes` budgets (in bytes) a
 /// `(location -> key)` cache that lets collision resolution resolve candidates from memory
 /// instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
@@ -271,7 +272,7 @@ pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    cache_bytes: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
 where
@@ -290,7 +291,8 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache =
+        cache_bytes.and_then(LocationCache::<<C::Item as Operation<F>>::Key>::with_budget);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -329,7 +331,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -351,7 +353,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -369,7 +371,7 @@ where
     // the authoritative deletion.
     cursor.delete();
     if let Some(cache) = cache {
-        cache.remove(&*loc);
+        cache.remove(*loc);
     }
 
     Ok(Some(loc))
@@ -381,7 +383,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -406,7 +408,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -423,7 +425,7 @@ where
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
-            cache.remove(&*loc);
+            cache.remove(*loc);
         }
         return Ok(Some(loc));
     }
@@ -440,7 +442,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -449,7 +451,7 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
             *k == *key
         } else {
             let op = reader.read(*loc).await?;
@@ -568,14 +570,15 @@ async fn build_snapshot_worker<F, C, R>(
     mut index: R,
     activity: Range<u64>,
     active: Arc<Atomic>,
-    cache_size: Option<NonZeroUsize>,
+    cache_bytes: Option<NonZeroUsize>,
 ) -> Result<(R, usize), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache =
+        cache_bytes.and_then(LocationCache::<<C::Item as Operation<F>>::Key>::with_budget);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
@@ -617,7 +620,7 @@ async fn build_snapshot_serial<F, C, I>(
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    cache_bytes: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
@@ -633,7 +636,7 @@ where
         reader,
         snapshot,
         init_buffer,
-        cache_size,
+        cache_bytes,
         |is_active, old_loc| {
             activity.push(is_active);
             if let Some(loc) = old_loc {
@@ -656,7 +659,7 @@ async fn build_snapshot_parallel<F, E, C, I>(
     log: &Arc<C>,
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    cache_bytes: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
@@ -695,7 +698,7 @@ where
             &**log,
             snapshot,
             init_buffer,
-            cache_size,
+            cache_bytes,
         )
         .await;
     }
@@ -707,7 +710,7 @@ where
     // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
     // partition and routing (`partition / range_size`) stays in `[0, workers)`.
     let workers = count.div_ceil(range_size);
-    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
+    let per_worker_cache = cache_bytes.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
 
     // All workers share one atomic bitmap to track the activity bits.
@@ -878,8 +881,8 @@ pub trait SnapshotBuild<F: Family>:
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
-    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache (`None` disables it).
+    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_bytes` budgets each
+    /// build's `(location -> key)` cache in bytes (`None` disables it).
     fn build_snapshot<E, C>(
         &mut self,
         _context: E,
@@ -887,14 +890,15 @@ pub trait SnapshotBuild<F: Family>:
         log: &Arc<C>,
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        cache_bytes: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         async move {
-            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_bytes)
+                .await
         }
     }
 }
@@ -934,7 +938,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        cache_bytes: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
@@ -947,7 +951,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
-            cache_size,
+            cache_bytes,
         )
         .await
     }
@@ -965,7 +969,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        cache_bytes: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
@@ -978,7 +982,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
-            cache_size,
+            cache_bytes,
         )
         .await
     }

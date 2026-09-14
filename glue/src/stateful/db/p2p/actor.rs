@@ -492,7 +492,7 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }

@@ -365,7 +365,7 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache_bytes: Some(NZUsize!(10 << 20)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -383,7 +383,7 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache_bytes: Some(NZUsize!(10 << 20)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -400,7 +400,7 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache_bytes: Some(NZUsize!(10 << 20)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -420,7 +420,7 @@ fn main() {
                         replay_buffer: REPLAY_BUFFER,
                     },
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache_bytes: Some(NZUsize!(10 << 20)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -432,7 +432,7 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache_bytes: Some(NZUsize!(10 << 20)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };

@@ -376,9 +376,10 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
+    /// Memory budget (in bytes) of the `(location -> key)` cache used during init to resolve
+    /// snapshot collisions without re-reading the log; `None` disables it, as does a budget
+    /// smaller than one entry.
+    pub init_cache_bytes: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -397,7 +398,7 @@ impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T,
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
-            init_cache_size: cfg.init_cache_size,
+            init_cache_bytes: cfg.init_cache_bytes,
             init_buffer: cfg.init_buffer,
             init_concurrency: cfg.init_concurrency,
         }
@@ -775,7 +776,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -818,7 +819,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -1739,7 +1740,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
-                init_cache_size: Some(NZUsize!(1024)),
+                init_cache_bytes: Some(NZUsize!(64 << 10)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(1),
             };

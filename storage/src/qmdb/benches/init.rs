@@ -24,7 +24,7 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 
 /// Init-time `(location -> key)` cache sizes to compare: `None` disables the cache (the no-cache
 /// baseline), and a reasonably sized cache that covers the bench's working set.
-const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
+const CACHE_BYTES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(10 << 20))];
 
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
@@ -78,8 +78,8 @@ fn bench_fixed_value_init(c: &mut Criterion) {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
-            for &cache_size in &CACHE_SIZES {
-                let cache = cache_size.map_or(0, NonZeroUsize::get);
+            for &cache_bytes in &CACHE_BYTES {
+                let cache = cache_bytes.map_or(0, NonZeroUsize::get);
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -109,7 +109,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |db| {
+                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_bytes, |db| {
                                 assert_ne!(db.bounds().end, 0);
                             })
                         });
@@ -145,8 +145,8 @@ fn bench_var_value_init(c: &mut Criterion) {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
-            for &cache_size in &CACHE_SIZES {
-                let cache = cache_size.map_or(0, NonZeroUsize::get);
+            for &cache_bytes in &CACHE_BYTES {
+                let cache = cache_bytes.map_or(0, NonZeroUsize::get);
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -171,7 +171,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_var_timed_init!(ctx, variant, iters, cache_size, |db| {
+                            dispatch_var_timed_init!(ctx, variant, iters, cache_bytes, |db| {
                                 assert_ne!(db.bounds().end, 0);
                             })
                         });

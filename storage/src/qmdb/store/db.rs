@@ -32,7 +32,7 @@
 //!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
-//!         init_cache_size: Some(NZUsize!(1 << 16)),
+//!         init_cache_bytes: Some(NZUsize!(4 << 20)),
 //!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
@@ -117,9 +117,10 @@ pub struct Config<T: Translator, C> {
     /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
+    /// Memory budget (in bytes) of the `(location -> key)` cache used during init to resolve
+    /// snapshot collisions without re-reading the log; `None` disables it, as does a budget
+    /// smaller than one entry.
+    pub init_cache_bytes: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -392,7 +393,7 @@ where
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
         // Build the snapshot.
-        let cache_size = cfg.init_cache_size;
+        let cache_bytes = cfg.init_cache_bytes;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
@@ -408,7 +409,7 @@ where
                 &log,
                 &mut snapshot,
                 init_buffer,
-                cache_size,
+                cache_bytes,
                 |_, _| {},
             )
             .await?;
@@ -583,7 +584,7 @@ mod test {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
         };
         TestStore::init(context, cfg).await.unwrap()
@@ -622,7 +623,7 @@ mod test {
                 page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
         };
         DelayedStore::init(
@@ -1371,7 +1372,7 @@ mod test {
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
+                init_cache_bytes: Some(NZUsize!(64 << 10)),
                 init_buffer: NZUsize!(1 << 21),
             };
 

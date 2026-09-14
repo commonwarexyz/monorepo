@@ -112,7 +112,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache_size: Some(NZUsize!(3)),
+                init_cache_bytes: Some(NZUsize!(128)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };

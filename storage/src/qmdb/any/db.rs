@@ -738,7 +738,7 @@ where
         shared_bitmap: Option<Arc<Shared<N>>>,
         init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        cache_bytes: Option<NonZeroUsize>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
@@ -766,7 +766,7 @@ where
                     &log,
                     init_concurrency,
                     init_buffer,
-                    cache_size,
+                    cache_bytes,
                 )
                 .await?;
 

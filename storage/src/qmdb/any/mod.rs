@@ -129,9 +129,10 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
+    /// Memory budget (in bytes) of the `(location -> key)` cache used during init to resolve
+    /// snapshot collisions without re-reading the log; `None` disables it, as does a budget
+    /// smaller than one entry.
+    pub init_cache_bytes: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -212,7 +213,7 @@ where
         bitmap,
         cfg.init_concurrency,
         cfg.init_buffer,
-        cfg.init_cache_size,
+        cfg.init_cache_bytes,
         metrics,
     )
     .await
@@ -299,7 +300,7 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -356,7 +357,7 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache_bytes: Some(NZUsize!(64 << 10)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
