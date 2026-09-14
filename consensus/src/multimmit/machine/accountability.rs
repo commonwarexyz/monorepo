@@ -1,6 +1,6 @@
 //! Objective equivocation detection over authenticated protocol claims.
 
-use super::{Artifact, finality::CertificateDerivations};
+use super::{Artifact, finality::CertificateDerivations, view::drain_prefix};
 use crate::{
     Viewable as _,
     multimmit::types::{ChainId, Height, TransactionBlockHeader, VoteBody},
@@ -131,13 +131,19 @@ impl<D: Digest> AccountabilityState<D> {
     }
 
     pub(super) fn retire(&mut self, view: View, floors: &[crate::multimmit::types::BlockRef<D>]) {
-        self.views.retain(|(claim_view, _), _| *claim_view > view);
-        self.producer.retain(|(chain, height), _| {
-            let floor = floors[chain.get() as usize].height();
-            *height >= floor.previous().unwrap_or_else(Height::zero)
-        });
-        self.producer_order
-            .retain(|slot| self.producer.contains_key(slot));
+        drain_prefix(&mut self.views, |(claim_view, _)| *claim_view <= view).for_each(drop);
+        let retained = self.producer.len();
+        for (chain, floor) in floors.iter().enumerate() {
+            let chain = ChainId::new(chain as u32);
+            let first = floor.height().previous().unwrap_or_else(Height::zero);
+            self.producer
+                .extract_if((chain, Height::zero())..(chain, first), |_, _| true)
+                .for_each(drop);
+        }
+        if self.producer.len() != retained {
+            self.producer_order
+                .retain(|slot| self.producer.contains_key(slot));
+        }
     }
 
     fn observe_vote(
@@ -168,5 +174,69 @@ impl<D: Digest> AccountabilityState<D> {
 
     fn mark_fault(&mut self, participant: Participant) -> bool {
         self.faulted.insert(participant)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{multimmit::types::BlockRef, types::Epoch};
+    use commonware_cryptography::{Sha256, sha256};
+
+    #[test]
+    fn retirement_preserves_live_claims_and_producer_order() {
+        let digest = Sha256::hash(&[b"claim"]);
+        let mut state = AccountabilityState::<sha256::Digest>::new();
+        for view in [0, 1, 2, u64::MAX] {
+            state.views.insert(
+                (View::new(view), Participant::new(0)),
+                ViewClaims::default(),
+            );
+        }
+        let mut insertion_order = VecDeque::new();
+        for height in (1..=7).rev() {
+            for chain in 0..3 {
+                let slot = (ChainId::new(chain), Height::new(height));
+                let header =
+                    TransactionBlockHeader::new(Epoch::zero(), slot.0, slot.1, digest, digest)
+                        .unwrap();
+                state.producer.insert(slot, header);
+                insertion_order.push_back(slot);
+            }
+        }
+        state.producer_order = insertion_order.clone();
+        let floors = [0, 3, 6].map(Height::new);
+        let tips: Vec<_> = floors
+            .iter()
+            .enumerate()
+            .map(|(chain, height)| BlockRef::new(ChainId::new(chain as u32), *height, digest))
+            .collect();
+        let expected: VecDeque<_> = insertion_order
+            .into_iter()
+            .filter(|(chain, height)| height.get() >= [0, 2, 5][chain.get() as usize])
+            .collect();
+        for _ in 0..2 {
+            state.retire(View::new(1), &tips);
+            assert_eq!(
+                state
+                    .views
+                    .keys()
+                    .map(|(view, _)| view.get())
+                    .collect::<Vec<_>>(),
+                [2, u64::MAX]
+            );
+            assert_eq!(state.producer_order, expected);
+            assert_eq!(
+                state.producer.keys().copied().collect::<BTreeSet<_>>(),
+                expected.iter().copied().collect()
+            );
+        }
+        state
+            .views
+            .insert((View::zero(), Participant::new(0)), ViewClaims::default());
+        state.retire(View::new(1), &tips);
+        assert_eq!(state.views.len(), 2);
+        state.retire(View::new(u64::MAX), &tips);
+        assert!(state.views.is_empty());
     }
 }
