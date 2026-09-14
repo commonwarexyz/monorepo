@@ -95,7 +95,7 @@
     <use href="#validator-row" y="44"/>
   </g>
   <text class="note center green" x="575" y="431">67 signed</text>
-  <text class="note center" x="725" y="431">33 pending</text>
+  <text class="note center" x="725" y="431">33 not included</text>
 
   <path class="wire vote" d="M809 260 H990"/>
   <text class="label center green" x="900" y="239">Certify</text>
