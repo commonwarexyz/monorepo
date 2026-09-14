@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 930" role="img" aria-labelledby="title description">
   <title id="title">The Trees Behind a Close</title>
-  <desc id="description">Each validator derives the balance, activity, and withdrawal roots from the dealing and its retained state. The certified commitment binds these roots to the epoch, prior state, and withdrawal total. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and its payment-tree root. That tree records one payment of 4 to b and one of 7 to d. Activity records support receipt challenges even when an account's balance does not change. No withdrawals were requested. The right panel shows the destination and amount a withdrawal would record. The lines show commitment relationships.</desc>
+  <desc id="description">Each validator derives the balance, activity, and withdrawal roots from the dealing and its retained state. The commitment binds these roots to the epoch, prior state, and withdrawal total. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and its payment-tree root. That tree records one payment of 4 to b and one of 7 to d. Activity records support receipt challenges even when an account's balance does not change. No withdrawals were requested. The right panel shows the destination and amount a withdrawal would record. The lines show commitment relationships.</desc>
   <rect width="1320" height="930" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -24,12 +24,12 @@
   <text class="note" x="30" y="69">Three roots derived by each validator</text>
 
   <rect class="selected" x="427" y="98" width="466" height="90" rx="5"/>
-  <text class="heading center blue" x="660" y="133">Certified commitment</text>
+  <text class="heading center blue" x="660" y="133">Commitment</text>
   <text class="note center" x="660" y="164">epoch · prior state · withdrawal total</text>
   <path class="focus" d="M660 188 V219 M214 244 V219 H1106 V244 M660 219 V244"/>
 
   <rect class="panel" x="30" y="244" width="368" height="568" rx="5"/>
-  <text class="heading center" x="214" y="284">Account balances</text>
+  <text class="heading center" x="214" y="284">Account Balances</text>
   <text class="note center" x="214" y="313">QMDB · all live accounts</text>
   <rect class="record" x="122" y="346" width="184" height="42" rx="3"/>
   <text class="label center" x="214" y="373">State root</text>
@@ -52,7 +52,7 @@
   <text class="note center" x="214" y="775">for withdrawal or recovery</text>
 
   <rect class="panel" x="430" y="244" width="460" height="654" rx="5"/>
-  <text class="heading center" x="660" y="284">Account activity</text>
+  <text class="heading center" x="660" y="284">Account Activity</text>
   <text class="note center" x="660" y="313">BMT · accounts active this close</text>
   <rect class="record" x="568" y="346" width="184" height="42" rx="3"/>
   <text class="label center" x="660" y="373">Activity root</text>

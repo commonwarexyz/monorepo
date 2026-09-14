@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each close.*
+*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each settlement.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -86,7 +86,7 @@ Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator 
 Figure 1: The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
 :::
 
-An epoch groups accepted payments into a "close", the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+Payments are grouped into epochs. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
 
 The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
 
@@ -132,9 +132,9 @@ $$
 \end{bmatrix}
 $$
 
-Each payer's last vector of the epoch is its terminal vector. The operator and validators derive incoming credits from these vectors: $b$ receives $20+4+6=30$ across three payments. Each entry is authenticated by its payer's signed vector root.
-
 ## One Row per Active Account
+
+When an epoch ends, the operator builds a **close**, the settlement package that nets its payments into new account balances. Each payer's last vector of the epoch is its terminal vector. The operator and validators derive incoming credits from these vectors: $b$ receives $20+4+6=30$ across three payments. Each entry is authenticated by its payer's signed vector root.
 
 Netting each of the four accounts' debits and credits gives exact successor balances: $a$ ends at $100-20+5=85$, $b$ at $40-12+20+4+6=58$, $c$ at $25-7-4+12=26$, and $d$ at $35-5-6+7=31$. Gross debit equals gross credit at $20+12+7+5+4+6=54$, and the balances still sum to 200. The six payments change four account rows, one per account.
 
@@ -183,11 +183,11 @@ From these results, the validator builds the activity and withdrawal binary Merk
 All three roots are results of validation. A 32-byte commitment binds them to the epoch, prior state, and withdrawal total. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof. They install the candidate state once the close is admitted.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the certified commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested. The withdrawal panel shows the destination and amount a claim would prove.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested. The withdrawal panel shows the destination and amount a claim would prove.">
 ```
 
 ::: {.image-caption}
-Figure 3: The certified commitment links the three roots. Expanding $c$'s activity record shows its final payment totals for $b$ and $d$.
+Figure 3: The commitment links the three roots. Expanding $c$'s activity record shows its final payment totals for $b$ and $d$.
 :::
 
 The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
@@ -361,7 +361,7 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
 ```
 
 ::: {.image-caption}
-Figure 6: Sizes above processing times, measured on an AWS c8a.4xlarge with 16 workers and in-memory storage. Close timings are medians of ten successive closes after one warmup, starting from signed endpoints with no deposits or withdrawals. Validator totals include decoding, signature checks, balance reads, root construction, and application. Certificate verification uses one CPU thread. Durable commit and networking are excluded.
+Figure 6: Encoded sizes and processing times, measured on an AWS c8a.4xlarge with 16 workers and in-memory storage. Close timings are medians of ten successive closes after one warmup, starting from signed endpoints with no deposits or withdrawals. Validator totals include decoding, signature checks, balance reads, root construction, and application. Certificate verification uses one CPU thread. Durable commit and networking are excluded.
 :::
 
 With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 8.69 ms to decode, verify, and apply.

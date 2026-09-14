@@ -234,16 +234,16 @@ function mount(root) {
   const activity = el('div', { class: 'clearing-calculator-activity' });
   const pairs = el('span');
   const oE = el('b', { id: 'clearing-calc-e' });
-  pairs.append(oE, document.createTextNode(' sender-recipient pairs'));
+  pairs.append(document.createTextNode('Sender-recipient pairs: '), oE);
   const accounts = el('span');
   const oRows = el('b', { id: 'clearing-calc-rows' });
-  accounts.append(oRows, document.createTextNode(' accounts with activity'));
+  accounts.append(document.createTextNode('Accounts with activity: '), oRows);
   activity.append(pairs, accounts);
   panel.append(activity);
 
   const legend = el('div', { class: 'clearing-calculator-legend' });
   const oState = el('span', { class: 'state' });
-  legend.append(el('span', {}, 'Validator dealing (estimate)'), oState);
+  legend.append(el('span', {}, 'Sent to Each Validator (Estimate)'), oState);
   panel.append(legend);
 
   const canvas = el('canvas', {
@@ -260,7 +260,7 @@ function mount(root) {
   const oEgress = el('span', { id: 'clearing-calc-egress', class: 'egress' });
   const scope = el('span', { class: 'scope' });
   value.append(oDealing, oEgress);
-  dealing.append(el('div', { class: 'label' }, 'Validator dealing'), value, scope);
+  dealing.append(el('div', { class: 'label' }, 'Sent to Each Validator'), value, scope);
   const composition = el('div', { class: 'composition' });
   const breakdown = el('div', { class: 'clearing-calculator-breakdown' });
   composition.append(el('div', { class: 'label' }, 'Composition'), breakdown);
@@ -289,7 +289,7 @@ function mount(root) {
     const total = validators * payload;
     const state = ACCOUNT_RECORD * N;
     oDealing.textContent = bytesText(payload);
-    scope.textContent = 'Data sent to each validator for one close.';
+    scope.textContent = 'Data for one close.';
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
     oEgress.textContent = `(${bytesText(total)} total egress)`;
@@ -359,6 +359,7 @@ function mount(root) {
       g.textBaseline = 'middle';
       g.fillText(bytesText(yv).replace('.00', ''), L - 8, yy);
     }
+    let labelRight = -Infinity;
     for (const kt of [0.001, 0.01, 0.1, 1, 10, 100, 1000]) {
       if (kt < ks[0] || kt > kMax) continue;
       const xx = X(kt);
@@ -368,7 +369,12 @@ function mount(root) {
       g.stroke();
       g.textAlign = 'center';
       g.textBaseline = 'top';
-      g.fillText(String(kt), xx, T + ph + 8);
+      const label = String(kt);
+      const halfWidth = g.measureText(label).width / 2;
+      if (xx - halfWidth >= labelRight + 8) {
+        g.fillText(label, xx, T + ph + 8);
+        labelRight = xx + halfWidth;
+      }
     }
     g.strokeStyle = GRAY;
     g.lineWidth = 1.6;

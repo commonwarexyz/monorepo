@@ -410,7 +410,7 @@ function buildPaymentMinimal(mount) {
   const svg = baseSvg(mount);
   const s = new Scene(
     svg,
-    'The Payment Lifecycle',
+    'A Receipt in One Round Trip',
   );
 
   // Multimmit-style message-sequence timeline: rows are participants and the
@@ -554,7 +554,7 @@ function buildRolloverMinimal(mount) {
   const svg = baseSvg(mount);
   const s = new Scene(
     svg,
-    'Importing Credit While Spending in e+1',
+    'Spend While Credit Arrives',
   );
 
   s.label(191, 77, 'epoch e', {
