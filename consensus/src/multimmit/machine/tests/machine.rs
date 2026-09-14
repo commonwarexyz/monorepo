@@ -6,7 +6,7 @@ use super::{
 use crate::{
     Epochable, Viewable as _,
     multimmit::{
-        config::{Config, LeaderSchedule, Limits},
+        config::{CodecConfig, Config, LeaderSchedule, Limits},
         machine::{
             algebra::{VqcExtraction, validate_vqc},
             view::ViewState,
@@ -795,6 +795,19 @@ fn vqc(
         machine.profile().protocol().codec_config(),
     )
     .unwrap()
+}
+
+fn vqc_completion(
+    prepared: bool,
+    aggregate: &VqcAggregateJob<MinPk, Digest>,
+    certificate: Vqc<MinPk, Digest>,
+    codec: CodecConfig,
+) -> VqcAggregateCompletion<MinPk, Digest> {
+    if prepared {
+        VqcAggregateCompletion::prepare::<Sha256>(aggregate, certificate, codec).unwrap()
+    } else {
+        VqcAggregateCompletion::new(aggregate.id(), aggregate.generation(), certificate)
+    }
 }
 
 fn lqc(
@@ -5954,8 +5967,8 @@ fn drive_unanimous_votes(
     )
 }
 
-#[test]
-fn idle_vqc_progress_does_not_wait_for_persistence() {
+#[rstest::rstest]
+fn idle_vqc_progress_does_not_wait_for_persistence(#[values(false, true)] prepared: bool) {
     let (mut machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
     let proposed = leader(&machine, 1);
     let (aggregate, _) = drive_unanimous_votes(&mut machine, &proposed);
@@ -5967,10 +5980,11 @@ fn idle_vqc_progress_does_not_wait_for_persistence() {
     let certificate = vqc(&machine, aggregate.leader().clone(), &messages);
     let certificate_id = Artifact::Vqc(certificate.clone()).id::<Sha256>();
     let completed = machine
-        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
+        .step(Input::VqcAggregated(Box::new(vqc_completion(
+            prepared,
+            &aggregate,
             certificate,
+            machine.profile().protocol().codec_config(),
         ))))
         .unwrap();
     assert!(completed.capabilities().is_empty());
@@ -6003,7 +6017,7 @@ fn idle_vqc_progress_does_not_wait_for_persistence() {
             let (_, _, released, _) = directive.into_parts();
             released.iter().any(|job| {
                 matches!(job.request(), DurableEffect::Broadcast(artifact)
-                    if artifact.id::<Sha256>() == certificate_id)
+                if artifact.id::<Sha256>() == certificate_id)
             })
         }),
         "forwarding must reach journal enqueue without acknowledging the certificate record"
@@ -10161,8 +10175,8 @@ fn stale_lqc_completion_returns_the_pool_to_the_ready_set() {
     assert_eq!(machine.finality.ready_lqcs.len(), 1);
 }
 
-#[test]
-fn stale_vqc_completion_releases_the_pending_view() {
+#[rstest::rstest]
+fn stale_vqc_completion_releases_the_pending_view(#[values(false, true)] prepared: bool) {
     let (mut machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
     let proposed = leader(&machine, 2);
     let view = View::new(2);
@@ -10192,7 +10206,12 @@ fn stale_vqc_completion_releases_the_pending_view() {
     let messages = aggregate.messages().collect::<Vec<_>>();
     let assembled = vqc(&machine, aggregate.leader().clone(), &messages);
     let profile = machine.profile().clone();
-    let completion = VqcAggregateCompletion::new(aggregate.id(), aggregate.generation(), assembled);
+    let completion = vqc_completion(
+        prepared,
+        &aggregate,
+        assembled,
+        profile.protocol().codec_config(),
+    );
     let released = machine
         .views
         .prepare_vqc::<Sha256>(&profile, &completion, aggregate.generation() + 1)
@@ -12328,8 +12347,10 @@ fn nullification_recovery_uses_the_canonical_subset_and_exits() {
     assert_eq!(machine.inspect().view(), View::new(2));
 }
 
-#[test]
-fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
+#[rstest::rstest]
+fn vqc_aggregation_retains_exact_messages_and_exits_observer(
+    #[values(false, true)] prepared: bool,
+) {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile.clone());
     let proposed = leader(&machine, 1);
@@ -12394,10 +12415,11 @@ fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
     let certificate = vqc(&machine, proposed, &messages);
     let proof = Artifact::Vqc(certificate.clone()).id::<Sha256>();
     let completed = machine
-        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
+        .step(Input::VqcAggregated(Box::new(vqc_completion(
+            prepared,
+            &aggregate,
             certificate,
+            machine.profile().protocol().codec_config(),
         ))))
         .unwrap();
     let completed = settle(&mut machine, completed);
@@ -12417,6 +12439,37 @@ fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
     ));
     persist(&mut machine, &exit);
     assert_eq!(machine.inspect().view(), View::new(2));
+}
+
+#[test]
+fn prepared_vqc_completion_requires_the_issuing_job() {
+    let (mut first, _) = start_profile(profile_for(Role::Observer, 6, 2));
+    let (mut second, _) = start_profile(profile_for(Role::Observer, 6, 2));
+    let proposed = leader(&first, 1);
+    let (first_job, _) = drive_unanimous_votes(&mut first, &proposed);
+    let (second_job, _) = drive_unanimous_votes(&mut second, &proposed);
+    assert_eq!(first_job.id(), second_job.id());
+    assert_eq!(first_job.generation(), second_job.generation());
+    let messages = first_job.messages().collect::<Vec<_>>();
+    assert_eq!(messages, second_job.messages().collect::<Vec<_>>());
+    let certificate = vqc(&first, proposed, &messages);
+    let codec = first.profile().protocol().codec_config();
+    let foreign =
+        VqcAggregateCompletion::prepare::<Sha256>(&second_job, certificate.clone(), codec).unwrap();
+    let submitted = first.step(Input::VqcAggregated(Box::new(foreign))).unwrap();
+    assert_eq!(submitted.status(), &StepStatus::CompletionDeferred);
+    assert!(matches!(
+        first.poll(NonZeroUsize::MIN),
+        Err(StepError::CompletionMismatch)
+    ));
+    assert!(first.views.certificate_pending(View::new(1)));
+
+    let id = Artifact::Vqc(certificate.clone()).id::<Sha256>();
+    let own = VqcAggregateCompletion::prepare::<Sha256>(&first_job, certificate, codec).unwrap();
+    let submitted = first.step(Input::VqcAggregated(Box::new(own))).unwrap();
+    let completed = settle(&mut first, submitted);
+    persist(&mut first, &persist_job(&completed));
+    assert!(first.durable.local.contains_key(&id));
 }
 
 #[test]
@@ -12480,6 +12533,14 @@ fn local_vqc_emits_quorum_then_grows_to_the_full_sticky_transcript() {
     }
 
     let full_certificate = vqc(&machine, proposed.clone(), &messages);
+    assert!(
+        VqcAggregateCompletion::prepare::<Sha256>(
+            &first,
+            full_certificate.clone(),
+            machine.profile().protocol().codec_config(),
+        )
+        .is_err()
+    );
     let mismatch = machine
         .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
             first.id(),
@@ -14394,8 +14455,8 @@ fn earlier_unverified_vqc_claim_blocks_later_local_nullification() {
     }));
 }
 
-#[test]
-fn local_vqc_survives_a_crash_before_forwarding() {
+#[rstest::rstest]
+fn local_vqc_survives_a_crash_before_forwarding(#[values(false, true)] prepared: bool) {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile.clone());
     let proposed = leader(&machine, 1);
@@ -14490,10 +14551,11 @@ fn local_vqc_survives_a_crash_before_forwarding() {
     let selected = aggregate.messages().collect::<Vec<_>>();
     let certificate = vqc(&machine, proposed, &selected);
     let completed = machine
-        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
+        .step(Input::VqcAggregated(Box::new(vqc_completion(
+            prepared,
+            &aggregate,
             certificate,
+            machine.profile().protocol().codec_config(),
         ))))
         .unwrap();
     let completed = settle(&mut machine, completed);
@@ -14696,8 +14758,10 @@ fn local_nullification_promotes_an_identical_pending_artifact() {
     ));
 }
 
-#[test]
-fn local_vqc_origin_reconciles_identical_pending_later_ingress() {
+#[rstest::rstest]
+fn local_vqc_origin_reconciles_identical_pending_later_ingress(
+    #[values(false, true)] prepared: bool,
+) {
     let (mut machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
     let proposed = leader(&machine, 1);
     let proposal = observe(
@@ -14759,10 +14823,11 @@ fn local_vqc_origin_reconciles_identical_pending_later_ingress() {
         .expect("the local quorum must issue V-QC aggregation");
 
     let completed = machine
-        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
+        .step(Input::VqcAggregated(Box::new(vqc_completion(
+            prepared,
+            &aggregate,
             local.clone(),
+            machine.profile().protocol().codec_config(),
         ))))
         .unwrap();
     let completed = settle(&mut machine, completed);
@@ -15770,6 +15835,192 @@ fn signed_batch_identifies_each_artifact_once() {
         marginal, 4,
         "each batch artifact costs a fixed number of hashes through the durable transition"
     );
+}
+
+/// Measures serial local V-QC admission, excluding fixture setup and worker preparation.
+fn local_vqc_completion_cost(
+    participants: usize,
+    payloads: u32,
+    extensions: u32,
+    prepared: bool,
+) -> (usize, Duration) {
+    let resources = ResourceLimits::new(
+        NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroUsize::new(4).unwrap(),
+        2,
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
+        NonZeroUsize::new(64).unwrap(),
+    );
+    let pipeline_depth = payloads.div_ceil(participants as u32).max(2);
+    let extension_bound = extensions.div_ceil(participants as u32).max(1);
+    let seed = config_for(Epoch::new(7), participants, pipeline_depth);
+    let protocol = Config::new(
+        seed.epoch(),
+        NAMESPACE,
+        participants,
+        (0..participants).map(Participant::from_usize).collect(),
+        Limits::new(pipeline_depth, extension_bound).unwrap(),
+        seed.genesis().clone(),
+    )
+    .unwrap();
+    let tuning = Tuning {
+        view_timeout: Duration::from_secs(1),
+        production_interval: Duration::from_millis(100),
+        view_retention: retention_for(resources, participants),
+        ..Tuning::default()
+    };
+    let source = Machine::<Sha256, MinPk>::new(
+        Profile::with_limits(protocol.clone(), Role::Observer, tuning, resources).unwrap(),
+    );
+    let codec = protocol.codec_config();
+    let empty = leader(&source, 1);
+    let proposed = LeaderBlock::new(
+        empty.round(),
+        empty.parent(),
+        empty.history(),
+        empty
+            .proposals()
+            .iter()
+            .map(|proposal| {
+                let chain = proposal.anchor().chain();
+                ChainProposal::new(
+                    chain,
+                    proposal.anchor().clone(),
+                    (0..payloads)
+                        .filter(|index| *index as usize % participants == chain.get() as usize)
+                        .map(|index| digest(format!("proposal {index}").as_bytes()))
+                        .collect(),
+                    codec.pipeline_depth(),
+                )
+                .unwrap()
+            })
+            .collect(),
+        codec,
+    )
+    .unwrap();
+    let body = VoteBody::for_leader::<Sha256, MinPk>(
+        &proposed,
+        proposed
+            .proposals()
+            .iter()
+            .map(|proposal| Position::new(proposal.len() as u32))
+            .collect(),
+        (0..codec.chains())
+            .map(|chain| {
+                Extension::new(
+                    (0..extensions)
+                        .filter(|index| *index as usize % participants == chain)
+                        .map(|index| digest(format!("extension {index}").as_bytes()))
+                        .collect(),
+                    codec.extension_bound(),
+                )
+                .unwrap()
+            })
+            .collect(),
+        codec,
+    )
+    .unwrap();
+    let profile =
+        Profile::<CountingHasher, MinPk>::with_limits(protocol, Role::Observer, tuning, resources)
+            .unwrap();
+    let mut runner = Runner::new(profile);
+    let start = runner.submit(Input::Start).unwrap();
+    runner
+        .drain(&mut SymbolicPersistence, start.into_capabilities())
+        .unwrap();
+    let artifacts = std::iter::once(Artifact::LeaderBlock(SignedLeaderBlock::new(
+        proposed.clone(),
+        attestation(0),
+    )))
+    .chain(
+        (0..codec.view_quorum())
+            .map(|signer| Artifact::Vote(Vote::new(body.clone(), attestation(signer as u32)))),
+    );
+    let mut aggregate = None;
+    for artifact in artifacts {
+        let observed = runner
+            .submit(cohort::<CountingHasher, _>(vec![artifact]))
+            .unwrap();
+        let verified = runner
+            .drain(
+                &mut SymbolicVerifier::new(true),
+                observed.into_capabilities(),
+            )
+            .unwrap();
+        let effects = runner.drain(&mut SymbolicPersistence, verified).unwrap();
+        for effect in effects {
+            if let Capability::Leader(LeaderCapability::AggregateVqc(job)) = effect {
+                assert!(aggregate.replace(job).is_none());
+            }
+        }
+    }
+    let aggregate = aggregate.expect("a unanimous transcript reserves a view certificate");
+    let certificate = vqc(&source, proposed, &aggregate.messages().collect::<Vec<_>>());
+    let id = Artifact::Vqc(certificate.clone()).id::<Sha256>();
+    let completion = if prepared {
+        VqcAggregateCompletion::prepare::<CountingHasher>(&aggregate, certificate, codec).unwrap()
+    } else {
+        VqcAggregateCompletion::new(aggregate.id(), aggregate.generation(), certificate)
+    };
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let submitted = runner
+        .submit(Input::VqcAggregated(Box::new(completion)))
+        .unwrap();
+    let completed = runner.settle(submitted).unwrap();
+    let elapsed = started.elapsed();
+    let calls = HASH_CALLS.load(Ordering::Relaxed);
+    assert!(runner.machine().durable.local.contains_key(&id));
+    assert!(completed.capabilities().iter().any(|capability| matches!(
+        capability,
+        Capability::Durability(DurabilityCapability::Persist(_))
+    )));
+    (calls, elapsed)
+}
+
+#[test]
+fn local_vqc_serial_completion_cost() {
+    let _guard = HASH_TEST_LOCK.lock();
+    let mut samples = (0..9)
+        .map(|_| local_vqc_completion_cost(6, 0, 0, true))
+        .collect::<Vec<_>>();
+    let calls = samples[0].0;
+    assert!(samples.iter().all(|sample| sample.0 == calls));
+    samples.sort_unstable_by_key(|sample| sample.1);
+    eprintln!(
+        "local VQC serial completion: n=6 payloads=0 extensions=0 hashes={calls} median={:?}",
+        samples[4].1,
+    );
+    assert!(
+        calls < 28,
+        "worker preparation must reduce serial certificate hashing"
+    );
+}
+
+#[test]
+#[ignore = "host-time measurement of dense 50-participant certificate completion"]
+fn local_vqc_serial_completion_rich_profiles() {
+    let _guard = HASH_TEST_LOCK.lock();
+    for payloads in [20, 84] {
+        for extensions in [12, 72] {
+            for prepared in [false, true] {
+                let mut samples = (0..5)
+                    .map(|_| local_vqc_completion_cost(50, payloads, extensions, prepared))
+                    .collect::<Vec<_>>();
+                let calls = samples[0].0;
+                assert!(samples.iter().all(|sample| sample.0 == calls));
+                samples.sort_unstable_by_key(|sample| sample.1);
+                eprintln!(
+                    "local VQC serial completion: n=50 payloads={payloads} extensions={extensions} prepared={prepared} hashes={calls} median={:?}",
+                    samples[2].1,
+                );
+            }
+        }
+    }
 }
 
 /// Counts the hashes a verified V-QC claim performs through its finality lifecycle.

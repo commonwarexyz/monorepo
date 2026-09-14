@@ -498,7 +498,6 @@ where
                 let scheme = Arc::clone(&self.scheme);
                 let critical = self.critical_strategy.clone();
                 let view = job.leader().view();
-                let (id, generation) = (job.id(), job.generation());
                 let operation = move |strategy: C| {
                     let messages = job.messages().collect::<Vec<_>>();
                     scheme
@@ -507,13 +506,16 @@ where
                             &messages,
                             &strategy,
                         )
-                        .map(|certificate| CryptoOutcome::VqcAggregated {
-                            view,
-                            completion: Box::new(VqcAggregateCompletion::new(
-                                id,
-                                generation,
+                        .and_then(|certificate| {
+                            VqcAggregateCompletion::prepare::<H>(
+                                &job,
                                 certificate,
-                            )),
+                                scheme.codec_config(),
+                            )
+                        })
+                        .map(|completion| CryptoOutcome::VqcAggregated {
+                            view,
+                            completion: Box::new(completion),
                         })
                 };
                 self.spawn_crypto(

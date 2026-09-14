@@ -131,7 +131,8 @@ impl<V: Variant, D: Digest> DerivedVqc<V, D> {
         Self::new::<H>(certificate, validated)
     }
 
-    fn new<H: Hasher<Digest = D>>(
+    /// Pairs a certificate with projections established for its exact canonical bytes.
+    pub(super) fn new<H: Hasher<Digest = D>>(
         certificate: Vqc<V, D>,
         validated: ValidatedVqc<D>,
     ) -> Result<Self, Error> {

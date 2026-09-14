@@ -2750,7 +2750,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn complete_vqc_aggregation(
         &mut self,
-        completion: &VqcAggregateCompletion<V, H::Digest>,
+        completion: &mut VqcAggregateCompletion<V, H::Digest>,
     ) -> Result<Step<V, H::Digest>, StepError> {
         let Some(prepared) =
             self.views
@@ -2758,19 +2758,36 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         else {
             return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
         };
-        let id = self.validate_self_admission(&prepared.artifact)?;
+        let id = match completion.derived() {
+            Some(derived) => {
+                self.validate_self_admission_with_metadata(
+                    &prepared.artifact,
+                    derived.artifact_id,
+                    prepared.artifact.encoded_len(),
+                )?;
+                derived.artifact_id
+            }
+            None => self.validate_self_admission(&prepared.artifact)?,
+        };
         if self.durable.local.contains_key(&id) {
             // Already held: the proposal this node built carried the same certificate. Reserving a
             // second creation would journal an event apply_event, and therefore replay, rejects.
             self.views.finish_vqc(completion.id());
             return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
         }
-        let mut step = self.reserve_view_certificate(
-            Arc::clone(&prepared.artifact),
+        let mut step = self.reserve_change(Change::ViewCertificateCreated {
+            artifact: Arc::clone(&prepared.artifact),
+        })?;
+        // Capacity failures leave the completion intact at the FIFO head. Its projections move
+        // only after the certificate's event has been admitted.
+        self.self_admit_at(
+            prepared.artifact,
             id,
             prepared.observation,
+            completion.take_validated(),
             None,
         )?;
+        self.wake_components();
         self.views.finish_vqc(completion.id());
         step.status = StepStatus::VqcAggregated {
             admission: SelfAdmission::new(id),
@@ -2818,7 +2835,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let step = self.reserve_change(Change::ViewCertificateCreated {
             artifact: Arc::clone(&artifact),
         })?;
-        self.self_admit_at(artifact, id, observation, validated)?;
+        self.self_admit_at(artifact, id, observation, None, validated)?;
         self.wake_components();
         Ok(step)
     }
@@ -5486,10 +5503,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             };
             return self.drive_prepared_lqc(prepared);
         }
-        let Some(input) = self.pending_crypto.pop_front() else {
+        let Some(mut input) = self.pending_crypto.pop_front() else {
             return Ok((WorkStatus::Complete, Capabilities::None));
         };
-        let step = match &input {
+        let step = match &mut input {
             Input::RecoveredCertificate { block, certificate } => {
                 self.recovered_certificate(*block, certificate)
             }
@@ -5754,7 +5771,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         id: ArtifactId<H::Digest>,
     ) -> Result<(), StepError> {
         if let Some(existing) = self.artifacts.get(&id) {
-            return self.self_admit_at(artifact, id, existing.observation, None);
+            return self.self_admit_at(artifact, id, existing.observation, None, None);
         }
         let cohort = self.next_cohort;
         self.next_cohort = self
@@ -5762,7 +5779,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .checked_add(1)
             .expect("local admission identifier was prevalidated");
         let observation = Observation::new(cohort, 0);
-        self.self_admit_at(artifact, id, observation, None)
+        self.self_admit_at(artifact, id, observation, None, None)
     }
 
     fn self_admit_at(
@@ -5770,17 +5787,27 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         artifact: Arc<Artifact<V, H::Digest>>,
         id: ArtifactId<H::Digest>,
         observation: Observation,
-        validated: Option<ValidatedLqc<V, H::Digest>>,
+        mut validated_vqc: Option<ValidatedVqc<H::Digest>>,
+        validated_lqc: Option<ValidatedLqc<V, H::Digest>>,
     ) -> Result<(), StepError> {
-        let derivations = validated.map(|validated| {
-            let (leader, tips, votes, derived) = validated.into_parts();
-            CertificateDerivations::Lqc {
-                leader,
-                tips,
-                votes,
-                derived: Some(derived),
-            }
-        });
+        let derivations = validated_lqc
+            .map(|validated| {
+                let (leader, tips, votes, derived) = validated.into_parts();
+                CertificateDerivations::Lqc {
+                    leader,
+                    tips,
+                    votes,
+                    derived: Some(derived),
+                }
+            })
+            .or_else(|| {
+                validated_vqc
+                    .as_mut()
+                    .map(|validated| CertificateDerivations::Vqc {
+                        leader: validated.leader(),
+                        votes: validated.take_votes(),
+                    })
+            });
         if let Some(existing) = self.artifacts.get(&id) {
             debug_assert!(
                 existing.artifact.as_ref() == artifact.as_ref(),
@@ -5793,8 +5820,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 if observation < existing.observation {
                     existing.observation = observation;
                     if ready && self.lifecycle == Lifecycle::Live {
-                        self.views
-                            .observe::<H>(id, observation, &artifact, None, &self.profile)?;
+                        self.views.observe::<H>(
+                            id,
+                            observation,
+                            &artifact,
+                            validated_vqc.take(),
+                            &self.profile,
+                        )?;
                     }
                 }
                 existing.dependency_protected = true;
@@ -5812,7 +5844,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             if matches!(state, ArtifactState::Ready | ArtifactState::Waiting(_)) {
                 return Ok(());
             }
-            return self.authenticate(id, None);
+            return self.authenticate(id, validated_vqc);
         }
         let future_view = artifact.view().filter(|view| *view > self.durable.view);
         let future = future_view.is_some();
@@ -5837,7 +5869,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if let Some(view) = future_view {
             self.future.insert((view, id));
         }
-        self.authenticate(id, None)
+        self.authenticate(id, validated_vqc)
     }
 
     fn needs_dependency_slot(&self, artifact: &Artifact<V, H::Digest>) -> bool {

@@ -4,12 +4,15 @@ use super::{
     Artifact, ArtifactId, ChainState, Observation, Profile, ProposalRequest, Role, SignRequest,
     ViewNullification, ViewSnapshot, ViewStance, ViewTransition, VoteBodyPass, VoteBodyProgress,
     VoteRequest,
-    algebra::{DerivedVqc, Tips, ValidatedVqc, validate_vqc, validate_vqc_votes},
+    algebra::{
+        DerivedVqc, Tips, ValidatedVqc, validate_vqc, validate_vqc_votes, validate_vqc_with_votes,
+    },
 };
 use crate::{
     Epochable, Viewable,
     multimmit::{
         config::CodecConfig,
+        scheme::bls12381_threshold::{CertificateVotes, Error as SchemeError},
         types::{
             Anchor, CertificateId, LeaderBlock, Nullification, Nullify, ProposalParent,
             SelectedCommitments, SignedLeaderBlock, TipRecord, ViewMessage, Vote, VoteBody, Vqc,
@@ -312,17 +315,78 @@ impl<V: Variant, D: Digest> VqcAggregateJob<V, D> {
 pub(crate) struct VqcAggregateCompletion<V: Variant, D: Digest> {
     id: ViewCertificateId,
     generation: u64,
-    certificate: Vqc<V, D>,
+    artifact: Arc<Artifact<V, D>>,
+    prepared: Option<PreparedVqcCompletion<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedVqcCompletion<V: Variant, D: Digest> {
+    // Only the view owner constructs job transcripts. Clones retain this allocation, so its
+    // identity binds the worker's checked certificate to the exact still-pending request.
+    messages: Arc<[Arc<Artifact<V, D>>]>,
+    derived: DerivedVqc<V, D>,
 }
 
 impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
-    /// Creates a matched aggregation completion.
-    pub const fn new(id: ViewCertificateId, generation: u64, certificate: Vqc<V, D>) -> Self {
+    /// Creates an unprepared completion for exercising the admission fallback.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new(id: ViewCertificateId, generation: u64, certificate: Vqc<V, D>) -> Self {
         Self {
             id,
             generation,
-            certificate,
+            artifact: Arc::new(Artifact::Vqc(certificate)),
+            prepared: None,
         }
+    }
+
+    /// Checks the selected transcript and derives certificate projections in the worker.
+    pub(crate) fn prepare<H: Hasher<Digest = D>>(
+        job: &VqcAggregateJob<V, D>,
+        certificate: Vqc<V, D>,
+        config: CodecConfig,
+    ) -> Result<Self, SchemeError> {
+        if !vqc_matches_job::<H, V, D>(&certificate, &job.leader, &job.messages, config) {
+            return Err(SchemeError::Transcript);
+        }
+        let leader = certificate.leader().digest::<H>();
+        let mut votes = CertificateVotes {
+            leader,
+            designated: Vec::new(),
+            conflicting: Vec::new(),
+        };
+        for artifact in job.messages.iter() {
+            if let Artifact::Vote(vote) = artifact.as_ref() {
+                let target = if vote.body().leader() == leader {
+                    &mut votes.designated
+                } else {
+                    &mut votes.conflicting
+                };
+                target.push((vote.signer(), vote.body().clone()));
+            }
+        }
+        let validated = validate_vqc_with_votes::<H, V, D>(&certificate, config, votes)
+            .map_err(|_| SchemeError::Transcript)?;
+        let derived =
+            DerivedVqc::new::<H>(certificate, validated).map_err(|_| SchemeError::Transcript)?;
+        Ok(Self {
+            id: job.id,
+            generation: job.generation,
+            artifact: Arc::clone(&derived.artifact),
+            prepared: Some(PreparedVqcCompletion {
+                messages: Arc::clone(&job.messages),
+                derived,
+            }),
+        })
+    }
+
+    pub(super) fn derived(&self) -> Option<&DerivedVqc<V, D>> {
+        self.prepared.as_ref().map(|prepared| &prepared.derived)
+    }
+
+    pub(super) fn take_validated(&mut self) -> Option<ValidatedVqc<D>> {
+        self.prepared
+            .take()
+            .map(|prepared| prepared.derived.validated)
     }
 
     /// Returns the completed job identifier.
@@ -331,8 +395,11 @@ impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
     }
 
     /// Returns the aggregated certificate.
-    pub const fn certificate(&self) -> &Vqc<V, D> {
-        &self.certificate
+    pub fn certificate(&self) -> &Vqc<V, D> {
+        let Artifact::Vqc(certificate) = self.artifact.as_ref() else {
+            unreachable!("V-QC completions contain a V-QC")
+        };
+        certificate
     }
 }
 
@@ -2414,18 +2481,22 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         else {
             return Ok(None);
         };
-        if job.generation != completion.generation
-            || !vqc_matches_job::<H, V, D>(
-                &completion.certificate,
-                &job.leader,
-                &job.messages,
-                profile.protocol().codec_config(),
-            )
-        {
+        let matches = completion.prepared.as_ref().map_or_else(
+            || {
+                vqc_matches_job::<H, V, D>(
+                    completion.certificate(),
+                    &job.leader,
+                    &job.messages,
+                    profile.protocol().codec_config(),
+                )
+            },
+            |prepared| Arc::ptr_eq(&job.messages, &prepared.messages),
+        );
+        if job.generation != completion.generation || !matches {
             return Err(ViewError::CompletionMismatch);
         }
         Ok(Some(PreparedArtifact {
-            artifact: Arc::new(Artifact::Vqc(completion.certificate.clone())),
+            artifact: Arc::clone(&completion.artifact),
             observation: *observation,
         }))
     }
