@@ -466,9 +466,9 @@ impl MainRing {
 struct GhostSlot<K> {
     /// Historical key, or `None` when this slot is available for reuse.
     key: Option<K>,
-    /// Previous entry toward the Ghost head.
+    /// Previous entry toward the Ghost head, or `UNLINKED` when free.
     prev: usize,
-    /// Next entry toward the Ghost tail.
+    /// Next entry toward the Ghost tail, or the next free slot when `key` is `None`.
     next: usize,
 }
 
@@ -489,8 +489,8 @@ struct GhostQueue<K> {
     index: HashTable<usize>,
     /// Storage for linked historical entries.
     slots: Vec<GhostSlot<K>>,
-    /// Detached positions available for reuse.
-    free: Vec<usize>,
+    /// First detached position, linked through [GhostSlot::next].
+    free_head: Option<usize>,
     /// Newest historical entry.
     head: Option<usize>,
     /// Oldest historical entry.
@@ -505,7 +505,7 @@ impl<K: Hash + Eq> GhostQueue<K> {
         Self {
             index: HashTable::with_capacity(capacity.checked_mul(2).expect("capacity overflow")),
             slots: Vec::with_capacity(capacity),
-            free: Vec::with_capacity(capacity),
+            free_head: None,
             head: None,
             tail: None,
             capacity,
@@ -521,7 +521,8 @@ impl<K: Hash + Eq> GhostQueue<K> {
 
         // Prefer recycled storage, then grow to the Ghost bound, then reuse
         // the oldest live slot after removing its previous key.
-        let slot = if let Some(slot) = self.free.pop() {
+        let slot = if let Some(slot) = self.free_head {
+            self.free_head = linked(self.slots[slot].next);
             slot
         } else if self.slots.len() < self.capacity {
             let slot = self.slots.len();
@@ -599,7 +600,8 @@ impl<K: Hash + Eq> GhostQueue<K> {
 
         // Recycle the position before dropping the key, so a panicking
         // destructor cannot strand the detached slot outside the free list.
-        self.free.push(slot);
+        self.slots[slot].next = self.free_head.unwrap_or(UNLINKED);
+        self.free_head = Some(slot);
         drop(historical);
         true
     }
@@ -633,7 +635,7 @@ impl<K: Hash + Eq> GhostQueue<K> {
     fn clear(&mut self) {
         self.index.clear();
         self.slots.clear();
-        self.free.clear();
+        self.free_head = None;
         self.head = None;
         self.tail = None;
     }
@@ -903,6 +905,22 @@ mod tests {
 
     type TestCache<K, V> = Cache<K, V, Clock2QPlus<K>>;
 
+    impl<K> GhostQueue<K> {
+        fn check_free_slots(&self) -> HashSet<usize> {
+            let mut free = HashSet::new();
+            let mut current = self.free_head;
+            while let Some(slot) = current {
+                assert!(free.insert(slot), "duplicate Ghost free slot {slot}");
+                let entry = &self.slots[slot];
+                assert!(entry.key.is_none());
+                assert_eq!(entry.prev, UNLINKED);
+                current = linked(entry.next);
+            }
+            assert_eq!(self.index.len() + free.len(), self.slots.len());
+            free
+        }
+    }
+
     impl<K: Hash + Eq + Clone + core::fmt::Debug, V> Cache<K, V, Clock2QPlus<K>> {
         /// Returns the number of residents attached to either partition.
         const fn residents(&self) -> usize {
@@ -1079,8 +1097,7 @@ mod tests {
             assert!(policy.ghost.index.len() <= policy.ghost.capacity);
             let ghost = self.ghost_order();
             assert_eq!(ghost.len(), policy.ghost.index.len());
-            let ghost_free: HashSet<_> = policy.ghost.free.iter().copied().collect();
-            assert_eq!(ghost_free.len(), policy.ghost.free.len());
+            let ghost_free = policy.ghost.check_free_slots();
             let mut seen_ghost = HashSet::new();
             for (rank, &slot) in ghost.iter().enumerate() {
                 assert!(seen_ghost.insert(slot));
@@ -1728,10 +1745,8 @@ mod tests {
                 linked_slots
             );
             assert_eq!(ghost.index.len(), expected.len());
-            assert_eq!(ghost.index.len() + ghost.free.len(), ghost.slots.len());
             assert!(ghost.slots.len() <= capacity);
-            let free = ghost.free.iter().copied().collect::<HashSet<_>>();
-            assert_eq!(free.len(), ghost.free.len());
+            let free = ghost.check_free_slots();
             for (slot, entry) in ghost.slots.iter().enumerate() {
                 assert_eq!(entry.key.is_some(), linked_slots.contains(&slot));
                 assert_eq!(free.contains(&slot), entry.key.is_none());
