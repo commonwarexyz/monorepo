@@ -216,6 +216,8 @@ mod tests {
         handoff_requests: Option<HandoffRequests>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
+        /// Whether the mock application drops proposal responses.
+        drop_proposals: bool,
         /// Whether the mock application accepts pipelined handoff requests.
         accept_handoffs: bool,
         /// Views whose verification requests reached the mock application.
@@ -240,6 +242,7 @@ mod tests {
                 propose_requests: None,
                 handoff_requests: None,
                 stall_proposals: false,
+                drop_proposals: false,
                 accept_handoffs: false,
                 verify_requests: None,
                 fail_verification: false,
@@ -293,6 +296,7 @@ mod tests {
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.set_stall_proposals(options.stall_proposals);
+        actor.set_drop_proposals(options.drop_proposals);
         actor.set_accept_handoffs(options.accept_handoffs);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
@@ -4137,6 +4141,127 @@ mod tests {
             }
             let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(2))];
             assert_eq!(propose_requests.lock().as_slice(), &expected);
+        });
+    }
+
+    /// A dropped handoff response is a terminal application failure for the
+    /// optimistic child, even if its parent later certifies.
+    #[test_traced]
+    fn test_pipelined_handoff_dropped_response_nullifies_after_parent_certification() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_dropped_response".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_requests: Some(propose_requests.clone()),
+                    drop_proposals: true,
+                    accept_handoffs: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let parent = prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            wait_for_request(&context, &propose_requests, View::new(3), |request| {
+                request.0
+            })
+            .await;
+            assert_eq!(
+                propose_requests.lock().as_slice(),
+                &[(View::new(3), View::new(2))]
+            );
+
+            let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
+            mailbox.recovered(Certificate::Notarization(notarization));
+
+            let deadline = context.current() + Duration::from_secs(1);
+            let mut parent_certified = false;
+            let mut entered_child = false;
+            let mut child_nullified = false;
+            while !parent_certified || !child_nullified {
+                select! {
+                    message = resolver_receiver.recv() => {
+                        if matches!(
+                            message.unwrap(),
+                            MailboxMessage::Certified { view, success: true, .. }
+                                if view == View::new(2)
+                        ) {
+                            parent_certified = true;
+                        }
+                    },
+                    message = batcher_receiver.recv() => {
+                        match message.unwrap() {
+                            batcher::Message::Update { current, .. }
+                                if current == View::new(3) =>
+                            {
+                                entered_child = true;
+                            }
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == View::new(3) =>
+                            {
+                                assert!(entered_child, "child nullified before becoming current");
+                                child_nullified = true;
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep_until(deadline) => {
+                        panic!(
+                            "expected dropped handoff to nullify view 3 before normal deadlines"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                propose_requests.lock().as_slice(),
+                &[(View::new(3), View::new(2))],
+                "parent certification must not retry a dropped handoff"
+            );
         });
     }
 

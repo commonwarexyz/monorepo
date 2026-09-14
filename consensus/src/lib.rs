@@ -195,9 +195,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certification commitments as returning a payload from [`Automaton::propose`].
         /// Returning [`HandoffProposal::AwaitCertification`] explicitly declines
         /// speculative construction while allowing consensus to retry through the ordinary
-        /// proposal path once the parent is certified. Keep the response pending while the
-        /// decision or construction is still in progress. Closing the response is terminal
-        /// for this request and should be reserved for cases such as shutdown.
+        /// proposal path once the parent is certified.
+        ///
+        /// Return the receiver promptly and perform pending decision or construction work
+        /// behind it. Consensus awaits this method before processing further events.
+        /// Keep the response pending while that work is in progress. Consensus may drop
+        /// the receiver when the request is no longer needed, including when parent
+        /// certification allows an ordinary proposal request. Stop pending work when the
+        /// receiver closes.
+        ///
+        /// Dropping the response sender abandons the proposal opportunity for this view;
+        /// parent certification does not retry it. Use [`HandoffProposal::AwaitCertification`]
+        /// to defer construction until the parent certifies.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
