@@ -416,7 +416,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             };
             let namespace = subject.namespace(self.namespace());
             let message = subject.message();
-            entries.push((namespace.to_vec(), message.to_vec(), *signature));
+            entries.push((namespace, message, *signature));
         }
 
         batch::verify_same_signer::<_, V, _>(
@@ -424,7 +424,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             self.identity(),
             non_empty![@entries
                 .iter()
-                .map(|(ns, msg, sig)| (ns.as_ref(), msg.as_ref(), *sig))],
+                .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))],
             strategy,
         )
         .is_ok()
