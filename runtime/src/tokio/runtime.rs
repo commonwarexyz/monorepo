@@ -523,6 +523,7 @@ impl crate::Runner for Runner {
             storage_buffer_pool,
             tree: Arc::clone(&tree),
             execution: Execution::default(),
+            inline_io: false,
         };
         let output = catch_unwind(AssertUnwindSafe(|| {
             runtime.block_on(panicked.interrupt(f(context)))
@@ -555,6 +556,7 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
+    inline_io: bool,
 }
 
 impl Context {
@@ -575,6 +577,11 @@ impl crate::Spawner for Context {
         self
     }
 
+    fn inline_io(mut self) -> Self {
+        self.inline_io = true;
+        self
+    }
+
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -587,7 +594,9 @@ impl crate::Spawner for Context {
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
         let past = self.execution;
+        let inline_io = self.inline_io;
         self.execution = Execution::default();
+        self.inline_io = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -620,6 +629,9 @@ impl crate::Spawner for Context {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.clone();
                 move || {
+                    // The thread belongs to this task alone, so an opted-in task may run its
+                    // blocking reads on it.
+                    utils::thread::INLINE_IO.with(|inline| inline.set(inline_io));
                     handle.block_on(f);
                 }
             });
@@ -693,6 +705,7 @@ impl crate::Supervisor for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
+            inline_io: false,
         }
     }
 
@@ -998,6 +1011,59 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    #[test]
+    fn test_inline_io_requires_dedicated_opt_in() {
+        fn thread_inline_io() -> bool {
+            utils::thread::INLINE_IO.with(|inline| inline.get())
+        }
+
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            // Dedicated tasks run reads inline only after opting in.
+            let plain = context
+                .child("plain")
+                .dedicated()
+                .spawn(|_| async { thread_inline_io() });
+            let opted = context
+                .child("opted")
+                .dedicated()
+                .inline_io()
+                .spawn(|_| async { thread_inline_io() });
+            assert!(!plain.await.unwrap());
+            assert!(opted.await.unwrap());
+
+            // Shared executors ignore the hint.
+            for blocking in [false, true] {
+                let shared = context
+                    .child("shared")
+                    .shared(blocking)
+                    .inline_io()
+                    .spawn(|_| async { thread_inline_io() });
+                assert!(!shared.await.unwrap());
+            }
+
+            // Descendants of an opted-in task start from a clean configuration.
+            let nested = context.child("nested").dedicated().inline_io();
+            let nested = nested.spawn(|context| async move {
+                let dedicated = context
+                    .child("dedicated")
+                    .dedicated()
+                    .spawn(|_| async { thread_inline_io() });
+                let shared = context
+                    .child("shared")
+                    .spawn(|_| async { thread_inline_io() });
+                (
+                    thread_inline_io(),
+                    dedicated.await.unwrap(),
+                    shared.await.unwrap(),
+                )
+            });
+            assert_eq!(nested.await.unwrap(), (true, false, false));
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]
