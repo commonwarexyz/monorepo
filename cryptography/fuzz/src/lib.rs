@@ -4,3 +4,4 @@
 //! binaries under `fuzz_targets/` only need to monomorphize them.
 
 pub mod certificate;
+pub mod reed_solomon;
