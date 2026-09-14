@@ -86,6 +86,7 @@ where
         match capability {
             VerificationCapability::Verify(job) => {
                 let span = info_span!(
+                    parent: root,
                     "multimmit.voter.verify",
                     epoch = self.protocol_epoch.get().traced(),
                     view = self.round_view.get().traced(),

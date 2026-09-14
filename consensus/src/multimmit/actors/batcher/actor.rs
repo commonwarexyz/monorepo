@@ -427,6 +427,7 @@ where
         let worker = info_span!(
             parent: &span,
             "multimmit.batcher.verify",
+            kind = kind.label(),
             epoch = round.epoch().get().traced(),
             view = round.view().get().traced(),
             job = job.id().get().traced(),

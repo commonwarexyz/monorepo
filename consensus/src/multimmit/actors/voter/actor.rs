@@ -3419,6 +3419,41 @@ mod tests {
     }
 
     #[test]
+    fn verification_trace_uses_owning_round_at_info_level() {
+        for unrelated_ambient in [false, true] {
+            let traces = TraceStorage::default();
+            let subscriber = tracing_subscriber::registry()
+                .with(CollectingLayer::new(traces.clone()))
+                .with(tracing_subscriber::filter::LevelFilter::INFO);
+            tracing::subscriber::with_default(subscriber, || {
+                let ambient = if unrelated_ambient {
+                    info_span!(parent: None, "test.unrelated_round")
+                } else {
+                    Span::none()
+                };
+                ambient.in_scope(|| {
+                    ready_runtime_source_between_actions(RuntimeSourceScenario::Verification);
+                });
+            });
+            let events = traces.get_by_level(tracing::Level::INFO);
+            let event = events
+                .iter()
+                .find(|event| event.metadata.content == "verification dispatched")
+                .expect("verification reached its batcher message");
+            let parents: Vec<_> = event
+                .spans
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect();
+            assert_eq!(
+                parents,
+                ["multimmit.voter.verify", "test.verification_round"],
+                "verification must use its supplied root; unrelated ambient: {unrelated_ambient}"
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_prune_waits_for_journal_command_capacity() {
         ready_runtime_source_between_actions(RuntimeSourceScenario::CheckpointAdmission);
     }
@@ -3713,16 +3748,18 @@ mod tests {
                     driver.core().task_generation(),
                     vec![VerificationItem::new(ticket, Arc::new(artifact), Vec::new())],
                 );
-                driver.execute_capabilities(
+                let root = info_span!(parent: None, "test.verification_round");
+                debug_span!("test.observation").in_scope(|| driver.execute_capabilities(
                     Capability::Verification(VerificationCapability::Verify(job)).into(),
-                    &Span::none(),
-                ).unwrap();
+                    &root,
+                )).unwrap();
                 let message = batcher_rx.try_recv().expect(
                     "critical verification must reach the batcher while producer permits remain held",
                 );
-                let batcher::Message::Verify { job, .. } = message else {
+                let batcher::Message::Verify { span, job, .. } = message else {
                     panic!("the observed proof must dispatch verification");
                 };
+                span.in_scope(|| info!("verification dispatched"));
                 assert!(job.view_critical());
                 assert_eq!(job.items().len(), 1);
                 assert!(driver.fast_verifications.is_empty());

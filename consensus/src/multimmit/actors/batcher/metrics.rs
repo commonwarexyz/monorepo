@@ -27,7 +27,7 @@ impl VerificationKind {
         Self::Mixed,
     ];
 
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::ViewMessage => "view_message",
             Self::Vqc => "vqc",

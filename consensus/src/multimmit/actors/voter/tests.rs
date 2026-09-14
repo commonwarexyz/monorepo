@@ -1427,23 +1427,16 @@ fn round_spans_track_ingress_and_publication_boundaries() {
                         .is_ok()
                     && event
                         .expect_span_at_index(2, |span| {
-                            if span.content == "multimmit.voter.observe"
+                            if span.content == "multimmit.voter.round"
                                 && span.expect_field_exact("epoch", "76").is_ok()
                                 && span.expect_field_exact("view", "1").is_ok()
                             {
                                 Ok(())
                             } else {
-                                Err("observe span is missing its round fields"
+                                Err("owning round is missing its round fields"
                                     .to_string()
                                     .into())
                             }
-                        })
-                        .is_ok()
-                    && event
-                        .expect_span(|span| {
-                            span.content == "multimmit.voter.round"
-                                && span.expect_field_exact("epoch", "76").is_ok()
-                                && span.expect_field_exact("view", "1").is_ok()
                         })
                         .is_ok()
             })
