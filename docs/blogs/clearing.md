@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-11T00:00:00Z"
+modified-time: "2026-09-15T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/11/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each close.*
+*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each close.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -289,6 +289,8 @@ Figure 5: Both calculations include the same predecessor credit. Importing it ad
 Accounts with deposits or withdrawals must resolve their full admitted outcome before spending in the successor epoch.
 
 ## The Close Follows Accounts and Edges
+
+An [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) is available in the Commonware Library.
 
 In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747), every account sends one unit payment to one of 512 recipients. Each of 100 validators receives the same update.
 

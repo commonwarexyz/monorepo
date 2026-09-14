@@ -25,7 +25,7 @@ more to replicate, settle onchain, and index than they’re worth. Yet
 your agent will need to make millions of them over the coming years." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-08-19T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-09-11T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-15T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/clearing" />
 
@@ -101,7 +101,7 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (9/11/26): Operators can process payments to the
+        <p><em>Update (9/15/26): Operators can process payments to the
         same recipient in parallel across payers, with one signature
         check covering each payer’s batch. Validators retain the account
         state in QMDB and apply only the changes at each close.</em></p>
@@ -554,6 +554,9 @@ O’Grady</a></div>
         admitted outcome before spending in the successor epoch.</p>
         <h2 id="the-close-follows-accounts-and-edges">The Close Follows
         Accounts and Edges</h2>
+        <p>An <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4664">initial
+        implementation</a> is available in the Commonware Library.</p>
         <p>In the <a
         href="https://github.com/commonwarexyz/monorepo/pull/4747">measured
         workload</a>, every account sends one unit payment to one of 512
