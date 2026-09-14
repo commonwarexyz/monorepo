@@ -583,7 +583,7 @@ enum CatalogEvent<D, A, M, S, C, Q> {
     Durability(D),
     DeliveryCursor(A),
     Materialization(M),
-    Seal(S),
+    Retirement(S),
     Command(C),
     Read(Q),
 }
@@ -593,7 +593,7 @@ async fn next_catalog_event<D, A, M, S, C, Q>(
     durability: D,
     acknowledgement: A,
     materialization: M,
-    seal: S,
+    retirement: S,
     command: C,
     read: Q,
     accept_acknowledgements: bool,
@@ -625,7 +625,7 @@ where
         completion = durability => CatalogEvent::Durability(completion),
         acknowledgement = acknowledgement => CatalogEvent::DeliveryCursor(acknowledgement),
         completion = materialization => CatalogEvent::Materialization(completion),
-        completion = seal => CatalogEvent::Seal(completion),
+        completion = retirement => CatalogEvent::Retirement(completion),
         command = command => CatalogEvent::Command(command),
         read = read => CatalogEvent::Read(read),
     }
@@ -1291,8 +1291,9 @@ where
     deferred: Option<TracedCommand<H, V, B>>,
     durability: Pool<'static, DurabilityCompletion<H::Digest>>,
     header_request_capacity: usize,
-    /// In-flight sealed-segment proofs; optimization-only writes that never gate barriers.
-    seals: Pool<'static, (Vec<u64>, Result<(), Error>)>,
+    /// In-flight retirements of full custody segments; optimization-only checkpoint writes that
+    /// never gate barriers.
+    retirements: Pool<'static, (Vec<u64>, Result<(), Error>)>,
     durability_capacity: usize,
     // Every ready resolver request may await the admission cut that establishes local custody.
     custody_waiter_capacity: usize,
@@ -1417,7 +1418,7 @@ where
             // Direct draining is safe only when no completion can become ready.
             } else if commands_open
                 && self.durability.is_empty()
-                && self.seals.is_empty()
+                && self.retirements.is_empty()
                 && self.materializer.is_idle()
             {
                 match self.commands.try_recv() {
@@ -1439,7 +1440,7 @@ where
                 && self.pending_admission.is_none()
                 && !self.admission_active
                 && self.durability.is_empty()
-                && self.seals.is_empty()
+                && self.retirements.is_empty()
                 && self.materializer.is_idle()
                 && self.body_waiters.is_empty()
             {
@@ -1457,7 +1458,7 @@ where
                 self.durability.next_completed(),
                 self.delivery_cursors.recv(),
                 self.materializer.complete_next(),
-                self.seals.next_completed(),
+                self.retirements.next_completed(),
                 self.commands.recv(),
                 next_read(
                     &mut self.independent_reads,
@@ -1480,7 +1481,7 @@ where
                     Some("checkpoint")
                 }
                 CatalogEvent::DeliveryCursor(Some(_)) => Some("delivery_cursor"),
-                CatalogEvent::Seal(_) => Some("seal"),
+                CatalogEvent::Retirement(_) => Some("retire"),
                 CatalogEvent::Materialization(_) => Some("materialization"),
                 CatalogEvent::Command(_)
                 | CatalogEvent::Read(_)
@@ -1496,10 +1497,13 @@ where
                         self.process_delivery_cursor(control)?;
                     }
                     CatalogEvent::DeliveryCursor(None) => delivery_cursors_open = false,
-                    CatalogEvent::Seal((sealed, result)) => {
+                    CatalogEvent::Retirement((retired, result)) => {
                         result?;
                         let pinned = self.pinned_body_segments();
-                        let reclaimed = self.stores.finish_pending_seals(sealed, &pinned).await?;
+                        let reclaimed = self
+                            .stores
+                            .finish_pending_retirement(retired, &pinned)
+                            .await?;
                         self.materializer.release_readers(reclaimed);
                     }
                     CatalogEvent::Materialization(completion) => {
@@ -1888,7 +1892,7 @@ where
 
     fn fail(&mut self, error: Error) {
         self.materializer.fail(error.clone());
-        self.seals.cancel_all();
+        self.retirements.cancel_all();
         if let Some(read) = self.deferred_read.take() {
             read.fail(error.clone());
         }
@@ -1934,7 +1938,7 @@ where
                 self.admission_active = false;
                 if result.is_ok() {
                     self.materializer
-                        .retain_readers(self.stores.sealed_body_readers());
+                        .retain_readers(self.stores.immutable_body_readers());
                     for reference in blocks {
                         self.volatile_blocks.remove(&reference);
                     }
@@ -1943,24 +1947,22 @@ where
                     drop(reply.send(result.clone()));
                 }
                 result?;
-                // The completed cut proved every full segment durable; persist their seal
-                // proofs so later readers open them from index metadata alone. Seals are an
-                // optimization with no ordering needs, so they never gate commit barriers; the
-                // store keeps sealing segments readable and unreclaimed until the proof lands.
-                let seal_span = info_span!(
+                // The completed cut proved every full segment durable; retire them so their
+                // final checkpoints let later readers open them without replay. Retirement is
+                // an optimization with no ordering needs, so it never gates commit barriers;
+                // the store keeps retiring segments readable and unreclaimed until it completes.
+                let retire_span = info_span!(
                     parent: &span,
-                    "multimmit.marshal.catalog.seal_pending",
+                    "multimmit.marshal.catalog.retire_pending",
                     segments = tracing::field::Empty,
                 );
-                let (sealed, handles) = self
-                    .stores
-                    .start_pending_seals()
-                    .instrument(seal_span.clone())
-                    .await?;
-                seal_span.record("segments", sealed.len());
-                if !handles.is_empty() {
-                    self.seals
-                        .push(async move { (sealed, drain(handles).await) }.instrument(seal_span));
+                let (retiring, retirements) = self.stores.start_pending_retirement();
+                retire_span.record("segments", retiring.len());
+                if !retirements.is_empty() {
+                    self.retirements.push(
+                        async move { (retiring, try_join_all(retirements).await.map(|_| ())) }
+                            .instrument(retire_span),
+                    );
                 }
                 self.complete_custody_waiters().await?;
                 self.start_admission_sync().await.map(|_| ())
@@ -3340,7 +3342,7 @@ where
         metrics.reader_acquisitions.clone(),
         metrics.materialized_body_bytes.clone(),
     );
-    materializer.retain_readers(stores.sealed_body_readers());
+    materializer.retain_readers(stores.immutable_body_readers());
     let clock = context.child("clock");
     let handle = context.shared(false).spawn(move |_| {
         Catalog {
@@ -3368,7 +3370,7 @@ where
             deferred: None,
             durability: Pool::default(),
             header_request_capacity: header_request_capacity.get(),
-            seals: Pool::default(),
+            retirements: Pool::default(),
             durability_capacity: admission_cut_capacity.get(),
             custody_waiter_capacity: custody_waiter_capacity.get(),
             durable_acknowledged,
@@ -4203,12 +4205,12 @@ mod tests {
 
     #[rstest::rstest]
     #[case::body(false, IndependentReadCase::Body)]
-    #[case::sealed_body(true, IndependentReadCase::Body)]
+    #[case::full_body(true, IndependentReadCase::Body)]
     #[case::candidate(false, IndependentReadCase::Candidate)]
     #[case::headers(false, IndependentReadCase::Headers)]
     #[case::outputs(false, IndependentReadCase::Outputs)]
     fn independent_read_completes_during_segment_open(
-        #[case] sealed: bool,
+        #[case] full: bool,
         #[case] read_case: IndependentReadCase,
     ) {
         deterministic::Runner::default().start(|context| async move {
@@ -4232,7 +4234,7 @@ mod tests {
                 .admit_block(first.reference(), first.clone())
                 .await
                 .unwrap();
-            if sealed {
+            if full {
                 let tail = producer_block(&committee, 2, 83);
                 client.admit_block(tail.reference(), tail).await.unwrap();
             }
@@ -4610,7 +4612,7 @@ mod tests {
     }
 
     #[test]
-    fn sequential_body_reads_reuse_resident_sealed_readers() {
+    fn sequential_body_reads_reuse_resident_immutable_readers() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 50,
@@ -4644,18 +4646,11 @@ mod tests {
             drop(client);
             assert!(handle.await.is_ok());
 
-            // Reopen: the current sealed segment's reader is offered at spawn, so one resident
+            // Reopen: the current full segment's reader is offered at spawn, so one resident
             // slot is already occupied.
             let (client, handle, _delivery) =
                 spawn_catalog(configure(&context), context.child("reopened")).await;
             let acquisitions = || metric_total(&context.encode(), "reader_acquisitions_total");
-            let recoveries = || {
-                metric_sum(
-                    &context.encode(),
-                    "reader_acquisitions_total",
-                    Some("Recovered"),
-                )
-            };
             let read = |index: usize| {
                 let client = &client;
                 let blocks = &blocks;
@@ -4698,8 +4693,7 @@ mod tests {
             );
 
             // The next two distinct segments evict the offered current reader, then the oldest
-            // opened reader (segment 0). Revisiting segment 0 must reacquire it through its
-            // sealed proof, never through recovery.
+            // opened reader (segment 0). Revisiting segment 0 must reacquire it.
             read(2 * (filling + 1)).await;
             assert_eq!(
                 acquisitions(),
@@ -4718,11 +4712,6 @@ mod tests {
                 4 + filling as u64,
                 "reader retention exceeded the materializer's bounded residency"
             );
-            assert_eq!(
-                recoveries(),
-                0,
-                "a sealed segment reader was reacquired through mutable recovery"
-            );
 
             drop(client);
             assert!(handle.await.is_ok());
@@ -4730,7 +4719,7 @@ mod tests {
     }
 
     #[test]
-    fn sealed_admission_reader_avoids_a_cold_acquisition() {
+    fn full_admission_reader_avoids_a_cold_acquisition() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 51,
@@ -4765,7 +4754,7 @@ mod tests {
             assert_eq!(
                 metric_total(&context.encode(), "reader_acquisitions_total"),
                 0,
-                "a live-sealed segment was reopened before its first materialization"
+                "a full current segment was reopened before its first materialization"
             );
 
             drop(client);
@@ -4774,7 +4763,7 @@ mod tests {
     }
 
     #[test]
-    fn recovered_sealed_reader_survives_segment_rollover() {
+    fn recovered_full_reader_survives_segment_rollover() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 52,
@@ -4814,7 +4803,7 @@ mod tests {
             assert_eq!(
                 metric_total(&context.encode(), "reader_acquisitions_total"),
                 0,
-                "a recovered sealed segment was reopened after rollover"
+                "a recovered full segment was reopened after rollover"
             );
 
             drop(client);
@@ -5259,7 +5248,9 @@ mod tests {
             };
             let (client, handle, _delivery) =
                 spawn_catalog(configure(&context), delayed.child("reopened")).await;
-            let gate = reads.arm();
+            // Each read job replays its run through its own storage read, so hold one gate per
+            // expected job to observe both in flight.
+            let gates = [reads.arm(), reads.arm()];
             let references = blocks
                 .iter()
                 .take(2)
@@ -5267,7 +5258,11 @@ mod tests {
                 .map(|block| block.reference())
                 .collect::<Vec<_>>();
             let mut body_read = Box::pin(client.bodies(references.clone()));
-            let mut blocked = Box::pin(gate.blocked);
+            let [first_gate, second_gate] = gates;
+            let mut blocked = Box::pin(futures::future::try_join(
+                first_gate.blocked,
+                second_gate.blocked,
+            ));
             commonware_macros::select! {
                 result = &mut blocked => { result.unwrap(); },
                 result = &mut body_read => panic!("body materialization completed before reaching storage: {result:?}"),
@@ -5289,7 +5284,9 @@ mod tests {
                 u64::try_from(request_bytes).unwrap(),
             );
 
-            gate.release.send(()).expect("blocked read was dropped");
+            for gate in [first_gate.release, second_gate.release] {
+                gate.send(()).expect("blocked read was dropped");
+            }
             let materialized = body_read.await.unwrap();
             assert_eq!(
                 materialized

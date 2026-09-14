@@ -19,10 +19,10 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Codec, EncodeSize, Error as CodecError, FixedSize as _, RangeCfg, Read, ReadExt as _,
-    Write,
+    Write, varint::MAX_U32_VARINT_SIZE,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, crc32};
-use commonware_runtime::{Handle, ReadOptions, telemetry::metrics::EncodeLabelValue};
+use commonware_runtime::{Handle, ReadOptions};
 use commonware_storage::{
     Context,
     journal::{
@@ -33,7 +33,7 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::sequence::Unit;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, future::BoxFuture};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
@@ -41,13 +41,11 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
-use tracing::debug;
 
 type StoredBody<H, B> = Shared<TransactionBlock<H, B>>;
 type BodyJournal<E, H, B> = variable::Journal<E, StoredBody<H, B>>;
 type BodySnapshot<E, H, B> = variable::Reader<'static, E, StoredBody<H, B>>;
 type MetadataJournal<E, H> = variable::Journal<E, BlockMeta<<H as Hasher>::Digest>>;
-type MetadataSnapshot<E, H> = variable::Reader<'static, E, BlockMeta<<H as Hasher>::Digest>>;
 
 const STATE_VERSION: u8 = 2;
 /// Bounds file descriptors and filesystem operations used by one segment I/O wave.
@@ -177,25 +175,14 @@ where
         ))
     }
 
-    /// Starts the paired durable seal proof (each journal's recovery watermark at the full
-    /// segment size). Must only run after the segment's final durability cut completed.
-    async fn start_seal(self) -> Result<(Self, Vec<Handle<()>>), Error> {
-        let Self { bodies, metadata } = self;
-        let ((bodies, body_handle), (metadata, metadata_handle)) = futures::try_join!(
-            async move { bodies.start_seal().await.map_err(Error::from) },
-            async move { metadata.start_seal().await.map_err(Error::from) },
-        )?;
-        Ok((
-            Self { bodies, metadata },
-            vec![body_handle, metadata_handle],
-        ))
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
+    /// Persists both journals' final recovery checkpoints and closes them. Must only run after
+    /// the segment's final durability cut completed: the completed data syncs are reused, so
+    /// only the checkpoint markers are written, and reopening then replays no frames.
+    async fn retire(self) -> Result<(), Error> {
         let Self { bodies, metadata } = self;
         futures::try_join!(
-            async move { bodies.destroy().await.map_err(Error::from) },
-            async move { metadata.destroy().await.map_err(Error::from) },
+            async move { bodies.sync().await.map_err(Error::from) },
+            async move { metadata.sync().await.map_err(Error::from) },
         )?;
         Ok(())
     }
@@ -229,15 +216,6 @@ pub(in crate::multimmit::marshal) struct BodyLocator<D: Digest> {
     encoded_len: u64,
 }
 
-/// How a cold segment reader was produced. Doubles as the acquisition metric label.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub(in crate::multimmit::marshal) enum ColdOpen {
-    /// The segment's durable sealed proof held, so opening read only index metadata.
-    Sealed,
-    /// The proof did not hold; one authoritative mutable recovery re-established it.
-    Recovered,
-}
-
 /// The inputs needed to open one shared snapshot for a segment without a resident reader.
 pub(in crate::multimmit::marshal) struct ColdSource<E, H, B>
 where
@@ -246,9 +224,6 @@ where
     B: Codec + Digestible<Digest = H::Digest>,
 {
     context: E,
-    /// An equivalent context for the recovery fallback; contexts are not cloneable, and
-    /// re-registering the same metric keys returns the existing handles.
-    recovery_context: E,
     config: variable::Config<B::Cfg>,
     segment: u64,
     segment_capacity: u64,
@@ -262,35 +237,12 @@ where
     B: Codec + Digestible<Digest = H::Digest>,
     B::Cfg: Clone,
 {
-    /// Opens the segment sealed-first: a sealed segment proves its exact durable size, so its
-    /// reader opens from index metadata alone. A failed proof (a crash before the seal
-    /// watermark landed, or a partially filled crash-residue segment) falls back to one
-    /// authoritative recovery, which re-establishes the proof for the next open.
-    pub(in crate::multimmit::marshal) async fn open(
-        self,
-    ) -> Result<(BodyReader<E, H, B>, ColdOpen), Error> {
-        match BodyJournal::<E, H, B>::init_sealed(
-            self.context,
-            self.config.clone(),
-            self.segment_capacity,
-        )
-        .await
-        {
-            Ok(reader) => {
-                return Ok((
-                    BodyReader::new(self.segment, self.segment_capacity, reader),
-                    ColdOpen::Sealed,
-                ));
-            }
-            Err(journal::Error::Unsealed(reason)) => {
-                debug!(
-                    segment = self.segment,
-                    reason, "pending segment is not provably sealed"
-                );
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let journal = BodyJournal::init(self.recovery_context, self.config).await?;
+    /// Opens the segment's body journal through ordinary recovery and snapshots it. A retired
+    /// segment's checkpoint covers its whole range, so opening replays no frames; crash residue
+    /// replays only its unproven suffix and heals its checkpoint for the next open. The segment
+    /// accepts no further appends, so the snapshot is immutable.
+    pub(in crate::multimmit::marshal) async fn open(self) -> Result<BodyReader<E, H, B>, Error> {
+        let journal = BodyJournal::init(self.context, self.config).await?;
         let bounds = journal.bounds();
         if bounds.start != 0 || bounds.end > self.segment_capacity {
             return Err(Error::Inconsistent(
@@ -299,9 +251,11 @@ where
         }
         let (journal, reader) = journal.snapshot().await?;
         drop(journal);
-        Ok((
-            BodyReader::new(self.segment, self.segment_capacity, reader),
-            ColdOpen::Recovered,
+        Ok(BodyReader::new(
+            self.segment,
+            self.segment_capacity,
+            reader,
+            true,
         ))
     }
 }
@@ -326,15 +280,10 @@ where
     B::Cfg: Clone,
 {
     #[cfg(test)]
-    pub(in crate::multimmit::marshal) async fn open(
-        self,
-    ) -> Result<(BodyReader<E, H, B>, Option<ColdOpen>), Error> {
+    pub(in crate::multimmit::marshal) async fn open(self) -> Result<BodyReader<E, H, B>, Error> {
         match self {
-            Self::Ready(reader) => Ok((reader, None)),
-            Self::Cold(source) => {
-                let (reader, cold) = source.open().await?;
-                Ok((reader, Some(cold)))
-            }
+            Self::Ready(reader) => Ok(reader),
+            Self::Cold(source) => source.open().await,
         }
     }
 }
@@ -348,6 +297,10 @@ where
     segment: u64,
     segment_capacity: u64,
     reader: Arc<BodySnapshot<E, H, B>>,
+    /// Whether the segment's journals can no longer change: it is full or no longer current, so
+    /// no append, rewind, or namespace reuse can touch the bytes this snapshot covers. Such
+    /// segments are read through sequential replay rather than the page cache.
+    immutable: bool,
 }
 
 impl<E, H, B> Clone for BodyReader<E, H, B>
@@ -361,6 +314,7 @@ where
             segment: self.segment,
             segment_capacity: self.segment_capacity,
             reader: Arc::clone(&self.reader),
+            immutable: self.immutable,
         }
     }
 }
@@ -371,11 +325,17 @@ where
     H: Hasher,
     B: Codec + Digestible<Digest = H::Digest>,
 {
-    fn new(segment: u64, segment_capacity: u64, reader: BodySnapshot<E, H, B>) -> Self {
+    fn new(
+        segment: u64,
+        segment_capacity: u64,
+        reader: BodySnapshot<E, H, B>,
+        immutable: bool,
+    ) -> Self {
         Self {
             segment,
             segment_capacity,
             reader: Arc::new(reader),
+            immutable,
         }
     }
 
@@ -383,8 +343,55 @@ where
         self.segment
     }
 
-    fn is_sealed(&self) -> bool {
-        self.reader.bounds() == (0..self.segment_capacity)
+    /// Reads adjacent runs of strictly increasing local `positions` through one sequential
+    /// replay each, so a run costs one batched physical read per `prefetch` budget instead of
+    /// one page fault per cached page, and no page enters the software cache. Holes between
+    /// runs are never decoded. `lengths` are the encoded body lengths at those positions.
+    async fn replay_runs(
+        &self,
+        positions: &[u64],
+        lengths: &[u64],
+        prefetch: Prefetch,
+    ) -> Result<Vec<StoredBody<H, B>>, Error> {
+        let mut stored = Vec::with_capacity(positions.len());
+        let mut start = 0;
+        while start < positions.len() {
+            let mut end = start + 1;
+            while end < positions.len() && positions[end] == positions[end - 1] + 1 {
+                end += 1;
+            }
+            let bytes = lengths[start..end].iter().fold(0u64, |total, len| {
+                total
+                    .saturating_add(*len)
+                    .saturating_add(MAX_U32_VARINT_SIZE as u64)
+            });
+            let range = positions[start]..positions[end - 1] + 1;
+            let items = self
+                .reader
+                .replay_range(
+                    range.clone(),
+                    prefetch.buffer(bytes),
+                    ReadOptions::default(),
+                )
+                .await?;
+            futures::pin_mut!(items);
+            let mut expected = range.start;
+            while let Some(item) = items.next().await {
+                let (position, item) = item?;
+                if position != expected {
+                    return Err(Error::Inconsistent(
+                        "pending body replay skipped a position",
+                    ));
+                }
+                expected += 1;
+                stored.push(item);
+            }
+            if expected != range.end {
+                return Err(Error::Inconsistent("pending body replay ended early"));
+            }
+            start = end;
+        }
+        Ok(stored)
     }
 
     const fn local_position(&self, position: u64) -> Result<u64, Error> {
@@ -414,6 +421,26 @@ where
     }
 }
 
+/// Physical read budget for one sequential replay of an immutable segment.
+#[derive(Clone, Copy)]
+struct Prefetch {
+    /// Largest physical read for one replay fill.
+    buffer: NonZeroUsize,
+    /// Page size of the journal's blobs.
+    page: u64,
+}
+
+impl Prefetch {
+    /// Sizes the replay buffer for a run of `bytes`: the run is split into equal fills of at
+    /// most `buffer` bytes, so each fill is one physical read and the last one prefetches at
+    /// most two pages past the run.
+    fn buffer(self, bytes: u64) -> NonZeroUsize {
+        let fills = bytes.div_ceil(self.buffer.get() as u64).max(1);
+        let fill = bytes.div_ceil(fills).saturating_add(2 * self.page);
+        NonZeroUsize::new(usize::try_from(fill).unwrap_or(usize::MAX)).unwrap_or(self.buffer)
+    }
+}
+
 /// One owned, single-segment materialization job. Entries retain their requested output indexes
 /// and are sorted by storage position for one deduplicated batched journal read.
 pub(in crate::multimmit::marshal) struct BodyReadGroup<E, H, B>
@@ -425,6 +452,7 @@ where
     source: BodySource<E, H, B>,
     entries: Vec<(usize, BodyLocator<H::Digest>)>,
     encoded_bytes: u64,
+    prefetch: Prefetch,
 }
 
 impl<E, H, B> BodyReadGroup<E, H, B>
@@ -437,12 +465,14 @@ where
     fn new(
         source: BodySource<E, H, B>,
         entries: Vec<(usize, BodyLocator<H::Digest>)>,
+        prefetch: Prefetch,
     ) -> Result<Self, Error> {
         let encoded_bytes = Self::total_encoded_bytes(&entries)?;
         Ok(Self {
             source,
             entries,
             encoded_bytes,
+            prefetch,
         })
     }
 
@@ -482,8 +512,7 @@ where
         self,
     ) -> Result<Vec<(usize, Arc<TransactionBlock<H, B>>)>, Error> {
         let (source, read) = self.into_parts();
-        let (reader, _) = source.open().await?;
-        read.read(reader).await
+        read.read(source.open().await?).await
     }
 
     pub(in crate::multimmit::marshal) fn into_parts(self) -> (BodySource<E, H, B>, BodyRead<H>) {
@@ -494,6 +523,7 @@ where
                 segment,
                 entries: self.entries,
                 encoded_bytes: self.encoded_bytes,
+                prefetch: self.prefetch,
             },
         )
     }
@@ -507,6 +537,7 @@ where
     segment: u64,
     entries: Vec<(usize, BodyLocator<H::Digest>)>,
     encoded_bytes: u64,
+    prefetch: Prefetch,
 }
 
 impl<H> BodyRead<H>
@@ -536,7 +567,19 @@ where
             .clone()
             .map(|requests| reader.local_position(requests[0].1.position))
             .collect::<Result<Vec<_>, _>>()?;
-        let stored = reader.reader.read_many(&positions).await?;
+        // An active snapshot's recent pages are hot in the page cache and its tail page may
+        // still be rewritten beneath a raw replay, so only immutable segments replay.
+        let stored = if reader.immutable {
+            let lengths = requests
+                .clone()
+                .map(|requests| requests[0].1.encoded_len)
+                .collect::<Vec<_>>();
+            reader
+                .replay_runs(&positions, &lengths, self.prefetch)
+                .await?
+        } else {
+            reader.reader.read_many(&positions).await?
+        };
         let mut results = Vec::new();
         for (requests, stored) in requests.zip(stored) {
             let block = stored.into_inner();
@@ -601,9 +644,10 @@ where
     open_segments: BTreeMap<u64, Option<Segment<E, H, B>>>,
     active_readers: BTreeMap<u64, BodyReader<E, H, B>>,
     dirty_segments: BTreeSet<u64>,
-    /// Segments whose durable seal proof is still being written. Their readers stay retained
-    /// (so no cold open can race the write) and reclamation skips them until the proof lands.
-    sealing: BTreeSet<u64>,
+    /// Full segments whose lent-out journals are writing their final checkpoints. Their readers
+    /// stay retained (so no cold open can race the write) and reclamation skips them until the
+    /// retirement completes.
+    retiring: BTreeSet<u64>,
     by_digest: HashMap<H::Digest, Entry<H::Digest>>,
     by_position: BTreeMap<u64, H::Digest>,
     by_chain: Vec<BTreeMap<Height, Vec<H::Digest>>>,
@@ -683,7 +727,7 @@ where
             open_segments: BTreeMap::new(),
             active_readers: BTreeMap::new(),
             dirty_segments: BTreeSet::new(),
-            sealing: BTreeSet::new(),
+            retiring: BTreeSet::new(),
             by_digest: HashMap::new(),
             by_position: BTreeMap::new(),
             by_chain: vec![BTreeMap::new(); chains],
@@ -701,33 +745,14 @@ where
                 .checked_mul(store.segment_capacity)
                 .ok_or(Error::Inconsistent("pending segment coordinate overflow"))?;
 
-            // Sealed segments prove their exact durable size, so their indexes rebuild from
-            // read-only compact-metadata snapshots without opening mutable recovery or reading
-            // any body bytes. Only the current tail and segments whose proof does not hold (a
-            // crash before their seal landed) take the authoritative recovery path below, which
-            // re-establishes the proof for the next restart.
-            if Some(segment_id) != current {
-                match store.open_sealed(segment_id).await {
-                    Ok(metadata) => {
-                        let rows = replay_rows::<H>(&metadata, store.archive.replay_buffer).await?;
-                        store.remember_rows(segment_start, rows, store.segment_capacity)?;
-                        continue;
-                    }
-                    Err(journal::Error::Unsealed(reason)) => {
-                        debug!(
-                            segment = segment_id,
-                            reason, "recovering pending segment without a sealed proof"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-
+            // Every segment reopens through ordinary recovery. A retired segment's checkpoints
+            // cover its whole range, so opening reads index metadata and no body bytes; the
+            // current tail and crash residue replay only their unproven suffix and heal their
+            // checkpoints for the next restart. Metadata is the sole recovery index: the
+            // paired-size reconciliation proves that every replayed row has one body at the
+            // same local position. Journals of non-current segments close once indexed.
             let segment = store.open_segment(segment_id).await?;
             let (segment, common_size) = segment.reconcile(store.segment_capacity).await?;
-
-            // Metadata is the sole recovery index. The paired-size reconciliation proves that
-            // every replayed row has one body at the same local position.
             let rows = replay_rows::<H>(&segment.metadata, store.archive.replay_buffer).await?;
             store.remember_rows(segment_start, rows, common_size)?;
 
@@ -736,7 +761,12 @@ where
                 let (bodies, reader) = bodies.snapshot().await?;
                 store.active_readers.insert(
                     segment_id,
-                    BodyReader::new(segment_id, store.segment_capacity, reader),
+                    BodyReader::new(
+                        segment_id,
+                        store.segment_capacity,
+                        reader,
+                        common_size == store.segment_capacity,
+                    ),
                 );
                 store.next_position = segment_start
                     .checked_add(common_size)
@@ -812,8 +842,9 @@ where
         }
     }
 
-    /// Absent manifest coordinates reset both journals before reuse, discarding any residue
-    /// from interrupted segment destruction. Existing coordinates use authoritative recovery.
+    /// Absent manifest coordinates remove both journals' partitions before reuse, so residue from
+    /// an interrupted destruction, however damaged, never enters recovery. Existing coordinates
+    /// use authoritative recovery.
     fn open_segment(
         &self,
         segment: u64,
@@ -826,41 +857,28 @@ where
         async move {
             let (bodies, metadata) = futures::try_join!(
                 async move {
-                    if exists {
-                        BodyJournal::init(body_context, body_config).await
-                    } else {
-                        BodyJournal::init_at_size(body_context, body_config, 0).await
+                    if !exists {
+                        BodyJournal::<E, H, B>::destroy_partition(
+                            &body_context,
+                            &body_config.partition,
+                        )
+                        .await?;
                     }
+                    BodyJournal::init(body_context, body_config).await
                 },
                 async move {
-                    if exists {
-                        MetadataJournal::<E, H>::init(metadata_context, metadata_config).await
-                    } else {
-                        MetadataJournal::<E, H>::init_at_size(metadata_context, metadata_config, 0)
-                            .await
+                    if !exists {
+                        MetadataJournal::<E, H>::destroy_partition(
+                            &metadata_context,
+                            &metadata_config.partition,
+                        )
+                        .await?;
                     }
+                    MetadataJournal::<E, H>::init(metadata_context, metadata_config).await
                 },
             )?;
             Ok(Segment { bodies, metadata })
         }
-    }
-
-    /// Opens a sealed segment's compact-metadata snapshot after proving both of its journals
-    /// hold exactly one full segment durably. Fails with [`journal::Error::Unsealed`] when
-    /// either proof does not hold, without repairing anything.
-    async fn open_sealed(&self, segment: u64) -> Result<MetadataSnapshot<E, H>, journal::Error> {
-        let bodies = BodyJournal::<E, H, B>::init_sealed(
-            self.body_context(segment),
-            self.body_config(segment),
-            self.segment_capacity,
-        );
-        let metadata = MetadataJournal::<E, H>::init_sealed(
-            self.metadata_context(segment),
-            self.metadata_config(segment),
-            self.segment_capacity,
-        );
-        let (_, metadata) = futures::try_join!(bodies, metadata)?;
-        Ok(metadata)
     }
 
     fn state_snapshot(&self) -> Result<PendingState, Error> {
@@ -931,23 +949,21 @@ where
             self.active_readers.remove(segment);
             self.segments.remove(segment);
         }
-        // The manifest stops naming each segment before physical destruction. A crash during
-        // destroy can therefore leave only unreachable residue, which reuse resets to empty.
+        // The manifest stops naming each segment before physical destruction, so a crash during
+        // destruction leaves only unreachable residue, which reuse removes. Retired contents
+        // are removed by name: they are never reopened or replayed.
         self.persist_state().await?;
         for batch in segments.chunks(BODY_READ_CONCURRENCY) {
             futures::future::try_join_all(batch.iter().map(|&segment| {
-                let bodies =
-                    BodyJournal::init(self.body_context(segment), self.body_config(segment));
-                let metadata = MetadataJournal::<E, H>::init(
-                    self.metadata_context(segment),
-                    self.metadata_config(segment),
-                );
+                let context = &self.context;
+                let bodies = self.segment_prefix("bodies", segment);
+                let metadata = self.segment_prefix("metadata", segment);
                 async move {
-                    let (bodies, metadata) = futures::try_join!(
-                        async move { bodies.await.map_err(Error::from) },
-                        async move { metadata.await.map_err(Error::from) },
+                    futures::try_join!(
+                        BodyJournal::<E, H, B>::destroy_partition(context, &bodies),
+                        MetadataJournal::<E, H>::destroy_partition(context, &metadata),
                     )?;
-                    Segment::<E, H, B> { bodies, metadata }.destroy().await
+                    Ok::<_, Error>(())
                 }
             }))
             .await?;
@@ -1071,7 +1087,7 @@ where
     /// Exact duplicates consume no positions; completed rows retain input order.
     ///
     /// Only immutable body reads may run until `finish_put` returns the journals. The occupied
-    /// segment slot keeps an appendable segment from being mistaken for a cold sealed segment.
+    /// segment slot keeps an appendable segment from being mistaken for a cold immutable one.
     #[allow(clippy::type_complexity)]
     pub(in crate::multimmit::marshal) fn start_put(
         &mut self,
@@ -1209,12 +1225,12 @@ where
         let dirty = std::mem::take(&mut self.dirty_segments);
         let current = self.segments.last().copied();
         // Catalog starts a new admission cut only after the prior cut completes. Readers for its
-        // sealed segments can now be dropped, except while a seal proof is being written (the
+        // full segments can now be dropped, except while a retirement is writing checkpoints (the
         // retained reader keeps every read off the journals the write still touches); externally
         // issued Arc snapshots remain valid.
-        let sealing = &self.sealing;
+        let retiring = &self.retiring;
         self.active_readers
-            .retain(|segment, _| Some(*segment) == current || sealing.contains(segment));
+            .retain(|segment, _| Some(*segment) == current || retiring.contains(segment));
         let mut cuts = Vec::with_capacity(dirty.len());
         for segment_id in dirty {
             let segment = self
@@ -1243,13 +1259,14 @@ where
         for (segment_id, segment, segment_handles, reader) in cuts {
             self.open_segments.insert(segment_id, Some(segment));
             handles.extend(segment_handles);
+            let immutable = reader.bounds().end == self.segment_capacity;
             self.active_readers.insert(
                 segment_id,
-                BodyReader::new(segment_id, self.segment_capacity, reader),
+                BodyReader::new(segment_id, self.segment_capacity, reader, immutable),
             );
         }
         // A full segment's final cut is in flight: keep its journals until the cut completes so
-        // start_seals can prove it sealed on disk.
+        // start_retire can persist their final checkpoints.
         let capacity = self.segment_capacity;
         self.open_segments.retain(|segment, journals| {
             Some(*segment) == current
@@ -1268,20 +1285,19 @@ where
         Ok(handles)
     }
 
-    /// Starts durable seal proofs for full segments whose final admission cut completed, then
-    /// releases their journals. Returns the sealing segments and their proof handles; the
-    /// caller must hand the segments back through [`Self::finish_seals`] once every handle
-    /// completes.
+    /// Lends out the journals of full segments whose final admission cut completed so they can
+    /// be retired off the admission path. Returns the retiring segments and one future per
+    /// segment that persists its final checkpoints and closes it; the caller must hand the
+    /// segments back through [`Self::finish_retire`] once every future completes.
     ///
     /// A dirty full segment holds appends its next cut has not yet covered, so it stays open
-    /// and seals after that cut completes. Sealing is an optimization only: a crash before a
-    /// seal lands falls back to one authoritative recovery that re-establishes the proof. A
-    /// full segment that is still current keeps its journals and re-proves idempotently until
-    /// it rolls over.
-    pub(in crate::multimmit::marshal) async fn start_seals(
+    /// and retires after that cut completes. Retirement is an optimization only: a crash before
+    /// it completes leaves a segment whose next open replays its final cut and then heals its
+    /// checkpoints itself.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::multimmit::marshal) fn start_retire(
         &mut self,
-    ) -> Result<(Vec<u64>, Vec<Handle<()>>), Error> {
-        let current = self.segments.last().copied();
+    ) -> (Vec<u64>, Vec<BoxFuture<'static, Result<(), Error>>>) {
         let full = self
             .open_segments
             .iter()
@@ -1293,39 +1309,37 @@ where
                     .size()
                     == self.segment_capacity
                     && !self.dirty_segments.contains(segment)
-                    && !self.sealing.contains(segment)
+                    && !self.retiring.contains(segment)
             })
             .map(|(&segment, _)| segment)
             .collect::<Vec<_>>();
-        let mut handles = Vec::new();
-        for &segment_id in &full {
-            let segment = self
-                .open_segments
-                .remove(&segment_id)
-                .expect("full pending segment was just observed")
-                .expect("catalog owns pending segment");
-            let (segment, seal_handles) = segment.start_seal().await?;
-            handles.extend(seal_handles);
-            self.sealing.insert(segment_id);
-            if Some(segment_id) == current {
-                self.open_segments.insert(segment_id, Some(segment));
-            }
-        }
-        Ok((full, handles))
+        let retirements = full
+            .iter()
+            .map(|segment_id| {
+                let segment = self
+                    .open_segments
+                    .remove(segment_id)
+                    .expect("full pending segment was just observed")
+                    .expect("catalog owns pending segment");
+                self.retiring.insert(*segment_id);
+                Box::pin(segment.retire()) as BoxFuture<'static, Result<(), Error>>
+            })
+            .collect();
+        (full, retirements)
     }
 
-    /// Releases segments whose durable seal proof landed: later opens use the proof, so their
+    /// Releases segments whose retirement completed: later opens replay nothing, so their
     /// retained readers drop and reclamation may destroy them once empty. Segments a
-    /// concurrent prune skipped while sealing are reclaimed here (unless a cut is in flight,
+    /// concurrent prune skipped while retiring are reclaimed here (unless a cut is in flight,
     /// which defers them to the next reclamation), and the destroyed set is returned.
-    pub(in crate::multimmit::marshal) async fn finish_seals(
+    pub(in crate::multimmit::marshal) async fn finish_retire(
         &mut self,
         segments: Vec<u64>,
         pinned: &BTreeSet<u64>,
     ) -> Result<Vec<u64>, Error> {
         let current = self.segments.last().copied();
         for segment in segments {
-            self.sealing.remove(&segment);
+            self.retiring.remove(&segment);
             if Some(segment) != current {
                 self.active_readers.remove(&segment);
             }
@@ -1337,12 +1351,19 @@ where
     }
 
     /// Clones snapshots whose segments cannot accept another append.
-    pub(in crate::multimmit::marshal) fn sealed_body_readers(&self) -> Vec<BodyReader<E, H, B>> {
+    pub(in crate::multimmit::marshal) fn immutable_body_readers(&self) -> Vec<BodyReader<E, H, B>> {
         self.active_readers
             .values()
-            .filter(|reader| reader.is_sealed())
+            .filter(|reader| reader.immutable)
             .cloned()
             .collect()
+    }
+
+    fn prefetch(&self) -> Prefetch {
+        Prefetch {
+            buffer: self.archive.replay_buffer,
+            page: u64::from(self.archive.page_cache.page_size().get()),
+        }
     }
 
     const fn locator(entry: &Entry<H::Digest>) -> BodyLocator<H::Digest> {
@@ -1358,7 +1379,6 @@ where
             || {
                 BodySource::Cold(ColdSource {
                     context: self.body_context(segment),
-                    recovery_context: self.body_context(segment),
                     config: self.body_config(segment),
                     segment,
                     segment_capacity: self.segment_capacity,
@@ -1372,8 +1392,8 @@ where
     /// Plans bounded, immutable reads for exact locally stored references.
     ///
     /// Positions beyond the latest snapshot remain unavailable until their admission cut starts.
-    /// Sealed segments are safe to open independently because they can no longer be appended.
-    /// Each group contains positions from one segment in ascending order. Byte-safe groups are
+    /// Non-current segments are safe to open independently because they can no longer be
+    /// appended. Each group contains positions from one segment in ascending order. Byte-safe groups are
     /// split to expose up to `max_groups` jobs. Groups do not exceed an equal share of `max_bytes`,
     /// except that one individually oversized block is admitted alone so reads can make progress.
     /// A block is never split.
@@ -1475,7 +1495,11 @@ where
                     remaining_entries -= 1;
                     chunk.push(entries.next().expect("a peeked body read entry exists"));
                 }
-                groups.push(BodyReadGroup::new(self.body_source(segment), chunk)?);
+                groups.push(BodyReadGroup::new(
+                    self.body_source(segment),
+                    chunk,
+                    self.prefetch(),
+                )?);
                 remaining_groups -= 1;
             }
         }
@@ -1534,13 +1558,13 @@ where
             .get(&segment)
             .is_some_and(|reader| reader.contains(entry.position))
         {
-            let (reader, _) = self.body_source(segment).open().await?;
+            let reader = self.body_source(segment).open().await?;
             return reader.read(locator).await.map(Some);
         }
         if self.open_segments.contains_key(&segment) {
             return self.read_live_body(segment, locator).await.map(Some);
         }
-        let (reader, _) = self.body_source(segment).open().await?;
+        let reader = self.body_source(segment).open().await?;
         reader.read(locator).await.map(Some)
     }
 
@@ -1591,7 +1615,7 @@ where
             .copied()
             .filter(|segment| {
                 !pinned.contains(segment)
-                    && !self.sealing.contains(segment)
+                    && !self.retiring.contains(segment)
                     && !self.segment_has_live_blocks(*segment)
             })
             .collect::<Vec<_>>();
@@ -1633,6 +1657,7 @@ mod tests {
     };
     use commonware_storage::translator::TwoCap;
     use commonware_utils::{NZU16, NZU64, NZUsize};
+    use rstest::rstest;
 
     type TestBody = EmptyBlock<Sha256>;
     type InnerTestStore = PendingBlocks<TwoCap, DeterministicContext, Sha256, TestBody>;
@@ -1730,15 +1755,28 @@ mod tests {
         Arc::new(TransactionBlock::new(header, body).unwrap())
     }
 
-    /// One production-shaped durability round: the admission cut, then the seal proofs the
-    /// catalog starts once the cut completes and releases once they land.
+    /// One production-shaped durability round: the admission cut, then the retirements the
+    /// catalog starts once the cut completes and releases once they finish.
     async fn sync(store: &mut TestStore) {
         futures::future::try_join_all(store.start_sync().await.unwrap())
             .await
             .unwrap();
-        let (sealed, handles) = store.start_seals().await.unwrap();
-        futures::future::try_join_all(handles).await.unwrap();
-        store.finish_seals(sealed, &BTreeSet::new()).await.unwrap();
+        let (retiring, retirements) = store.start_retire();
+        futures::future::try_join_all(retirements).await.unwrap();
+        store
+            .finish_retire(retiring, &BTreeSet::new())
+            .await
+            .unwrap();
+    }
+
+    /// Storage bytes read, writes, and syncs recorded so far.
+    fn storage_io(context: &DeterministicContext) -> (u64, u64, u64) {
+        let encoded = context.encode();
+        (
+            counter(&encoded, "storage_read_bytes"),
+            counter(&encoded, "storage_writes"),
+            counter(&encoded, "storage_syncs"),
+        )
     }
 
     #[test]
@@ -1940,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn only_full_snapshots_are_exposed_as_sealed() {
+    fn only_full_snapshots_are_exposed_as_immutable() {
         deterministic::Runner::default().start(|context| async move {
             let mut store = open(&context, "store", "pending_snapshot_bound").await;
             for height in 1..=5 {
@@ -1949,7 +1987,7 @@ mod tests {
             }
 
             // The completed cut is the catalog's offer point: every cut segment has a frozen
-            // reader, and only the full ones are exposed as sealed.
+            // reader, and only the full ones are exposed as immutable.
             futures::future::try_join_all(store.start_sync().await.unwrap())
                 .await
                 .unwrap();
@@ -1959,16 +1997,17 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .sealed_body_readers()
+                    .immutable_body_readers()
                     .iter()
                     .map(BodyReader::segment)
                     .collect::<Vec<_>>(),
                 vec![0, 1]
             );
 
-            // Readers stay retained while seal proofs are in flight, and drop once they land.
-            let (sealed, handles) = store.start_seals().await.unwrap();
-            assert_eq!(sealed, vec![0, 1]);
+            // Readers stay retained while retirements are in flight, and drop once they finish.
+            // Retirement reuses the completed cut's data syncs and writes only checkpoints.
+            let (retiring, retirements) = store.start_retire();
+            assert_eq!(retiring, vec![0, 1]);
             assert_eq!(
                 store.active_readers.keys().copied().collect::<Vec<_>>(),
                 vec![0, 1, 2]
@@ -1977,8 +2016,23 @@ mod tests {
                 store.open_segments.keys().copied().collect::<Vec<_>>(),
                 vec![2]
             );
-            futures::future::try_join_all(handles).await.unwrap();
-            store.finish_seals(sealed, &BTreeSet::new()).await.unwrap();
+            let (_, writes, syncs) = storage_io(&context);
+            futures::future::try_join_all(retirements).await.unwrap();
+            let (_, writes_after, syncs_after) = storage_io(&context);
+            assert_eq!(
+                writes_after - writes,
+                4,
+                "one checkpoint per retired journal"
+            );
+            assert_eq!(
+                syncs_after - syncs,
+                4,
+                "no data fsync beyond the checkpoints"
+            );
+            store
+                .finish_retire(retiring, &BTreeSet::new())
+                .await
+                .unwrap();
             assert_eq!(
                 store.active_readers.keys().copied().collect::<Vec<_>>(),
                 vec![2]
@@ -1989,14 +2043,14 @@ mod tests {
                 store.active_readers.keys().copied().collect::<Vec<_>>(),
                 vec![2]
             );
-            assert!(store.sealed_body_readers().is_empty());
+            assert!(store.immutable_body_readers().is_empty());
         });
     }
 
     #[test]
-    fn sealing_segments_defer_reclamation_until_their_proof_lands() {
+    fn retiring_segments_defer_reclamation_until_they_finish() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "store", "pending_sealing_reclaim").await;
+            let mut store = open(&context, "store", "pending_retiring_reclaim").await;
             for height in 1..=5 {
                 let block = block(0, height, height);
                 store.put(block.reference(), block).await.unwrap();
@@ -2004,18 +2058,21 @@ mod tests {
             futures::future::try_join_all(store.start_sync().await.unwrap())
                 .await
                 .unwrap();
-            let (sealed, handles) = store.start_seals().await.unwrap();
-            assert_eq!(sealed, vec![0, 1]);
+            let (retiring, retirements) = store.start_retire();
+            assert_eq!(retiring, vec![0, 1]);
 
-            // Pruning past every block must not destroy a segment whose seal proof is still
-            // being written; the proof landing reclaims the deferred segments itself.
+            // Pruning past every block must not destroy a segment whose checkpoints are still
+            // being written; the retirement finishing reclaims the deferred segments itself.
             let reclaimed = store
                 .prune(&[Some(Height::new(6)), None], &BTreeSet::new())
                 .await
                 .unwrap();
             assert!(reclaimed.is_empty());
-            futures::future::try_join_all(handles).await.unwrap();
-            let reclaimed = store.finish_seals(sealed, &BTreeSet::new()).await.unwrap();
+            futures::future::try_join_all(retirements).await.unwrap();
+            let reclaimed = store
+                .finish_retire(retiring, &BTreeSet::new())
+                .await
+                .unwrap();
             assert_eq!(reclaimed, vec![0, 1]);
         });
     }
@@ -2550,8 +2607,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn unpublished_segment_is_reset_before_reuse() {
+    /// Durable journals for a segment the manifest never named are residue: reuse removes them
+    /// by name first, so even residue recovery could not open does not block the store.
+    #[rstest]
+    fn unpublished_segment_is_reset_before_reuse(#[values(false, true)] corrupt: bool) {
         deterministic::Runner::default().start(|context| async move {
             let first = block(0, 1, 1);
             let second = block(0, 2, 2);
@@ -2574,7 +2633,11 @@ mod tests {
             store
                 .open_segments
                 .insert(1, Some(Segment { bodies, metadata }));
+            let partition = store.body_config(1).partition + "_data";
             drop(store);
+            if corrupt {
+                drop(context.open(&partition, b"invalid").await.unwrap());
+            }
 
             let mut store = open(&context, "reopen", "pending_unpublished_segment").await;
             assert_eq!(store.segments.iter().copied().collect::<Vec<_>>(), vec![0]);
@@ -2646,29 +2709,37 @@ mod tests {
         references
     }
 
+    /// Opens segment 0 cold and asserts the open wrote and synced nothing.
+    async fn cold_open_without_writes(
+        context: &DeterministicContext,
+        store: &TestStore,
+    ) -> BodyReader<DeterministicContext, Sha256, TestBody> {
+        let (_, writes, syncs) = storage_io(context);
+        let reader = store.body_source(0).open().await.unwrap();
+        let (_, writes_after, syncs_after) = storage_io(context);
+        assert_eq!(writes_after, writes, "a retired cold open must not write");
+        assert_eq!(syncs_after, syncs, "a retired cold open must not sync");
+        reader
+    }
+
     #[test]
-    fn sealed_segment_cold_opens_without_recovery_or_writes() {
+    fn retired_segment_cold_opens_without_replay_or_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "store", "pending_sealed_cold").await;
+            let mut store = open(&context, "store", "pending_retired_cold").await;
             let references = fill_first_segment(&mut store).await;
 
-            // The sealed proof opens the segment from index metadata alone: no repair, no
-            // rebuilt offsets, no watermark writes. Recovery would show up as storage writes.
-            let before = context.encode();
-            let (reader, cold) = store.body_source(0).open().await.unwrap();
-            let after = context.encode();
-            assert_eq!(cold, Some(ColdOpen::Sealed));
-            assert_eq!(
-                counter(&after, "storage_writes"),
-                counter(&before, "storage_writes"),
-                "sealed cold open must not write"
-            );
-            assert_eq!(
-                counter(&after, "storage_syncs"),
-                counter(&before, "storage_syncs"),
-                "sealed cold open must not sync"
-            );
+            // The retired checkpoints cover the whole segment, so the open reads index
+            // metadata only: no body replay, no rebuilt offsets, no checkpoint writes.
+            let (read, _, _) = storage_io(&context);
+            let reader = cold_open_without_writes(&context, &store).await;
+            let (read_after, _, _) = storage_io(&context);
             let locator = TestStore::locator(store.by_digest.get(&references[0].digest()).unwrap());
+            let body = locator.encoded_len;
+            assert!(
+                read_after - read < 2 * body + 6 * 1024,
+                "cold open read {} bytes of index metadata for a {body}-byte body segment",
+                read_after - read
+            );
             assert_eq!(
                 reader.read(locator).await.unwrap().reference(),
                 references[0]
@@ -2677,36 +2748,34 @@ mod tests {
     }
 
     #[test]
-    fn broken_seal_proof_falls_back_to_authoritative_recovery() {
+    fn missing_checkpoint_recovers_and_heals_on_cold_open() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "store", "pending_broken_seal").await;
+            let mut store = open(&context, "store", "pending_missing_checkpoint").await;
             let references = fill_first_segment(&mut store).await;
 
-            // Destroy segment 0's durable seal proof (the offsets journal checkpoint).
+            // Destroy segment 0's body checkpoint (the offsets journal's recovery record).
             context
-                .remove("pending_broken_seal_bodies_0_offsets-metadata", None)
+                .remove("pending_missing_checkpoint_bodies_0_offsets-metadata", None)
                 .await
                 .unwrap();
 
-            // The cold open falls back to one authoritative recovery, which serves exact
-            // bodies and re-establishes the proof for the next open.
-            let (reader, cold) = store.body_source(0).open().await.unwrap();
-            assert_eq!(cold, Some(ColdOpen::Recovered));
+            // The cold open recovers authoritatively, serves exact bodies, and rewrites the
+            // checkpoint, so the next open is write-free again.
+            let reader = store.body_source(0).open().await.unwrap();
             let locator = TestStore::locator(store.by_digest.get(&references[1].digest()).unwrap());
             assert_eq!(
                 reader.read(locator).await.unwrap().reference(),
                 references[1]
             );
             drop(reader);
-            let (_, cold) = store.body_source(0).open().await.unwrap();
-            assert_eq!(cold, Some(ColdOpen::Sealed));
+            cold_open_without_writes(&context, &store).await;
         });
     }
 
     #[test]
-    fn dirty_full_segment_defers_its_seal_to_the_covering_cut() {
+    fn dirty_full_segment_defers_its_retirement_to_the_covering_cut() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "store", "pending_dirty_seal").await;
+            let mut store = open(&context, "store", "pending_dirty_retire").await;
             let first = block(0, 1, 1);
             let filler = block(0, 2, 2);
             let next = block(1, 1, 3);
@@ -2719,14 +2788,13 @@ mod tests {
             store.put(next.reference(), next).await.unwrap();
             futures::future::try_join_all(cut).await.unwrap();
 
-            // The catalog seals on cut completion; the dirty tail defers this segment's seal
-            // and keeps its journals appendable for the covering cut.
-            assert!(store.start_seals().await.unwrap().0.is_empty());
+            // The catalog retires on cut completion; the dirty tail defers this segment's
+            // retirement and keeps its journals appendable for the covering cut.
+            assert!(store.start_retire().0.is_empty());
             sync(&mut store).await;
             sync(&mut store).await;
 
-            let (reader, cold) = store.body_source(0).open().await.unwrap();
-            assert_eq!(cold, Some(ColdOpen::Sealed));
+            let reader = cold_open_without_writes(&context, &store).await;
             let locator =
                 TestStore::locator(store.by_digest.get(&filler_reference.digest()).unwrap());
             assert_eq!(
@@ -2737,24 +2805,108 @@ mod tests {
     }
 
     #[test]
-    fn unsealed_full_segment_self_heals_on_reopen() {
+    fn unretired_full_segment_self_heals_on_reopen() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "first", "pending_unsealed_reopen").await;
+            let mut store = open(&context, "first", "pending_unretired_reopen").await;
             let references = put_first_segment(&mut store).await;
-            // Crash window: the admission cut completes but the seal proof never lands.
+            // Crash window: the admission cut completes but the retirement never runs.
             futures::future::try_join_all(store.start_sync().await.unwrap())
                 .await
                 .unwrap();
             drop(store);
 
-            // Startup recovers the unproven segment authoritatively, which also re-establishes
-            // its seal proof, so the next cold open reads index metadata alone.
-            let store = open(&context, "reopen", "pending_unsealed_reopen").await;
+            // Startup replays the segment's unproven suffix and records its final checkpoints,
+            // so the next cold open reads index metadata alone.
+            let store = open(&context, "reopen", "pending_unretired_reopen").await;
             for reference in &references {
                 assert!(store.block(*reference).await.unwrap().is_some());
             }
-            let (_, cold) = store.body_source(0).open().await.unwrap();
-            assert_eq!(cold, Some(ColdOpen::Sealed));
+            cold_open_without_writes(&context, &store).await;
+        });
+    }
+
+    #[test]
+    fn immutable_segment_reads_replay_adjacent_runs() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut store =
+                open_with_capacity(&context, "store", "pending_replay_runs", NZU64!(4)).await;
+            let blocks = (0..5)
+                .map(|height| block(0, height + 1, height))
+                .collect::<Vec<_>>();
+            store.put_many(&blocks).await;
+            sync(&mut store).await;
+            sync(&mut store).await;
+            assert!(!store.active_readers.contains_key(&0));
+
+            // Positions 0, 1, and 3 of the retired segment: two adjacent runs, one hole. Each
+            // run is one sequential replay, so the reads stay bounded by runs, not by pages.
+            let reader = store.body_source(0).open().await.unwrap();
+            assert!(reader.immutable);
+            let requests = [
+                blocks[3].reference(),
+                blocks[0].reference(),
+                blocks[1].reference(),
+            ];
+            let groups = store
+                .body_read_groups(requests.iter().copied().enumerate(), u64::MAX, 1)
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            let (_, read) = groups.into_iter().next().unwrap().into_parts();
+            let reads = counter(&context.encode(), "storage_reads");
+            let mut results = read.read(reader).await.unwrap();
+            assert!(
+                counter(&context.encode(), "storage_reads") - reads <= 4,
+                "two runs must cost at most one index and one data read each"
+            );
+            results.sort_by_key(|(output, _)| *output);
+            assert_eq!(results.len(), 3);
+            for (output, block) in results {
+                assert_eq!(block.reference(), requests[output]);
+            }
+
+            // The current segment stays on the cached snapshot path.
+            let current = store.active_readers.get(&1).unwrap();
+            assert!(!current.immutable);
+            assert_eq!(
+                store.block(blocks[4].reference()).await.unwrap().as_deref(),
+                Some(blocks[4].as_ref())
+            );
+        });
+    }
+
+    #[test]
+    fn reclaimed_segments_are_removed_by_name_without_reads() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut store = open(&context, "store", "pending_reclaim_by_name").await;
+            let references = fill_first_segment(&mut store).await;
+
+            // Retired contents need not be recoverable, including malformed blob names.
+            let partition = store.body_config(0).partition + "_data";
+            drop(context.open(&partition, b"invalid").await.unwrap());
+            let reads = counter(&context.encode(), "storage_reads");
+            let reclaimed = store
+                .prune(&[Some(Height::new(3)), None], &BTreeSet::new())
+                .await
+                .unwrap();
+            assert_eq!(reclaimed, vec![0]);
+            assert_eq!(counter(&context.encode(), "storage_reads"), reads);
+            assert!(matches!(
+                context.scan(&partition).await,
+                Err(commonware_runtime::Error::PartitionMissing(_))
+            ));
+            drop(store);
+
+            let store = open(&context, "reopen", "pending_reclaim_by_name").await;
+            assert!(store.block(references[0]).await.unwrap().is_none());
+            assert_eq!(
+                store
+                    .block(references[2])
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .reference(),
+                references[2]
+            );
         });
     }
 

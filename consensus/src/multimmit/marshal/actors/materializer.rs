@@ -3,15 +3,13 @@
 //! The catalog owns this compact state machine, but every storage read and block decode executes
 //! on a shared runtime task. This keeps destructive storage transitions ordered without putting
 //! producer admission behind bulk body I/O.
-//! Sealed readers remain resident across sequential requests under a residency bound independent
-//! of the active read-job bound; appendable-segment snapshots stay attached to the exact request
-//! that planned them.
+//! Immutable-segment readers remain resident across sequential requests under a residency bound
+//! independent of the active read-job bound; appendable-segment snapshots stay attached to the
+//! exact request that planned them.
 
-use super::{catalog::Error, metrics::ReaderAcquisitions};
+use super::catalog::Error;
 use crate::multimmit::{
-    marshal::storage::pending::{
-        BodyRead, BodyReadGroup, BodyReader, BodySource, ColdOpen, ColdSource,
-    },
+    marshal::storage::pending::{BodyRead, BodyReadGroup, BodyReader, BodySource, ColdSource},
     types::{BlockRef, TransactionBlock},
 };
 use commonware_codec::Codec;
@@ -28,8 +26,8 @@ use tracing::{Instrument as _, Span, debug_span, info_span};
 /// Bounds resident segment readers independently of active read jobs.
 ///
 /// Residency exists to absorb request locality: a reader that stays resident serves later
-/// requests for its segment without another acquisition. Sealed reacquisition is cheap (index
-/// metadata only), so the bound caps file descriptors, not a recovery cliff.
+/// requests for its segment without another acquisition. Reacquiring a retired segment is cheap
+/// (index metadata only), so the bound caps file descriptors, not a recovery cliff.
 pub(super) const BODY_READER_RESIDENCY: usize = 64;
 
 type Values<H, B> = Vec<Option<Arc<TransactionBlock<H, B>>>>;
@@ -57,7 +55,7 @@ where
 {
     Cold(ColdSource<E, H, B>),
     Opening,
-    /// A sealed snapshot retained before any read demands its segment.
+    /// An immutable snapshot retained before any read demands its segment.
     Offered(BodyReader<E, H, B>),
     Opened(BodyReader<E, H, B>),
 }
@@ -93,7 +91,7 @@ where
 {
     Reader {
         segment: u64,
-        result: Result<(BodyReader<E, H, B>, ColdOpen), Error>,
+        result: Result<BodyReader<E, H, B>, Error>,
     },
     Read {
         request: u64,
@@ -134,7 +132,7 @@ where
     queued: VecDeque<QueuedRead<E, H, B>>,
     active: Pool<'static, Completion<E, H, B>>,
     active_bytes: u64,
-    reader_acquisitions: ReaderAcquisitions,
+    reader_acquisitions: Counter,
     materialized_body_bytes: Counter,
 }
 
@@ -151,7 +149,7 @@ where
         max_jobs: usize,
         max_bytes: u64,
         request_capacity: usize,
-        reader_acquisitions: ReaderAcquisitions,
+        reader_acquisitions: Counter,
         materialized_body_bytes: Counter,
     ) -> Self {
         Self {
@@ -220,7 +218,7 @@ where
             .count()
     }
 
-    /// Retains already-open sealed readers without displacing the demanded working set.
+    /// Retains already-open immutable readers without displacing the demanded working set.
     pub(super) fn retain_readers(&mut self, readers: Vec<BodyReader<E, H, B>>) {
         let mut resident = self.resident();
         for reader in readers {
@@ -320,8 +318,8 @@ where
                 if !matches!(slot, SegmentReader::Opening) {
                     return Err(Error::Invalid("body segment reader opened twice"));
                 }
-                let (reader, cold) = result?;
-                self.reader_acquisitions.inc(cold);
+                let reader = result?;
+                self.reader_acquisitions.inc();
                 *slot = SegmentReader::Opened(reader);
                 self.schedule()?;
                 return Ok(None);

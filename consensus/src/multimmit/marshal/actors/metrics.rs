@@ -1,6 +1,6 @@
 //! Low-cardinality actor metrics for marshal's durable and bounded state.
 
-use crate::multimmit::marshal::{storage::pending::ColdOpen, types::OutputIndex};
+use crate::multimmit::marshal::types::OutputIndex;
 use commonware_resolver::Outcome;
 use commonware_runtime::{
     Metrics,
@@ -45,11 +45,6 @@ struct FetchLabel {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ReaderSourceLabel {
-    source: ColdOpen,
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct CutTriggerLabel {
     trigger: &'static str,
 }
@@ -58,27 +53,6 @@ struct CutTriggerLabel {
 struct CatalogWorkLabel {
     source: &'static str,
     operation: &'static str,
-}
-
-/// Cold body reader acquisitions by source.
-#[derive(Clone)]
-pub(in crate::multimmit::marshal) struct ReaderAcquisitions(CounterFamily<ReaderSourceLabel>);
-
-impl ReaderAcquisitions {
-    fn new(context: &impl Metrics) -> Self {
-        let family = context.family(
-            "reader_acquisitions",
-            "Temporary-custody segments opened for body materialization, by source",
-        );
-        for source in [ColdOpen::Sealed, ColdOpen::Recovered] {
-            let _ = family.get_or_create(&ReaderSourceLabel { source });
-        }
-        Self(family)
-    }
-
-    pub(in crate::multimmit::marshal) fn inc(&self, source: ColdOpen) {
-        self.0.get_or_create(&ReaderSourceLabel { source }).inc();
-    }
 }
 
 pub(in crate::multimmit::marshal) struct Catalog {
@@ -96,7 +70,7 @@ pub(in crate::multimmit::marshal) struct Catalog {
     pub materialized_bodies: Counter,
     pub materialized_body_bytes: Counter,
     pub materialization_groups: Counter,
-    pub reader_acquisitions: ReaderAcquisitions,
+    pub reader_acquisitions: Counter,
     pub admission_durability: histogram::Timed,
     pub finalized_archive_durability: histogram::Timed,
     pub checkpoint_publication: histogram::Timed,
@@ -256,7 +230,10 @@ impl Catalog {
                 "materialization_groups",
                 "Temporary-custody read groups submitted for materialization",
             ),
-            reader_acquisitions: ReaderAcquisitions::new(context),
+            reader_acquisitions: context.counter(
+                "reader_acquisitions",
+                "Temporary-custody segments opened for body materialization",
+            ),
             admission_durability: histogram::Timed::register(
                 context,
                 "admission_durability_duration",

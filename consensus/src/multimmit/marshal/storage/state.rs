@@ -33,7 +33,7 @@ use commonware_runtime::Handle;
 use commonware_storage::{Context, metadata::Metadata, translator::Translator};
 use commonware_utils::sequence::Unit;
 use futures::{
-    FutureExt as _,
+    FutureExt as _, TryFutureExt as _,
     future::{BoxFuture, try_join_all},
 };
 use std::{
@@ -440,30 +440,35 @@ where
         Ok(handles)
     }
 
-    pub(in crate::multimmit::marshal) fn sealed_body_readers(&self) -> Vec<BodyReader<E, H, B>> {
+    pub(in crate::multimmit::marshal) fn immutable_body_readers(&self) -> Vec<BodyReader<E, H, B>> {
         self.pending_blocks
             .as_ref()
             .expect("catalog owns pending blocks")
-            .sealed_body_readers()
+            .immutable_body_readers()
     }
 
-    /// Starts durable seal proofs for full pending segments whose admission cut completed.
-    /// The returned segments must come back through [`Self::finish_pending_seals`] once every
-    /// handle completes.
-    pub(in crate::multimmit::marshal) async fn start_pending_seals(
+    /// Lends out full pending segments whose admission cut completed for retirement. The
+    /// returned segments must come back through [`Self::finish_pending_retirement`] once every
+    /// future completes.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::multimmit::marshal) fn start_pending_retirement(
         &mut self,
-    ) -> Result<(Vec<u64>, Vec<Handle<()>>), Error> {
-        self.pending_blocks
+    ) -> (Vec<u64>, Vec<BoxFuture<'static, Result<(), Error>>>) {
+        let (segments, retirements) = self
+            .pending_blocks
             .as_mut()
             .expect("catalog owns pending blocks")
-            .start_seals()
-            .await
-            .map_err(Error::storage)
+            .start_retire();
+        let retirements = retirements
+            .into_iter()
+            .map(|retirement| retirement.map_err(Error::storage).boxed())
+            .collect();
+        (segments, retirements)
     }
 
-    /// Releases pending segments whose durable seal proof landed and returns any segments
-    /// reclaimed now that sealing no longer defers them.
-    pub(in crate::multimmit::marshal) async fn finish_pending_seals(
+    /// Releases pending segments whose retirement completed and returns any segments reclaimed
+    /// now that retirement no longer defers them.
+    pub(in crate::multimmit::marshal) async fn finish_pending_retirement(
         &mut self,
         segments: Vec<u64>,
         pinned: &BTreeSet<u64>,
@@ -471,7 +476,7 @@ where
         self.pending_blocks
             .as_mut()
             .expect("catalog owns pending blocks")
-            .finish_seals(segments, pinned)
+            .finish_retire(segments, pinned)
             .await
             .map_err(Error::storage)
     }

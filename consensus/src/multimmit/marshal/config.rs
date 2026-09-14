@@ -237,7 +237,7 @@ pub struct Config<T: Translator, V: Variant, B: Codec + Digestible> {
     pub admission_cut_capacity: NonZeroUsize,
     /// Items in each pending-block storage segment.
     ///
-    /// A segment is the unit of pending-custody reclamation and of sealed-reader recovery, so
+    /// A segment is the unit of pending-custody reclamation and of cold-reader recovery, so
     /// its byte bound is approximately `pending_segment_items * max_block_bytes` plus
     /// framing. This value is persisted storage geometry and must remain unchanged when
     /// reopening an existing storage namespace.

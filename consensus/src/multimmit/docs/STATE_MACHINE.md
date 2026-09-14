@@ -802,9 +802,11 @@ Let `n` be committee size, `f = floor((n - 1) / 5)`, `d` pipeline depth, `e` ext
   sync. Runtime floor installation adds one bounded intent sync before its parallel finalized-archive
   syncs; idempotent recovery consumes that intent before ordinary synchronization. Floor cleanup
   durably advances chain-local frontiers before physical reclamation. Shared pending-block custody
-  is divided into bounded append segments: each retained segment prunes through its first live row,
-  and segments with no live row are deleted. A stalled chain therefore cannot pin later segments it
-  does not inhabit. Cold segments are opened transiently, and cleanup touches only segments that
+  is divided into bounded append segments: rows are retired logically as chain floors advance, and
+  a segment is deleted by name, without reopening it, once no live row remains. A stalled chain
+  therefore cannot pin later segments it does not inhabit. A full segment is retired with one final
+  checkpoint sync off the admission path, so reopening it replays no bodies; cold segments are
+  opened transiently and read through sequential replay, and cleanup touches only segments that
   lost rows in bounded concurrent waves, so work and file-descriptor use do not grow with the
   manifest. Cleanup never scans finalized history. No consensus certificate is expanded into its
   constituent votes for marshal.
