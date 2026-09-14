@@ -597,7 +597,7 @@ O’Grady</a></div>
         <table>
           <thead>
             <tr>
-              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Per close</th>
+              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
               <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
             </tr>
             <tr>
@@ -610,84 +610,62 @@ O’Grady</a></div>
           <tbody>
             <tr>
               <td>Validator dealing</td>
-              <td style="text-align:right;">105 KB</td>
-              <td style="text-align:right;">1.03 MB</td>
-              <td style="text-align:right;">10.3 MB</td>
-              <td style="text-align:right;">103 MB</td>
-            </tr>
-            <tr>
-              <td>Total operator egress</td>
-              <td style="text-align:right;">10.5 MB</td>
-              <td style="text-align:right;">103 MB</td>
-              <td style="text-align:right;">1.03 GB</td>
-              <td style="text-align:right;">10.3 GB</td>
+              <td style="text-align:right;"><strong>105 KB</strong><br><small>8.03 ms</small></td>
+              <td style="text-align:right;"><strong>1.03 MB</strong><br><small>57.7 ms</small></td>
+              <td style="text-align:right;"><strong>10.3 MB</strong><br><small>566 ms</small></td>
+              <td style="text-align:right;"><strong>103 MB</strong><br><small>6.54 s</small></td>
             </tr>
             <tr>
               <td>Commitment + certificate</td>
-              <td style="text-align:right;"><strong>101 B</strong></td>
-              <td style="text-align:right;"><strong>101 B</strong></td>
-              <td style="text-align:right;"><strong>101 B</strong></td>
-              <td style="text-align:right;"><strong>101 B</strong></td>
+              <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
+              <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
+              <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
+              <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
             </tr>
-            <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
+          </tbody>
+          <tbody>
+            <tr><th colspan="5" style="text-align:left;">Processing phases</th></tr>
             <tr>
-              <td>Prepare and apply</td>
-              <td style="text-align:right;">5.61 ms</td>
-              <td style="text-align:right;">28.7 ms</td>
-              <td style="text-align:right;">333 ms</td>
-              <td style="text-align:right;">4.09 s</td>
-            </tr>
-            <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
-            <tr>
-              <td>Decode</td>
-              <td style="text-align:right;">0.726 ms</td>
-              <td style="text-align:right;">6.73 ms</td>
-              <td style="text-align:right;">74.3 ms</td>
-              <td style="text-align:right;">907 ms</td>
+              <td style="text-align:left;"><small>Operator: prepare and apply</small></td>
+              <td style="text-align:right;"><small>5.61 ms</small></td>
+              <td style="text-align:right;"><small>28.7 ms</small></td>
+              <td style="text-align:right;"><small>333 ms</small></td>
+              <td style="text-align:right;"><small>4.09 s</small></td>
             </tr>
             <tr>
-              <td>Verify and sign</td>
-              <td style="text-align:right;">6.95 ms</td>
-              <td style="text-align:right;">48.9 ms</td>
-              <td style="text-align:right;">472 ms</td>
-              <td style="text-align:right;">5.36 s</td>
+              <td style="text-align:left;"><small>Validator: decode</small></td>
+              <td style="text-align:right;"><small>0.726 ms</small></td>
+              <td style="text-align:right;"><small>6.73 ms</small></td>
+              <td style="text-align:right;"><small>74.3 ms</small></td>
+              <td style="text-align:right;"><small>907 ms</small></td>
             </tr>
             <tr>
-              <td>Apply balances</td>
-              <td style="text-align:right;">0.234 ms</td>
-              <td style="text-align:right;">2.07 ms</td>
-              <td style="text-align:right;">19.7 ms</td>
-              <td style="text-align:right;">275 ms</td>
+              <td style="text-align:left;"><small>Validator: verify and sign</small></td>
+              <td style="text-align:right;"><small>6.95 ms</small></td>
+              <td style="text-align:right;"><small>48.9 ms</small></td>
+              <td style="text-align:right;"><small>472 ms</small></td>
+              <td style="text-align:right;"><small>5.36 s</small></td>
             </tr>
             <tr>
-              <td><strong>Receive and apply</strong></td>
-              <td style="text-align:right;"><strong>8.03 ms</strong></td>
-              <td style="text-align:right;"><strong>57.7 ms</strong></td>
-              <td style="text-align:right;"><strong>566 ms</strong></td>
-              <td style="text-align:right;"><strong>6.54 s</strong></td>
-            </tr>
-            <tr><th colspan="5" style="text-align:left;">Retained between closes</th></tr>
-            <tr>
-              <td>Account records per validator</td>
-              <td style="text-align:right;">41.0 KB</td>
-              <td style="text-align:right;">400 KB</td>
-              <td style="text-align:right;">4.00 MB</td>
-              <td style="text-align:right;">40.0 MB</td>
+              <td style="text-align:left;"><small>Validator: apply balances</small></td>
+              <td style="text-align:right;"><small>0.234 ms</small></td>
+              <td style="text-align:right;"><small>2.07 ms</small></td>
+              <td style="text-align:right;"><small>19.7 ms</small></td>
+              <td style="text-align:right;"><small>275 ms</small></td>
             </tr>
           </tbody>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 6: One signed payment per account, with no boundary
-        flows. Times are medians of ten successive closes after one
-        warmup on an AWS c8a.4xlarge with 16 workers and in-memory
-        storage. Preparation starts from signed terminal inputs.
+        <p>Figure 6: Dealing and certificate sizes, with processing
+        times beneath them. One signed payment per account, with no
+        boundary flows. Close timings are medians of ten successive
+        closes after one warmup on an AWS c8a.4xlarge with 16 workers
+        and in-memory storage. Certificate verification uses one CPU
+        thread. Preparation starts from signed terminal inputs.
         Verification includes balance reads and construction of the new
         QMDB root; the total also includes decoding and application.
-        Durable commit and networking are excluded. Egress assumes 100
-        direct copies. Account records count 32-byte keys and 8-byte
-        balances, before QMDB indexes, history, and retained
-        evidence.</p>
+        Durable commit and networking are excluded.</p>
         </div>
         <p>With a million live accounts but only 1,024 senders paying
         that same recipient pool, the dealing is still 105 KB and takes
@@ -711,11 +689,9 @@ O’Grady</a></div>
         </div>
         <h3 id="proof-sizes-and-verification">Proof Sizes and
         Verification</h3>
-        <p>Verifying the certified commitment takes 0.672 ms for a
-        100-validator committee. The tables below show encoded proof
-        sizes, with verification times beneath them. Times are medians
-        of ten samples on one CPU thread of the same host, starting from
-        decoded proofs.</p>
+        <p>The tables below show encoded proof sizes, with verification
+        times beneath them. Times are medians of ten samples on one CPU
+        thread of the same host, starting from decoded proofs.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
