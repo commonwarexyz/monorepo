@@ -115,6 +115,11 @@ where
     ) -> Result<(), Fatal> {
         match capability {
             DurabilityCapability::Persist(directive) => self.persist(directive, root)?,
+            DurabilityCapability::Retain(artifact) => self.retain_served(
+                &artifact,
+                #[cfg(test)]
+                RetentionBoundary::Exposure,
+            )?,
             DurabilityCapability::Acknowledged {
                 retention,
                 forwarded_nullifications,

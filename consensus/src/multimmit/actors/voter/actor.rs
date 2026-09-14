@@ -132,6 +132,7 @@ pub(super) enum RetentionBoundary {
     Staged(crate::multimmit::machine::BarrierId),
     Acknowledged(crate::multimmit::machine::BarrierAck),
     Recovered,
+    Exposure,
 }
 
 /// Every recorded issue attempt for one durable effect, in issue order.
@@ -796,6 +797,12 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn with_journal_capacity(mut self, capacity: NonZeroUsize) -> Self {
+        self.journal_gates = super::journal::TestGates::with_capacity(capacity);
+        self
+    }
+
+    #[cfg(test)]
     pub(super) fn new_with_test_hooks(
         context: E,
         config: Config<E, H, P, V, A, R, F, T, C>,
@@ -1027,6 +1034,20 @@ where
                 }
                 if driver.machine.has_runnable_work() {
                     continue;
+                }
+            }
+            if !driver.journal_responses.is_empty() {
+                if let Err(failure) = driver.journal.wait_for_capacity().await {
+                    record_fatal(
+                        &self.metrics,
+                        &driver.round_span,
+                        &Fatal::JournalDriver(failure),
+                    );
+                    return;
+                }
+                if driver.journal.try_flush().is_err() {
+                    record_fatal(&self.metrics, &driver.round_span, &Fatal::Closed);
+                    return;
                 }
             }
             if let Some(pending) = driver.journal_responses.front_mut() {
@@ -1453,6 +1474,19 @@ where
         }
         let observation_batch = self.observation_batch;
         let mut carried_observation = None;
+        // A fenced driver cannot rely on new ingress to fill a quiet journal prefix. Capture
+        // failed admission here so a concurrent FIFO drain cannot erase the capacity wake.
+        let flush_full = if self.checkpoint_fenced() && !self.journal_responses.is_empty() {
+            match self.journal.try_flush() {
+                Ok(()) => false,
+                Err(JournalAdmission::Full(())) => true,
+                Err(JournalAdmission::Closed(())) => {
+                    return Some(RuntimeEvent::JournalCapacity(Err(JournalFailure::Closed)));
+                }
+            }
+        } else {
+            false
+        };
         let journal_idle = self.journal_responses.is_empty();
         let (source, event) = select! {
             result = next_journal_response(
@@ -1464,7 +1498,7 @@ where
             },
             result = wait_for_journal_capacity(
                 &self.journal,
-                !self.journal.has_capacity(),
+                flush_full || !self.journal.has_capacity(),
             ) => (ReadinessCursor::SOURCES, RuntimeEvent::JournalCapacity(result)),
             result = wait_for_checkpoint(
                 self.pending_checkpoint.as_mut(),
@@ -3002,7 +3036,7 @@ where
         Submission { accepted, complete }
     }
 
-    /// Makes one durably admitted checkpoint available to resolver peers.
+    /// Makes one authenticated proof available after its local signature exposure floor.
     fn retain_served(
         &mut self,
         artifact: &Artifact<V, H::Digest>,
@@ -3484,7 +3518,9 @@ mod tests {
             machine.start_fresh().unwrap();
             let mut startup = VecDeque::from(collect(&mut machine));
             while let Some(job) = startup.pop_front() {
-                let durable = journal.try_append(Span::none(), job).ok().unwrap().await.unwrap();
+                let response = journal.try_append(Span::none(), job).ok().unwrap();
+                journal.try_flush().unwrap();
+                let durable = response.await.unwrap();
                 machine.persistence_completed(durable.ack).unwrap();
                 startup.extend(collect(&mut machine));
             }
@@ -3504,6 +3540,7 @@ mod tests {
             assert!(responses.len() >= 3, "two completions and a FIFO readiness witness: got {}", responses.len());
             // The journal sends replies in append order. Receiving the last reply proves every
             // earlier response is already ready, without polling or consuming those responses.
+            journal.try_flush().unwrap();
             let witness = responses.pop_back().unwrap().response.await.unwrap();
             let first = responses.pop_front().unwrap();
             let first_durable = first.response.await.unwrap();

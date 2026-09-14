@@ -2505,12 +2505,7 @@ fn stalled_journal_sync_bounds_staged_persistence() {
             node.envelope(CertificateMessage::Lqc(node.committee.lqc(1))).encode(),
             true,
         );
-        select! {
-            () = sync.wait_entered() => {},
-            () = context.sleep(Duration::from_secs(1)) => {
-                panic!("voter did not reach the armed journal sync");
-            },
-        }
+
 
         let metric = "staged_bound_voter_staged_batches";
         let ceiling = CoreState::<Sha256, MinPk>::MAX_STAGED_BARRIERS as f64;
@@ -2573,6 +2568,13 @@ fn stalled_journal_sync_bounds_staged_persistence() {
                     },
                 }
             }
+        }
+
+        select! {
+            () = sync.wait_entered() => {},
+            () = context.sleep(Duration::from_secs(1)) => {
+                panic!("voter did not reach the armed journal sync");
+            },
         }
 
         let ceiling_view = ceiling_view.expect("staged persistence reached its ceiling");
@@ -3781,7 +3783,7 @@ fn all_publication_discharge_families_wait_for_their_exact_barrier_ack() {
         DeterministicRunner::timed(Duration::from_secs(15)).start(move |context| async move {
             let application = MockApplication::new();
             application.pause_building();
-            let gates = TestGates::default();
+            let gates = TestGates::with_capacity(NonZeroUsize::MIN);
             let hooks = TestHooks::default();
             let node = Node::start_with_attachments(
                 &context,
@@ -3828,7 +3830,7 @@ fn all_publication_discharge_families_wait_for_their_exact_barrier_ack() {
 }
 
 #[test_traced]
-fn resolver_retention_obeys_its_exact_durability_boundary() {
+fn resolver_retention_obeys_its_signature_exposure_boundary() {
     let seed = 110;
     DeterministicRunner::timed(Duration::from_secs(10)).start(move |context| async move {
         let application = MockApplication::new();
@@ -3850,9 +3852,10 @@ fn resolver_retention_obeys_its_exact_durability_boundary() {
         )
         .await;
         let (mut certificates_tx, _) = node.peer(1, 2).await;
-
+        // Holding every new sync proves neither independently verifiable proof needs its own
+        // metadata acknowledgement. This observer has no fresh local signature exposure.
+        let _sync = gates.arm_next_start_sync();
         let first_view = View::new(1);
-        let mut first_sync = gates.arm_next_after_sync();
         certificates_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
@@ -3861,90 +3864,54 @@ fn resolver_retention_obeys_its_exact_durability_boundary() {
             .encode(),
             true,
         );
-        select! {
-            () = first_sync.wait_entered() => {},
-            () = context.sleep(Duration::from_secs(2)) => {
-                panic!("the first nullification did not reach its post-sync cut");
-            },
-        }
-        let staged_barrier = hooks.events().iter().find_map(|event| match event {
-            TestEvent::Retained {
-                object: resolver::Served::Nullification(certificate),
-                boundary: RetentionBoundary::Staged(barrier),
-            } if certificate.view() == first_view => Some(*barrier),
-            _ => None,
-        });
-        let staged_barrier = staged_barrier
-            .expect("a forwarded proof enters serving custody while its barrier is staged");
-        assert!(
-            !hooks.events().iter().any(|event| {
+        let deadline = context.current() + Duration::from_secs(2);
+        loop {
+            if hooks.events().iter().any(|event| {
                 matches!(event, TestEvent::Retained {
-                    object: resolver::Served::Nullification(certificate),
-                    boundary: RetentionBoundary::Acknowledged(_),
-                } if certificate.view() == first_view)
-            }),
-            "acknowledgement-gated retention crossed the post-sync response gate"
-        );
-        first_sync.release();
-
-        let (predecessor, _) = wait_for_live_publication(&context, &hooks, |effect| {
-            matches!(effect, DurableEffect::Broadcast(artifact)
-                if matches!(artifact.as_ref(), Artifact::Nullification(certificate)
-                    if certificate.view() == first_view))
-        })
-        .await;
-        let publication_ack = wait_for_publication_ack(&context, &hooks, predecessor).await;
-        assert_eq!(publication_ack.barrier(), staged_barrier);
-
+                object: resolver::Served::Nullification(certificate),
+                boundary: RetentionBoundary::Staged(_),
+            } if certificate.view() == first_view)
+            }) {
+                break;
+            }
+            assert!(
+                context.current() < deadline,
+                "forwarded nullification never entered custody"
+            );
+            context.sleep(Duration::from_millis(1)).await;
+        }
         let lqc_view = View::new(3);
-        let mut lqc_sync = gates.arm_after_sync_retiring(predecessor);
         certificates_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(CertificateMessage::Lqc(node.committee.lqc(lqc_view.get())))
                 .encode(),
             true,
         );
-        select! {
-            () = lqc_sync.wait_entered() => {},
-            () = context.sleep(Duration::from_secs(2)) => {
-                panic!("the L-QC did not reach its post-sync cut");
-            },
-        }
-        assert!(
-            !hooks.events().iter().any(|event| {
-                matches!(event, TestEvent::Retained {
-                    object: resolver::Served::Lqc(certificate),
-                    ..
-                } if certificate.view() == lqc_view)
-            }),
-            "an L-QC entered serving custody before its durable acknowledgement"
-        );
-        let lqc_point = *gates
-            .appends()
-            .last()
-            .expect("the post-sync gate covers one appended L-QC transition");
-        lqc_sync.release();
-
         let deadline = context.current() + Duration::from_secs(2);
-        let retention_ack = loop {
-            if let Some(ack) = hooks.events().iter().find_map(|event| match event {
-                TestEvent::Retained {
-                    object: resolver::Served::Lqc(certificate),
-                    boundary: RetentionBoundary::Acknowledged(ack),
-                } if certificate.view() == lqc_view => Some(*ack),
-                _ => None,
-            }) {
-                break ack;
+        loop {
+            let events = hooks.events();
+            let forwarded = events.iter().any(|event| {
+                matches!(event, TestEvent::Retained {
+                object: resolver::Served::Nullification(certificate),
+                boundary: RetentionBoundary::Staged(_),
+            } if certificate.view() == first_view)
+            });
+            let floor = events.iter().any(|event| {
+                matches!(event, TestEvent::Retained {
+                object: resolver::Served::Lqc(certificate),
+                boundary: RetentionBoundary::Exposure,
+            } if certificate.view() == lqc_view)
+            });
+            if forwarded && floor {
+                break;
             }
             select! {
-                () = context.sleep(Duration::from_millis(10)) => {},
+                () = context.sleep(Duration::from_millis(1)) => {},
                 () = context.sleep_until(deadline) => {
-                    panic!("the acknowledged L-QC never entered serving custody");
+                    panic!("resolver proofs waited for reconstructible metadata durability");
                 },
             }
-        };
-        assert_eq!(retention_ack.barrier(), lqc_point.barrier);
-        assert_eq!(retention_ack.cursor(), lqc_point.result);
+        }
     });
 }
 
@@ -3955,7 +3922,7 @@ fn crash_after_successor_append_releases_only_recovered_successors() {
         let application = MockApplication::new();
         application.pause_building();
         let recovered_application = application.clone();
-        let first_gates = TestGates::default();
+        let first_gates = TestGates::with_capacity(NonZeroUsize::MIN);
         let first_hooks = TestHooks::default();
         let runner = DeterministicRunner::timed(Duration::from_secs(15));
         let ((prepared, successor), checkpoint) =
@@ -4000,7 +3967,7 @@ fn crash_after_successor_append_releases_only_recovered_successors() {
                 (prepared, successor)
             });
 
-        let recovered_gates = TestGates::default();
+        let recovered_gates = TestGates::with_capacity(NonZeroUsize::MIN);
         let recovered_hooks = TestHooks::default();
         let mut generation_gate = recovered_gates.arm_next_after_sync();
         DeterministicRunner::from(checkpoint).start(move |context| async move {
@@ -5014,14 +4981,14 @@ fn attached_observer_matches_the_synchronous_core() {
         // The attached machine converges to the same normalized projection.
         let mut attached = node.inspect().await;
         for _ in 0..200 {
-            if matches_modulo_outbox_ids(&attached, &expected) {
+            if matches_protocol_projection(&attached, &expected) {
                 break;
             }
             context.sleep(Duration::from_millis(25)).await;
             attached = node.inspect().await;
         }
         assert!(
-            matches_modulo_outbox_ids(&attached, &expected),
+            matches_protocol_projection(&attached, &expected),
             "attached {attached:?} does not match pure {expected:?}"
         );
     });
@@ -5201,12 +5168,8 @@ fn broadcast_parent_proposal(update_parent: bool) {
     });
 }
 
-/// Compares two inspections, ignoring outbox effect-id numbering.
-///
-/// Assemblies complete on the compute pool, so effect-id interleaving is scheduling-dependent:
-/// the machine's semantics are order-tolerant, and everything but the id numbering must still
-/// match, including the number of durable unacknowledged effects.
-fn matches_modulo_outbox_ids(
+/// Compares protocol state, excluding scheduling-dependent outbox IDs and pending barriers.
+fn matches_protocol_projection(
     left: &Inspection<Sha256Digest>,
     right: &Inspection<Sha256Digest>,
 ) -> bool {
@@ -5224,7 +5187,6 @@ fn matches_modulo_outbox_ids(
         && left.dropped_artifacts() == right.dropped_artifacts()
         && left.future_artifacts() == right.future_artifacts()
         && left.verification_jobs() == right.verification_jobs()
-        && left.pending_barrier() == right.pending_barrier()
         && left.local_artifacts() == right.local_artifacts()
         && left.finality_floor() == right.finality_floor()
         && left.produced_blocks() == right.produced_blocks()

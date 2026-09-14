@@ -17,7 +17,7 @@
 //!    |<-- Durable(span, job, ack) --| oldest first
 //! ```
 //!
-//! Each admitted command owns a one-shot response allocated before the bounded command send. An
+//! Each admitted append owns a one-shot response allocated before the bounded command send. An
 //! append response remains owned by the task until the exact captured prefix is durable, which
 //! bounds response storage together with the pending and command limits. The caller should retain
 //! append responses in admission order and feed each returned [`BarrierAck`] to the core in
@@ -25,9 +25,10 @@
 //!
 //! A sync captures every append visible when it starts. Later appends continue while that handle
 //! runs, but never borrow its durability. There is at most one sync handle. Once it completes, the
-//! task acknowledges exactly the captured prefix. Whenever no sync is running and appends await
-//! acknowledgement, it drains already queued commands and syncs the resulting prefix. Appends
-//! coalesce both in the ready command queue and behind an in-flight sync.
+//! task acknowledges exactly the captured prefix. Local signature publication, pipeline capacity,
+//! explicit drain requests, and command closure require durability. Before starting a demanded
+//! sync, the owner drains ready commands so authorization and signature records can share it.
+//! Quiet reconstructible records remain buffered until one of these demands arrives.
 //!
 //! Byte charging uses the same barrier, generation, previous-cursor, event-count, and encoded
 //! event fields as the storage journal record. The storage configuration separately validates the
@@ -43,7 +44,7 @@ use crate::multimmit::machine::{BarrierId, Change, Cursor, EffectId};
 use crate::{
     LATENCY,
     multimmit::{
-        machine::{BarrierAck, PersistJob},
+        machine::{BarrierAck, MAX_INFLIGHT_BARRIERS, PersistJob},
         storage::{JournalError, SafetyJournal},
     },
 };
@@ -105,6 +106,7 @@ where
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(super) struct TestGates {
+    command_capacity: Option<NonZeroUsize>,
     append: Arc<Mutex<Option<GateWaiter>>>,
     after_append: Arc<Mutex<Option<GateWaiter>>>,
     start_sync: Arc<Mutex<Option<GateWaiter>>>,
@@ -155,6 +157,13 @@ pub(super) struct TestGate {
 
 #[cfg(test)]
 impl TestGates {
+    pub(super) fn with_capacity(command_capacity: NonZeroUsize) -> Self {
+        Self {
+            command_capacity: Some(command_capacity),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn appends(&self) -> Vec<JournalPoint> {
         self.appends.lock().clone()
     }
@@ -418,6 +427,8 @@ where
     V: Variant,
     D: Digest,
 {
+    #[cfg(test)]
+    let command_capacity = gates.command_capacity.unwrap_or(command_capacity);
     let (commands, receiver) = mpsc::channel(command_capacity.get());
     let pending_limit = command_capacity.get();
     let metrics = JournalMetrics::new(&context);
@@ -531,6 +542,17 @@ where
             .map_err(|_| JournalFailure::Closed)?;
         drop(permit);
         Ok(())
+    }
+
+    /// Requests durability for every append preceding this command in the FIFO.
+    ///
+    /// Append responses carry completion and failure; this command adds no response ownership.
+    pub(super) fn try_flush(&self) -> Result<(), Admission<()>> {
+        match self.commands.try_send(Command::Flush) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(Admission::Full(())),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(Admission::Closed(())),
+        }
     }
 
     /// Rolls to the section that will follow a fully acknowledged checkpoint snapshot.
@@ -670,6 +692,7 @@ where
         append: Append<V, D>,
         responder: Responder<Durable<V, D>>,
     },
+    Flush,
     Roll {
         span: Span,
         responder: Responder<()>,
@@ -687,6 +710,7 @@ where
 {
     fn fail(self, failure: JournalFailure) {
         match self {
+            Self::Flush => {}
             Self::Append { responder, .. } => {
                 let _ = responder.send(Err(failure));
             }
@@ -895,7 +919,15 @@ where
 
     async fn serve(&mut self) -> Result<(), JournalFailure> {
         loop {
-            if self.sync.is_none() && !self.pending.is_empty() {
+            if self.sync.is_none()
+                && !self.pending.is_empty()
+                && (!self.commands_open
+                    || self.pending.len() >= self.pending_limit.min(MAX_INFLIGHT_BARRIERS)
+                    || self
+                        .pending
+                        .iter()
+                        .any(|pending| pending.append.job.urgent()))
+            {
                 self.drain_ready_commands().await?;
                 self.start_sync().await?;
             }
@@ -924,6 +956,15 @@ where
     async fn process(&mut self, command: Command<V, D>) -> Result<(), JournalFailure> {
         match command {
             Command::Append { append, responder } => self.append(append, responder).await,
+            Command::Flush => {
+                if self.sync.is_some() {
+                    wait_for_sync(self.sync.as_mut())
+                        .await
+                        .map_err(|error| JournalFailure::Sync(Arc::new(error)))?;
+                    self.complete_sync().await?;
+                }
+                self.start_sync().await
+            }
             Command::Roll { span, responder } => self.roll(responder).instrument(span).await,
             Command::Prune { span, responder } => self.prune(responder).instrument(span).await,
         }
@@ -1182,9 +1223,8 @@ where
 
 /// Returns the canonical encoded size of one persisted journal record.
 ///
-/// Saturation is conservative: an arithmetic overflow forces an immediate sync. Validated journal
-/// records fit in `usize`, so ordinary operation is byte-for-byte identical to
-/// `JournalRecord::encode_size`.
+/// Validated journal records fit in `usize`; saturation keeps diagnostic byte accounting bounded
+/// even if that storage invariant is violated.
 fn encoded_size<V: Variant, D: Digest>(job: &PersistJob<V, D>) -> usize {
     let event_bytes = job.events().iter().fold(0usize, |bytes, event| {
         bytes.saturating_add(event.encode_size())
@@ -1930,6 +1970,41 @@ mod tests {
     }
 
     #[test]
+    fn authorization_waits_for_signature_demand() {
+        deterministic::Runner::default().start(|context| async move {
+            let epoch = Epoch::new(8);
+            let (context, journal, pending, baseline) =
+                open_delayed(context, "voter-journal-signature-demand", epoch).await;
+            let gates = TestGates::default();
+            let (client, monitor) =
+                spawn_with_gates(context.child("owner"), journal, NZUsize!(8), gates.clone());
+            let mut appended = gates.arm_after_append();
+            let authorization = client
+                .try_append(Span::none(), job(epoch, 1, 0, false))
+                .unwrap();
+            appended.wait_entered_at().await;
+            appended.release();
+            for _ in 0..8 {
+                reschedule().await;
+            }
+            assert_eq!(client.metrics().start_syncs.get(), 0);
+            let signature = client
+                .try_append(Span::none(), job(epoch, 2, 1, true))
+                .unwrap();
+            wait_for_starts(&pending, baseline + 1).await;
+            assert_eq!(client.metrics().covered_barriers.get(), 2);
+            release_next(&pending).await;
+            assert_eq!(
+                authorization.await.unwrap().ack.barrier(),
+                BarrierId::new(1)
+            );
+            assert_eq!(signature.await.unwrap().ack.barrier(), BarrierId::new(2));
+            assert_eq!(client.metrics().start_syncs.get(), 1);
+            finish(client, monitor, &pending).await;
+        });
+    }
+
+    #[test]
     fn ready_urgent_prefix_uses_one_sync() {
         deterministic::Runner::default().start(|context| async move {
             let epoch = Epoch::new(8);
@@ -1973,6 +2048,7 @@ mod tests {
                 .unwrap();
             let busy = client.try_roll().unwrap();
             assert!(matches!(busy.await, Err(JournalFailure::Busy)));
+            client.try_flush().unwrap();
             wait_for_starts(&pending, baseline + 1).await;
             assert_eq!(client.metrics().start_syncs.get(), 1);
             assert_eq!(client.metrics().appended_barriers.get(), 3);
@@ -1990,38 +2066,89 @@ mod tests {
         });
     }
 
+    #[rstest::rstest]
+    fn nonurgent_demand_syncs_without_coalescing_delay(#[values(1, 2, 3)] capacity: usize) {
+        deterministic::Runner::default().start(|context| async move {
+            let epoch = Epoch::new(8);
+            let (context, journal, pending, baseline) =
+                open_delayed(context, "voter-journal-demand", epoch).await;
+            let gates = TestGates::default();
+            let (client, monitor) = spawn_with_gates(
+                context.child("owner"),
+                journal,
+                NonZeroUsize::new(capacity).unwrap(),
+                gates.clone(),
+            );
+            let mut append_gate = gates.arm_after_append();
+            let mut start_gate = gates.arm_next_start_sync();
+            let response = client
+                .try_append(Span::none(), job(epoch, 1, 0, false))
+                .unwrap();
+            let appended_at = append_gate.wait_entered_at().await;
+            client.try_flush().unwrap();
+            append_gate.release();
+            let started_at = start_gate.wait_entered_at().await;
+            assert!(started_at.duration_since(appended_at).unwrap() < Duration::from_millis(25));
+            start_gate.release();
+            wait_for_starts(&pending, baseline + 1).await;
+            release_next(&pending).await;
+            assert_eq!(response.await.unwrap().ack.barrier(), BarrierId::new(1));
+            finish(client, monitor, &pending).await;
+        });
+    }
+
+    #[rstest::rstest]
+    fn capacity_demand_flushes_small_nonurgent_prefixes(#[values(1, 2, 3, 4)] capacity: usize) {
+        deterministic::Runner::default().start(|context| async move {
+            let epoch = Epoch::new(8);
+            let (context, journal, pending, baseline) =
+                open_delayed(context, "voter-journal-capacity-demand", epoch).await;
+            let (client, monitor) = spawn(
+                context.child("owner"),
+                journal,
+                NonZeroUsize::new(capacity).unwrap(),
+            );
+            let mut responses = Vec::new();
+            for barrier in 1..=capacity as u64 {
+                responses.push(
+                    client
+                        .try_append(Span::none(), job(epoch, barrier, barrier - 1, false))
+                        .unwrap(),
+                );
+            }
+            wait_for_starts(&pending, baseline + 1).await;
+            assert_eq!(client.metrics().covered_barriers.get(), capacity as i64);
+            release_next(&pending).await;
+            for response in responses {
+                response.await.unwrap();
+            }
+            finish(client, monitor, &pending).await;
+        });
+    }
+
     #[test]
-    fn nonurgent_demand_syncs_without_coalescing_delay() {
-        for capacity in 1..=3 {
-            deterministic::Runner::default().start(|context| async move {
-                let epoch = Epoch::new(8);
-                let (context, journal, pending, baseline) =
-                    open_delayed(context, "voter-journal-demand", epoch).await;
-                let gates = TestGates::default();
-                let (client, monitor) = spawn_with_gates(
-                    context.child("owner"),
-                    journal,
-                    NonZeroUsize::new(capacity).unwrap(),
-                    gates.clone(),
-                );
-                let mut append_gate = gates.arm_after_append();
-                let mut start_gate = gates.arm_next_start_sync();
-                let response = client
-                    .try_append(Span::none(), job(epoch, 1, 0, false))
-                    .unwrap();
-                let appended_at = append_gate.wait_entered_at().await;
-                append_gate.release();
-                let started_at = start_gate.wait_entered_at().await;
-                assert!(
-                    started_at.duration_since(appended_at).unwrap() < Duration::from_millis(25)
-                );
-                start_gate.release();
-                wait_for_starts(&pending, baseline + 1).await;
-                release_next(&pending).await;
-                assert_eq!(response.await.unwrap().ack.barrier(), BarrierId::new(1));
-                finish(client, monitor, &pending).await;
-            });
-        }
+    fn explicit_flush_covers_nonurgent_tail_behind_active_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let epoch = Epoch::new(8);
+            let (context, journal, pending, baseline) =
+                open_delayed(context, "voter-journal-flush-tail", epoch).await;
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
+            let first = client
+                .try_append(Span::none(), job(epoch, 1, 0, true))
+                .unwrap();
+            wait_for_starts(&pending, baseline + 1).await;
+            let tail = client
+                .try_append(Span::none(), job(epoch, 2, 1, false))
+                .unwrap();
+            client.try_flush().unwrap();
+            release_next(&pending).await;
+            first.await.unwrap();
+            wait_for_starts(&pending, baseline + 2).await;
+            release_next(&pending).await;
+            tail.await.unwrap();
+            assert_eq!(client.metrics().start_syncs.get(), 2);
+            finish(client, monitor, &pending).await;
+        });
     }
 
     #[test]

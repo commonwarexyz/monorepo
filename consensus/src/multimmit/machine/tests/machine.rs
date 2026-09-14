@@ -6043,6 +6043,13 @@ fn aggregated_lqc_is_retained_without_a_publication() {
         "retaining an aggregate must not queue a publication"
     );
 
+    assert!(
+        completed.capabilities().iter().any(|capability| {
+            matches!(capability, Capability::Durability(DurabilityCapability::Retain(artifact))
+            if artifact.as_ref() == &Artifact::Lqc(certificate.clone()))
+        }),
+        "a locally assembled proof is servable before its reconstructible metadata is synced"
+    );
     let persisted = persist(&mut machine, &job);
     for step in [&completed, &persisted] {
         assert!(
@@ -7071,11 +7078,7 @@ fn signature_publication_waits_for_its_exact_barrier_acknowledgement() {
     ));
 }
 
-#[test]
-fn aggregate_publication_defers_to_the_signature_exposure_floor() {
-    // An aggregate certificate may embed one of our shares, so its publication must wait
-    // until every fresh local signature staged before it is durable. With such a signature
-    // pending, the aggregate defers; the signature's acknowledgement releases both.
+fn unacknowledged_proposal() -> (TestMachine, Step<MinPk, Digest>) {
     let mut machine = active_machine(Role::Validator(Participant::new(0)));
     let proposed = leader(&machine, 2);
     let reserved = machine
@@ -7096,6 +7099,15 @@ fn aggregate_publication_defers_to_the_signature_exposure_floor() {
         }))
         .unwrap();
     let completed = settle(&mut machine, completed);
+    (machine, completed)
+}
+
+#[test]
+fn aggregate_publication_defers_to_the_signature_exposure_floor() {
+    // An aggregate certificate may embed one of our shares, so its publication must wait
+    // until every fresh local signature staged before it is durable. With such a signature
+    // pending, the aggregate defers; the signature's acknowledgement releases both.
+    let (mut machine, completed) = unacknowledged_proposal();
     let signature_barrier = persist_job(&completed);
 
     // The signature is staged but not yet acknowledged: an aggregate queued now is unsafe to
@@ -7126,6 +7138,78 @@ fn aggregate_publication_defers_to_the_signature_exposure_floor() {
         matches!(durable_effect(effect), Some(DurableEffect::Broadcast(artifact))
             if artifact.as_ref() == &aggregate)
     }));
+}
+
+#[test]
+fn resolver_retention_defers_to_the_signature_exposure_floor() {
+    let (mut machine, completed) = unacknowledged_proposal();
+    let signature_barrier = persist_job(&completed);
+    let proposed = leader(&machine, 3);
+    let votes = (0..machine.profile().protocol().codec_config().participants() as u32)
+        .map(|signer| view_vote(&machine, &proposed, signer))
+        .collect::<Vec<_>>();
+    let proof = Arc::new(Artifact::Lqc(lqc(&machine, proposed, &votes)));
+    let observed = observe(&mut machine, proof.as_ref().clone());
+    let completed = complete_with_step(&mut machine, &observed, true);
+    let completed = settle(&mut machine, completed);
+    assert!(
+        !completed.capabilities().iter().any(|capability| {
+            matches!(capability, Capability::Durability(DurabilityCapability::Retain(artifact))
+            if artifact == &proof)
+        }),
+        "resolver retention must not expose an unacknowledged own share"
+    );
+    assert!(machine.deferred_releases.iter().any(|(floor, release)| {
+        *floor == signature_barrier.last_cursor()
+            && matches!(release, DeferredRelease::Retain(artifact) if artifact == &proof)
+    }));
+    let released = persist_raw(&mut machine, &signature_barrier);
+    assert!(
+        released.capabilities().iter().any(|capability| {
+            matches!(capability, Capability::Durability(DurabilityCapability::Retain(artifact))
+            if artifact == &proof)
+        }),
+        "the exact signature floor releases custody before the proof metadata is synced"
+    );
+}
+
+#[test]
+fn generation_ack_preserves_resolver_exposure_floors() {
+    let mut machine = Machine::new(profile_for(Role::Observer, 6, 2));
+    let started = machine.step(Input::Start).unwrap();
+    let barrier = persist_job(&started);
+    let ready = Arc::new(Artifact::Nullification(symbolic_nullification(
+        &machine,
+        View::new(1),
+        7,
+    )));
+    let later = Arc::new(Artifact::Nullification(symbolic_nullification(
+        &machine,
+        View::new(2),
+        8,
+    )));
+    machine.deferred_releases.push_back((
+        barrier.last_cursor(),
+        DeferredRelease::Retain(ready.clone()),
+    ));
+    let later_floor = barrier.last_cursor().next().unwrap();
+    machine
+        .deferred_releases
+        .push_back((later_floor, DeferredRelease::Retain(later.clone())));
+    let acknowledged = persist_raw(&mut machine, &barrier);
+    let retained = acknowledged
+        .capabilities()
+        .iter()
+        .filter_map(|capability| match capability {
+            Capability::Durability(DurabilityCapability::Retain(artifact)) => Some(artifact),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retained, vec![&ready]);
+    assert!(
+        matches!(machine.deferred_releases.front(), Some((floor, DeferredRelease::Retain(artifact)))
+        if *floor == later_floor && artifact == &later)
+    );
 }
 
 #[test]

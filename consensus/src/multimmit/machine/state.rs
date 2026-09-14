@@ -43,6 +43,13 @@ pub(crate) struct ArtifactEntry<V: Variant, D: Digest> {
 /// One artifact promoted to [`ArtifactState::Ready`], as admission telemetry needs it.
 pub(crate) type ReadyPromotion<V, D> = (Observation, ArtifactId<D>, Arc<Artifact<V, D>>);
 
+/// Process-local publication released once its own-signature exposure floor is durable.
+#[derive(Clone, Debug)]
+pub(crate) enum DeferredRelease<V: Variant, D: Digest> {
+    Outbox(EffectId),
+    Retain(Arc<Artifact<V, D>>),
+}
+
 /// An acknowledged checkpoint cut whose derived projections can be built off the voter task.
 pub(crate) struct CheckpointCut<H: Hasher, V: Variant> {
     epoch: Epoch,
@@ -658,8 +665,8 @@ pub(super) struct Machine<H: Hasher, V: Variant> {
     /// only once `acked` reaches this floor, so no fresh signature leaves the process before
     /// its record is durable. Capabilities free of such references release at staging.
     pub(crate) own_exposure: Cursor,
-    /// Outbox effects awaiting their exposure floor, as `(floor, effect)` in cursor order.
-    pub(crate) deferred_releases: VecDeque<(Cursor, EffectId)>,
+    /// Publications awaiting their exposure floor, in cursor order.
+    pub(crate) deferred_releases: VecDeque<(Cursor, DeferredRelease<V, H::Digest>)>,
     pub(crate) pending_signing: PendingSigningCompletions<V, H::Digest>,
     /// Reused canonical encoding buffer for machine-validated local artifacts.
     pub(crate) artifact_id_scratch: Vec<u8>,

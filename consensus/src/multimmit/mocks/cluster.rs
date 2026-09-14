@@ -204,6 +204,8 @@ pub struct Cluster<V: Variant> {
     blocked_certificate_recipients: Vec<Arc<Mutex<Vec<ed25519::PublicKey>>>>,
     #[cfg(test)]
     checkpoint_interval: Option<NonZeroU64>,
+    #[cfg(test)]
+    journal_capacity: Option<NonZeroUsize>,
     generations: Vec<usize>,
     production_policy: ProductionPolicy,
     storage_sync_interval: Option<Duration>,
@@ -364,6 +366,8 @@ impl<V: Variant> Cluster<V> {
             blocked_certificate_recipients: Vec::new(),
             #[cfg(test)]
             checkpoint_interval: None,
+            #[cfg(test)]
+            journal_capacity: None,
             generations: Vec::new(),
             production_policy: ProductionPolicy::Paused,
             storage_sync_interval: None,
@@ -402,6 +406,13 @@ impl<V: Variant> Cluster<V> {
             "the block observer must be installed before any engine starts"
         );
         self.block_callback = Some(Arc::new(Mutex::new(Box::new(callback))));
+    }
+
+    /// Selects real journal capacity demand for deterministic crash-cut tests.
+    #[cfg(test)]
+    pub(crate) fn set_journal_capacity(&mut self, capacity: NonZeroUsize) {
+        assert!(self.engines.iter().all(Option::is_none));
+        self.journal_capacity = Some(capacity);
     }
 
     /// Sets the shared checkpoint cadence before any engine starts.
@@ -870,6 +881,12 @@ impl<V: Variant> Cluster<V> {
         #[cfg(test)]
         let engine = match self.checkpoint_interval {
             Some(checkpoint_interval) => engine.with_checkpoint_interval(checkpoint_interval),
+            None => engine,
+        };
+
+        #[cfg(test)]
+        let engine = match self.journal_capacity {
+            Some(capacity) => engine.with_journal_capacity(capacity),
             None => engine,
         };
 

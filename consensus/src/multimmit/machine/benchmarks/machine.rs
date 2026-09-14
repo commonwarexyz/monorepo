@@ -100,7 +100,9 @@ fn start_counted(protocol: Config<Digest>) -> Machine<CountedSha256, MinPk> {
                     capabilities.extend(step.into_capabilities());
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
-                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(
+                    DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retain(_),
+                )
                 | Capability::Durability(DurabilityCapability::Retire(_))
                 | Capability::Resolver(
                     ResolverCapability::Resolve(_)
@@ -223,7 +225,9 @@ fn drain_validator(
                 | Capability::Leader(LeaderCapability::RecoverNullification(_))
                 | Capability::Leader(LeaderCapability::AggregateVqc(_))
                 | Capability::Leader(LeaderCapability::AggregateLqc(_))
-                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(
+                    DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retain(_),
+                )
                 | Capability::Durability(DurabilityCapability::Retire(_))
                 | Capability::Resolver(
                     ResolverCapability::Resolve(_)
@@ -305,7 +309,9 @@ fn next_persist(
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
                 | Capability::Producer(ProducerCapability::ArmTimer(_))
-                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(
+                    DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retain(_),
+                )
                 | Capability::Durability(DurabilityCapability::Retire(_))
                 | Capability::Resolver(
                     ResolverCapability::Resolve(_)

@@ -1697,7 +1697,9 @@ impl<'a> World<'a> {
                     continue;
                 }
                 Capability::Durability(
-                    DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retire(_),
+                    DurabilityCapability::Acknowledged { .. }
+                    | DurabilityCapability::Retain(_)
+                    | DurabilityCapability::Retire(_),
                 ) => {
                     // These capabilities mutate only actor-owned resolver/egress state. The pure
                     // Core world has neither collaborator, so execution completes inline here.

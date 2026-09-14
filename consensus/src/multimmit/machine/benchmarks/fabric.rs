@@ -350,7 +350,9 @@ pub(super) fn drain_with<F, P>(
                 ) => {}
                 Capability::Leader(LeaderCapability::ArmTimer(_))
                 | Capability::Producer(ProducerCapability::ArmTimer(_))
-                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+                | Capability::Durability(
+                    DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retain(_),
+                )
                 | Capability::Durability(DurabilityCapability::Retire(_)) => {}
                 Capability::Resolver(
                     ResolverCapability::Cancel(_)
@@ -684,7 +686,9 @@ fn schedule_capabilities(
                 | ProducerCapability::ForwardShare(_)
                 | ProducerCapability::AnchorAdvanced(_),
             )
-            | Capability::Durability(DurabilityCapability::Acknowledged { .. })
+            | Capability::Durability(
+                DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retain(_),
+            )
             | Capability::Durability(DurabilityCapability::Retire(_))
             | Capability::Resolver(
                 ResolverCapability::Cancel(_)

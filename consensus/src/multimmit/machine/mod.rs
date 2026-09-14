@@ -153,7 +153,7 @@ pub(crate) use reducer::*;
 pub(crate) use scheduler::*;
 use state::Machine;
 pub(crate) use state::{
-    ArtifactEntry, ArtifactState, CheckpointCut, FrozenAcknowledgement, Lifecycle,
+    ArtifactEntry, ArtifactState, CheckpointCut, DeferredRelease, FrozenAcknowledgement, Lifecycle,
     PendingPersistence, PendingSigningCompletion, Progress,
 };
 pub use state::{ChainProgress, Inspection, ProducerProgress};

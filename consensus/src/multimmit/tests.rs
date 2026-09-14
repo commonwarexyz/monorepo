@@ -33,7 +33,7 @@ use commonware_runtime::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -704,6 +704,8 @@ fn duplicated_reordered_certificates_converge_after_healing() {
             },
         )
         .await;
+        // Capacity demand makes the exact future-exit prefix durable before the crash cut.
+        cluster.set_journal_capacity(NonZeroUsize::MIN);
         cluster.start_all().await;
         cluster.produce_once();
 

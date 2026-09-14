@@ -626,6 +626,8 @@ where
     context: ContextCell<E>,
     config: Config<H, P, V, A, R, F, T, C, B>,
     checkpoint_interval: NonZeroU64,
+    #[cfg(test)]
+    journal_capacity: Option<NonZeroUsize>,
     skip_timeout: Option<Duration>,
 }
 
@@ -689,6 +691,8 @@ where
             skip_timeout: config.profile.timers().view_timeout().checked_mul(5),
             config,
             checkpoint_interval: CHECKPOINT_INTERVAL,
+            #[cfg(test)]
+            journal_capacity: None,
         }
     }
 
@@ -719,6 +723,13 @@ where
             );
         }
         self.skip_timeout = skip_timeout;
+        self
+    }
+
+    /// Sets the journal capacity used to demand exact crash cuts in tests.
+    #[cfg(test)]
+    pub(crate) const fn with_journal_capacity(mut self, capacity: NonZeroUsize) -> Self {
+        self.journal_capacity = Some(capacity);
         self
     }
 
@@ -842,6 +853,11 @@ where
                 mailbox_size: config.mailbox_size,
             },
         );
+        #[cfg(test)]
+        let voter = match self.journal_capacity {
+            Some(capacity) => voter.with_journal_capacity(capacity),
+            None => voter,
+        };
         let voter::Mailbox {
             control: voter_control,
             queries: voter_queries,

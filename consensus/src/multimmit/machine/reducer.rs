@@ -3,14 +3,15 @@
 use super::{
     Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId, BuildCompletion,
     BuildJob, BuildOutcome, ChainEffect, ChainError, Change, CustodyCancellation,
-    CustodyCompletion, CustodyJob, DaChoice, DaVoteRequest, Dependency, DomainEvent, DurableEffect,
-    DurableJob, DurableState, EffectCompletion, EffectId, FrozenAcknowledgement,
-    IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion, LqcAggregateJob, Machine,
-    NullificationRecoveryCompletion, NullificationRecoveryJob, Observation, PendingPersistence,
-    PendingSigningCompletion, PersistDirective, PersistJob, ProductionTimer, ProtocolComponent,
-    ReplayError, Replayed, ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest,
-    SignRequest, Timer, Verdict, VerificationCompletion, VerificationItem, VerificationTicket,
-    VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
+    CustodyCompletion, CustodyJob, DaChoice, DaVoteRequest, DeferredRelease, Dependency,
+    DomainEvent, DurableEffect, DurableJob, DurableState, EffectCompletion, EffectId,
+    FrozenAcknowledgement, IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion,
+    LqcAggregateJob, Machine, NullificationRecoveryCompletion, NullificationRecoveryJob,
+    Observation, PendingPersistence, PendingSigningCompletion, PersistDirective, PersistJob,
+    ProductionTimer, ProtocolComponent, ReplayError, Replayed, ResolutionCompletion, ResolutionJob,
+    Role, SelfAdmission, SendRequest, SignRequest, Timer, Verdict, VerificationCompletion,
+    VerificationItem, VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob,
+    WorkKey,
     algebra::{DerivedVqc, ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
@@ -214,6 +215,8 @@ pub(crate) enum VerificationCapability<V: Variant, D: Digest> {
 pub(crate) enum DurabilityCapability<V: Variant, D: Digest> {
     /// Append exact domain events after installing pre-publication resolver custody.
     Persist(PersistDirective<V, D>),
+    /// Expose an independently verifiable resolver proof whose own-signature floor is durable.
+    Retain(Arc<Artifact<V, D>>),
     /// Install resolver custody and accounting released by an exact durable acknowledgement.
     Acknowledged {
         retention: Vec<Arc<Artifact<V, D>>>,
@@ -1833,7 +1836,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // its barrier is in flight join the next reservation instead of each staging its own
         // signing action, durable event, and barrier; the acknowledgement wakes this component,
         // so the window is the journal's own group-commit rhythm rather than a timer, and a vote
-        // waits at most one barrier. An idle machine acknowledges immediately and never waits.
+        // waits at most one signature barrier. The signed result supplies the sync demand.
         if self.da_vote_reserved_through > self.acked {
             return Ok((WorkStatus::Complete, Capabilities::None));
         }
@@ -3681,7 +3684,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let release_after_enqueue = if let Some(id) = event.change().queued_effect() {
             if event.change().records_local_signature() {
                 self.own_exposure = cursor;
-                self.deferred_releases.push_back((cursor, id));
+                self.deferred_releases
+                    .push_back((cursor, DeferredRelease::Outbox(id)));
                 urgent = true;
                 None
             } else {
@@ -3695,7 +3699,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     .get(&id)
                     .is_some_and(|effect| effect.references_own_signature(me));
                 if referenced && self.own_exposure > self.acked {
-                    self.deferred_releases.push_back((self.own_exposure, id));
+                    self.deferred_releases
+                        .push_back((self.own_exposure, DeferredRelease::Outbox(id)));
                     None
                 } else if matches!(event.change(), Change::ArtifactForwarded { .. }) {
                     self.release_outbox_job(id)
@@ -3707,6 +3712,24 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         } else {
             None
         };
+        if let Change::ViewCertificateCreated { artifact }
+        | Change::FinalityFloorAdvanced {
+            proof: artifact, ..
+        } = event.change()
+        {
+            // Aggregates may contain our shares. Their metadata is reconstructible, but exposing
+            // the proof still requires durability of every fresh local signature it could carry.
+            if self.own_exposure > self.acked {
+                self.deferred_releases.push_back((
+                    self.own_exposure,
+                    DeferredRelease::Retain(Arc::clone(artifact)),
+                ));
+            } else {
+                capabilities.push(Capability::Durability(DurabilityCapability::Retain(
+                    Arc::clone(artifact),
+                )));
+            }
+        }
         // A late finality floor leaves the view where the ordinary exit put it; re-arming the
         // timer for it would push out the deadline the running view already earned.
         if matches!(
@@ -3826,9 +3849,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     retention.push(Arc::clone(artifact));
                     retirements.extend(retired);
                 }
-                Change::ViewCertificateCreated { artifact } => {
-                    retention.push(Arc::clone(artifact));
-                }
+                Change::ViewCertificateCreated { .. } => {}
                 Change::ArtifactForwarded {
                     retired, artifact, ..
                 } => {
@@ -3839,11 +3860,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 }
                 Change::ViewAdvanced { retired, .. } => retirements.extend(retired),
                 Change::FinalityFloorAdvanced {
-                    proof,
                     publication_retired,
                     ..
                 } => {
-                    retention.push(Arc::clone(proof));
                     retirements.extend(publication_retired);
                 }
                 Change::GenerationAdvanced(_) => {}
@@ -3982,9 +4001,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             }));
         }
         if starts_generation {
-            // Everything recovered is durable again under the new generation, so the deferred
-            // queue is subsumed by re-releasing the outbox.
-            self.deferred_releases.clear();
+            // Re-releasing the recovered outbox subsumes its deferred entries. Process-local
+            // resolver proofs keep their individual signature floors across this boundary.
+            self.deferred_releases
+                .retain(|(_, release)| matches!(release, DeferredRelease::Retain(_)));
             let mut released = self
                 .durable
                 .signing_reservations
@@ -3994,16 +4014,20 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 .collect::<Vec<_>>();
             released.sort_unstable();
             self.release_outbox(released, &mut capabilities);
-        } else {
-            while let Some((floor, _)) = self.deferred_releases.front() {
-                if *floor > self.acked {
-                    break;
-                }
-                let (_, id) = self
-                    .deferred_releases
-                    .pop_front()
-                    .expect("the deferred front was just inspected");
-                self.release_outbox([id], &mut capabilities);
+        }
+        while let Some((floor, _)) = self.deferred_releases.front() {
+            if *floor > self.acked {
+                break;
+            }
+            let (_, release) = self
+                .deferred_releases
+                .pop_front()
+                .expect("the deferred front was just inspected");
+            match release {
+                DeferredRelease::Outbox(id) => self.release_outbox([id], &mut capabilities),
+                DeferredRelease::Retain(artifact) => capabilities.push(Capability::Durability(
+                    DurabilityCapability::Retain(artifact),
+                )),
             }
         }
         self.sync_signing_completions();
