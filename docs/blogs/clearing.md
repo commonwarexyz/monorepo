@@ -136,13 +136,13 @@ Each payer's last vector of the epoch is its terminal vector. The operator and v
 
 Netting each of the four accounts' debits and credits gives exact successor balances: $a$ ends at $100-20+5=85$, $b$ at $40-12+20+4+6=58$, $c$ at $25-7-4+12=26$, and $d$ at $35-5-6+7=31$. Gross debit equals gross credit at $20+12+7+5+4+6=54$, and the balances still sum to 200. The six payments change four account rows, one per account.
 
-For each account, the opening and closing balances are $B_a^0$ and $B_a^1$, with debit and credit deltas $d_a$ and $c_a$. Deposits $f_a$, withdrawals $w_a$, and external payouts $p_a$ complete the balance equation:
+For each account, the opening and closing balances are $B_a^0$ and $B_a^1$, with debit and credit deltas $d_a$ and $c_a$. Deposits $f_a$ and withdrawals $w_a$ complete the balance equation:
 
 $$
-\boxed{B_a^1+d_a+w_a+p_a=B_a^0+c_a+f_a.}
+\boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
 $$
 
-A recipient without a live account can receive a net external payout onchain after finalization. The row validator derives each settlement output from the same balance equation and signed authorizations.
+Every payment credits its recipient's balance. A close creates payout outputs only for authorized withdrawals.
 
 Each row describes the account's activity and, when it sent, its terminal signed endpoint. Every validator derives the resulting balances and checks the epoch's gross debit $D_e$ and credit $C_e$:
 
@@ -150,10 +150,10 @@ $$
 \boxed{D_e=C_e.}
 $$
 
-Here $D_e=C_e=54$. Summing account balances into $L_e$ and $L_{e+1}$ cancels payments, leaving only deposits $F_e$, withdrawals $W_e$, and external payouts $P_e$:
+Here $D_e=C_e=54$. Summing account balances into $L_e$ and $L_{e+1}$ cancels payments, leaving only deposits $F_e$ and withdrawals $W_e$:
 
 $$
-\boxed{L_{e+1}=L_e+F_e-W_e-P_e.}
+\boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
 With no boundary flows, $L_{e+1}=L_e=200$.
@@ -166,7 +166,9 @@ With no boundary flows, $L_{e+1}=L_e=200$.
 Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
 :::
 
-QMDB Current Ordered with MMB stores each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Presence means the account is live. Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero. Payment totals and counts belong to the epoch's evidence.
+QMDB Current Ordered with MMB stores each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record. Payment totals and counts belong to the epoch's evidence.
+
+When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before authorizing a sweep.
 
 ## Keep the State, Send the Changes
 
@@ -176,7 +178,7 @@ Accounts are named by public key, and payment entries refer to those accounts by
 
 Validators derive the same candidate QMDB batch from their prior state and apply it once the close is admitted. QMDB updates its authenticated state without rebuilding the tree over every live account. Validators already hold the prior state, so the operator needs no separate state-change proof.
 
-The payer vectors are the common source of truth for both sides of every payment. Validators build a BMT of the epoch's account activity, retaining terminal payment positions and settlement outputs for challenges and claims. This evidence includes accounts whose balances stay unchanged. A 32-byte commitment binds the activity BMT, withdrawal-output BMT, and QMDB state root to the epoch, predecessor, and checked settlement totals.
+The payer vectors are the common source of truth for both sides of every payment. Validators build a BMT of the epoch's account activity, retaining terminal payment positions and settlement outputs for challenges and claims. This evidence includes accounts whose balances stay unchanged. A 32-byte commitment binds the activity BMT, withdrawal-output BMT, and QMDB state root to the epoch, predecessor, and withdrawal total.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified close binds QMDB balances, account activity, and withdrawal outputs. Each payer's payment BMT is nested in its activity record. The running example expands account c: its balance is 26, its terminal debit is 11, and its payment tree contains b with amount 4 and count 1 and d with amount 7 and count 1. Withdrawal leaves show the destination and amount format used when withdrawals are requested.">
@@ -202,7 +204,7 @@ Figure 4: Each validator checks the same update against its complete prior state
 
 An honest signer retains the close and its predecessor state durably before publishing its vote. It keeps predecessor and successor proofs available while the close is pending and through its challenge deadline $\Delta_e$, and retains the last finalized state for recovery. A new validator replays the retained updates and checks the resulting state root.
 
-The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified commitment is 101 bytes. Admission also supplies the three roots and two outflow totals, another 112 bytes.
+The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified commitment is 101 bytes. Admission also supplies the three roots and withdrawal total, another 104 bytes.
 
 The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge blocks that close and its pending descendants.
 
@@ -218,7 +220,7 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
 
-The close commits each active account's terminal position under $\mathsf{ChangeRoot}_e$. An opening supports receipt challenges and external-payout claims. A payer absent from this BMT has a public debit of zero for the epoch, so a BMT absence proof suffices to challenge an omitted payment. A holder can prove three kinds of contradiction:
+The close commits each active account's terminal position under $\mathsf{ChangeRoot}_e$. An opening supports receipt challenges. A payer absent from this BMT has a public debit of zero for the epoch, so a BMT absence proof suffices to challenge an omitted payment. A holder can prove three kinds of contradiction:
 
 1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
 
@@ -240,7 +242,7 @@ $$
 
 An exact withdrawal releases its amount if the epoch's final balance covers it. An account close sweeps that balance. Once the carrying close finalizes, the user claims the certified payout with an opening in that close's withdrawal-output BMT. Each output can be claimed only once.
 
-Custody remains onchain throughout. Finalization reserves withdrawals and external payouts, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
+Custody remains onchain throughout. Finalization reserves withdrawals, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
 
 ### Hard Fault
 
@@ -487,7 +489,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ::: {.image-caption}
 Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic; certificates, transport, and other messages are excluded.
 
-Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits, withdrawals, or external payouts.
+Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals.
 :::
 
 ## A Bajillion Payments, One Settlement

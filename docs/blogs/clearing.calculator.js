@@ -9,7 +9,7 @@ const KEY = 32;
 const AGG = 48;
 const ACCOUNT_RECORD = KEY + 8;
 
-// Validators reconstruct the roots and outflow totals bound by this header.
+// Validators reconstruct the roots and withdrawal total bound by this header.
 const METADATA = 32;
 const MAX_VECTOR_LENGTH = 1 << 24;
 

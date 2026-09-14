@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 930" role="img" aria-labelledby="title description">
   <title id="title">The Trees Behind a Close</title>
-  <desc id="description">The certified close binds the QMDB account-state root, an account-activity BMT root, and a withdrawal-output BMT root, together with the epoch, predecessor, and settlement totals. QMDB retains account balances between epochs: a has 85, b 58, c 26, and d 31 in the running example. Each activity record commits the terminal payer position and settlement output, including accounts with no net balance change. Account c's record has debit 11, sequence 2, no output, and the root of its payment BMT. That nested tree contains b with amount 4 and count 1, and d with amount 7 and count 1. Withdrawal outputs, when requested, contain a destination and amount. Lines show commitment relationships and logical contents, not QMDB's physical storage layout.</desc>
+  <desc id="description">The certified close binds the QMDB account-state root, an account-activity BMT root, and a withdrawal-output BMT root, together with the epoch, predecessor, and withdrawal total. QMDB retains account balances between epochs: a has 85, b 58, c 26, and d 31 in the running example. Each activity record commits the terminal payer position and settlement output, including accounts with no net balance change. Account c's record has debit 11, sequence 2, no output, and the root of its payment BMT. That nested tree contains b with amount 4 and count 1, and d with amount 7 and count 1. Withdrawal outputs, when requested, contain a destination and amount. Lines show commitment relationships and logical contents, not QMDB's physical storage layout.</desc>
   <rect width="1320" height="930" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -25,7 +25,7 @@
 
   <rect class="selected" x="427" y="98" width="466" height="90" rx="5"/>
   <text class="heading center blue" x="660" y="133">Certified close</text>
-  <text class="note center" x="660" y="164">epoch · predecessor · settlement totals</text>
+  <text class="note center" x="660" y="164">epoch · predecessor · withdrawal total</text>
   <path class="focus" d="M660 188 V219 M214 244 V219 H1106 V244 M660 219 V244"/>
 
   <rect class="panel" x="30" y="244" width="368" height="568" rx="5"/>
