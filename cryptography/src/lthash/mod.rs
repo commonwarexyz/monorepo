@@ -76,8 +76,8 @@ use crate::{
     Hasher as _,
     blake3::{Blake3, CoreBlake3, Digest},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 /// Size of the internal [LtHash] state in bytes.
 const LTHASH_SIZE: usize = 2048;
@@ -345,7 +345,7 @@ mod tests {
 
         let mut buf = Vec::new();
         lthash.write(&mut buf);
-        let lthash2 = LtHash::read_cfg(&mut &buf[..], &()).unwrap();
+        let lthash2 = LtHash::read_cfg(&mut bytes::Bytes::from(buf), &()).unwrap();
         let hash2 = lthash2.checksum();
         assert_eq!(hash, hash2);
     }

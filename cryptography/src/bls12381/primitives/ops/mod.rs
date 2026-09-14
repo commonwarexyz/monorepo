@@ -293,11 +293,11 @@ mod tests {
         for line in MIN_SIG_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
             let private_bytes = from_hex(parts[0]).unwrap();
-            let private = Private::read(&mut private_bytes.as_ref()).unwrap();
+            let private = Private::read(&mut bytes::Bytes::from(private_bytes)).unwrap();
             let message = from_hex(parts[1]).unwrap();
             let signature = from_hex(parts[2]).unwrap();
             let mut signature =
-                <MinSig as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+                <MinSig as Variant>::Signature::read(&mut bytes::Bytes::from(signature)).unwrap();
 
             let computed = sign::<MinSig>(&private, DST, &message);
             assert_eq!(signature, computed);
@@ -337,11 +337,11 @@ mod tests {
         for line in MIN_PK_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
             let private_bytes = from_hex(parts[0]).unwrap();
-            let private = Private::read(&mut private_bytes.as_ref()).unwrap();
+            let private = Private::read(&mut bytes::Bytes::from(private_bytes)).unwrap();
             let message = from_hex(parts[1]).unwrap();
             let signature = from_hex(parts[2]).unwrap();
             let mut signature =
-                <MinPk as Variant>::Signature::read(&mut signature.as_ref()).unwrap();
+                <MinPk as Variant>::Signature::read(&mut bytes::Bytes::from(signature)).unwrap();
 
             let computed = sign::<MinPk>(&private, DST, &message);
             assert_eq!(signature, computed);
@@ -406,17 +406,17 @@ mod tests {
 
     fn parse_private_key(private_key: &str) -> Result<Private, CodecError> {
         let bytes = commonware_formatting::from_hex(private_key).unwrap();
-        Private::decode(bytes.as_ref())
+        Private::decode(bytes)
     }
 
     fn parse_public_key(public_key: &str) -> Result<<MinPk as Variant>::Public, CodecError> {
         let bytes = commonware_formatting::from_hex(public_key).unwrap();
-        <MinPk as Variant>::Public::decode(bytes.as_ref())
+        <MinPk as Variant>::Public::decode(bytes)
     }
 
     fn parse_signature(signature: &str) -> Result<<MinPk as Variant>::Signature, CodecError> {
         let bytes = commonware_formatting::from_hex(signature).unwrap();
-        <MinPk as Variant>::Signature::decode(bytes.as_ref())
+        <MinPk as Variant>::Signature::decode(bytes)
     }
 
     fn parse_verify_vector(

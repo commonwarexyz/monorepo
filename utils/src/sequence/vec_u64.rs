@@ -1,7 +1,7 @@
 //! A `u64` encoded with the same framing as a `Vec<u8>` of its big-endian bytes.
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, Write};
 
 /// A `u64` encoded with the same framing as a `Vec<u8>` of its big-endian bytes.
 ///

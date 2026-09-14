@@ -1,7 +1,7 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::BitMap;
 use core::{
     num::NonZeroU32,
@@ -722,7 +722,7 @@ impl<F: Read> Read for Matrix<F> {
     type Cfg = (usize, <F as Read>::Cfg);
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl Buf,
         (max_els, f_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let cfg = RangeCfg::from(..=*max_els);

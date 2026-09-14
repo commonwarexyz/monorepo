@@ -14,8 +14,8 @@ use crate::{
         },
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_runtime::BufMut;
 
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
 where

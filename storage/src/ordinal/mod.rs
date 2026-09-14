@@ -140,13 +140,12 @@ pub struct Config {
 mod tests {
     use super::*;
     use crate::utils::bits_for_indices;
-    use commonware_codec::{FixedSize, Read, ReadExt, Write};
+    use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions,
-        deterministic,
+        Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;

@@ -216,7 +216,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: plan.marshal_start(genesis.clone()),
+            start: plan.marshal_start(genesis.clone().into()),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),

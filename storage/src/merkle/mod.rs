@@ -26,8 +26,8 @@ pub mod storage;
 #[cfg(feature = "std")]
 pub mod verification;
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};

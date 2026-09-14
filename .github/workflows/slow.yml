@@ -28,22 +28,21 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/iouring"
           - "--no-default-features"
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
           - os: macos-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: macos-latest
-            flags: "--features commonware-runtime/iouring-network"
+            flags: "--features commonware-runtime/iouring"
           # Only run --no-default-features on Ubuntu
           - os: macos-latest
             flags: "--no-default-features"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -68,6 +67,12 @@ jobs:
     needs: Tests
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -90,9 +95,6 @@ jobs:
             lint_flags: ""
           - package: commonware-storage
             test_flags: "--features test-traits"
-            lint_flags: "--cfg full_bench"
-          - package: commonware-storage
-            test_flags: "--features commonware-runtime/iouring-storage,test-traits"
             lint_flags: "--cfg full_bench"
           - package: commonware-coding
             test_flags: ""
@@ -119,6 +121,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -178,6 +182,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -241,6 +247,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -272,6 +280,12 @@ jobs:
     needs: Unsafe
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Unsafe.result }}" != "success" ]; then
@@ -298,6 +312,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -319,6 +335,12 @@ jobs:
     needs: conformance
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check conformance results
         run: |
           if [ "${{ needs.conformance.result }}" != "success" ]; then

@@ -242,9 +242,10 @@ impl crate::Storage for Storage {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, ReadOptions, Storage as _, WriteOptions,
+        Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _, WriteOptions,
         storage::{Layout, tests::run_storage_tests},
         telemetry::metrics::Registry,
+        tokio::Runner,
     };
     use commonware_utils::sys_rng;
     use futures::FutureExt as _;
@@ -359,14 +360,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    #[tokio::test]
-    async fn test_storage() {
-        let mut rng = sys_rng();
-        let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory, Layout::ALL);
-        let storage = Storage::new(config, test_pool());
-        run_storage_tests(storage).await;
+    #[test]
+    fn test_storage() {
+        Runner::default().start(|context| async move {
+            let mut rng = sys_rng();
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
+            let config = Config::new(storage_directory, Layout::ALL);
+            let storage = Storage::new(config, test_pool());
+            run_storage_tests(context, storage).await;
+        });
     }
 
     /// Dropping the `start_sync` receiver must not break the blob: the handle stays

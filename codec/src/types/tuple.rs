@@ -1,7 +1,7 @@
 //! Codec implementation for tuples.
 
-use crate::{BufsMut, EncodeSize, Error, Read, Write};
-use bytes::{Buf, BufMut};
+use crate::{Buf, BufsMut, EncodeSize, Error, Read, Write};
+use bytes::BufMut;
 use paste::paste;
 
 // Tuple implementation
