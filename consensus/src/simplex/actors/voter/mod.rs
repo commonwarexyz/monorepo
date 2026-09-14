@@ -115,7 +115,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
-    type OptimisticRequests = Arc<Mutex<Vec<View>>>;
+    type HandoffRequests = Arc<Mutex<Vec<View>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     async fn start_test_network_with_peers<I>(
@@ -213,7 +213,7 @@ mod tests {
         /// Views and parents supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
         /// Views supplied with handoff proposal requests.
-        optimistic_requests: Option<OptimisticRequests>,
+        handoff_requests: Option<HandoffRequests>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
         /// Whether the mock application accepts pipelined handoff requests.
@@ -238,7 +238,7 @@ mod tests {
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 propose_requests: None,
-                optimistic_requests: None,
+                handoff_requests: None,
                 stall_proposals: false,
                 accept_handoffs: false,
                 verify_requests: None,
@@ -279,7 +279,7 @@ mod tests {
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
-        let optimistic_requests = options.optimistic_requests;
+        let handoff_requests = options.handoff_requests;
         let verify_requests = options.verify_requests;
 
         let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -302,9 +302,9 @@ mod tests {
                     .push((context.view(), context.parent.0));
             }));
         }
-        if let Some(optimistic_requests) = optimistic_requests {
+        if let Some(handoff_requests) = handoff_requests {
             actor.set_handoff_propose_observer(Box::new(move |context| {
-                optimistic_requests.lock().push(context.view());
+                handoff_requests.lock().push(context.view());
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -3840,7 +3840,7 @@ mod tests {
                     .await;
 
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
-            let optimistic_requests = Arc::new(Mutex::new(Vec::new()));
+            let handoff_requests = Arc::new(Mutex::new(Vec::new()));
             let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
             let controlled = certification_requests.clone();
             let certifier =
@@ -3859,7 +3859,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     propose_requests: Some(propose_requests.clone()),
-                    optimistic_requests: Some(optimistic_requests.clone()),
+                    handoff_requests: Some(handoff_requests.clone()),
                     certifier,
                     ..Default::default()
                 },
@@ -3870,11 +3870,11 @@ mod tests {
                 request.0
             })
             .await;
-            wait_for_request(&context, &optimistic_requests, View::new(2), |request| {
+            wait_for_request(&context, &handoff_requests, View::new(2), |request| {
                 *request
             })
             .await;
-            assert_eq!(optimistic_requests.lock().as_slice(), &[View::new(2)]);
+            assert_eq!(handoff_requests.lock().as_slice(), &[View::new(2)]);
             assert_eq!(
                 propose_requests
                     .lock()
