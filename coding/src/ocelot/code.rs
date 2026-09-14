@@ -22,8 +22,8 @@
 //! inverse transforms each block of `m` originals at its own position, sums
 //! the results, and forward transforms that sum at position 0.
 //!
-//! Every operation on shards is elementwise, so the transform on one byte
-//! range of every shard is independent of every other byte range.
+//! Every operation on shards is elementwise. Stripe boundaries preserve the
+//! implementation's byte layout, so each stripe can be transformed independently.
 //!
 //! # Erasure decoding
 //!
@@ -48,11 +48,19 @@ use thiserror::Error;
 ///
 /// This is large enough to amortize scheduling and transform setup while
 /// exposing parallelism for large shards. The actual width is rounded down to
-/// an element boundary, or raised to one element for unusually wide fields.
+/// a layout boundary, or raised to one layout block for unusually wide blocks.
 const STRIPE_BYTES: usize = 16 * 1024;
 
+/// Target total size of the encoder's transform buffers per worker.
+const ENCODE_WORK_BYTES: usize = 512 * 1024;
+
 pub(super) fn stripe_bytes<I: Impl>() -> usize {
-    (STRIPE_BYTES / I::ALIGN).max(1) * I::ALIGN
+    const {
+        assert!(I::ALIGN > 0);
+        assert!(I::STRIPE_ALIGN > 0);
+        assert!(I::STRIPE_ALIGN.is_multiple_of(I::ALIGN));
+    }
+    (STRIPE_BYTES / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN
 }
 
 /// Split shard-major output buffers into disjoint mutable columns, one per
@@ -101,6 +109,13 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// whole number of elements. This is 1 for GF(2^8) and 2 for GF(2^16).
     const ALIGN: usize = Self::BITS / 8;
 
+    /// Byte alignment of every stripe boundary except the end of a shard.
+    ///
+    /// This must be a positive multiple of [`Self::ALIGN`]. Splitting a shard
+    /// at these boundaries must preserve its symbol ordering and byte layout
+    /// within each stripe, including a shorter final stripe.
+    const STRIPE_ALIGN: usize = Self::ALIGN;
+
     /// Globally unique transcript namespace for this field and code variant.
     const NAMESPACE: &'static [u8];
 
@@ -112,15 +127,19 @@ pub trait Impl: Copy + Send + Sync + 'static {
     fn basis() -> &'static [Self::Element];
 
     /// `dst += src`, elementwise.
+    ///
+    /// This must support both individual shards and concatenations of shards.
     fn add_into(self, dst: &mut [u8], src: &[u8]);
 
     /// `dst -= src`, elementwise.
+    ///
+    /// This has the same layout requirements as [`Self::add_into`].
     fn sub_into(self, dst: &mut [u8], src: &[u8]);
 
-    /// `dst += c * src`, elementwise.
+    /// `dst += c * src`, elementwise, for one shard.
     fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element);
 
-    /// `dst -= c * src`, elementwise.
+    /// `dst -= c * src`, elementwise, for one shard.
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
 
     /// Compute the contribution of `range` to the randomized checksums of `shard`.
@@ -137,11 +156,13 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// of the original shards must produce the checksums of the encoded shards.
     /// The random maps must detect any nonzero shard difference, except with
     /// probability 2^-8 per output code symbol. Output symbols use the code
-    /// field's canonical byte representation.
+    /// field's shard byte layout.
     ///
     /// `shard` and `coefficients` are the complete buffers. Overwrite `out`
-    /// with the projection of `shard` with all symbols outside `range` set to
-    /// zero. Adding contributions from a disjoint partition with
+    /// with the projection onto symbols in
+    /// `range.start / Self::ALIGN..range.end / Self::ALIGN`. These logical
+    /// symbol positions need not occupy consecutive bytes. Adding
+    /// contributions from a disjoint partition with
     /// [`Self::add_into`] must yield the full-shard checksum. An empty range
     /// must write zero.
     ///
@@ -168,6 +189,68 @@ pub trait Impl: Copy + Send + Sync + 'static {
         self.sub_into(y, x);
         if c != Self::Element::zero() {
             self.mul_sub(x, y, c);
+        }
+    }
+
+    /// Compute two forward-transform layers on four equal shard groups.
+    ///
+    /// Each quarter contains a whole number of `shard_len`-byte shards. The
+    /// outer pairs (0, 2) and (1, 3) use `coefficients[2]` first, followed by
+    /// the inner pairs (0, 1) and (2, 3) using `coefficients[0]` and
+    /// `coefficients[1]`, respectively.
+    fn fft_butterfly_two_layers(
+        self,
+        quarters: [&mut [u8]; 4],
+        shard_len: usize,
+        coefficients: [Self::Element; 3],
+    ) {
+        let [q0, q1, q2, q3] = quarters;
+        assert!(shard_len > 0, "shard length is zero");
+        assert_eq!(q0.len(), q1.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q2.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q3.len(), "quarter lengths differ");
+        assert!(q0.len().is_multiple_of(shard_len), "partial shard group");
+        let [c0, c1, c2] = coefficients;
+        for (((x0, x1), x2), x3) in q0
+            .chunks_exact_mut(shard_len)
+            .zip(q1.chunks_exact_mut(shard_len))
+            .zip(q2.chunks_exact_mut(shard_len))
+            .zip(q3.chunks_exact_mut(shard_len))
+        {
+            self.fft_butterfly(x0, x2, c2);
+            self.fft_butterfly(x1, x3, c2);
+            self.fft_butterfly(x0, x1, c0);
+            self.fft_butterfly(x2, x3, c1);
+        }
+    }
+
+    /// Compute two inverse-transform layers on four equal shard groups.
+    ///
+    /// This undoes [`Self::fft_butterfly_two_layers`] with the same shard
+    /// grouping and coefficients.
+    fn ifft_butterfly_two_layers(
+        self,
+        quarters: [&mut [u8]; 4],
+        shard_len: usize,
+        coefficients: [Self::Element; 3],
+    ) {
+        let [q0, q1, q2, q3] = quarters;
+        assert!(shard_len > 0, "shard length is zero");
+        assert_eq!(q0.len(), q1.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q2.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q3.len(), "quarter lengths differ");
+        assert!(q0.len().is_multiple_of(shard_len), "partial shard group");
+        let [c0, c1, c2] = coefficients;
+        for (((x0, x1), x2), x3) in q0
+            .chunks_exact_mut(shard_len)
+            .zip(q1.chunks_exact_mut(shard_len))
+            .zip(q2.chunks_exact_mut(shard_len))
+            .zip(q3.chunks_exact_mut(shard_len))
+        {
+            self.ifft_butterfly(x0, x1, c0);
+            self.ifft_butterfly(x2, x3, c1);
+            self.ifft_butterfly(x0, x2, c2);
+            self.ifft_butterfly(x1, x3, c2);
         }
     }
 }
@@ -225,7 +308,10 @@ impl<I: Impl> Encoder<I> {
         if len == 0 {
             return vec![Vec::new(); recovery];
         }
-        let stripe_bytes = stripe_bytes::<I>();
+        let buffers = 1 + usize::from(k > m);
+        let workspace_stripe =
+            (ENCODE_WORK_BYTES / buffers / m / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN;
+        let stripe_bytes = stripe_bytes::<I>().min(workspace_stripe);
         let work_bytes = stripe_bytes.min(len);
         let mut output = vec![vec![0; len]; recovery];
         let columns = stripe_columns(&mut output, stripe_bytes);
@@ -242,11 +328,9 @@ impl<I: Impl> Encoder<I> {
                 let width = column[0].len();
                 let start = stripe * stripe_bytes;
                 let end = start + width;
-                acc.data.resize(m * width, 0);
-                acc.len = width;
+                acc.resize(width);
                 if let Some(tmp) = tmp {
-                    tmp.data.resize(m * width, 0);
-                    tmp.len = width;
+                    tmp.resize(width);
                 }
 
                 for (i, block) in original.chunks(m).enumerate() {
@@ -264,12 +348,10 @@ impl<I: Impl> Encoder<I> {
                     }
                     self.transform.ifft(work, block.len(), shift);
                     if i != 0 {
-                        for (a, t) in acc
-                            .shards_mut()
-                            .zip(tmp.as_ref().expect("multiple original blocks").shards())
-                        {
-                            self.transform.imp.add_into(a, t);
-                        }
+                        self.transform.imp.add_into(
+                            acc.data_mut(),
+                            tmp.as_ref().expect("multiple original blocks").data(),
+                        );
                     }
                 }
                 self.transform.fft(acc, recovery);
@@ -470,23 +552,22 @@ impl<I: Impl> Decoder<I> {
                 let width = column[0].len();
                 let start = stripe * stripe_bytes;
                 let end = start + width;
-                work.data.resize(n * width, 0);
-                work.data.fill(0);
-                work.len = width;
+                work.resize(width);
+                work.data_mut().fill(0);
                 for &(i, shard, coefficient) in &inputs {
                     imp.mul_add(
-                        &mut work.data[i * width..(i + 1) * width],
+                        &mut work.data_mut()[i * width..(i + 1) * width],
                         &shard[start..end],
                         coefficient,
                     );
                 }
                 self.transform.ifft(work, nonzero, 0);
-                derivative(imp, &mut work.data, width);
+                derivative(imp, work.data_mut(), width);
                 self.transform.fft(work, needed);
                 for ((dst, &i), &inverse) in column.into_iter().zip(&missing).zip(&inverses) {
                     imp.mul_add(
                         dst,
-                        &work.data[(m + i) * width..(m + i + 1) * width],
+                        &work.data()[(m + i) * width..(m + i + 1) * width],
                         inverse,
                     );
                 }

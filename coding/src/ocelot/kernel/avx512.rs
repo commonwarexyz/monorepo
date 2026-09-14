@@ -2,8 +2,8 @@
 
 use super::{Kernel, WithKernel};
 use core::arch::x86_64::{
-    __m512i, _mm512_gf2p8mul_epi8, _mm512_loadu_si512, _mm512_set1_epi64, _mm512_storeu_si512,
-    _mm512_xor_si512,
+    __m512i, __mmask16, _mm512_gf2p8mul_epi8, _mm512_loadu_si512, _mm512_mask_storeu_epi32,
+    _mm512_maskz_loadu_epi32, _mm512_set1_epi64, _mm512_storeu_si512, _mm512_xor_si512,
 };
 
 /// An AVX-512F and GFNI [`Kernel`].
@@ -39,6 +39,7 @@ impl Default for Avx512 {
 impl Kernel for Avx512 {
     type Vector = __m512i;
     const LANES: usize = 64;
+    const PARTIAL_GRANULARITY: usize = 4;
     const FUSED_BUTTERFLY: bool = true;
     type Constant = __m512i;
 
@@ -64,12 +65,44 @@ impl Kernel for Avx512 {
     }
 
     #[inline]
+    fn load_partial(self, bytes: &[u8]) -> Self::Vector {
+        assert!(!bytes.is_empty(), "partial load is empty");
+        assert!(bytes.len() <= Self::LANES, "partial load exceeds LANES");
+        assert!(
+            bytes.len().is_multiple_of(Self::PARTIAL_GRANULARITY),
+            "partial load is not aligned"
+        );
+        let mask = prefix_mask(bytes.len());
+        // SAFETY: `Avx512` proves AVX-512F is available. Each enabled mask bit loads one
+        // four-byte lane, and the checks above prove `bytes` contains every enabled lane.
+        // Masked-off lanes are not accessed and are set to zero. The unaligned load imposes
+        // no alignment requirement.
+        unsafe { load_partial(bytes.as_ptr(), mask) }
+    }
+
+    #[inline]
     fn store(self, a: Self::Vector, out: &mut [u8]) {
         assert_eq!(out.len(), Self::LANES, "out.len() != LANES");
         // SAFETY: `Avx512` proves AVX-512F is available, and the length check above proves `out`
         // contains space for exactly one full vector. The unaligned store imposes no alignment
         // requirement.
         unsafe { store(a, out.as_mut_ptr()) }
+    }
+
+    #[inline]
+    fn store_partial(self, a: Self::Vector, out: &mut [u8]) {
+        assert!(!out.is_empty(), "partial store is empty");
+        assert!(out.len() <= Self::LANES, "partial store exceeds LANES");
+        assert!(
+            out.len().is_multiple_of(Self::PARTIAL_GRANULARITY),
+            "partial store is not aligned"
+        );
+        let mask = prefix_mask(out.len());
+        // SAFETY: `Avx512` proves AVX-512F is available. Each enabled mask bit stores one
+        // four-byte lane, and the checks above prove `out` contains every enabled lane.
+        // Masked-off lanes are not accessed. The unaligned store imposes no alignment
+        // requirement.
+        unsafe { store_partial(a, out.as_mut_ptr(), mask) }
     }
 
     #[inline]
@@ -103,6 +136,12 @@ fn available() -> bool {
 }
 
 #[inline]
+const fn prefix_mask(bytes: usize) -> __mmask16 {
+    let lanes = bytes / 4;
+    u16::MAX >> (16 - lanes)
+}
+
+#[inline]
 #[target_feature(enable = "avx512f")]
 fn splat(x: u8) -> __m512i {
     let repeated = u64::from_ne_bytes([x; 8]);
@@ -119,10 +158,26 @@ unsafe fn load(bytes: *const u8) -> __m512i {
 
 #[inline]
 #[target_feature(enable = "avx512f")]
+unsafe fn load_partial(bytes: *const u8, mask: __mmask16) -> __m512i {
+    // SAFETY: the caller guarantees that `bytes` points to four readable bytes for each enabled
+    // low mask bit. The intrinsic does not access masked-off lanes and permits unaligned input.
+    unsafe { _mm512_maskz_loadu_epi32(mask, bytes.cast()) }
+}
+
+#[inline]
+#[target_feature(enable = "avx512f")]
 unsafe fn store(a: __m512i, out: *mut u8) {
     // SAFETY: the caller guarantees `out` points to 64 writable bytes. `storeu` imposes no
     // alignment requirement.
     unsafe { _mm512_storeu_si512(out.cast(), a) };
+}
+
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn store_partial(a: __m512i, out: *mut u8, mask: __mmask16) {
+    // SAFETY: the caller guarantees that `out` points to four writable bytes for each enabled low
+    // mask bit. The intrinsic does not access masked-off lanes and permits unaligned output.
+    unsafe { _mm512_mask_storeu_epi32(out.cast(), mask, a) };
 }
 
 #[inline]

@@ -22,7 +22,7 @@ commonware_macros::stability_scope!(ALPHA {
     // TODO: remove this once we have a full impl.
     #[allow(dead_code)]
     mod ocelot;
-    pub use ocelot::{Error as OcelotError, Ocelot8};
+    pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16};
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -554,7 +554,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{Ocelot8, PhasedAsScheme, Scheme, reed_solomon::ReedSolomon};
+        use crate::{Ocelot8, Ocelot16, PhasedAsScheme, Scheme, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -630,8 +630,17 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            decode_rejects_mixed_commitments::<PhasedAsScheme<Ocelot16<Sha256>>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
             decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
             decode_rejects_empty_checked_shards::<PhasedAsScheme<Ocelot8<Sha256>>>(
+                &config,
+                b"alpha payload",
+            );
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<Ocelot16<Sha256>>>(
                 &config,
                 b"alpha payload",
             );
@@ -647,6 +656,7 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, b"", &selected);
         }
 
         #[test]
@@ -660,6 +670,7 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, &data, &selected);
         }
 
         #[test]
@@ -679,11 +690,21 @@ mod test {
                 Ok(())
             });
         }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot16() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
     }
 
     mod phased_scheme {
         use super::*;
-        use crate::{Ocelot8, PhasedScheme};
+        use crate::{Ocelot8, Ocelot16, PhasedScheme};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -824,6 +845,11 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            check_rejects_mixed_commitments::<Ocelot16<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
         }
 
         #[test]
@@ -835,6 +861,7 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<Ocelot8<Sha256>>(&config, b"", &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -847,6 +874,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
         }
 
         #[test]
@@ -854,6 +882,15 @@ mod test {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot16() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }
