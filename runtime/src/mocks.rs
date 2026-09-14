@@ -581,6 +581,11 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
         self
     }
 
+    fn inline_io(mut self) -> Self {
+        self.inner = self.inner.inline_io();
+        self
+    }
+
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
         F: FnOnce(Self) -> Fut + Send + 'static,
@@ -701,6 +706,11 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn dedicated(mut self) -> Self {
         self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn inline_io(mut self) -> Self {
+        self.inner = self.inner.inline_io();
         self
     }
 

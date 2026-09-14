@@ -279,7 +279,7 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        task::spawn_blocking(move || {
+        let read = move || {
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
@@ -291,9 +291,16 @@ impl crate::Blob for Blob {
                 bufs.copy_from_slice(temp.as_ref());
             }
             Ok(bufs)
-        })
-        .await
-        .map_err(|_| Error::ReadFailed)?
+        };
+
+        // A dedicated task that opted in owns its thread, so the read runs on it directly and
+        // skips the blocking-pool handoff (a pool wake plus a park of this thread per read).
+        if crate::utils::thread::INLINE_IO.with(|inline| inline.get()) {
+            return read();
+        }
+        task::spawn_blocking(read)
+            .await
+            .map_err(|_| Error::ReadFailed)?
     }
 
     async fn write_at(
