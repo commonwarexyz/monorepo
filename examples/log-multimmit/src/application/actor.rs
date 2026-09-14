@@ -128,13 +128,15 @@ struct ProposalStart {
     started_at: SystemTime,
     input_ready_at: Option<SystemTime>,
     finalized: bool,
+    ordered: bool,
 }
 
 /// Tracks signed local proposals to consensus finality and to ordered delivery.
 ///
 /// Finality is the pool fact that places the block under a directly finalized leader. Ordering
-/// is the block's delivery in the total order. A start is kept until the block is ordered or
-/// evicted, including after its finality sample has been recorded.
+/// is the block's delivery in the total order. Marshal can deliver L-QC ancestry before the
+/// voter reports a covering pool fact. A start is kept until both milestones are observed or
+/// it is evicted.
 #[derive(Clone)]
 pub struct ProposalLatency {
     started: Arc<Mutex<VecDeque<ProposalStart>>>,
@@ -293,8 +295,10 @@ impl ProposalLatency {
                 self.finality_evicted.inc();
                 self.nonfinalized.dec();
             }
-            self.dropped.inc();
-            self.outstanding.dec();
+            if !evicted.ordered {
+                self.dropped.inc();
+                self.outstanding.dec();
+            }
             self.sample(&evicted, "eviction", "capacity", SystemTime::now(), None);
         }
         self.starts.inc();
@@ -305,6 +309,7 @@ impl ProposalLatency {
             started_at,
             input_ready_at,
             finalized: false,
+            ordered: false,
         };
         self.sample(&start, "start", "signed", started_at, None);
         started.push_back(start);
@@ -341,7 +346,8 @@ impl ProposalLatency {
             finalized
         };
         let now = SystemTime::now();
-        for start in self.started.lock().iter_mut() {
+        let mut started = self.started.lock();
+        for start in started.iter_mut() {
             if start.finalized || !finalized.contains(&start.block) {
                 continue;
             }
@@ -370,20 +376,25 @@ impl ProposalLatency {
                 );
             }
         }
+        started.retain(|start| !start.finalized || !start.ordered);
     }
 
-    /// Records the ordered delivery of `block` and forgets its start.
+    /// Records ordered delivery once, retaining the start until finality is also observed.
     pub fn order(&self, block: BlockRef<Sha256Digest>) {
         let mut started = self.started.lock();
         if let Some(index) = started.iter().position(|start| start.block == block) {
-            let start = started.remove(index).unwrap();
+            let start = &mut started[index];
+            if start.ordered {
+                return;
+            }
+            start.ordered = true;
             let now = SystemTime::now();
             self.outstanding.dec();
-            if !start.finalized {
-                self.nonfinalized.dec();
-            }
             self.ordering.observe_between(start.started_at, now);
-            self.sample(&start, "ordered", "delivery", now, None);
+            self.sample(start, "ordered", "delivery", now, None);
+            if start.finalized {
+                started.remove(index);
+            }
         }
     }
 }
@@ -910,6 +921,13 @@ mod tests {
                 };
                 let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
                 latency.start(block(1), started, None);
+                latency.finalize(
+                    &[block(1)],
+                    &[Height::new(1)],
+                    3,
+                    View::new(1),
+                    &Staged::default(),
+                );
                 latency.order(block(1));
                 assert!(output.0.lock().is_empty());
                 let latency = latency.enable_benchmark(NZUsize!(3));
@@ -964,8 +982,24 @@ mod tests {
             assert_eq!(last["starts"].as_u64(), Some(4));
             assert_eq!(last["drops"].as_u64(), Some(1));
             assert_eq!(last["outstanding"].as_u64(), Some(0));
-            assert_eq!(last["nonfinalized"].as_u64(), Some(0));
+            assert_eq!(last["nonfinalized"].as_u64(), Some(1));
         });
+    }
+
+    fn start_chain(latency: &ProposalLatency, staged: &Staged, count: u64) -> Vec<Arc<Block>> {
+        let mut parent = Sha256::hash(&[b"genesis"]);
+        (1..=count)
+            .map(|height| {
+                let context =
+                    Context::new(Epoch::new(7), ChainId::new(0), Height::new(height), parent)
+                        .unwrap();
+                let block = Arc::new(Block::from_context(context, Body::junk(9, context, 32)));
+                parent = block.digest();
+                assert!(staged.insert(Arc::clone(&block)));
+                latency.start(block.reference(), SystemTime::now(), None);
+                block
+            })
+            .collect()
     }
 
     #[test]
@@ -973,19 +1007,7 @@ mod tests {
         deterministic::Runner::default().start(|runtime| async move {
             let latency = ProposalLatency::new(&runtime, NZUsize!(8)).enable_benchmark(NZUsize!(3));
             let staged = Staged::default();
-            let mut parent = Sha256::hash(&[b"genesis"]);
-            let blocks: Vec<_> = (1..=4)
-                .map(|height| {
-                    let context =
-                        Context::new(Epoch::new(7), ChainId::new(0), Height::new(height), parent)
-                            .unwrap();
-                    let block = Arc::new(Block::from_context(context, Body::junk(9, context, 32)));
-                    parent = block.digest();
-                    assert!(staged.insert(Arc::clone(&block)));
-                    latency.start(block.reference(), SystemTime::now(), None);
-                    block
-                })
-                .collect();
+            let blocks = start_chain(&latency, &staged, 4);
             let conflicting = BlockRef::new(
                 ChainId::new(0),
                 Height::new(2),
@@ -1035,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_censored_starts_remain_visible_until_ordering_or_eviction() {
+    fn benchmark_censored_starts_remain_visible_until_finality_or_eviction() {
         deterministic::Runner::default().start(|runtime| async move {
             let latency = ProposalLatency::new(&runtime, NZUsize!(2)).enable_benchmark(NZUsize!(2));
             let block = |height| {
@@ -1061,10 +1083,18 @@ mod tests {
             latency.order(block(2));
             latency.order(block(2));
             assert_eq!(latency.outstanding.get(), 1);
-            assert_eq!(latency.nonfinalized.get(), 1);
+            assert_eq!(latency.nonfinalized.get(), 2);
             latency.order(block(3));
             assert_eq!(latency.outstanding.get(), 0);
-            assert_eq!(latency.nonfinalized.get(), 0);
+            assert_eq!(latency.nonfinalized.get(), 2);
+            for height in 4..=5 {
+                latency.start(block(height), now, None);
+            }
+            assert_eq!(latency.started.lock().len(), 2);
+            assert_eq!(latency.outstanding.get(), 2);
+            assert_eq!(latency.nonfinalized.get(), 2);
+            assert_eq!(latency.dropped.get(), 1);
+            assert_eq!(latency.finality_evicted.get(), 3);
         });
     }
 
@@ -1124,7 +1154,7 @@ mod tests {
             latency.order(reference(4));
             latency.start(reference(5), runtime.current(), None);
             assert_eq!(latency.dropped.get(), 2);
-            assert_eq!(latency.finality_evicted.get(), 1);
+            assert_eq!(latency.finality_evicted.get(), 3);
         });
     }
 
@@ -1194,6 +1224,56 @@ mod tests {
             assert!(!started.iter().any(|start| start.block == old));
             assert!(started.iter().any(|start| start.block == newer));
             assert!(started.iter().any(|start| start.block == newest));
+        });
+    }
+
+    #[test]
+    fn proposal_latency_observes_skipped_ancestry_after_ordering() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let latency = ProposalLatency::new(&runtime, NZUsize!(4)).enable_benchmark(NZUsize!(3));
+            let staged = Staged::default();
+            let blocks = start_chain(&latency, &staged, 3);
+            let conflicting = BlockRef::new(
+                ChainId::new(0),
+                Height::new(1),
+                Sha256::hash(&[b"conflict"]),
+            );
+            latency.start(conflicting, SystemTime::now(), None);
+            // Marshal can deliver an L-QC's ancestry before the voter reports a later pool fact.
+            for block in &blocks[..2] {
+                latency.order(block.reference());
+                latency.order(block.reference());
+            }
+            assert_eq!(latency.outstanding.get(), 2);
+            assert!(
+                runtime
+                    .encode()
+                    .contains("proposal_finalization_latency_count 0\n")
+            );
+            for _ in 0..2 {
+                latency.finalize(
+                    &[blocks[2].reference()],
+                    &[Height::new(2)],
+                    3,
+                    View::new(7),
+                    &staged,
+                );
+            }
+            assert_eq!(latency.proposed_early.get(), 2);
+            assert_eq!(latency.extension_early.get(), 1);
+            assert_eq!(latency.nonfinalized.get(), 1);
+            assert_eq!(latency.outstanding.get(), 2);
+            assert_eq!(latency.started.lock().len(), 2);
+            assert!(
+                latency
+                    .started
+                    .lock()
+                    .iter()
+                    .any(|s| s.block == conflicting && !s.finalized)
+            );
+            let metrics = runtime.encode();
+            assert!(metrics.contains("proposal_finalization_latency_count 3\n"));
+            assert!(metrics.contains("proposal_ordering_latency_count 2\n"));
         });
     }
 
@@ -1290,9 +1370,12 @@ mod tests {
             );
             latency.start(block, SystemTime::now(), None);
             latency.order(block);
-            assert!(latency.started.lock().is_empty());
+            assert_eq!(latency.started.lock().len(), 1);
+            assert!(latency.started.lock()[0].ordered);
             latency.order(block);
-            assert!(latency.started.lock().is_empty());
+            assert_eq!(latency.started.lock().len(), 1);
+            assert_eq!(latency.outstanding.get(), 0);
+            assert_eq!(latency.nonfinalized.get(), 1);
         });
     }
 
