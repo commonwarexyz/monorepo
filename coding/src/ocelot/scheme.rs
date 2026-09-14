@@ -16,7 +16,8 @@ use thiserror::Error;
 
 /// Number of independent checksum outputs, each with 8 bits of soundness.
 const CHECKSUMS: usize = 16;
-const MAX_CHECKSUM_BYTES: usize = CHECKSUMS * u8::MAX as usize;
+/// At most 65,535 originals, each carrying 16 two-byte checksum symbols.
+const MAX_CHECKSUM_BYTES: usize = CHECKSUMS * 2 * u16::MAX as usize;
 
 fn coefficient_count(shard_len: usize, align: usize) -> Result<usize, Error> {
     if align == 0 || !shard_len.is_multiple_of(align) {
@@ -175,6 +176,7 @@ where
 /// Data derived from a participant's strong shard for checking forwarded shards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckingData<D: Digest> {
+    namespace: &'static [u8],
     commitment: Summary,
     config: Config,
     data_bytes: u32,
@@ -347,6 +349,7 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotX<I, H, CHECKSUM_BYT
             .chain(encoded.into_iter().map(Bytes::from))
             .collect();
         Ok(CheckingData {
+            namespace: I::NAMESPACE,
             commitment: expected_commitment,
             config: *config,
             data_bytes: shard.data_bytes,
@@ -365,7 +368,7 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotX<I, H, CHECKSUM_BYT
         weak: WeakShard<H::Digest>,
         strategy: &impl Strategy,
     ) -> Result<CheckedShard, Error> {
-        if checking_data.commitment != *commitment {
+        if checking_data.namespace != I::NAMESPACE || checking_data.commitment != *commitment {
             return Err(Error::CommitmentMismatch);
         }
         let (_, _, total) = Self::topology(&checking_data.config)?;
@@ -492,7 +495,10 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotX<I, H, CHECKSUM_BYT
         shards: impl Iterator<Item = &'a CheckedShard>,
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Error> {
-        if checking_data.commitment != *commitment || checking_data.config != *config {
+        if checking_data.namespace != I::NAMESPACE
+            || checking_data.commitment != *commitment
+            || checking_data.config != *config
+        {
             return Err(Error::CommitmentMismatch);
         }
         let (original_count, recovery_count, total) = Self::topology(config)?;
@@ -573,7 +579,7 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotX<I, H, CHECKSUM_BYT
 mod tests {
     use super::*;
     use crate::{
-        Ocelot8, PhasedScheme,
+        Ocelot8, Ocelot16, PhasedScheme,
         ocelot::{
             Impl8,
             field::gf8::GF8,
@@ -589,6 +595,236 @@ mod tests {
         minimum_shards: NZU16!(3),
         extra_shards: NZU16!(4),
     };
+
+    #[test]
+    fn ocelot16_roundtrip_above_256_shards() {
+        let config = Config {
+            minimum_shards: NZU16!(257),
+            extra_shards: NZU16!(8),
+        };
+        let mut data = vec![0; 1027];
+        test_rng().fill_bytes(&mut data);
+        let (commitment, shards) =
+            Ocelot16::<Sha256>::encode(b"test", &config, &data[..], &Sequential).unwrap();
+        let cfg = CodecConfig {
+            maximum_shard_size: 16,
+        };
+        let owner = StrongShard::read_cfg(&mut shards[0].encode(), &cfg).unwrap();
+        assert_eq!(owner.checksum.len(), 257 * 32);
+        let (checking_data, _, _) =
+            Ocelot16::<Sha256>::weaken(b"test", &config, &commitment, 0, owner, &Sequential)
+                .unwrap();
+        let checked: Vec<_> = shards
+            .iter()
+            .enumerate()
+            .skip(8)
+            .map(|(index, shard)| {
+                let weak = WeakShard::read_cfg(&mut shard.weak.encode(), &cfg).unwrap();
+                Ocelot16::<Sha256>::check(
+                    &config,
+                    &commitment,
+                    &checking_data,
+                    index as u16,
+                    weak,
+                    &Sequential,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            Ocelot16::<Sha256>::decode(
+                &config,
+                &commitment,
+                checking_data,
+                checked.iter(),
+                &Sequential,
+            )
+            .unwrap(),
+            data,
+        );
+        assert!(matches!(
+            Ocelot8::<Sha256>::encode(b"test", &config, &data[..], &Sequential),
+            Err(Error::InvalidShardCount),
+        ));
+    }
+
+    #[test]
+    fn ocelot16_rejects_malformed_shards() {
+        let (commitment, shards) =
+            Ocelot16::<Sha256>::encode(b"test", &CONFIG, &b"odd length!"[..], &Sequential).unwrap();
+        let (checking_data, _, _) = Ocelot16::<Sha256>::weaken(
+            b"test",
+            &CONFIG,
+            &commitment,
+            0,
+            shards[0].clone(),
+            &Sequential,
+        )
+        .unwrap();
+        for byte in [0, shards[3].weak.shard.len() / 2] {
+            let mut weak = shards[3].weak.clone();
+            let mut corrupt = weak.shard.to_vec();
+            corrupt[byte] ^= 1;
+            weak.shard = corrupt.into();
+            assert!(matches!(
+                Ocelot16::<Sha256>::check(
+                    &CONFIG,
+                    &commitment,
+                    &checking_data,
+                    3,
+                    weak,
+                    &Sequential,
+                ),
+                Err(Error::InvalidWeakShard),
+            ));
+        }
+        let mut weak = shards[3].weak.clone();
+        weak.shard.truncate(weak.shard.len() - 1);
+        assert!(matches!(
+            Ocelot16::<Sha256>::check(&CONFIG, &commitment, &checking_data, 3, weak, &Sequential,),
+            Err(Error::InvalidWeakShard),
+        ));
+        let mut strong = shards[0].clone();
+        strong.checksum.truncate(strong.checksum.len() - 1);
+        assert!(matches!(
+            Ocelot16::<Sha256>::weaken(b"test", &CONFIG, &commitment, 0, strong, &Sequential,),
+            Err(Error::InvalidStrongShard),
+        ));
+    }
+
+    #[test]
+    fn ocelot_variants_are_domain_separated() {
+        let (commitment, shards) =
+            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &b"variant"[..], &Sequential).unwrap();
+        let (checking_data, checked, weak) = Ocelot8::<Sha256>::weaken(
+            b"test",
+            &CONFIG,
+            &commitment,
+            0,
+            shards[0].clone(),
+            &Sequential,
+        )
+        .unwrap();
+        assert!(matches!(
+            Ocelot16::<Sha256>::weaken(
+                b"test",
+                &CONFIG,
+                &commitment,
+                0,
+                shards[0].clone(),
+                &Sequential,
+            ),
+            Err(Error::InvalidStrongShard),
+        ));
+        assert!(matches!(
+            Ocelot16::<Sha256>::check(&CONFIG, &commitment, &checking_data, 0, weak, &Sequential,),
+            Err(Error::CommitmentMismatch),
+        ));
+        let mut checked = vec![checked];
+        for (index, shard) in shards.iter().enumerate().take(3).skip(1) {
+            checked.push(
+                Ocelot8::<Sha256>::check(
+                    &CONFIG,
+                    &commitment,
+                    &checking_data,
+                    index as u16,
+                    shard.weak.clone(),
+                    &Sequential,
+                )
+                .unwrap(),
+            );
+        }
+        assert!(matches!(
+            Ocelot16::<Sha256>::decode(
+                &CONFIG,
+                &commitment,
+                checking_data,
+                checked.iter(),
+                &Sequential,
+            ),
+            Err(Error::CommitmentMismatch),
+        ));
+    }
+
+    #[test]
+    fn ocelot16_topology_limits() {
+        type Scheme = OcelotX<crate::ocelot::Impl16<Portable>, Sha256, 32>;
+        let valid = Config {
+            minimum_shards: NZU16!(32768),
+            extra_shards: NZU16!(32768),
+        };
+        assert_eq!(Scheme::topology(&valid).unwrap(), (32768, 32768, 65536));
+        let invalid = Config {
+            minimum_shards: NZU16!(32769),
+            ..valid
+        };
+        assert!(matches!(
+            Scheme::topology(&invalid),
+            Err(Error::InvalidShardCount)
+        ));
+        let padded_overflow = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(32769),
+        };
+        assert!(matches!(
+            Scheme::topology(&padded_overflow),
+            Err(Error::InvalidShardCount)
+        ));
+    }
+
+    #[test]
+    fn ocelot16_preserves_bytes_across_layout_and_stripe_boundaries() {
+        let len = stripe_bytes::<crate::ocelot::Impl16<Portable>>() + 130;
+        let mut data = vec![0; 3 * len - u32::SIZE];
+        test_rng().fill_bytes(&mut data);
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let (commitment, shards) =
+            Ocelot16::<Sha256>::encode(b"test", &CONFIG, &data[..], &strategy).unwrap();
+        let original_bytes: Vec<_> = shards[..3]
+            .iter()
+            .flat_map(|shard| shard.weak.shard.iter().copied())
+            .collect();
+        assert_eq!(
+            &original_bytes[..u32::SIZE],
+            &(data.len() as u32).to_be_bytes()
+        );
+        assert_eq!(&original_bytes[u32::SIZE..], data);
+
+        let (checking_data, own_checked, _) = Ocelot16::<Sha256>::weaken(
+            b"test",
+            &CONFIG,
+            &commitment,
+            3,
+            shards[3].clone(),
+            &strategy,
+        )
+        .unwrap();
+        let mut checked = vec![own_checked];
+        for (index, shard) in shards.iter().enumerate().take(6).skip(4) {
+            checked.push(
+                Ocelot16::<Sha256>::check(
+                    &CONFIG,
+                    &commitment,
+                    &checking_data,
+                    index as u16,
+                    shard.weak.clone(),
+                    &strategy,
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(
+            Ocelot16::<Sha256>::decode(
+                &CONFIG,
+                &commitment,
+                checking_data,
+                checked.iter(),
+                &strategy,
+            )
+            .unwrap(),
+            data,
+        );
+    }
 
     #[test]
     fn roundtrip_from_recovery_shards() {
