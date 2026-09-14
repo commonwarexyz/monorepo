@@ -368,9 +368,8 @@ pub struct StatefulStateSyncFuzzInput {
     pub join_after: u8,
     /// Operations the joiner fetches and applies per sync step.
     pub sync_batch: NonZeroU64,
-    /// Crash the joiner this many steps of
-    /// [`JOINER_CRASH_STEP`](super::JOINER_CRASH_STEP) after it starts,
-    /// before the general restart schedule, so a sync in flight is
+    /// Crash the joiner this many steps of ten simulated milliseconds after
+    /// it starts, before the general restart schedule, so a sync in flight is
     /// interrupted and must resume.
     pub joiner_crash: Option<u8>,
     /// Number of scheduled crash/restart events over every node.

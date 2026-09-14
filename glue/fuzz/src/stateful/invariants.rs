@@ -319,6 +319,11 @@ pub struct Counts {
     pub correct_nodes: usize,
     /// Distinct heights checked under I1.
     pub chain_heights: usize,
+    /// Peer-synced nodes whose first block could not be linked to the chain
+    /// the other correct nodes delivered, because none of them had delivered
+    /// the height below it by the measurement point. Such a node's anchor
+    /// was not checked, so the run is unmeasured.
+    pub unlinked_anchors: usize,
     /// Cross-node database-state comparisons made under I2.
     pub state_comparisons: usize,
     /// Cross-node verdict comparisons made under I3.
@@ -340,6 +345,7 @@ impl Counts {
     pub const fn measured(&self) -> bool {
         self.correct_nodes > 0
             && self.chain_heights > 0
+            && self.unlinked_anchors == 0
             && self.state_comparisons > 0
             && self.verdict_comparisons > 0
     }
@@ -360,19 +366,29 @@ pub(super) type CorrectNode<'a> = (usize, &'a EngineObservations);
 /// rather than at genesis; its first block must then be the child of the block
 /// the other correct nodes delivered below it, and a sync resumed from a newer
 /// floor restarts its sequence from that floor.
-pub(super) fn check_chain_of_blocks(nodes: &[CorrectNode<'_>], genesis: Digest) -> usize {
+///
+/// Returns the number of distinct heights compared across nodes and the number
+/// of peer-synced nodes whose first block could not be linked because no
+/// correct node had delivered the height below it. Nodes deliver in order, so
+/// that happens only when the synced node is ahead of every other node's
+/// delivery, and then nothing about its anchor can be compared: the caller
+/// reports the run as unmeasured rather than as passing.
+pub(super) fn check_chain_of_blocks(nodes: &[CorrectNode<'_>], genesis: Digest) -> (usize, usize) {
     let mut by_height: BTreeMap<Height, Digest> = BTreeMap::new();
     for (_, observations) in nodes {
         for (height, block) in observations.blocks() {
             by_height.entry(height).or_insert(block.digest);
         }
     }
+    let mut unlinked = 0;
     for (engine, observations) in nodes {
         let synced = observations.peer_synced();
         check_in_order(*engine, &observations.timeline());
-        check_parent_linkage(*engine, synced, &observations.blocks(), &by_height, genesis);
+        if !check_parent_linkage(*engine, synced, &observations.blocks(), &by_height, genesis) {
+            unlinked += 1;
+        }
     }
-    check_agreement(nodes)
+    (check_agreement(nodes), unlinked)
 }
 
 /// Per-node in-order, gap-free delivery.
@@ -453,13 +469,18 @@ fn check_in_order(engine: usize, timeline: &[Event]) {
 /// Every pair of consecutively delivered blocks is parent-linked, and the chain
 /// is rooted at genesis: directly, or through the block the other correct
 /// nodes delivered below a peer-synced node's first one.
+///
+/// Returns whether the node's first block was linked to the chain. It is not
+/// only when the node peer synced and no correct node delivered the height
+/// below its first block.
 fn check_parent_linkage(
     engine: usize,
     synced: bool,
     blocks: &BTreeMap<Height, Linkage>,
     by_height: &BTreeMap<Height, Digest>,
     genesis: Digest,
-) {
+) -> bool {
+    let mut linked = true;
     if let Some((height, block)) = blocks.first_key_value() {
         if *height == Height::zero() {
             assert_eq!(
@@ -487,6 +508,8 @@ fn check_parent_linkage(
                 block.parent,
                 height.get() - 1,
             );
+        } else {
+            linked = false;
         }
     }
 
@@ -518,6 +541,7 @@ fn check_parent_linkage(
             next.context_parent,
         );
     }
+    linked
 }
 
 /// At most one distinct block per height across all correct nodes.
@@ -647,7 +671,8 @@ pub(super) fn check_verdict_agreement(nodes: &[CorrectNode<'_>]) -> usize {
 /// it synced to, the height below the first one the engine applied
 /// afterwards, rather than at genesis; that floor bounds it until pruning
 /// moves past it. Floors are chain properties, so the one recorded by any
-/// correct node serves, and I2 has already established that they agree.
+/// correct node serves, and I2 has already established that they agree; a
+/// height no node applied is bounded by the nearest applied height above it.
 ///
 /// Returns the number of observations checked and the number in which
 /// pruning had visibly run.
@@ -672,14 +697,23 @@ pub(super) fn check_retention(
             }
         }
     }
+    // The floor of a height no correct node applied is bounded by the floor
+    // of the nearest applied height above it, since floors are monotone: a
+    // sound, looser bound. This covers a sync height whose block the serving
+    // nodes have delivered but not yet applied at the measurement point.
     let floor_of = |engine: &usize, height: u64| {
         if height == 0 {
-            initial
-        } else {
-            *floors.get(&Height::new(height)).unwrap_or_else(|| {
-                panic!("engine{engine} needs a prune floor for height {height} no node recorded")
-            })
+            return initial;
         }
+        floors.range(Height::new(height)..).next().map_or_else(
+            || {
+                panic!(
+                    "engine{engine} needs a prune floor at or above height {height}, which \
+                         no node recorded"
+                )
+            },
+            |(_, floor)| *floor,
+        )
     };
 
     let mut checks = 0;
@@ -966,6 +1000,81 @@ mod tests {
         check_in_order(0, &timeline);
     }
 
+    /// A block at `height` whose parent is `parent`.
+    fn child(height: u64, label: &[u8], parent: &[u8]) -> Block<Standard> {
+        let mut block = block(height, label);
+        block.parent = digest(parent);
+        block
+    }
+
+    /// A serving node that delivered a chain rooted at `genesis` up to
+    /// height 4, and the digest of its block at height 4.
+    fn serving_chain(genesis: Digest) -> (EngineObservations, Digest) {
+        let serving = EngineObservations::new();
+        let mut parent = genesis;
+        for height in 1..=4u64 {
+            let mut block = block(height, &height.to_be_bytes());
+            block.parent = parent;
+            block.context.parent.1 = parent;
+            serving.record_delivery(&block);
+            parent = block.digest();
+        }
+        (serving, parent)
+    }
+
+    /// A synced node's first block links to what the serving nodes delivered
+    /// below it.
+    #[test]
+    fn synced_anchor_links_to_the_delivered_chain() {
+        let genesis = digest(b"genesis");
+        let (serving, below) = serving_chain(genesis);
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        let mut first = block(5, b"e");
+        first.parent = below;
+        joiner.record_delivery(&first);
+        assert_eq!(
+            check_chain_of_blocks(&[(0, &serving), (1, &joiner)], genesis),
+            (5, 0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "synced onto a chain the other correct nodes did not deliver")]
+    fn synced_anchor_off_the_delivered_chain_is_rejected() {
+        let genesis = digest(b"genesis");
+        let (serving, _) = serving_chain(genesis);
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        joiner.record_delivery(&child(5, b"e", b"elsewhere"));
+        check_chain_of_blocks(&[(0, &serving), (1, &joiner)], genesis);
+    }
+
+    /// When no node delivered the height below a synced node's first block,
+    /// nothing can be compared: the anchor is reported unlinked and the run
+    /// counts as unmeasured rather than as passing.
+    #[test]
+    fn unlinkable_synced_anchor_is_unmeasured() {
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        joiner.record_delivery(&child(5, b"e", b"elsewhere"));
+        let (heights, unlinked) = check_chain_of_blocks(&[(0, &joiner)], digest(b"genesis"));
+        assert_eq!((heights, unlinked), (1, 1));
+        let counts = Counts {
+            correct_nodes: 1,
+            chain_heights: heights,
+            unlinked_anchors: unlinked,
+            state_comparisons: 1,
+            verdict_comparisons: 1,
+            retention_checks: 0,
+            prunes: 0,
+            sync_starts: 1,
+            synced_nodes: 0,
+            restarts: 0,
+        };
+        assert!(!counts.measured());
+    }
+
     #[test]
     #[should_panic(expected = "correct nodes forked at height 2")]
     fn cross_node_fork_is_rejected() {
@@ -1083,6 +1192,58 @@ mod tests {
         let node = pruned_node(4);
         node.record_applied(applied(4, b"root", 8, 7));
         check_retention(&[(0, &node)], WINDOW);
+    }
+
+    /// A start that chose peer state sync.
+    fn sync_start() -> Startup {
+        Startup {
+            requested: true,
+            should_sync: true,
+            resumed: false,
+            sync_height: None,
+            floor_round: Some(Round::new(Epoch::zero(), View::new(1))),
+        }
+    }
+
+    /// A synced database starts at the floor of the height it synced to,
+    /// recorded by a serving node that applied it.
+    #[test]
+    fn synced_node_is_bounded_by_its_sync_floor() {
+        let serving = EngineObservations::new();
+        for height in 1..=5u64 {
+            serving.record_applied(applied(height, b"root", height * 2, 0));
+        }
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        // Synced to height 5, whose floor is 10; the joiner retains from there.
+        joiner.record_applied(applied(6, b"root", 12, 10));
+        assert_eq!(
+            check_retention(&[(0, &serving), (1, &joiner)], WINDOW),
+            (6, 0)
+        );
+    }
+
+    /// When no node applied the synced height itself, the joiner's own first
+    /// height bounds it: floors are monotone, so the bound stays sound.
+    #[test]
+    fn unapplied_sync_height_is_bounded_from_above() {
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        joiner.record_applied(applied(6, b"root", 12, 10));
+        assert_eq!(check_retention(&[(0, &joiner)], WINDOW), (1, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "I9 violated")]
+    fn synced_node_pruning_past_its_floor_is_rejected() {
+        let serving = EngineObservations::new();
+        for height in 1..=5u64 {
+            serving.record_applied(applied(height, b"root", height * 2, 0));
+        }
+        let joiner = EngineObservations::new();
+        joiner.note_startup(sync_start());
+        joiner.record_applied(applied(6, b"root", 12, 11));
+        check_retention(&[(0, &serving), (1, &joiner)], WINDOW);
     }
 
     #[test]

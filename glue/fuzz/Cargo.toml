@@ -10,9 +10,9 @@ default = [ "stateful-all" ]
 stateful-all = [
 	"stateful-cert-mock-restarts",
 	"stateful-cert-mock-restarts-db",
+	"stateful-cert-mock-state-sync",
 	"stateful-cert-mock-twins",
 	"stateful-cert-mock-twins-coding",
-	"stateful-cert-mock-state-sync",
 	"stateful-db-sync",
 	"stateful-probe",
 ]
@@ -25,7 +25,7 @@ mocks = [
 stateful-cert-mock-restarts = [ "mocks" ]
 stateful-cert-mock-restarts-db = [ "mocks" ]
 stateful-cert-mock-twins = [ "mocks" ]
-stateful-cert-mock-twins-coding = [ "mocks", "dep:commonware-coding" ]
+stateful-cert-mock-twins-coding = [ "dep:commonware-coding", "mocks" ]
 stateful-cert-mock-state-sync = [ "mocks" ]
 stateful-db-sync = [ "mocks" ]
 stateful-probe = [ "mocks" ]

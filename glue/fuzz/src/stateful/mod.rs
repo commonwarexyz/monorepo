@@ -165,7 +165,8 @@ pub(crate) const MAX_RETAINED_BLOCKS: u8 = 6;
 /// joiner starts.
 pub(crate) const MAX_JOIN_AFTER: u8 = 6;
 
-/// The unit of the state-sync target's joiner crash delay.
+/// The unit of the state-sync target's joiner crash delay. The input's
+/// documentation states this value.
 pub(crate) const JOINER_CRASH_STEP: Duration = Duration::from_millis(10);
 
 /// Most crash-delay steps the state-sync target's joiner may be given.

@@ -99,6 +99,7 @@ impl RunReport {
             counts: Counts {
                 correct_nodes: 0,
                 chain_heights: 0,
+                unlinked_anchors: 0,
                 state_comparisons: 0,
                 verdict_comparisons: 0,
                 retention_checks: 0,
@@ -121,14 +122,15 @@ impl fmt::Display for RunReport {
         write!(
             f,
             "[{}] database={} marshal={} outcome={} correct_nodes={} chain_heights={} \
-             state_comparisons={} verdict_comparisons={} retention_checks={} prunes={} \
-             sync_starts={} synced_nodes={} restarts={}{}",
+             unlinked_anchors={} state_comparisons={} verdict_comparisons={} retention_checks={} \
+             prunes={} sync_starts={} synced_nodes={} restarts={}{}",
             self.target,
             self.database,
             self.marshal,
             self.outcome,
             self.counts.correct_nodes,
             self.counts.chain_heights,
+            self.counts.unlinked_anchors,
             self.counts.state_comparisons,
             self.counts.verdict_comparisons,
             self.counts.retention_checks,
@@ -488,9 +490,12 @@ pub(super) fn measure<B: Backend, M: Marshal, EC>(
     let (retention_checks, prunes) =
         invariants::check_retention(&correct, retention_window::<B, M>(prune, genesis));
     let (sync_starts, synced_nodes) = invariants::check_state_sync(&correct);
+    let (chain_heights, unlinked_anchors) =
+        invariants::check_chain_of_blocks(&correct, genesis.digest());
     let counts = Counts {
         correct_nodes: correct.len(),
-        chain_heights: invariants::check_chain_of_blocks(&correct, genesis.digest()),
+        chain_heights,
+        unlinked_anchors,
         state_comparisons: invariants::check_state_agreement(&correct),
         verdict_comparisons: invariants::check_verdict_agreement(&correct),
         retention_checks,

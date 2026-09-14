@@ -470,8 +470,11 @@ I10 to the state-sync target, and I11 to the database-set target.
   anchor. Delivery is at-least-once and restarts make repeats normal, so an exact repeat of a
   height already delivered MUST be accepted and a differing repeat MUST NOT. A node that peer
   synced starts its sequence at the floor it synced from, and its first block MUST be the child
-  of the block the other correct nodes delivered below it; a sync resumed after a crash begins a
-  new sequence at its floor, which MUST NOT lie below an earlier one.
+  of the block the other correct nodes delivered below it; if no correct node has delivered that
+  height by the measurement point, which nodes' in-order delivery makes possible only when the
+  synced node is ahead of every other node, the anchor cannot be compared and the run MUST be
+  reported as unmeasured rather than as passing. A sync resumed after a crash begins a new
+  sequence at its floor, which MUST NOT lie below an earlier one.
 - **I2 — Database-state agreement.** For every height finalized by two or more correct nodes,
   those nodes' committed database state for that height MUST be identical. The observable is the
   per-height canonical state commitment each node reaches once the height is applied, recorded per
@@ -519,7 +522,9 @@ I10 to the state-sync target, and I11 to the database-set target.
   prune floor of the bounding height, and below the window nothing may have been pruned. A
   database populated by peer state sync starts at the floor of the height it synced to, the one
   below the first height the node applied afterwards, and is bounded by that floor until pruning
-  moves past it. Prune floors are chain properties, so any correct node's record serves.
+  moves past it. Prune floors are chain properties, so any correct node's record serves; a height
+  no correct node applied by the measurement point is bounded by the floor of the nearest applied
+  height above it, which floors' monotonicity makes a sound, looser bound rather than a failure.
 - **I10 — Single, durable state sync.** Across a node's starts, in order: the plan MUST NOT
   choose peer state sync unless the driver requested it or an interrupted sync had to resume; the
   durable sync height, once recorded, MUST be present at every later start, MUST NOT decrease,
