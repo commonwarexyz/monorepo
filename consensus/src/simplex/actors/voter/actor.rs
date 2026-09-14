@@ -119,13 +119,7 @@ enum ProposalReceiver<D> {
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
 }
 
-impl<D> ProposalReceiver<D> {
-    const fn is_handoff(&self) -> bool {
-        matches!(self, Self::Handoff(_))
-    }
-}
-
-type PendingProposal<D, P> = Option<Request<Context<D, P>, ProposalReceiver<D>>>;
+type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalReceiver<D>>>;
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
 
 impl<D> Future for ProposalReceiver<D> {
@@ -397,10 +391,10 @@ impl<
     #[allow(clippy::async_yields_async)]
     async fn try_propose(
         &mut self,
-    ) -> Option<Request<Context<D, S::PublicKey>, ProposalReceiver<D>>> {
+    ) -> Option<Request<ProposalRequest<D, S::PublicKey>, ProposalReceiver<D>>> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
-        let context = request.context();
+        let context = request.context().clone();
 
         // Request proposal from application
         let span = info_span!(
@@ -409,27 +403,27 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let (context, receiver) = match request {
-            ProposalRequest::Handoff(context) => {
+        let receiver = match &request {
+            ProposalRequest::Handoff(_) => {
                 let receiver = async {
                     debug!(round = ?context.round, "requested handoff proposal from automaton");
-                    self.automaton.propose_handoff(context.clone()).await
+                    self.automaton.propose_handoff(context).await
                 }
                 .instrument(span.clone())
                 .await;
-                (context, ProposalReceiver::Handoff(receiver))
+                ProposalReceiver::Handoff(receiver)
             }
-            ProposalRequest::Regular(context) => {
+            ProposalRequest::Regular(_) => {
                 let receiver = async {
                     debug!(round = ?context.round, "requested proposal from automaton");
-                    self.automaton.propose(context.clone()).await
+                    self.automaton.propose(context).await
                 }
                 .instrument(span.clone())
                 .await;
-                (context, ProposalReceiver::Regular(receiver))
+                ProposalReceiver::Regular(receiver)
             }
         };
-        Some(Request(context, span, receiver))
+        Some(Request(request, span, receiver))
     }
 
     /// Attempt to verify a proposed block.
@@ -486,8 +480,8 @@ impl<
         let current_view = self.state.current_view();
         if pending_propose.as_ref().is_some_and(|request| {
             request.view() < current_view
-                || self.state.supersede_proposal_request(&request.0)
-                || (request.2.is_handoff() && self.state.release_certified_handoff(&request.0))
+                || self.state.supersede_proposal_request(request.0.context())
+                || self.state.release_certified_handoff(&request.0)
         }) {
             *pending_propose = None;
         }
@@ -716,10 +710,11 @@ impl<
     /// Returns the view to notify if the proposal was recorded.
     fn process_proposed(
         &mut self,
-        context: Context<D, S::PublicKey>,
+        request: ProposalRequest<D, S::PublicKey>,
         proposed: Result<ProposalResponse<D>, oneshot::error::RecvError>,
     ) -> Option<View> {
         // Try to use result
+        let context = request.into_context();
         let proposed = match proposed {
             Ok(ProposalResponse::Proposed(proposed)) => proposed,
             Ok(ProposalResponse::AwaitCertification) => {
@@ -1238,13 +1233,13 @@ impl<
                 (self, nullify) = self.timeout(reason).instrument(span).await;
                 view = self.state.current_view();
             },
-            (context, span, proposed) = propose_wait => {
+            (request, span, proposed) = propose_wait => {
                 // Clear propose waiter
                 pending_propose = None;
 
                 // Process the automaton's response
                 let Some(proposed_view) =
-                    span.in_scope(|| self.process_proposed(context, proposed))
+                    span.in_scope(|| self.process_proposed(request, proposed))
                 else {
                     continue;
                 };

@@ -84,15 +84,22 @@ impl ParentPayloadError {
 
 /// A proposal opportunity selected by the consensus state machine.
 pub(super) enum ProposalRequest<D: Digest, P: PublicKey> {
-    /// The parent is already certified or no cross-term handoff is involved.
+    /// An ordinary proposal on certified or intra-term ancestry.
     Regular(Context<D, P>),
-    /// A term-start proposal may be pipelined over an uncertified outgoing proposal.
+    /// A term-start proposal on the outgoing term's uncertified final view.
     Handoff(Context<D, P>),
 }
 
 impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
     /// Returns the proposal context.
     pub(super) const fn context(&self) -> &Context<D, P> {
+        match self {
+            Self::Regular(context) | Self::Handoff(context) => context,
+        }
+    }
+
+    /// Returns the proposal context.
+    pub(super) fn into_context(self) -> Context<D, P> {
         match self {
             Self::Regular(context) | Self::Handoff(context) => context,
         }
@@ -105,6 +112,12 @@ impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
             Self::Regular(context) => (context, false),
             Self::Handoff(context) => (context, true),
         }
+    }
+}
+
+impl<D: Digest, P: PublicKey> Viewable for ProposalRequest<D, P> {
+    fn view(&self) -> View {
+        self.context().view()
     }
 }
 
@@ -996,30 +1009,29 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Records that the application declined a pipelined handoff request.
     ///
-    /// The ordinary proposal path becomes eligible when the captured parent
-    /// certifies or when different fallback ancestry replaces it.
+    /// [`Self::try_propose`] skips the view while the same handoff remains
+    /// preferred, and proposes again once the captured parent certifies or
+    /// different ancestry replaces it.
     pub fn defer_handoff(&mut self, context: &Context<D, S::PublicKey>) {
         let view = context.view();
         if let Some(round) = self.views.get_mut(&view) {
             round.clear_proposal_request();
         }
-
-        let still_handoff = self
-            .find_parent(view)
-            .is_ok_and(|parent| parent == context.parent)
-            && view.is_term_start(self.term_length())
-            && view.previous() == Some(context.parent.0)
-            && self.explicit_ancestry_payload(context.parent.0).is_none();
-        if still_handoff {
-            self.deferred_handoffs.insert(view, context.parent);
-        }
+        self.deferred_handoffs.insert(view, context.parent);
     }
 
     /// Releases a pending handoff once its captured parent is explicitly certified.
     ///
     /// Returns true when the caller should cancel the handoff receiver and issue
-    /// an ordinary proposal request for the same view.
-    pub fn release_certified_handoff(&mut self, context: &Context<D, S::PublicKey>) -> bool {
+    /// an ordinary proposal request for the same view. Regular requests are
+    /// never released.
+    pub(super) fn release_certified_handoff(
+        &mut self,
+        request: &ProposalRequest<D, S::PublicKey>,
+    ) -> bool {
+        let ProposalRequest::Handoff(context) = request else {
+            return false;
+        };
         if self.explicit_ancestry_payload(context.parent.0) != Some(&context.parent.1) {
             return false;
         }
@@ -4738,8 +4750,7 @@ mod tests {
             let child_context = state
                 .try_propose()
                 .expect("optimistic child proposal should start")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(child_context.view(), View::new(2));
             assert_eq!(child_context.parent, (View::new(1), parent.payload));
 
@@ -6871,8 +6882,7 @@ mod tests {
             let propose_context = state
                 .try_propose()
                 .expect("child view should be able to build on certified parent")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(propose_context.round.view(), child_view);
             assert_eq!(propose_context.parent, (parent_view, payload));
         });
@@ -7046,8 +7056,7 @@ mod tests {
             let proposal = state
                 .try_propose()
                 .expect("term-start proposal should use prior-term certified parent")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(proposal.round.view(), View::new(6));
             assert_eq!(proposal.parent, (parent_view, parent_payload));
         });
@@ -7097,8 +7106,7 @@ mod tests {
         let context = state
             .try_propose()
             .expect("outgoing leader should propose the term tip")
-            .into_parts()
-            .0;
+            .into_context();
         let tip = fetch_proposal(5, 4, 65);
         assert!(state.proposed(&context, tip.payload));
         assert!(state.construct_notarize(View::new(5)).is_some());
@@ -7125,8 +7133,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("handoff proposal should use the uncertified tip")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(state.current_view(), View::new(5));
@@ -7172,8 +7179,7 @@ mod tests {
             let child_context = state
                 .try_propose()
                 .expect("handoff proposal should use the uncertified tip")
-                .into_parts()
-                .0;
+                .into_context();
             let child = fetch_proposal(6, 5, 66);
             assert!(state.proposed(&child_context, child.payload));
             assert!(state.construct_notarize(View::new(6)).is_some());
@@ -7260,8 +7266,7 @@ mod tests {
             let child_context = state
                 .try_propose()
                 .expect("handoff proposal should use the uncertified tip")
-                .into_parts()
-                .0;
+                .into_context();
             let child = fetch_proposal(6, 5, 66);
             assert!(state.proposed(&child_context, child.payload));
             assert!(state.construct_notarize(View::new(6)).is_some());
@@ -7313,8 +7318,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("replayed outgoing vote should restore the handoff")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
 
@@ -7424,8 +7428,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("term-start proposal should use the certified parent")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
         });
@@ -7458,8 +7461,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("term-start proposal should use the certified fallback")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
 
             // Late certification makes the outgoing tip preferred, but the
@@ -7491,8 +7493,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("handoff proposal should use the outgoing tip")
-                .into_parts()
-                .0;
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // The tip's term is abandoned while the application is building.
@@ -7521,8 +7522,7 @@ mod tests {
             let initial = state
                 .try_propose()
                 .expect("handoff proposal should use the outgoing tip")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(initial.parent.0, View::new(5));
             assert!(state.try_propose().is_none());
 
@@ -7538,8 +7538,7 @@ mod tests {
             let retry = state
                 .try_propose()
                 .expect("rejected handoff should retry on certified ancestry")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(retry.round.view(), View::new(6));
             assert_eq!(retry.parent, (View::new(4), certified.payload));
             assert!(state.try_propose().is_none());
@@ -7570,8 +7569,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("handoff proposal should use the outgoing tip")
-                .into_parts()
-                .0;
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // Local certification rejects the tip while the application is building.
@@ -7598,8 +7596,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("handoff proposal should use the outgoing tip")
-                .into_parts()
-                .0;
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // The outgoing leader equivocates while the application is building.
@@ -7624,8 +7621,7 @@ mod tests {
             let proposal_context = state
                 .try_propose()
                 .expect("handoff proposal should use the outgoing tip")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(proposal_context.parent, (View::new(5), tip.payload));
 
             // A certificate from the other three validators replaces the tip
@@ -7702,8 +7698,7 @@ mod tests {
             let ctx = state
                 .try_propose()
                 .expect("handoff proposal should pipeline single-view terms")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(2));
             assert_eq!(ctx.parent, (View::new(1), first.payload));
             assert_eq!(state.current_view(), View::new(1));
@@ -7781,8 +7776,7 @@ mod tests {
             let proposal = state
                 .try_propose()
                 .expect("term-start proposal should skip the blocked chain")
-                .into_parts()
-                .0;
+                .into_context();
             assert_eq!(proposal.parent, (View::new(1), payload_v1));
 
             // View 2's notarization finally arrives, and certification
