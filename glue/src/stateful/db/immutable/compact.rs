@@ -179,7 +179,7 @@ where
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
-            .await;
+            .await?;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -708,7 +708,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(metadata), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
 
@@ -745,7 +746,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = sync::CompactTarget {
@@ -836,7 +838,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = sync::CompactTarget {
@@ -849,7 +852,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = sync::CompactTarget {
@@ -910,7 +914,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let mut db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -922,7 +927,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -955,7 +961,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));

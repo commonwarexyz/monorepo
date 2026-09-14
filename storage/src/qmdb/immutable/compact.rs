@@ -33,7 +33,7 @@ use crate::{
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        batch_chain::{self, Bounds, Commitment, OnChain},
         compact::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
@@ -274,6 +274,24 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// Prove the live database is on this chain's own states, returning the witness
+    /// committed reads require (see [`Bounds::on_chain`]).
+    #[allow(clippy::type_complexity)]
+    fn on_chain<'a, E, C>(
+        &self,
+        db: &'a Db<F, E, K, V, H, C, S>,
+    ) -> Result<OnChain<'a, Db<F, E, K, V, H, C, S>>, Error<F>>
+    where
+        E: Context,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        self.parent.as_ref().map_or_else(
+            || self.base.on_chain(db, db.commitment()),
+            |parent| parent.bounds.on_chain(db, db.commitment()),
+        )
+    }
+
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self
@@ -291,18 +309,20 @@ where
         level = "info",
         skip_all
     )]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, K, V, H, C, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>, Error<F>>
     where
         F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
     {
+        let db = self.on_chain(db)?;
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -335,7 +355,7 @@ where
             |batch| batch.commitment(),
         );
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
             operations,
             commit_metadata: metadata,
@@ -348,7 +368,7 @@ where
                 inactivity_floor,
             },
             _key: PhantomData,
-        })
+        }))
     }
 }
 
@@ -783,7 +803,8 @@ mod tests {
         }
         let seed = seed
             .merkleize(&db, Some(Sha256::fill(7)), Location::new(0))
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let floor = db.size();
@@ -801,12 +822,16 @@ mod tests {
         for key in 8u8..=12 {
             parent = parent.set(Sha256::fill(key), value(key));
         }
-        let parent = parent.merkleize(&db, Some(Sha256::fill(13)), floor).await;
+        let parent = parent
+            .merkleize(&db, Some(Sha256::fill(13)), floor)
+            .await
+            .unwrap();
         let child = parent
             .new_batch::<Sha256>()
             .set(Sha256::fill(14), value(14))
             .merkleize(&db, Some(Sha256::fill(15)), floor)
-            .await;
+            .await
+            .unwrap();
 
         // The operation suffix is the batch's own sets plus its commit, handed out zero-copy.
         let (child_start, child_ops) = child.operations();
@@ -881,7 +906,8 @@ mod tests {
         let commit_only = db
             .new_batch()
             .merkleize(&db, Some(Sha256::fill(16)), commit_floor)
-            .await;
+            .await
+            .unwrap();
         let (commit_start, commit_ops) = commit_only.operations();
         let commit_end = commit_only.bounds().tip.size;
         let commit_root = commit_only.root();
@@ -917,12 +943,14 @@ mod tests {
             .new_batch()
             .set(Sha256::fill(17), value(17))
             .merkleize(&db, Some(Sha256::fill(18)), db.size())
-            .await;
+            .await
+            .unwrap();
         let late = late_parent
             .new_batch::<Sha256>()
             .set(Sha256::fill(19), value(19))
             .merkleize(&db, Some(Sha256::fill(20)), db.size())
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
         assert!(matches!(
             late_parent.proof(&db),
@@ -1006,7 +1034,8 @@ mod tests {
             .new_batch()
             .set(key, value)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -1164,16 +1193,25 @@ mod tests {
                 .new_batch()
                 .set(key1, value1)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let batch_b = db
                 .new_batch()
                 .set(key2, value2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
+            let stale = db.new_batch().set(key2, value2);
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             assert_eq!(db.root(), expected_root);
+            // A fork from the pre-apply state can no longer merkleize, and the
+            // merkleized sibling can no longer apply.
+            assert!(matches!(
+                stale.merkleize(&db, None, Location::new(0)).await,
+                Err(Error::StaleRead)
+            ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,
                 Err(Error::StaleBatch)
@@ -1196,16 +1234,18 @@ mod tests {
                 .new_batch()
                 .set(key1, value1)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let b = a
                 .new_batch::<Sha256>()
                 .set(key2, value2)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let c = b.new_batch::<Sha256>().set(key3, value3);
 
             let (db, _) = db.apply_batch(a).await.unwrap();
-            let c = c.merkleize(&db, None, Location::new(0)).await;
+            let c = c.merkleize(&db, None, Location::new(0)).await.unwrap();
             let expected_root = c.root();
             let (db, _) = db.apply_batch(c).await.unwrap();
 
@@ -1233,7 +1273,8 @@ mod tests {
                 .new_batch()
                 .set(key, value)
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
 
             // Observe the applied state before making it durable.
@@ -1263,17 +1304,20 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[10]]), Sha256::fill(10u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let sibling_a = common_parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[11]]), Sha256::fill(11u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let sibling_b = common_parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[12]]), Sha256::fill(12u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(sibling_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
@@ -1284,17 +1328,20 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let parent_b = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let child_b = parent_b
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(parent_a).await.unwrap();
             assert!(matches!(
@@ -1315,12 +1362,14 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let (db, _) = db.apply_batch(child).await.unwrap();
             assert!(matches!(
@@ -1339,12 +1388,14 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let expected_root = child.root();
 
             let (db, _) = db.apply_batch(parent).await.unwrap();
@@ -1363,7 +1414,10 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-floor-regressed").await;
 
             let advance_floor = db.new_batch().set(Sha256::hash(&[&[1]]), Sha256::fill(1u8));
-            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1)).await;
+            let advance_floor = advance_floor
+                .merkleize(&db, None, Location::new(1))
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -1372,7 +1426,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(regressed).await,
@@ -1401,12 +1456,14 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let child = parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let target = db.target();
             assert!(matches!(
@@ -1438,7 +1495,8 @@ mod tests {
                 .new_batch()
                 .set(k1, v1)
                 .merkleize(&db, Some(meta1), floor1)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -1453,7 +1511,8 @@ mod tests {
                 .new_batch()
                 .set(k2, v2)
                 .merkleize(&db, Some(meta2), floor2)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
@@ -1483,7 +1542,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), floor1)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let root = db.root();
@@ -1493,7 +1553,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), floor2)
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
 
@@ -1523,7 +1584,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -1531,7 +1593,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 db.root()
@@ -1559,7 +1622,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta1), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let root_a = db.root();
@@ -1569,7 +1633,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[2]]), Sha256::fill(22u8))
                     .merkleize(&db, Some(meta2), Location::new(1))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let _db = db.commit().await.unwrap();
                 (root_a, size_a)
@@ -1597,7 +1662,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[1]]), Sha256::fill(11u8))
                     .merkleize(&db, Some(meta), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 // The commit already made the state durable, so this is a no-op.
@@ -1621,7 +1687,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1653,7 +1720,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let rewind_target = db.target().size;
@@ -1661,7 +1729,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tip_target = db.target();
@@ -1717,7 +1786,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1751,7 +1821,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -1792,7 +1863,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[7]]), Sha256::fill(7u8))
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let tampered_target = db.target();
@@ -1833,7 +1905,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let target_a = db.target();
@@ -1886,7 +1959,8 @@ mod tests {
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -1898,7 +1972,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, Some(Sha256::fill(0xb1)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_b = db.root();
@@ -1938,7 +2013,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_a = db.root();
@@ -1951,7 +2027,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::fill(i))
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -1981,7 +2058,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
@@ -2014,7 +2092,8 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::fill(i))
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 sizes.push(db.size());
@@ -2054,7 +2133,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let target = db.target();
@@ -2084,7 +2164,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2094,14 +2175,16 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             // Advance past that state and commit, then rewind back to it.
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let db = db.rewind(size_after_first).await.unwrap();
@@ -2129,7 +2212,8 @@ mod tests {
                 .set(k1, v1)
                 .set(k2, v2)
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2160,7 +2244,8 @@ mod tests {
                     .set(k1, v1)
                     .set(k2, v2)
                     .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 (db.root(), db.size())
@@ -2194,7 +2279,8 @@ mod tests {
                 .set(k1, v1)
                 .set(k2, v2)
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root_after_first = db.root();
@@ -2206,7 +2292,8 @@ mod tests {
                 .new_batch()
                 .set(k3, v3)
                 .merkleize(&db, Some(Sha256::fill(0xbb)), Location::new(1))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2233,7 +2320,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let size_after_first = db.size();
@@ -2242,7 +2330,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
 
@@ -2251,7 +2340,8 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             let db = db.rewind(size_after_first).await.unwrap();
 
@@ -2266,7 +2356,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-floor-beyond").await;
 
-            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(2))
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(batch).await,
@@ -2289,13 +2383,15 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
                 .merkleize(&db, None, Location::new(3))
-                .await;
+                .await
+                .unwrap();
             // child: valid on its own (floor=0), but parent's floor is bad.
             let child = parent
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
 
             assert!(matches!(
                 db.apply_batch(child).await,
