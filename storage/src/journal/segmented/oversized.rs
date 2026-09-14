@@ -255,171 +255,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Ov
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
-    /// Open with an upper bound on section and index-byte end. A partial index entry
-    /// rounds down. Recovery validates the selected paired prefix before publication.
-    pub async fn init_at_most(
-        context: E,
-        cfg: Config<V::Cfg>,
-        section: u64,
-        end: u64,
-    ) -> Result<Self, Error> {
-        let buffer = cfg.replay_buffer;
-        let mut pending = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
-        let (index_end, value_end) = pending.select_cap(section, end, 0).await?;
-        pending.index = pending
-            .index
-            .truncate_pending_tail(section, index_end)
-            .await?;
-        pending.values = pending.values.truncate(section, value_end).await?;
-        pending.recover_inferred(buffer).await
-    }
-
-    /// Initialize with inferred crash recovery.
-    ///
-    /// Recovery infers the durable state: it finds each section's last valid entry (in bounds of
-    /// the glob, checksum-verified) and truncates the index journal to exclude the entries beyond
-    /// it.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let replay_buffer = cfg.replay_buffer;
-        let journal = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
-        journal.recover_inferred(replay_buffer).await
-    }
-
-    /// Initialize with crash recovery restoring a durable checkpoint, as
-    /// `(section, index size)`.
-    ///
-    /// Recovery keeps exactly the checkpointed state: each section below `section` is
-    /// adopted at its validated terminal boundary, `section` is truncated to `index
-    /// size`, and everything after it is removed. A missing or damaged boundary the
-    /// checkpoint covers fails init with [Error::Corruption], while interior damage
-    /// below a boundary surfaces lazily as read errors. Callers must only provide a
-    /// checkpoint that was durably synced before it was published (see
-    /// [crate::freezer::Freezer]).
-    pub async fn init_with_checkpoint(
-        context: E,
-        cfg: Config<V::Cfg>,
-        checkpoint: (u64, u64),
-    ) -> Result<Self, Error> {
-        let (section, index_size) = checkpoint;
-        Recovery::init(
-            context,
-            cfg,
-            RecoveryMode::Restore {
-                section,
-                index_size,
-            },
-        )
-        .await
-        .map(Into::into)
-    }
-
-    /// Initialize tracked recovery and return its required full replay.
-    ///
-    /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
-    /// durable marker are retained after their cross-journal boundary is proven. Entries above it
-    /// are value-validated in order and the first invalid entry truncates its section.
-    pub async fn init_with_metadata(
-        context: &E,
-        cfg: Config<V::Cfg>,
-        metadata_partition: String,
-        read_options: ReadOptions,
-    ) -> Result<Replay<E, I, V>, Error> {
-        Self::init_tracked_inner(context, cfg, metadata_partition, read_options, None).await
-    }
-
-    /// Begin tracked initialization with an upper bound on the retained section/index-byte end.
-    /// Required markers and the selected paired boundary are validated before lowering markers
-    /// and releasing suffix storage. Drain the returned replay before publication.
-    pub async fn init_with_metadata_at_most(
-        context: &E,
-        cfg: Config<V::Cfg>,
-        metadata_partition: String,
-        read_options: ReadOptions,
-        section: u64,
-        end: u64,
-    ) -> Result<Replay<E, I, V>, Error> {
-        Self::init_tracked_inner(
-            context,
-            cfg,
-            metadata_partition,
-            read_options,
-            Some((section, end)),
-        )
-        .await
-    }
-
-    async fn init_tracked_inner(
-        context: &E,
-        cfg: Config<V::Cfg>,
-        metadata_partition: String,
-        read_options: ReadOptions,
-        cap: Option<(u64, u64)>,
-    ) -> Result<Replay<E, I, V>, Error> {
-        let replay_buffer = cfg.replay_buffer;
-
-        // Open the commit markers before the data they constrain.
-        let mut metadata: Metadata<E, SectionKey, u64> = Metadata::init(
-            context.child("metadata"),
-            MetadataConfig {
-                partition: metadata_partition,
-                codec_config: (),
-            },
-        )
-        .await?;
-        let mut floors = metadata
-            .keys()
-            .map(|key| {
-                (
-                    u64::from(key),
-                    *metadata.get(key).expect("metadata key must have a value"),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        if let Some((section, end)) = cap {
-            let items = end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
-            floors.retain(|candidate, _| *candidate <= section);
-            if let Some(floor) = floors.get_mut(&section) {
-                *floor = (*floor).min(items);
-            }
-        }
-
-        // Every advertised prefix is proven before ordinary suffix repair may mutate either
-        // journal. An empty sidecar retains the legacy inferred-recovery behavior.
-        let recovery = if floors.is_empty() {
-            RecoveryMode::Infer
-        } else {
-            RecoveryMode::Floors(&floors)
-        };
-        let mut journal = Recovery::init(context.child("oversized"), cfg, recovery).await?;
-        if let Some((section, end)) = cap {
-            let minimum_items = floors.get(&section).copied().unwrap_or(0);
-            let (index_end, value_end) = journal.select_cap(section, end, minimum_items).await?;
-            let items = index_end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
-            metadata.retain(|key, _| u64::from(key) <= section);
-            let key = SectionKey::new(section);
-            if metadata.get(&key).is_some_and(|floor| *floor > items) {
-                metadata.put(key, items);
-            }
-            metadata = metadata.sync().await?;
-            journal.index = journal
-                .index
-                .truncate_pending_tail(section, index_end)
-                .await?;
-            journal.values = journal.values.truncate(section, value_end).await?;
-        }
-        journal.tracking = Some(Tracking {
-            metadata,
-            marker_sync_pending: None,
-            barriers: BTreeMap::new(),
-        });
-        journal
-            .replay(replay_buffer, read_options, Some(Validation::new()))
-            .await
-    }
-}
-
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Recovery<E, I, V>>
     for Oversized<E, I, V>
 {
@@ -872,6 +707,169 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
+    /// Open with an upper bound on section and index-byte end. A partial index entry
+    /// rounds down. Recovery validates the selected paired prefix before publication.
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<V::Cfg>,
+        section: u64,
+        end: u64,
+    ) -> Result<Self, Error> {
+        let buffer = cfg.replay_buffer;
+        let mut pending = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
+        let (index_end, value_end) = pending.select_cap(section, end, 0).await?;
+        pending.index = pending
+            .index
+            .truncate_pending_tail(section, index_end)
+            .await?;
+        pending.values = pending.values.truncate(section, value_end).await?;
+        pending.recover_inferred(buffer).await
+    }
+
+    /// Initialize with inferred crash recovery.
+    ///
+    /// Recovery infers the durable state: it finds each section's last valid entry (in bounds of
+    /// the glob, checksum-verified) and truncates the index journal to exclude the entries beyond
+    /// it.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        let replay_buffer = cfg.replay_buffer;
+        let journal = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
+        journal.recover_inferred(replay_buffer).await
+    }
+
+    /// Initialize with crash recovery restoring a durable checkpoint, as
+    /// `(section, index size)`.
+    ///
+    /// Recovery keeps exactly the checkpointed state: each section below `section` is
+    /// adopted at its validated terminal boundary, `section` is truncated to `index
+    /// size`, and everything after it is removed. A missing or damaged boundary the
+    /// checkpoint covers fails init with [Error::Corruption], while interior damage
+    /// below a boundary surfaces lazily as read errors. Callers must only provide a
+    /// checkpoint that was durably synced before it was published (see
+    /// [crate::freezer::Freezer]).
+    pub async fn init_with_checkpoint(
+        context: E,
+        cfg: Config<V::Cfg>,
+        checkpoint: (u64, u64),
+    ) -> Result<Self, Error> {
+        let (section, index_size) = checkpoint;
+        Recovery::init(
+            context,
+            cfg,
+            RecoveryMode::Restore {
+                section,
+                index_size,
+            },
+        )
+        .await
+        .map(Into::into)
+    }
+
+    /// Initialize tracked recovery and return its required full replay.
+    ///
+    /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
+    /// durable marker are retained after their cross-journal boundary is proven. Entries above it
+    /// are value-validated in order and the first invalid entry truncates its section.
+    pub async fn init_with_metadata(
+        context: &E,
+        cfg: Config<V::Cfg>,
+        metadata_partition: String,
+        read_options: ReadOptions,
+    ) -> Result<Replay<E, I, V>, Error> {
+        Self::init_tracked_inner(context, cfg, metadata_partition, read_options, None).await
+    }
+
+    /// Begin tracked initialization with an upper bound on the retained section/index-byte end.
+    /// Required markers and the selected paired boundary are validated before lowering markers
+    /// and releasing suffix storage. Drain the returned replay before publication.
+    pub async fn init_with_metadata_at_most(
+        context: &E,
+        cfg: Config<V::Cfg>,
+        metadata_partition: String,
+        read_options: ReadOptions,
+        section: u64,
+        end: u64,
+    ) -> Result<Replay<E, I, V>, Error> {
+        Self::init_tracked_inner(
+            context,
+            cfg,
+            metadata_partition,
+            read_options,
+            Some((section, end)),
+        )
+        .await
+    }
+
+    async fn init_tracked_inner(
+        context: &E,
+        cfg: Config<V::Cfg>,
+        metadata_partition: String,
+        read_options: ReadOptions,
+        cap: Option<(u64, u64)>,
+    ) -> Result<Replay<E, I, V>, Error> {
+        let replay_buffer = cfg.replay_buffer;
+
+        // Open the commit markers before the data they constrain.
+        let mut metadata: Metadata<E, SectionKey, u64> = Metadata::init(
+            context.child("metadata"),
+            MetadataConfig {
+                partition: metadata_partition,
+                codec_config: (),
+            },
+        )
+        .await?;
+        let mut floors = metadata
+            .keys()
+            .map(|key| {
+                (
+                    u64::from(key),
+                    *metadata.get(key).expect("metadata key must have a value"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        if let Some((section, end)) = cap {
+            let items = end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
+            floors.retain(|candidate, _| *candidate <= section);
+            if let Some(floor) = floors.get_mut(&section) {
+                *floor = (*floor).min(items);
+            }
+        }
+
+        // Every advertised prefix is proven before ordinary suffix repair may mutate either
+        // journal. An empty sidecar retains the legacy inferred-recovery behavior.
+        let recovery = if floors.is_empty() {
+            RecoveryMode::Infer
+        } else {
+            RecoveryMode::Floors(&floors)
+        };
+        let mut journal = Recovery::init(context.child("oversized"), cfg, recovery).await?;
+        if let Some((section, end)) = cap {
+            let minimum_items = floors.get(&section).copied().unwrap_or(0);
+            let (index_end, value_end) = journal.select_cap(section, end, minimum_items).await?;
+            let items = index_end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
+            metadata.retain(|key, _| u64::from(key) <= section);
+            let key = SectionKey::new(section);
+            if metadata.get(&key).is_some_and(|floor| *floor > items) {
+                metadata.put(key, items);
+            }
+            metadata = metadata.sync().await?;
+            journal.index = journal
+                .index
+                .truncate_pending_tail(section, index_end)
+                .await?;
+            journal.values = journal.values.truncate(section, value_end).await?;
+        }
+        journal.tracking = Some(Tracking {
+            metadata,
+            marker_sync_pending: None,
+            barriers: BTreeMap::new(),
+        });
+        journal
+            .replay(replay_buffer, read_options, Some(Validation::new()))
+            .await
+    }
+
     /// Append entry + value.
     ///
     /// Writes value to glob first, then writes index entry with the value location.
