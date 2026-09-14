@@ -37,7 +37,7 @@ use std::{
     collections::BTreeMap, future::Future, marker::PhantomData, panic::AssertUnwindSafe, sync::Arc,
     time::SystemTime,
 };
-use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
+use tracing::{Instrument as _, Span, debug, debug_span, error};
 
 type VerifyResult<V, D> = (
     Span,
@@ -424,16 +424,27 @@ where
         let verified_votes = Arc::clone(&self.verified_votes);
         let transcript_messages = self.metrics.certificate_transcript_messages.clone();
         let known_messages = self.metrics.certificate_known_messages.clone();
-        let worker = info_span!(
-            parent: &span,
-            "multimmit.batcher.verify",
-            kind = kind.label(),
-            epoch = round.epoch().get().traced(),
-            view = round.view().get().traced(),
-            job = job.id().get().traced(),
-            items = job.items().len().traced(),
-            pool,
-        );
+        macro_rules! worker_span {
+            ($level:expr) => {
+                tracing::span!(
+                    parent: &span,
+                    $level,
+                    "multimmit.batcher.verify",
+                    kind = kind.label(),
+                    epoch = round.epoch().get().traced(),
+                    view = round.view().get().traced(),
+                    job = job.id().get().traced(),
+                    items = job.items().len().traced(),
+                    pool,
+                )
+            };
+        }
+        // Mixed jobs may contain a vote or certificate needed to advance the round.
+        let worker = if kind == VerificationKind::Bulk {
+            worker_span!(tracing::Level::DEBUG)
+        } else {
+            worker_span!(tracing::Level::INFO)
+        };
         let context = self.context.child("verify");
         let operation = move |mut context: E, strategy: S| {
             let timer = latency.timer(&context);
@@ -850,6 +861,7 @@ mod tests {
     use super::*;
     use crate::multimmit::{
         config::Limits,
+        machine::{JobId, Observation, VerificationItem, VerificationTicket},
         mocks::{Committee, RecordingBlocker},
     };
     use bytes::Bytes;
@@ -865,6 +877,8 @@ mod tests {
     };
     use commonware_utils::sync::{Condvar, Mutex};
     use std::{collections::VecDeque, future::pending, num::NonZeroUsize, sync::Arc, thread};
+    use tracing::info_span;
+    use tracing_subscriber::prelude::*;
 
     type IngressActor<H = Sha256, T = Sequential> = Actor<
         deterministic::Context,
@@ -900,6 +914,108 @@ mod tests {
             },
         )
         .0
+    }
+
+    #[derive(Clone, Default)]
+    struct VerificationSpans(Arc<Mutex<Vec<Option<&'static str>>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for VerificationSpans
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() == "multimmit.batcher.verify" {
+                self.0.lock().push(
+                    ctx.span(id)
+                        .unwrap()
+                        .parent()
+                        .map(|span| span.metadata().name()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verification_trace_levels_preserve_round_prerequisites() {
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            let spans = VerificationSpans::default();
+            let subscriber = tracing_subscriber::registry()
+                .with(spans.clone())
+                .with(tracing_subscriber::filter::LevelFilter::from_level(level));
+            tracing::subscriber::with_default(subscriber, || {
+                deterministic::Runner::default().start(|context| async move {
+                    let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+                    let actor = ingress_actor::<Sha256, _>(
+                        context.child("batcher"),
+                        &committee,
+                        Sequential,
+                    );
+                    let proposal = committee.leader_block(1);
+                    let bulk = Artifact::TransactionBlock(
+                        committee.signed_block(0, Sha256::hash(&[b"bulk"])),
+                    );
+                    let cases = vec![
+                        vec![bulk.clone()],
+                        vec![Artifact::LeaderBlock(proposal.clone())],
+                        vec![Artifact::Vote(committee.vote(0, &proposal))],
+                        vec![Artifact::Vqc(committee.vqc(1))],
+                        vec![Artifact::Lqc(committee.lqc(1))],
+                        vec![bulk, Artifact::NoVote(committee.novote(0, 1))],
+                    ];
+                    let root = info_span!(parent: None, "test.round");
+                    for (index, artifacts) in cases.into_iter().enumerate() {
+                        let id = JobId::new(index as u64);
+                        let items = artifacts
+                            .into_iter()
+                            .enumerate()
+                            .map(|(item, artifact)| {
+                                let ticket = VerificationTicket::new(
+                                    id,
+                                    artifact.id::<Sha256>(),
+                                    Observation::new(item as u64, 0),
+                                );
+                                VerificationItem::new(ticket, Arc::new(artifact), Vec::new())
+                            })
+                            .collect();
+                        let job = VerifyJob::new(id, 0, items);
+                        let before = spans.0.lock().len();
+                        let (completion_parent, result) = actor
+                            .verification(
+                                Sequential,
+                                if index == 0 { BULK_POOL } else { CRITICAL_POOL },
+                                root.clone(),
+                                Round::new(committee.config.epoch(), View::new(1)),
+                                job,
+                                context.current(),
+                            )
+                            .await;
+                        assert!(
+                            result
+                                .unwrap()
+                                .verdicts()
+                                .iter()
+                                .all(|verdict| verdict.valid())
+                        );
+                        assert_eq!(completion_parent.id(), root.id());
+                        let recorded = spans.0.lock();
+                        let visible = index != 0 || level == tracing::Level::DEBUG;
+                        assert_eq!(
+                            recorded.len() - before,
+                            usize::from(visible),
+                            "case {index} at {level}"
+                        );
+                        if visible {
+                            assert_eq!(recorded.last(), Some(&Some("test.round")));
+                        }
+                    }
+                });
+            });
+        }
     }
 
     #[test]

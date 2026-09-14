@@ -64,7 +64,7 @@ use std::{
     sync::{Arc, mpsc::TryRecvError},
     time::SystemTime,
 };
-use tracing::{Instrument as _, Span, info_span};
+use tracing::{Instrument as _, Span, debug_span, info_span};
 
 /// Bounds temporary archive growth without putting cleanup on every publication.
 const MAX_COMMITS_BEFORE_CLEANUP: usize = 8;
@@ -1951,7 +1951,7 @@ where
                 // final checkpoints let later readers open them without replay. Retirement is
                 // an optimization with no ordering needs, so it never gates commit barriers;
                 // the store keeps retiring segments readable and unreclaimed until it completes.
-                let retire_span = info_span!(
+                let retire_span = debug_span!(
                     parent: &span,
                     "multimmit.marshal.catalog.retire_pending",
                     segments = tracing::field::Empty,
