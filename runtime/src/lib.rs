@@ -351,6 +351,27 @@ stability_scope!(BETA {
         #[must_use]
         fn dedicated(self) -> Self;
 
+        /// Return a [`Spawner`] whose next task performs blocking storage reads on its own thread
+        /// instead of handing them to a blocking pool.
+        ///
+        /// Only meaningful together with [`Spawner::dedicated`]: an inline read holds the thread
+        /// for the duration of the syscall, which a dedicated task owns but a shared executor does
+        /// not, so runtimes apply the hint to dedicated tasks only. While a read is in flight the
+        /// task does not yield: reads complete one at a time, and timers, sibling futures, and
+        /// cancellation are delayed until the read returns. A task that relies on overlapping
+        /// concurrent reads (for example through `join!` or `buffer_unordered`) or on prompt
+        /// reaction to other events must not opt in.
+        ///
+        /// This is an optional hint: runtimes that do not hand storage reads to a blocking pool
+        /// ignore it, which the default implementation does.
+        #[must_use]
+        fn inline_io(self) -> Self
+        where
+            Self: Sized,
+        {
+            self
+        }
+
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
@@ -379,8 +400,8 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
-        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
+        /// [`Spawner::dedicated`], [`Spawner::shared`], and [`Spawner::inline_io`] only affect
+        /// the handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
         /// both start child task contexts from a clean spawn configuration.
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
