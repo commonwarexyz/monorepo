@@ -255,7 +255,7 @@ impl RefinementDriver {
             spec::Root::R2C => (spec::Root::R1, [8, 0, 0]),
             spec::Root::R3D => (spec::Root::R2, [15, 1, 0]),
             spec::Root::R4 => (spec::Root::R3, [0, 7, 0]),
-            spec::Root::Offset | spec::Root::OffsetC => (spec::Root::R0, [10, 3, 0]),
+            spec::Root::Offset | spec::Root::OffsetC => (spec::Root::R0, [10, 5, 0]),
             spec::Root::R0 | spec::Root::Empty => {
                 unreachable!("no successor history for this root")
             }
@@ -696,11 +696,12 @@ impl RefinementDriver {
                 }
             }
         };
+        let batch_id = material.id;
         self.fixture
             .chain
             .challenge(
                 u64::from(self.now),
-                material.id,
+                batch_id,
                 &challenge,
             )
             .is_ok_and(|verdict| {
@@ -815,9 +816,10 @@ impl RefinementDriver {
                     spec::Terminal::Claiming { .. } => self.state.unfinalized_deposits[index],
                     spec::Terminal::Settled => 0,
                 };
+                let key = self.key(account);
                 self.fixture
                     .chain
-                    .claim_pending_deposit(u64::from(self.now), &self.key(account))
+                    .claim_pending_deposit(u64::from(self.now), &key)
                     .is_ok_and(|refund| {
                         refund.account == self.key(account) && refund.amount == u64::from(expected)
                     })
@@ -1087,7 +1089,10 @@ impl RefinementDriver {
             };
             let withdrawal = u64::from(self.state.withdrawal_reserve[batch.index()]);
             let payout = u64::from(self.state.payout_reserve[batch.index()]);
-            let actual = chain.claimable_batches.get(&material.id);
+            let actual = chain
+                .claimable_batches
+                .get(&material.id)
+                .filter(|claims| claims.withdrawal_remaining != 0 || claims.payout_remaining != 0);
             assert_eq!(actual.is_some(), withdrawal != 0 || payout != 0);
             if let Some(actual) = actual {
                 assert_eq!(actual.change_root, material.close.roots.change);
@@ -1651,8 +1656,7 @@ fn uncovered_carried_amount_refines_terminal_degrade() {
     carried_fault_profile();
 }
 
-// A carried request exactly offsetting Bob's staged deposit defers it, the
-// withdrawal clears, and the expired deposit refunds directly.
+// Bob's deposit and carried withdrawal settle together without changing his balance.
 fn carried_offset_profile() -> RefinementDriver {
     let mut driver = RefinementDriver::new();
     driver.step(spec::SettlementAction::RecordDeposit(
@@ -1670,12 +1674,11 @@ fn carried_offset_profile() -> RefinementDriver {
         source: spec::Batch::OffsetC,
         position: 0,
     });
-    driver.step(spec::SettlementAction::ClaimDeposit(spec::Account::Bob));
     driver
 }
 
 #[test]
-fn carried_offset_deferral_refines_production() {
+fn carried_offset_inclusion_refines_production() {
     carried_offset_profile();
 }
 

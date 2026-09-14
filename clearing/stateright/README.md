@@ -113,7 +113,7 @@ The checked state counts are part of the tests so an accidental state-space redu
   representative endpoint classes for both excess dimensions (cumulative credit and payment
   count), and the equal-endpoint terminal control that must not convict;
 - 1,025 claim-ledger states covering every ordering of eight typed batch-position identities;
-- 3,000,804 settlement states from the ordinary initial state, including the operator-carried
+- 2,842,877 settlement states from the ordinary initial state, including the operator-carried
   registration branch and the coverage-degraded certification branch; and
 - 26 deterministic end-to-end scenarios using the same settlement transition function.
 
@@ -122,7 +122,7 @@ ordered finalizations, front/middle/tail suffix cuts, exact admission and challe
 Amount and Close claims, external payouts, batch-position replay, reserve survival after a later
 fault, exact front/middle/tail and registration-expiry recovery outcomes, a carried withdrawal
 clearing at full value, a degraded amount finalizing with a zero reserve, an uncovered
-carried amount degrading at the frozen root, and a carried offset deferring its staged deposit. Each safety predicate
+carried amount degrading at the frozen root, and a carried offset including its staged deposit. Each safety predicate
 also has a deliberately corrupted negative-control state so a disconnected or vacuous property
 fails its ordinary Rust test.
 
@@ -176,7 +176,7 @@ All three challenge kinds use real payer and operator signatures and production 
 every abstract contradiction the settlement model can raise has a constructible production
 counterpart.
 
-This is bounded trace refinement, not the Cartesian product of the 3,000,804-state lifecycle graph
+This is bounded trace refinement, not the Cartesian product of the 2,842,877-state lifecycle graph
 with cryptographic fixtures. The independent fixed-point model proves the declared finite
 interleavings. The refinement profiles catch drift at every production action and state component
 they traverse. Neither result is an inductive proof for arbitrary cardinalities or evidence of
@@ -250,7 +250,7 @@ selected paths unless **Run to completion** is requested. The exhaustive tests r
 fixed-point check and assert the complete finite state counts above.
 
 The explorer is an interactive action/path view, not a static rendering of every graph node. A
-single image containing the settlement instance's 3,000,804 states would not be usable.
+single image containing the settlement instance's 2,842,877 states would not be usable.
 
 There is no single monolithic explorer target. The four models deliberately compose through
 `CertifiedClose` and `ProvenChallenge` capabilities so the checked graph does not multiply every

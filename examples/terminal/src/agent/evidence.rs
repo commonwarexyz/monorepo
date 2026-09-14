@@ -12,7 +12,7 @@ use crate::{
         },
         state::{AdmittedRootsResponse, StatusRecord},
     },
-    protocol::Key,
+    protocol::{Key, WithdrawalWitness},
     rpc,
 };
 use anyhow::{Context as _, Result, bail, ensure};
@@ -20,7 +20,7 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, HigherEntryLookup},
     qmdb::{StateLookup, StateOpening, StateRoot, account_key},
-    transition::{ExternalPayoutClaim, WithdrawalClaim},
+    transition::ExternalPayoutClaim,
 };
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
@@ -79,7 +79,7 @@ fn describe(declines: &[(SocketAddr, Decline)]) -> String {
 impl Holders {
     /// The validators in the order this wallet asks them.
     pub(super) fn order(&self, chain: &Client, account: &Key) -> Result<Vec<SocketAddr>> {
-        let mut holders = chain.genesis().holders_for_account(account)?;
+        let mut holders = chain.genesis().holders()?;
         ensure!(!holders.is_empty(), "the deployment has no validators");
         let served = self.served.lock().get(account).copied();
         let start = served
@@ -123,61 +123,6 @@ impl Holders {
         }
         Err(Exhausted { declines }.into())
     }
-}
-
-/// The account's deterministic first holder: its hash modulo the quorum size.
-fn spread(account: &Key, quorum: usize) -> usize {
-    let digest = Sha256::hash(&[account.as_ref()]);
-    let mut prefix = [0_u8; 8];
-    prefix.copy_from_slice(&digest.as_ref()[..8]);
-    let quorum = u64::try_from(quorum).expect("a quorum size fits u64");
-    usize::try_from(u64::from_be_bytes(prefix) % quorum)
-        .expect("a remainder below the quorum size fits usize")
-}
-
-/// One bounded evidence request to `holder`.
-async fn ask<E: Env>(
-    ctx: &E,
-    holder: SocketAddr,
-    request: Bytes,
-) -> Result<EvidenceResponse, Decline> {
-    select! {
-        answer = rpc::invoke(ctx, holder, "validator", METHOD_EVIDENCE, request) => {
-            answer
-                .and_then(|body| {
-                    EvidenceResponse::decode(body).context("decode evidence response")
-                })
-                .map_err(Decline::Failed)
-        },
-        _ = ctx.sleep(TIMEOUT) => Err(Decline::Timeout),
-    }
-}
-
-/// Checks that `opening` is `account`'s leaf under `root`.
-pub(super) fn check_opening(
-    opening: &StateOpening<Key, Digest>,
-    root: &StateRoot<Digest>,
-    account: &Key,
-) -> Result<()> {
-    ensure!(
-        opening.account == *account,
-        "payer opening belongs to another account"
-    );
-    opening
-        .verify::<Sha256>(root)
-        .context("verify payer Current state opening")?;
-    Ok(())
-}
-
-/// Names both failed sources when neither the operator nor the validators
-/// served a usable head.
-pub(super) fn unusable_head(operator: anyhow::Error, validators: anyhow::Error) -> anyhow::Error {
-    validators.context(format!(
-        "the operator served no usable head ({operator:#}) and the validators served none"
-    ))
-}
-
-impl Holders {
     /// Selects the retained genesis or finalized successor evidence for the certified head.
     async fn head_lookup<E: Env>(
         ctx: &E,
@@ -349,38 +294,74 @@ impl Holders {
         self.fetch(ctx, chain, payer, lookup, accept).await
     }
 
-    /// `account`'s withdrawal output claim in the admitted close, verified
-    /// against the admitted withdrawal-outputs root and paying `destination`,
-    /// the one this wallet signs into every withdrawal.
-    pub(super) async fn withdrawal_claim<E: Env>(
+    /// Authenticates the complete withdrawal boundary before deciding exact request membership.
+    pub(super) async fn carried_withdrawal<E: Env>(
+        &self,
+        ctx: &E,
+        chain: &Client,
+        epoch: u64,
+        admitted: &AdmittedRootsResponse,
+        request: &commonware_clearing::bajillion::boundary::SignedWithdrawal<Key, Digest>,
+    ) -> Result<bool> {
+        self.fetch(
+            ctx,
+            chain,
+            request.account(),
+            EvidenceLookup::Dealing { epoch },
+            |evidence| {
+                let Evidence::Dealing(saved) = evidence else {
+                    bail!("served evidence is not a close dealing");
+                };
+                ensure!(
+                    saved.context.deployment() == &chain.deployment()
+                        && saved.context.payment().epoch() == epoch
+                        && saved.header.batch_id::<Sha256>() == admitted.batch_id
+                        && saved.roots == admitted.roots
+                        && saved.header.verify::<Sha256, Key>(
+                            &saved.context,
+                            &saved.roots,
+                            &saved.amounts
+                        ),
+                    "withdrawal boundary differs from the certified close"
+                );
+                ensure!(
+                    saved.withdrawals.root::<Sha256>()?
+                        == *saved.context.epoch_context().withdrawal_root(),
+                    "withdrawal boundary root mismatch"
+                );
+                Ok(saved.withdrawals.request_for(request.account()) == Some(request))
+            },
+        )
+        .await
+    }
+
+    /// Verifies the account's request and output against the admitted close descriptor.
+    pub(super) async fn withdrawal_evidence<E: Env>(
         &self,
         ctx: &E,
         chain: &Client,
         admitted: &AdmittedRootsResponse,
         account: &Key,
         destination: &[u8],
-    ) -> Result<WithdrawalClaim<Digest>> {
-        let outputs = admitted.roots.withdrawal_outputs;
+    ) -> Result<WithdrawalWitness> {
         let lookup = EvidenceLookup::WithdrawalOutput {
             batch: admitted.batch_id.into_digest(),
             account: account.clone(),
         };
         let accept = |evidence: Evidence| {
             let Evidence::Close {
-                body: EvidenceBody::WithdrawalOutput(claim),
+                body: EvidenceBody::WithdrawalOutput(witness),
                 ..
             } = evidence
             else {
                 bail!("served evidence is not a withdrawal claim");
             };
-            let output = claim
-                .verify::<Sha256>(&outputs)
-                .context("verify the withdrawal claim against the admitted outputs root")?;
             ensure!(
-                output.destination().as_ref() == destination,
-                "the withdrawal claim pays another destination"
+                witness.verify(&admitted.roots, &chain.deployment(), account, destination)?
+                    == admitted.batch_id,
+                "withdrawal descriptor names another admitted batch"
             );
-            Ok(claim)
+            Ok(witness)
         };
         self.fetch(ctx, chain, account, lookup, accept).await
     }
@@ -418,4 +399,56 @@ impl Holders {
         };
         self.fetch(ctx, chain, account, lookup, accept).await
     }
+}
+
+/// The account's deterministic first holder: its hash modulo the quorum size.
+fn spread(account: &Key, quorum: usize) -> usize {
+    let digest = Sha256::hash(&[account.as_ref()]);
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&digest.as_ref()[..8]);
+    let quorum = u64::try_from(quorum).expect("a quorum size fits u64");
+    usize::try_from(u64::from_be_bytes(prefix) % quorum)
+        .expect("a remainder below the quorum size fits usize")
+}
+
+/// One bounded evidence request to `holder`.
+async fn ask<E: Env>(
+    ctx: &E,
+    holder: SocketAddr,
+    request: Bytes,
+) -> Result<EvidenceResponse, Decline> {
+    select! {
+        answer = rpc::invoke(ctx, holder, "validator", METHOD_EVIDENCE, request) => {
+            answer
+                .and_then(|body| {
+                    EvidenceResponse::decode(body).context("decode evidence response")
+                })
+                .map_err(Decline::Failed)
+        },
+        _ = ctx.sleep(TIMEOUT) => Err(Decline::Timeout),
+    }
+}
+
+/// Checks that `opening` is `account`'s leaf under `root`.
+pub(super) fn check_opening(
+    opening: &StateOpening<Key, Digest>,
+    root: &StateRoot<Digest>,
+    account: &Key,
+) -> Result<()> {
+    ensure!(
+        opening.account == *account,
+        "payer opening belongs to another account"
+    );
+    opening
+        .verify::<Sha256>(root)
+        .context("verify payer Current state opening")?;
+    Ok(())
+}
+
+/// Names both failed sources when neither the operator nor the validators
+/// served a usable head.
+pub(super) fn unusable_head(operator: anyhow::Error, validators: anyhow::Error) -> anyhow::Error {
+    validators.context(format!(
+        "the operator served no usable head ({operator:#}) and the validators served none"
+    ))
 }

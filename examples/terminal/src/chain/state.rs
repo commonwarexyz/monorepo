@@ -49,19 +49,19 @@ use crate::{
         types::{Batch, Database, KEY_BYTES, Qmdb, Sealed, StateKey},
     },
     protocol::{
-        Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing, committee,
-        epoch_context_at, settlement_config, verify_chain_registration_signature,
+        Deployment, DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing,
+        committee, epoch_context_at, settlement_config, verify_chain_registration_signature,
     },
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
-    boundary::{SignedWithdrawal, WithdrawalBatch},
+    boundary::SignedWithdrawal,
     challenge::{ChallengeKind, Verdict},
     commitment::VectorRoot,
     qmdb::StateRoot,
     settlement::{
-        Bounds, ClaimError, DepositRefund, HardFaultReason, HardFaultRelease, HardFaultSettlement,
-        Registered, SettlementChain, SettlementError,
+        Bounds, ClaimError, DepositRefund, FinalizedClaims, HardFaultReason, HardFaultRelease,
+        HardFaultSettlement, Registered, SettlementChain, SettlementError,
     },
     transition::{BatchId, ExternalPayout, RootBundle, WithdrawalOutput},
 };
@@ -80,9 +80,9 @@ use tracing::debug;
 
 /// Decode bounds for the persisted settlement machine.
 ///
-/// The machine record is only decoded from state this node wrote or state
-/// synced under a certified root, so these bounds are a structural backstop
-/// sized generously above the demo deployment's configured limits.
+/// Enrollment and the withdrawal notice window bound active epochs and replay state.
+/// Finalized claims live in independent per-batch records. Decoding requires state
+/// written by this node or synced under a certified root.
 const MACHINE_BOUNDS: Bounds = Bounds {
     committee: 16,
     items: 1 << 20,
@@ -195,9 +195,13 @@ pub(crate) fn hard_fault_key(deployment: &Digest, account: &Key) -> StateKey {
     derive(deployment, Domain::HardFault, &account.encode())
 }
 
-/// Key of one deployment's deposit refund by account.
-pub(crate) fn refund_key(deployment: &Digest, account: &Key) -> StateKey {
-    derive(deployment, Domain::Refund, &account.encode())
+/// Key of one account's refund before or after terminal settlement begins.
+pub(crate) fn refund_key(deployment: &Digest, account: &Key, terminal: bool) -> StateKey {
+    derive(
+        deployment,
+        Domain::Refund,
+        &(account.clone(), terminal).encode(),
+    )
 }
 
 /// Key of one deployment's fault singleton.
@@ -395,8 +399,7 @@ pub(crate) struct RegistrationRecord {
     pub(crate) challenge_deadline: u64,
     /// Root of the derived deposit boundary.
     pub(crate) deposits_root: VectorRoot<Digest>,
-    /// Root of the full staged deposit view.
-    pub(crate) staged_root: VectorRoot<Digest>,
+
     /// Root of the registered withdrawal batch.
     pub(crate) withdrawals_root: VectorRoot<Digest>,
     /// The admitted close, once one is admitted for this registration.
@@ -411,7 +414,7 @@ impl Write for RegistrationRecord {
         self.admission_deadline.write(buf);
         self.challenge_deadline.write(buf);
         self.deposits_root.write(buf);
-        self.staged_root.write(buf);
+
         self.withdrawals_root.write(buf);
         self.admitted.write(buf);
     }
@@ -425,7 +428,6 @@ impl EncodeSize for RegistrationRecord {
             + self.admission_deadline.encode_size()
             + self.challenge_deadline.encode_size()
             + self.deposits_root.encode_size()
-            + self.staged_root.encode_size()
             + self.withdrawals_root.encode_size()
             + self.admitted.encode_size()
     }
@@ -442,7 +444,7 @@ impl Read for RegistrationRecord {
             admission_deadline: u64::read(buf)?,
             challenge_deadline: u64::read(buf)?,
             deposits_root: VectorRoot::read(buf)?,
-            staged_root: VectorRoot::read(buf)?,
+
             withdrawals_root: VectorRoot::read(buf)?,
             admitted: Option::<BatchId<Digest>>::read(buf)?,
         })
@@ -1097,7 +1099,7 @@ pub(crate) enum Record {
     Status(StatusRecord),
     Anchor(Digest),
     Admitted(AdmittedRootsResponse),
-    ClaimRoots(ClaimRootsResponse),
+    ClaimRoots(FinalizedClaims<Digest>),
     Deposit(DepositEvent),
     Withdrawal(SignedWithdrawal<Key, Digest>),
     Registration(RegistrationRecord),
@@ -1228,7 +1230,10 @@ impl Read for Record {
             0 => Ok(Self::Status(StatusRecord::read(buf)?)),
             1 => Ok(Self::Anchor(Digest::read(buf)?)),
             2 => Ok(Self::Admitted(AdmittedRootsResponse::read(buf)?)),
-            3 => Ok(Self::ClaimRoots(ClaimRootsResponse::read(buf)?)),
+            3 => Ok(Self::ClaimRoots(FinalizedClaims::read_cfg(
+                buf,
+                &(..=MAX_ACCOUNTS).into(),
+            )?)),
             4 => Ok(Self::Deposit(DepositEvent::read(buf)?)),
             5 => Ok(Self::Withdrawal(SignedWithdrawal::read_cfg(
                 buf,
@@ -1295,16 +1300,12 @@ enum Reject {
     EpochSequence,
     /// The settlement epoch was not registered.
     NotRegistered,
-    /// The close does not match the registered settlement epoch.
-    SubmissionMismatch,
-    /// The operator staged deposits differ from settlement.
-    StagedDivergence,
     /// The operator deposit boundary differs from settlement.
     BoundaryDivergence,
     /// The registration omits a queued settlement withdrawal.
     MissingQueuedWithdrawal,
-    /// The registration is missing an opening for a carried withdrawal.
-    MissingOpening,
+    /// Withdrawal openings do not match the complete ordered request batch.
+    WithdrawalOpenings,
     /// The registration signature failed authentication.
     Signature,
     /// The claim was adjudicated against an immutable finalized batch and
@@ -1366,6 +1367,7 @@ enum Fired {
         epoch: u64,
         batch_id: BatchId<Digest>,
         roots: RootBundle<Digest>,
+        claims: FinalizedClaims<Digest>,
     },
     /// The deployment hard-faulted.
     Faulted { reason: HardFaultReasonResponse },
@@ -1377,7 +1379,7 @@ enum Fired {
 const fn claim_rejection(error: &ClaimError) -> TxOutcome {
     match error {
         ClaimError::Unavailable => TxOutcome::Unavailable,
-        ClaimError::Consumed | ClaimError::Reserve | ClaimError::Proof(_) => {
+        ClaimError::Context | ClaimError::Consumed | ClaimError::Reserve | ClaimError::Proof(_) => {
             TxOutcome::Rejected(Reject::ClaimInvalid)
         }
     }
@@ -1532,7 +1534,7 @@ impl Machine {
             committee().expect("the demo committee is statically valid"),
             config.genesis(),
             0,
-            settlement_config(timing),
+            settlement_config(timing).expect("validated native timing"),
         )
         .expect("the genesis settlement configuration is valid");
         Self {
@@ -1574,12 +1576,13 @@ impl Machine {
         // finalization consumes the front.
         let front = self.chain.pending().map(|batch| batch.roots);
         match self.chain.finalize(height) {
-            Ok(finalized) => {
+            Ok((finalized, claims)) => {
                 let roots = front.expect("finalization consumes the pipeline front");
                 fired.push(Fired::Finalized {
                     epoch: finalized.epoch,
                     batch_id: finalized.batch_id,
                     roots,
+                    claims,
                 });
             }
 
@@ -1597,18 +1600,6 @@ impl Machine {
             Err(error) => unreachable!("admitted close must finalize past its window: {error}"),
         }
 
-        // Finalization observed the liveness deadlines for this height on the
-        // way in. Repeat the observation explicitly in case it declined
-        // before doing so.
-        if self.chain.hard_fault().is_none() {
-            match self.chain.fault_expired(height) {
-                Ok(_) | Err(SettlementError::DeadlineNotReached) => {}
-
-                // `fault_expired` fails otherwise only through its operating
-                // gate, and the fault check above proved that gate passing.
-                Err(error) => unreachable!("liveness observation failed: {error}"),
-            }
-        }
         if !faulted_before && let Some(reason) = self.chain.hard_fault() {
             fired.push(Fired::Faulted {
                 reason: reason.clone().into(),
@@ -1647,9 +1638,11 @@ impl Machine {
                     .await?
             }
             SettlementTx::Admit(request) => self.admit(config, height, request, view).await?,
-            SettlementTx::ClaimWithdrawal(request) => self.claim_withdrawal(config, request),
+            SettlementTx::ClaimWithdrawal(request) => {
+                self.claim_withdrawal(config, request, view).await?
+            }
             SettlementTx::ClaimExternalPayout(request) => {
-                self.claim_external_payout(config, request)
+                self.claim_external_payout(config, request, view).await?
             }
             SettlementTx::Challenge(request) => {
                 self.challenge(config, height, request, view).await?
@@ -1733,7 +1726,6 @@ impl Machine {
             request.epoch,
             request.predecessor_liability,
             &request.deposits_root,
-            &request.staged_root,
             &request.withdrawals,
             request.fee,
             &request.signature,
@@ -1774,22 +1766,8 @@ impl Machine {
             return Ok(Step::rejected(Reject::Deadline));
         };
 
-        // The full staged view must agree before the boundary is derived: a
-        // deferral hides its account from both derived boundaries, so root
-        // equality alone cannot see a deposit the operator never credited.
-        let staged = self.chain.boundary_deposits(&WithdrawalBatch::empty());
-        let Ok(staged_root) = staged.root::<Sha256>() else {
-            return Ok(Step::rejected(Reject::Chain));
-        };
-        if staged_root != request.staged_root {
-            return Ok(Step::rejected(Reject::StagedDivergence));
-        }
-
-        // The canonical boundary is settlement's own custody record with the
-        // chain's deferral rule applied. The operator commits the root of the
-        // boundary it built its context from, so a diverging deposit view is
-        // rejected here without consuming the registration slot.
-        let deposits = self.chain.boundary_deposits(&request.withdrawals);
+        // The deposit root must match settlement custody before registration consumes a slot.
+        let deposits = self.chain.pending_deposits();
         let Ok(derived_root) = deposits.root::<Sha256>() else {
             return Ok(Step::rejected(Reject::Chain));
         };
@@ -1810,24 +1788,31 @@ impl Machine {
             }
         }
 
-        // A registration is an immutable admission obligation, so the chain
-        // proves every carried extra certifiable with one predecessor-root
-        // opening in batch order.
+        // The native request carries one predecessor opening per withdrawal in batch
+        // order. Settlement has already checked queued authorizations; it checks the
+        // carried extras below. Every supplied proof must authenticate its account.
+        if request.openings.len() != request.withdrawals.requests().len() {
+            return Ok(Step::rejected(Reject::WithdrawalOpenings));
+        }
+        let predecessor = self
+            .chain
+            .pending_batches()
+            .last()
+            .map_or(self.chain.current_state_root(), |batch| {
+                batch.roots.successor
+            });
         let mut extra_openings = Vec::new();
-        for carried in request
-            .withdrawals
-            .requests()
-            .iter()
-            .filter(|entry| pending.request_for(entry.account()).is_none())
-        {
-            let Some(opening) = request
-                .openings
-                .iter()
-                .find(|opening| &opening.account == carried.account())
-            else {
-                return Ok(Step::rejected(Reject::MissingOpening));
-            };
-            extra_openings.push(opening.clone());
+        for (withdrawal, opening) in request.withdrawals.requests().iter().zip(&request.openings) {
+            if &opening.account != withdrawal.account() {
+                return Ok(Step::rejected(Reject::WithdrawalOpenings));
+            }
+            if pending.request_for(withdrawal.account()).is_some() {
+                if opening.verify::<Sha256>(&predecessor).is_err() {
+                    return Ok(Step::rejected(Reject::WithdrawalOpenings));
+                }
+            } else {
+                extra_openings.push(opening.clone());
+            }
         }
         let Ok(context) = epoch_context_at(
             *config.digest(),
@@ -1858,7 +1843,7 @@ impl Machine {
             admission_deadline,
             challenge_deadline,
             deposits_root: request.deposits_root,
-            staged_root: request.staged_root,
+
             withdrawals_root,
             admitted: None,
         };
@@ -1908,18 +1893,8 @@ impl Machine {
         if registration.admitted.is_some() {
             return Ok(Step::rejected(Reject::AdmissionConflict));
         }
-        let (Ok(deposits_root), Ok(withdrawals_root)) = (
-            request.deposits.root::<Sha256>(),
-            request.withdrawals.root::<Sha256>(),
-        ) else {
-            return Ok(Step::rejected(Reject::Chain));
-        };
-        if registration.epoch != request.epoch
-            || registration.predecessor_liability != request.predecessor_liability
-            || registration.deposits_root != deposits_root
-            || registration.withdrawals_root != withdrawals_root
-        {
-            return Ok(Step::rejected(Reject::SubmissionMismatch));
+        if registration.epoch != request.epoch {
+            return Ok(Step::rejected(Reject::EpochSequence));
         }
         let batch_id = match self.chain.admit(
             height,
@@ -2043,52 +2018,91 @@ impl Machine {
         height: u64,
         request: &ClaimPendingDepositRequest,
     ) -> Step {
+        if request.terminal != self.chain.hard_fault_settlement_started() {
+            return Step::rejected(Reject::Chain);
+        }
         let refund = match self.chain.claim_pending_deposit(height, &request.account) {
             Ok(refund) => refund,
             Err(error) => return Step::rejected(chain_rejection(&error)),
         };
         Step::applied(vec![(
-            refund_key(config.digest(), &request.account),
+            refund_key(config.digest(), &request.account, request.terminal),
             Some(Record::Refund(refund.into())),
         )])
     }
 
-    fn claim_withdrawal(&mut self, config: &Deployment, request: &WithdrawalClaimRequest) -> Step {
-        let release = match self
-            .chain
-            .claim_withdrawal(request.batch_id, &request.claim)
-        {
-            Ok(release) => release,
-            Err(error) => return Step::outcome(claim_rejection(&error)),
+    async fn claim_withdrawal<E>(
+        &mut self,
+        config: &Deployment,
+        request: &WithdrawalClaimRequest,
+        view: &View<'_, E>,
+    ) -> Result<Step, QmdbError<mmr::Family>>
+    where
+        E: StorageContext + Spawner,
+    {
+        let key = claim_roots_key(config.digest(), &request.batch_id);
+        let mut claims = match view.get(&key).await? {
+            Some(Record::ClaimRoots(claims)) => claims,
+            None => return Ok(Step::outcome(TxOutcome::Unavailable)),
+            Some(_) => unreachable!("the claim key holds a finalized claim record"),
         };
-        Step::applied(vec![(
-            withdrawal_release_key(config.digest(), &request.batch_id, request.claim.position()),
-            Some(Record::WithdrawalRelease(WithdrawalReleaseRecord {
-                claim: Sha256::hash(&[&request.claim.encode()]),
-                released: release.into(),
-            })),
-        )])
+        let release =
+            match self
+                .chain
+                .claim_withdrawal(request.batch_id, &mut claims, &request.claim)
+            {
+                Ok(release) => release,
+                Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
+            };
+        Ok(Step::applied(vec![
+            (key, Some(Record::ClaimRoots(claims))),
+            (
+                withdrawal_release_key(
+                    config.digest(),
+                    &request.batch_id,
+                    request.claim.position(),
+                ),
+                Some(Record::WithdrawalRelease(WithdrawalReleaseRecord {
+                    claim: Sha256::hash(&[&request.claim.encode()]),
+                    released: release.into(),
+                })),
+            ),
+        ]))
     }
 
-    fn claim_external_payout(
+    async fn claim_external_payout<E>(
         &mut self,
         config: &Deployment,
         request: &ExternalPayoutClaimRequest,
-    ) -> Step {
-        let payout = match self
-            .chain
-            .claim_external_payout(request.batch_id, &request.claim)
-        {
-            Ok(payout) => payout,
-            Err(error) => return Step::outcome(claim_rejection(&error)),
+        view: &View<'_, E>,
+    ) -> Result<Step, QmdbError<mmr::Family>>
+    where
+        E: StorageContext + Spawner,
+    {
+        let key = claim_roots_key(config.digest(), &request.batch_id);
+        let mut claims = match view.get(&key).await? {
+            Some(Record::ClaimRoots(claims)) => claims,
+            None => return Ok(Step::outcome(TxOutcome::Unavailable)),
+            Some(_) => unreachable!("the claim key holds a finalized claim record"),
         };
-        Step::applied(vec![(
-            payout_release_key(config.digest(), &request.batch_id, request.claim.position()),
-            Some(Record::PayoutRelease(PayoutReleaseRecord {
-                claim: Sha256::hash(&[&request.claim.encode()]),
-                released: payout.into(),
-            })),
-        )])
+        let payout =
+            match self
+                .chain
+                .claim_external_payout(request.batch_id, &mut claims, &request.claim)
+            {
+                Ok(payout) => payout,
+                Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
+            };
+        Ok(Step::applied(vec![
+            (key, Some(Record::ClaimRoots(claims))),
+            (
+                payout_release_key(config.digest(), &request.batch_id, request.claim.position()),
+                Some(Record::PayoutRelease(PayoutReleaseRecord {
+                    claim: Sha256::hash(&[&request.claim.encode()]),
+                    released: payout.into(),
+                })),
+            ),
+        ]))
     }
 
     /// The status record for a block at `height` with `timestamp`.
@@ -2649,14 +2663,12 @@ where
                     epoch,
                     batch_id,
                     roots,
+                    claims,
                 } => {
                     let mut emitted = vec![
                         (
                             claim_roots_key(deployment, batch_id),
-                            Some(Record::ClaimRoots(ClaimRootsResponse {
-                                withdrawal_outputs: roots.withdrawal_outputs,
-                                change: roots.change,
-                            })),
+                            Some(Record::ClaimRoots(claims.clone())),
                         ),
                         (
                             admitted_key(deployment, *epoch),

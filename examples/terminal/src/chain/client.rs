@@ -307,7 +307,10 @@ pub(crate) trait Chain: Send + 'static {
             });
             let verified = self.read(ctx, &request).await?;
             match verified.record {
-                Some(Record::ClaimRoots(roots)) => Ok(Some(roots)),
+                Some(Record::ClaimRoots(claims)) => Ok(Some(ClaimRootsResponse {
+                    withdrawal_outputs: claims.withdrawal_root(),
+                    change: claims.change_root(),
+                })),
                 Some(_) => bail!("certified claim-roots read returned a foreign record"),
                 None => Ok(None),
             }
@@ -441,14 +444,15 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// The deposit refund for `account`, if claimed.
+    /// The refund for this account and settlement phase, if claimed.
     fn refund<E: Env>(
         &mut self,
         ctx: &E,
         account: Key,
+        terminal: bool,
     ) -> impl Future<Output = Result<Option<ClaimPendingDepositResponse>>> + Send {
         async move {
-            let request = self.request(Lookup::Refund { account });
+            let request = self.request(Lookup::Refund { account, terminal });
             let verified = self.read(ctx, &request).await?;
             match verified.record {
                 Some(Record::Refund(refund)) => Ok(Some(refund)),
@@ -683,8 +687,10 @@ fn extract_status(verified: Verified) -> Result<StatusRecord> {
     }
 }
 
-/// Poll budget for certified close admission.
-const ADMISSION_ATTEMPTS: usize = 3_000;
+/// Admission is unresolved; its durable close remains eligible for a later attempt.
+#[derive(Debug, thiserror::Error)]
+#[error("close admission remains pending")]
+pub(crate) struct AdmissionPending;
 
 /// Space exact admission renewals to limit repeated gossip while ingress may evict pending work.
 const ADMISSION_RESUBMIT_POLLS: usize = 25;
@@ -703,11 +709,7 @@ pub(crate) async fn admit<C: Chain, E: Env>(
     let batch_id = request.header.batch_id::<Sha256>();
     let roots = request.roots;
     let tx = SettlementTx::Admit(request);
-    chain
-        .deliver(ctx, &tx)
-        .await
-        .context("submit close admission")?;
-    for attempt in 0..ADMISSION_ATTEMPTS {
+    for attempt in 0..SUBMIT_ATTEMPTS {
         if let Ok(Some(admitted)) = chain.admitted(ctx, epoch).await {
             ensure!(
                 admitted.batch_id == batch_id && admitted.roots == roots,
@@ -733,16 +735,19 @@ pub(crate) async fn admit<C: Chain, E: Env>(
                 bail!("the admitted close was invalidated by a proven challenge");
             }
         }
-        if (attempt + 1) % ADMISSION_RESUBMIT_POLLS == 0 {
+        if attempt % ADMISSION_RESUBMIT_POLLS == 0 {
             // Delivery may be ambiguous; a stalled renewal must not stop certified effect polling.
-            commonware_macros::select! {
-                _ = chain.submit(ctx, &tx) => {},
-                _ = ctx.sleep(POLL * ADMISSION_RESUBMIT_POLLS as u32) => {},
+            let submitted = commonware_macros::select! {
+                result = chain.submit(ctx, &tx) => Some(result),
+                _ = ctx.sleep(POLL * ADMISSION_RESUBMIT_POLLS as u32) => None,
+            };
+            if matches!(submitted, Some(Ok(Submission::Oversized))) {
+                bail!("close admission exceeds the chain wire bound");
             }
         }
         ctx.sleep(POLL).await;
     }
-    bail!("the close did not earn certified admission in time")
+    Err(AdmissionPending.into())
 }
 
 #[cfg(test)]

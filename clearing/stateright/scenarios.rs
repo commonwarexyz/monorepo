@@ -1161,7 +1161,7 @@ fn uncovered_carried_amount_degrades_at_the_frozen_root() {
 }
 
 #[test]
-fn carried_offset_defers_the_deposit() {
+fn carried_offset_includes_the_deposit_and_preserves_the_account_balance() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
     step(
@@ -1176,33 +1176,20 @@ fn carried_offset_defers_the_deposit() {
     );
     step(model, &mut state, admission(Batch::OffsetC));
 
-    // The deferred deposit stays staged with its deadline intact.
-    assert_eq!(state.pending_deposits, [0, 2, 0]);
-    assert_eq!(state.deposit_deadlines[Account::Bob as usize], Some(2));
-
-    // With no successor close admitted before its deadline, the deposit
-    // expires and refunds directly while the carried withdrawal still clears.
+    assert_eq!(state.pending_deposits, [0, 0, 0]);
+    assert_eq!(state.deposit_deadlines[Account::Bob as usize], None);
     step(model, &mut state, SettlementAction::Observe(2));
-    assert_eq!(
-        state.fault,
-        Fault::ExpiredDeposit {
-            account: Account::Bob,
-            expired_at: 2,
-        }
-    );
+    assert!(state.fault.healthy());
     step(model, &mut state, SettlementAction::Observe(4));
     step(model, &mut state, SettlementAction::Finalize);
     assert_eq!(state.last, SettlementEdge::Finalize(Batch::OffsetC));
     step(model, &mut state, withdrawal_claim(Batch::OffsetC));
     assert_eq!(state.clean_claim_paid, 2);
-    step(
-        model,
-        &mut state,
-        SettlementAction::ClaimDeposit(Account::Bob),
-    );
-    assert_eq!(state.refunded_deposits[Account::Bob as usize], 2);
-    drain_terminal(model, &mut state);
-    assert_eq!(state.released, state.total_in);
+    assert_eq!(state.current_liability, 15);
+    assert_eq!(state.custody, 15);
+    assert_eq!(state.refunded_deposits[Account::Bob as usize], 0);
+    assert_eq!(state.released, 2);
+    assert!(state.fault.healthy());
 }
 
 #[test]

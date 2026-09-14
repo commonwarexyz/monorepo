@@ -1,5 +1,29 @@
 use super::*;
 use commonware_codec::{FixedSize as _, Read as _, ReadExt as _, varint::UInt};
+use commonware_parallel::Rayon;
+use std::sync::OnceLock;
+
+fn decode_with_each_strategy(
+    wire: Bytes,
+    context: &CloseContext<VerifyingKey, ShaDigest>,
+) -> Result<posted::Dealing<VerifyingKey, ShaDigest>, commonware_codec::Error> {
+    static STRATEGY: OnceLock<Rayon> = OnceLock::new();
+    let parallel = STRATEGY.get_or_init(|| Rayon::new(NZUsize!(4)).unwrap());
+    let serial = posted::decode(wire.clone(), context);
+    let concurrent = posted::decode_with_strategy(wire, context, parallel);
+    assert_eq!(serial.is_ok(), concurrent.is_ok());
+    if let (Ok(serial), Ok(concurrent)) = (&serial, &concurrent) {
+        assert_eq!(serial.header, concurrent.header);
+        assert_eq!(serial.aggregate, concurrent.aggregate);
+        assert_eq!(serial.rows.len(), concurrent.rows.len());
+        for (serial, concurrent) in serial.rows.iter().zip(&concurrent.rows) {
+            assert_eq!(serial.account, concurrent.account);
+            assert_eq!(serial.outgoing, concurrent.outgoing);
+            assert_eq!(serial.vector, concurrent.vector);
+        }
+    }
+    concurrent
+}
 
 struct Offsets {
     accounts: Vec<usize>,
@@ -13,12 +37,14 @@ fn offsets(wire: &Bytes) -> Offsets {
     let mut reader = wire.clone();
     let position = |reader: &Bytes| wire.len() - reader.len();
     crate::bajillion::transition::Header::<ShaDigest>::read(&mut reader).unwrap();
-    let count = usize::read_cfg(&mut reader, &(0..=100).into()).unwrap();
+    let count = usize::read_cfg(&mut reader, &(0..=wire.len()).into()).unwrap();
     let mut accounts = Vec::new();
     let mut outgoing = Vec::new();
     for _ in 0..count {
         accounts.push(position(&reader));
         VerifyingKey::read(&mut reader).unwrap();
+    }
+    for _ in 0..count {
         outgoing.push(position(&reader));
         if u8::read(&mut reader).unwrap() == 1 {
             UInt::<u64>::read(&mut reader).unwrap();
@@ -50,6 +76,49 @@ fn offsets(wire: &Bytes) -> Offsets {
         entries,
         aggregate: position(&reader),
     }
+}
+
+#[test]
+fn keyed_dealing_validates_unsigned_account_keys() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime, 4, 4, 2, 1).await;
+        let encode = |key: &[u8]| {
+            let mut wire = fixture.prepared.encoded()[..32].to_vec();
+            wire.push(1);
+            wire.extend_from_slice(key);
+            wire.extend_from_slice(&[0, 0, 0]);
+            Bytes::from(wire)
+        };
+        assert!(
+            decode_with_each_strategy(encode(fixture.accounts[0].0.as_ref()), &fixture.context)
+                .is_ok()
+        );
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        let mut negative_zero = identity;
+        negative_zero[31] = 0x80;
+        let mut order_four = [0; 32];
+        order_four[31] = 0x80;
+        let mut order_two = [0xff; 32];
+        order_two[0] = 0xec;
+        order_two[31] = 0x7f;
+        let mut noncanonical = [0xff; 32];
+        noncanonical[0] = 0xed;
+        noncanonical[31] = 0x7f;
+        for key in [
+            identity,
+            negative_zero,
+            [0; 32],
+            order_four,
+            order_two,
+            noncanonical,
+        ] {
+            assert!(
+                decode_with_each_strategy(encode(&key), &fixture.context).is_err(),
+                "unsigned key {key:?}"
+            );
+        }
+    });
 }
 
 #[test]
@@ -94,7 +163,7 @@ fn keyed_dealing_rejects_noncanonical_keys_indices_tags_and_infeasible_edges() {
         cases.push(("missing aggregate", missing));
         for (name, wire) in cases {
             assert!(
-                posted::decode::<VerifyingKey, ShaDigest>(wire.into(), &fixture.context).is_err(),
+                decode_with_each_strategy(wire.into(), &fixture.context).is_err(),
                 "{name}"
             );
         }
@@ -124,19 +193,59 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
             .await
             .unwrap();
             assert!(
-                posted::decode::<VerifyingKey, ShaDigest>(
-                    fixture.prepared.encoded().clone(),
-                    &context
-                )
-                .is_err()
+                decode_with_each_strategy(fixture.prepared.encoded().clone(), &context).is_err()
             );
         }
         // The claimed row count cannot exceed what the remaining bytes can encode, even
         // when the authenticated context permits the protocol maximum.
         let mut huge = fixture.prepared.encoded()[..32].to_vec();
         huge.extend_from_slice(&[0xff; 10]);
-        assert!(posted::decode::<VerifyingKey, ShaDigest>(huge.into(), &fixture.context).is_err());
+        assert!(decode_with_each_strategy(huge.into(), &fixture.context).is_err());
     });
+}
+
+#[test]
+fn keyed_dealing_strategies_preserve_alignment_and_authenticated_state() {
+    for (senders, recipients, degree) in [(0, 8, 1), (96, 129, 4), (129, 64, 2)] {
+        deterministic::Runner::default().start(|runtime| async move {
+            let fixture = fixture(runtime, 129, senders, recipients, degree).await;
+            let wire = fixture.prepared.encoded();
+            let dealing = decode_with_each_strategy(wire.clone(), &fixture.context).unwrap();
+            let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                &fixture.state,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                dealing,
+                &mut TestRng::new(5),
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            assert_eq!(prepared.close().header, fixture.prepared.close().header);
+            assert_eq!(prepared.close().roots, fixture.prepared.close().roots);
+            assert_eq!(
+                prepared.state().mutations(),
+                fixture.prepared.state().mutations()
+            );
+            let offsets = offsets(wire);
+            let cuts = [0, 31, 32, wire.len() - 1].into_iter().chain(
+                [&offsets.accounts, &offsets.outgoing, &offsets.vectors]
+                    .into_iter()
+                    .flat_map(|positions| {
+                        [0, positions.len() / 2, positions.len().saturating_sub(1)]
+                            .into_iter()
+                            .filter_map(move |index| positions.get(index).copied())
+                    }),
+            );
+            for length in cuts {
+                assert!(decode_with_each_strategy(wire.slice(..length), &fixture.context).is_err());
+            }
+            let (state, close) = prepared.apply(fixture.state).await.unwrap();
+            assert_eq!(state.root(), close.roots.successor);
+        });
+    }
 }
 
 #[test]

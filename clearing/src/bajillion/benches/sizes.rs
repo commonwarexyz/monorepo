@@ -86,6 +86,8 @@ fn dealing_bytes(close: &Close<VerifyingKey, Digest>) -> DealingBytes {
     };
     for row in &close.rows {
         sizes.account_keys += field(&mut wire, &row.account);
+    }
+    for row in &close.rows {
         sizes.outgoing_flags += field(&mut wire, &u8::from(row.outgoing.is_some()));
         if let Some(send) = &row.outgoing {
             sizes.sequences += field(&mut wire, &UInt(send.body().seq()));

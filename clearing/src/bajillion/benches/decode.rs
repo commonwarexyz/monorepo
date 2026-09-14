@@ -1,4 +1,4 @@
-use super::fixtures::{active_close_fixture, profile_key, selected_active_profiles};
+use super::fixtures::{active_close_fixture, profile_key, selected_active_profiles, strategy};
 use commonware_clearing::bajillion::posted;
 use commonware_runtime::Runner as _;
 use criterion::{Criterion, criterion_group};
@@ -20,7 +20,8 @@ fn bench_decode(c: &mut Criterion) {
             |b| {
                 b.iter(|| {
                     black_box(
-                        posted::decode(encoded.clone(), &context).expect("bounded dealing decode"),
+                        posted::decode_with_strategy(encoded.clone(), &context, strategy())
+                            .expect("bounded dealing decode"),
                     )
                 });
             },

@@ -330,7 +330,7 @@ keep independent balance and evidence ownership.
 | Clearing committee key (BLS) | each validator's `node.json` | seals dealings and signs close-admission votes |
 | Operator network key (ed25519) | each `operator-<index>/node.json` | authenticates that operator as a registered p2p secondary |
 | Operator clearing key (curve25519) | operator `node.json` | signs the curve25519 half of receipts and epoch registrations; the registered configuration binds it to the deployment |
-| Operator acknowledgment key (BLS MinSig) | operator `node.json` | signs the aggregable half of acknowledgments, verified against the registered public key |
+| Operator acknowledgment key (BLS MinSig) | operator `node.json` | signs terminal acknowledgments for close certification |
 | Wallet key (curve25519) | one per agent | signs sends and withdrawal authorizations, and names the account custody and claims resolve to |
 
 ## Run

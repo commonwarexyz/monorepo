@@ -284,13 +284,13 @@ fn preflight_uses_the_current_height_and_adjudicates_challenges() {
         let challenge = |amounts| {
             SettlementTx::Challenge(ChallengeRequest {
                 deployment: deployment(),
-                batch_id: fixture.result.finalized.batch_id,
+                batch_id: fixture.result.header.batch_id::<Sha256>(),
                 evidence: ack_fork(&fixture.result, &fixture.protocol, amounts).encode(),
             })
         };
         let bogus = SettlementTx::Challenge(ChallengeRequest {
             deployment: deployment(),
-            batch_id: fixture.result.finalized.batch_id,
+            batch_id: fixture.result.header.batch_id::<Sha256>(),
             evidence: Bytes::new(),
         });
         assert_eq!(
@@ -302,7 +302,7 @@ fn preflight_uses_the_current_height_and_adjudicates_challenges() {
         let expected = Preflight::Eligible {
             action: Some(ProofAction::Challenge {
                 deployment: deployment(),
-                batch_id: fixture.result.finalized.batch_id,
+                batch_id: fixture.result.header.batch_id::<Sha256>(),
             }),
         };
         assert_eq!(trial(&db, &finalized, &native, &first).await, expected);
@@ -446,18 +446,11 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
                     epoch: 1,
                     predecessor_liability: 393,
                     deposits_root: root,
-                    staged_root: root,
+
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
                     fee: 4096,
-                    signature: protocol.sign_chain_registration(
-                        1,
-                        393,
-                        &root,
-                        &root,
-                        &withdrawals,
-                        4096,
-                    ),
+                    signature: protocol.sign_chain_registration(1, 393, &root, &withdrawals, 4096),
                 };
                 apply(
                     &db,

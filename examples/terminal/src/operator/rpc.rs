@@ -4,6 +4,7 @@ use super::{
     actor::{CloseEvent, CommittedEntry, Operator, SendOutcome},
     store::MAX_INCOMING_PAGE,
 };
+pub(crate) use crate::protocol::WithdrawalEvidence as WithdrawalEvidenceResponse;
 use crate::{
     protocol::{Acceptance, Entry, Key, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
     rpc,
@@ -25,7 +26,7 @@ use commonware_codec::{
     DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-use commonware_runtime::Network;
+use commonware_runtime::{Clock, Network};
 use std::net::SocketAddr;
 
 const MAX_STATE_PROOF_DIGESTS: usize = 4096;
@@ -717,13 +718,13 @@ pub(crate) fn withdrawal_digest(request: &SignedWithdrawal<Key, Digest>) -> Dige
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WithdrawalEvidenceResponse {
+pub(crate) struct AcknowledgeWithdrawalRequest {
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) account: Key,
     pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
-impl Write for WithdrawalEvidenceResponse {
+impl Write for AcknowledgeWithdrawalRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.batch_id.write(buf);
         self.account.write(buf);
@@ -731,13 +732,13 @@ impl Write for WithdrawalEvidenceResponse {
     }
 }
 
-impl EncodeSize for WithdrawalEvidenceResponse {
+impl EncodeSize for AcknowledgeWithdrawalRequest {
     fn encode_size(&self) -> usize {
         self.batch_id.encode_size() + self.account.encode_size() + self.claim.encode_size()
     }
 }
 
-impl Read for WithdrawalEvidenceResponse {
+impl Read for AcknowledgeWithdrawalRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -749,7 +750,15 @@ impl Read for WithdrawalEvidenceResponse {
     }
 }
 
-pub(crate) type AcknowledgeWithdrawalRequest = WithdrawalEvidenceResponse;
+impl From<&WithdrawalEvidenceResponse> for AcknowledgeWithdrawalRequest {
+    fn from(evidence: &WithdrawalEvidenceResponse) -> Self {
+        Self {
+            batch_id: evidence.batch_id(),
+            account: evidence.witness.request.account().clone(),
+            claim: evidence.witness.claim.clone(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExternalPayoutEvidenceResponse {
@@ -1108,12 +1117,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let evidence = operator
                 .withdrawal_evidence(&request.account)
                 .context("read withdrawal evidence")?;
-            Ok(WithdrawalEvidenceResponse {
-                batch_id: evidence.batch_id,
-                account: evidence.account,
-                claim: evidence.claim,
-            }
-            .encode())
+            Ok(evidence.encode())
         }
         OperatorRequest::AcknowledgeWithdrawal(_) => {
             bail!("settlement confirmation is required before acknowledging a withdrawal")
@@ -1198,7 +1202,7 @@ pub(crate) fn acknowledge_external_payout_confirmed(
     }
 }
 
-async fn invoke<E: Network>(
+async fn invoke<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     method: u8,
@@ -1207,7 +1211,10 @@ async fn invoke<E: Network>(
     rpc::invoke(network, address, "operator", method, body).await
 }
 
-pub(crate) async fn status<E: Network>(network: &E, address: SocketAddr) -> Result<StatusResponse> {
+pub(crate) async fn status<E: Network + Clock>(
+    network: &E,
+    address: SocketAddr,
+) -> Result<StatusResponse> {
     StatusResponse::decode(invoke(network, address, METHOD_STATUS, StatusRequest.encode()).await?)
         .context("decode operator status")
 }
@@ -1218,7 +1225,7 @@ pub(crate) async fn status<E: Network>(network: &E, address: SocketAddr) -> Resu
 /// This read is off the payment hot path. A paying wallet signs from its cached context
 /// and learns a moved context from the corrective rejection, so the head serves only the
 /// no-cache fallback, the balance heartbeat, and the recovery-opening refresh.
-pub(crate) async fn payment_head<E: Network>(
+pub(crate) async fn payment_head<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: PaymentHeadRequest,
@@ -1229,7 +1236,7 @@ pub(crate) async fn payment_head<E: Network>(
     .context("decode payment head")
 }
 
-pub(crate) async fn accept_send<E: Network>(
+pub(crate) async fn accept_send<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
@@ -1245,7 +1252,7 @@ pub(crate) async fn accept_send<E: Network>(
 /// This is an optional receipts fetch for a wallet that already decided commitment from a
 /// finalized settlement root. It is never a verdict: absence or failure here leaves the
 /// wallet's own conclusion unchanged.
-pub(crate) async fn accepted_batch<E: Network>(
+pub(crate) async fn accepted_batch<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
@@ -1262,7 +1269,7 @@ pub(crate) async fn accepted_batch<E: Network>(
 /// once its verified receipt is durably held, so the caller verifies and persists every
 /// returned receipt before treating any credit as reliance-grade. Absence or failure changes
 /// nothing.
-pub(crate) async fn incoming_payments<E: Network>(
+pub(crate) async fn incoming_payments<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: IncomingPaymentsRequest,
@@ -1278,7 +1285,7 @@ pub(crate) async fn incoming_payments<E: Network>(
 ///
 /// This is the availability dependence of reconciliation: the operator can refuse to serve the
 /// lookup but cannot forge one, since it opens against the committed close's own change root.
-pub(crate) async fn committed_entry<E: Network>(
+pub(crate) async fn committed_entry<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: CommittedEntryRequest,
@@ -1289,7 +1296,7 @@ pub(crate) async fn committed_entry<E: Network>(
     .context("decode committed entry evidence")
 }
 
-pub(crate) async fn withdrawal_opening<E: Network>(
+pub(crate) async fn withdrawal_opening<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: WithdrawalOpeningRequest,
@@ -1306,7 +1313,7 @@ pub(crate) async fn withdrawal_opening<E: Network>(
     .context("decode withdrawal opening")
 }
 
-pub(crate) async fn apply_withdrawal<E: Network>(
+pub(crate) async fn apply_withdrawal<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: ApplyWithdrawalRequest,
@@ -1317,7 +1324,7 @@ pub(crate) async fn apply_withdrawal<E: Network>(
     .context("decode applied withdrawal")
 }
 
-pub(crate) async fn start_close<E: Network>(
+pub(crate) async fn start_close<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     expected_epoch: u64,
@@ -1334,7 +1341,7 @@ pub(crate) async fn start_close<E: Network>(
     .context("decode close start")
 }
 
-pub(crate) async fn poll_close<E: Network>(
+pub(crate) async fn poll_close<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     epoch: u64,
@@ -1351,7 +1358,7 @@ pub(crate) async fn poll_close<E: Network>(
     .context("decode close event")
 }
 
-pub(crate) async fn withdrawal_evidence<E: Network>(
+pub(crate) async fn withdrawal_evidence<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: WithdrawalEvidenceRequest,
@@ -1368,7 +1375,7 @@ pub(crate) async fn withdrawal_evidence<E: Network>(
     .context("decode withdrawal evidence")
 }
 
-pub(crate) async fn acknowledge_withdrawal<E: Network>(
+pub(crate) async fn acknowledge_withdrawal<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: AcknowledgeWithdrawalRequest,
@@ -1384,7 +1391,7 @@ pub(crate) async fn acknowledge_withdrawal<E: Network>(
     Ok(())
 }
 
-pub(crate) async fn external_payout_evidence<E: Network>(
+pub(crate) async fn external_payout_evidence<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: ExternalPayoutEvidenceRequest,
@@ -1401,7 +1408,7 @@ pub(crate) async fn external_payout_evidence<E: Network>(
     .context("decode external payout evidence")
 }
 
-pub(crate) async fn acknowledge_external_payout<E: Network>(
+pub(crate) async fn acknowledge_external_payout<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: AcknowledgeExternalPayoutRequest,
@@ -1801,10 +1808,10 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(evidence.account, payer_key);
-        assert_eq!(evidence.claim.output().amount(), 7);
+        assert_eq!(evidence.witness.request.account().clone(), payer_key);
+        assert_eq!(evidence.witness.claim.output().amount(), 7);
         assert_eq!(
-            evidence.claim.output().destination().as_ref(),
+            evidence.witness.claim.output().destination().as_ref(),
             payer_key.as_ref()
         );
     }
@@ -1820,9 +1827,9 @@ mod tests {
         operator.wait_for_closes().unwrap();
         let evidence = operator.withdrawal_evidence(&account).unwrap();
         let acknowledgement = AcknowledgeWithdrawalRequest {
-            batch_id: evidence.batch_id,
-            account: evidence.account,
-            claim: evidence.claim,
+            batch_id: evidence.batch_id(),
+            account: evidence.witness.request.account().clone(),
+            claim: evidence.witness.claim,
         };
 
         let error = error_text(handle(

@@ -311,10 +311,8 @@ async fn run(
                     )
                     .await?;
                     let assembled = super::actor::assemble_epoch(&protocol, &data, &registration)?;
-                    let mut events = data.deposits;
-                    events.extend(data.carried);
                     protocol
-                        .prepare(registration, events, &state, assembled.terminals)
+                        .prepare(registration, &state, assembled.terminals)
                         .await
                 }
                 .await;
@@ -414,7 +412,9 @@ fn open_journal(path: &Path) -> Result<Connection> {
             mutations BLOB NOT NULL,
             result BLOB
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS batches_root ON batches(root);",
+        CREATE UNIQUE INDEX IF NOT EXISTS batches_root ON batches(root);
+        CREATE INDEX IF NOT EXISTS batches_replay ON batches(sequence)
+            WHERE sequence > 0 AND length(mutations) > 0;",
     )?;
     Ok(journal)
 }
@@ -518,6 +518,17 @@ async fn recover<E: Context + Spawner>(
     } else {
         Some(sequence(journal, &state)?)
     };
+    if let Some(sequence) = applied
+        && journal.query_row(
+            "SELECT EXISTS(SELECT 1 FROM batches WHERE sequence > 0 AND sequence <= ?1
+             AND length(mutations) > 0)",
+            [i64::try_from(sequence)?],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        state = state.commit().await?;
+        retire_replay(journal, sequence)?;
+    }
     loop {
         let next = applied.map_or(Ok(0), |sequence| {
             sequence.checked_add(1).context("epoch overflow")
@@ -551,6 +562,7 @@ async fn recover<E: Context + Spawner>(
         #[cfg(test)]
         recovery.applied.push(sequence);
         state = state.apply(candidate).await?.commit().await?;
+        retire_replay(journal, sequence)?;
         applied = Some(sequence);
     }
     Ok(state)
@@ -606,6 +618,16 @@ fn record(
     Ok(())
 }
 
+/// Native commit owns durable replay; genesis mutations still bind the configured accounts.
+fn retire_replay(journal: &Connection, sequence: u64) -> Result<()> {
+    journal.execute(
+        "UPDATE batches SET mutations = x'' WHERE sequence > 0 AND sequence <= ?1
+         AND length(mutations) > 0",
+        [i64::try_from(sequence)?],
+    )?;
+    Ok(())
+}
+
 fn stored_result(journal: &Connection, epoch: u64) -> Result<Option<SettlementResult>> {
     let bytes: Option<Vec<u8>> = journal
         .query_row(
@@ -632,7 +654,8 @@ async fn persist(
     #[cfg(test)] fail_after_journal: bool,
 ) -> Result<(Database, SettlementResult)> {
     ensure!(
-        result.epoch == sequence(journal, &state)? && candidate.predecessor() == state.head(),
+        result.context.payment().epoch() == sequence(journal, &state)?
+            && candidate.predecessor() == state.head(),
         "close does not extend the balance state"
     );
     ensure!(
@@ -641,17 +664,19 @@ async fn persist(
     );
 
     // Canonical history and all settlement evidence become durable before QMDB can advance.
-    record(
-        journal,
-        result.epoch.checked_add(1).context("epoch overflow")?,
-        &candidate,
-        Some(&result),
-    )?;
+    let sequence = result
+        .context
+        .payment()
+        .epoch()
+        .checked_add(1)
+        .context("epoch overflow")?;
+    record(journal, sequence, &candidate, Some(&result))?;
     #[cfg(test)]
     if fail_after_journal {
         anyhow::bail!("injected crash after balance history commit");
     }
     let state = state.apply(candidate).await?.commit().await?;
+    retire_replay(journal, sequence)?;
     Ok((state, result))
 }
 
@@ -834,6 +859,20 @@ mod tests {
             assert_eq!(trace.prepared, [2]);
             assert_eq!(trace.applied, [2]);
             assert_eq!(*state.head(), expected);
+            assert_eq!(journal.query_row(
+                "SELECT COALESCE(SUM(length(mutations)), 0) FROM batches WHERE sequence > 0", [],
+                |row| row.get::<_, i64>(0),
+            ).unwrap(), 0);
+            assert!(
+                journal
+                    .query_row(
+                        "SELECT length(mutations) FROM batches WHERE sequence = 0",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                    > 0
+            );
             drop(state);
             let mut trace = Recovery::default();
             let state = recover(

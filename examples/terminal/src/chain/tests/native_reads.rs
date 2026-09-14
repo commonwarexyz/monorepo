@@ -315,7 +315,7 @@ impl Chain for AdmissionRetention {
         let height = self.fixture.finalized.latest().unwrap().height;
         self.accepted.push(height);
         if self.submissions.len() == 1 {
-            assert_eq!(height, self.submitted_at);
+            self.submitted_at = height;
 
             // Consensus permits this finite omission; no proposal borrows the target before expiry.
             for offset in 1..=INGRESS_LEASE * 4 {
@@ -400,7 +400,14 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
             exhausted: Some(exhausted),
         };
         let result = commonware_macros::select! {
-            result = crate::chain::client::admit(&context, &mut race, request) => Some(result),
+            result = async {
+                loop {
+                    match crate::chain::client::admit(&context, &mut race, request.clone()).await {
+                        Err(error) if error.is::<crate::chain::client::AdmissionPending>() => {},
+                        result => break result,
+                    }
+                }
+            } => Some(result),
             exhausted = exhaustion => {
                 exhausted.unwrap();
                 None
@@ -438,8 +445,8 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
             .expect("transient renewal failures must preserve certified effect polling");
         assert!(completed_at.is_some());
         assert_eq!(race.accepted.len(), 2);
-        assert_eq!(race.accepted[0], submitted_at);
-        assert!(race.accepted[1] > submitted_at + INGRESS_LEASE * 4);
+        assert_eq!(race.accepted[0], race.submitted_at);
+        assert!(race.accepted[1] > race.submitted_at + INGRESS_LEASE * 4);
         assert_eq!(race.submissions.len(), 5);
         for pair in race.submissions.windows(2) {
             assert!(pair[0].0 < pair[1].0, "proof polling continues between renewal attempts");

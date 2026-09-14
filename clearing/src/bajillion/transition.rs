@@ -1724,7 +1724,7 @@ where
     let header = Header::new::<H, P>(context, &roots, &amounts);
     let encoded = match encoded {
         Some(encoded) => encoded,
-        None => posted::encode(&header, &rows, &vectors, aggregate.as_ref())?,
+        None => posted::encode(&header, &rows, &vectors, &aggregate)?,
     };
     Ok(PreparedClose {
         close: Close {

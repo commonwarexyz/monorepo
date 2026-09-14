@@ -45,7 +45,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
     admission::bls12381::Certificate,
-    boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch},
+    boundary::{SignedWithdrawal, WithdrawalBatch},
     commitment::VectorRoot,
     qmdb::StateOpening,
     transition::{
@@ -447,18 +447,21 @@ impl Read for ClaimHardFaultRequest {
 pub(crate) struct ClaimPendingDepositRequest {
     pub(crate) deployment: Digest,
     pub(crate) account: Key,
+    /// Selects the refund set created when terminal settlement begins.
+    pub(crate) terminal: bool,
 }
 
 impl Write for ClaimPendingDepositRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.account.write(buf);
+        self.terminal.write(buf);
     }
 }
 
 impl EncodeSize for ClaimPendingDepositRequest {
     fn encode_size(&self) -> usize {
-        self.deployment.encode_size() + self.account.encode_size()
+        self.deployment.encode_size() + self.account.encode_size() + self.terminal.encode_size()
     }
 }
 
@@ -469,6 +472,7 @@ impl Read for ClaimPendingDepositRequest {
         Ok(Self {
             deployment: Digest::read(buf)?,
             account: Key::read(buf)?,
+            terminal: bool::read(buf)?,
         })
     }
 }
@@ -595,9 +599,7 @@ pub(crate) struct RegisterEpochRequest {
     pub(crate) epoch: u64,
     pub(crate) predecessor_liability: u64,
     pub(crate) deposits_root: VectorRoot<Digest>,
-    /// Root of the operator's full staged deposit set, deferred aggregates included, so a
-    /// deposit view divergence a deferral hides from the boundary is still rejected.
-    pub(crate) staged_root: VectorRoot<Digest>,
+
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     /// One predecessor-root opening per withdrawal in batch order. Execution selects the
     /// ones proving its operator-carried extras certifiable.
@@ -612,7 +614,7 @@ impl Write for RegisterEpochRequest {
         self.epoch.write(buf);
         self.predecessor_liability.write(buf);
         self.deposits_root.write(buf);
-        self.staged_root.write(buf);
+
         self.withdrawals.write(buf);
         self.openings.write(buf);
         self.fee.write(buf);
@@ -626,7 +628,6 @@ impl EncodeSize for RegisterEpochRequest {
             + self.epoch.encode_size()
             + self.predecessor_liability.encode_size()
             + self.deposits_root.encode_size()
-            + self.staged_root.encode_size()
             + self.withdrawals.encode_size()
             + self.openings.encode_size()
             + self.fee.encode_size()
@@ -643,7 +644,7 @@ impl Read for RegisterEpochRequest {
             epoch: u64::read(buf)?,
             predecessor_liability: u64::read(buf)?,
             deposits_root: VectorRoot::read(buf)?,
-            staged_root: VectorRoot::read(buf)?,
+
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -673,9 +674,6 @@ pub(crate) struct AdmitRequest {
     /// only earns a typed rejection there.
     pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
-    pub(crate) predecessor_liability: u64,
-    pub(crate) deposits: DepositBatch<Key>,
-    pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
     pub(crate) amounts: CloseAmounts,
@@ -685,11 +683,8 @@ pub(crate) struct AdmitRequest {
 impl From<&SettlementResult> for AdmitRequest {
     fn from(result: &SettlementResult) -> Self {
         Self {
-            deployment: *result.epoch_context.deployment(),
-            epoch: result.epoch,
-            predecessor_liability: result.epoch_context.predecessor_liability(),
-            deposits: result.deposits.clone(),
-            withdrawals: result.withdrawals.clone(),
+            deployment: *result.context.epoch_context().deployment(),
+            epoch: result.context.payment().epoch(),
             header: result.header,
             roots: result.roots,
             amounts: result.amounts,
@@ -702,9 +697,6 @@ impl Write for AdmitRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.epoch.write(buf);
-        self.predecessor_liability.write(buf);
-        self.deposits.write(buf);
-        self.withdrawals.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
         self.amounts.write(buf);
@@ -716,9 +708,6 @@ impl EncodeSize for AdmitRequest {
     fn encode_size(&self) -> usize {
         self.deployment.encode_size()
             + self.epoch.encode_size()
-            + self.predecessor_liability.encode_size()
-            + self.deposits.encode_size()
-            + self.withdrawals.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
             + self.amounts.encode_size()
@@ -733,15 +722,6 @@ impl Read for AdmitRequest {
         let request = Self {
             deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
-            predecessor_liability: u64::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_BATCH_ITEMS))?,
-            withdrawals: WithdrawalBatch::read_cfg(
-                buf,
-                &(
-                    RangeCfg::new(0..=MAX_BATCH_ITEMS),
-                    RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-                ),
-            )?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
             amounts: CloseAmounts::read(buf)?,
@@ -1213,7 +1193,7 @@ mod tests {
                     .unwrap()
             },
         );
-        let context = fraud.result.payment_context.clone();
+        let context = fraud.result.context.payment().clone();
         let held = &fraud.held_receipt;
         let genuine: Challenge<Key, Digest> = Challenge::HigherAckEntry {
             entry: Box::new(EntryWitness {

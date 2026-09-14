@@ -25,5 +25,5 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install quint
         run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
-      - name: Check Minimmit
+      - name: Run test
         run: cd pipeline/minimmit/quint && make typecheck && make test

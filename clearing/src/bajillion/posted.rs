@@ -5,15 +5,15 @@
 
 use crate::bajillion::{
     commitment::MAX_VECTOR_LENGTH,
-    payment::PaymentContext,
     state::AccountRow,
-    transition::{CloseContext, CloseLimits, Header, OperatorAggregate, TransitionError},
+    transition::{CloseContext, Header, OperatorAggregate, TransitionError},
     vector::{OutEntry, OutVector},
 };
 use alloc::vec::Vec;
 use bytes::{Buf, Bytes, BytesMut};
 use commonware_codec::{Error as CodecError, RangeCfg, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_parallel::{Sequential, Strategy};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Row<P: PublicKey> {
@@ -46,12 +46,16 @@ pub fn decode<P: PublicKey, D: Digest>(
     encoded: Bytes,
     context: &CloseContext<P, D>,
 ) -> Result<Dealing<P, D>, CodecError> {
-    decode_with(encoded, context.payment(), context.limits())
+    decode_with_strategy(encoded, context, &Sequential)
 }
-fn decode_with<P: PublicKey, D: Digest>(
+
+/// Decodes a bounded dealing, validating account keys with the supplied strategy.
+///
+/// Successful decoding checks the canonical structure, not signatures or state transitions.
+pub fn decode_with_strategy<P: PublicKey, D: Digest>(
     encoded: Bytes,
-    context: &PaymentContext<P, D>,
-    limits: &CloseLimits,
+    context: &CloseContext<P, D>,
+    strategy: &impl Strategy,
 ) -> Result<Dealing<P, D>, CodecError> {
     let invalid = |reason| CodecError::Invalid("clearing::Dealing", reason);
     if P::SIZE != 32 {
@@ -59,21 +63,38 @@ fn decode_with<P: PublicKey, D: Digest>(
     }
     let mut reader = encoded.clone();
     let header = Header::read(&mut reader)?;
+    let limits = context.limits();
     let max_rows = limits
         .max_rows()
         .min(u64::from(MAX_VECTOR_LENGTH))
         .min((reader.remaining() / 33) as u64) as usize;
     let count = usize::read_cfg(&mut reader, &RangeCfg::new(..=max_rows))?;
-    let mut skeleton = Vec::<(P, Option<(u64, P::Signature)>)>::with_capacity(count);
-    for _ in 0..count {
-        let account = P::read(&mut reader)?;
-        if skeleton
-            .last()
-            .is_some_and(|(last, _)| last.as_ref() >= account.as_ref())
-        {
-            return Err(invalid("account keys are not uniquely sorted"));
-        }
-        let outgoing = match u8::read(&mut reader)? {
+    // Groups of 64 keys let each worker use the key type's bulk validation. Collection
+    // preserves the byte order that binds each recipient index to its full public key.
+    let keys = reader.copy_to_bytes(count * P::SIZE);
+    let mut skeleton = strategy.try_fold(
+        keys.chunks(64 * P::SIZE),
+        Vec::new,
+        |mut rows, mut bytes| {
+            let count = bytes.len() / P::SIZE;
+            for account in P::read_vec(&mut bytes, count, &())? {
+                rows.push((account, None));
+            }
+            Ok::<_, CodecError>(rows)
+        },
+        |mut left, right| {
+            left.extend(right);
+            left
+        },
+    )?;
+    if skeleton
+        .windows(2)
+        .any(|pair| pair[0].0.as_ref() >= pair[1].0.as_ref())
+    {
+        return Err(invalid("account keys are not uniquely sorted"));
+    }
+    for (_, outgoing) in &mut skeleton {
+        *outgoing = match u8::read(&mut reader)? {
             0 => None,
             1 => Some((
                 UInt::<u64>::read(&mut reader)?.into(),
@@ -81,7 +102,6 @@ fn decode_with<P: PublicKey, D: Digest>(
             )),
             tag => return Err(CodecError::InvalidEnum(tag)),
         };
-        skeleton.push((account, outgoing));
     }
     let mut budget = limits.max_total_entries();
     let mut vectors = Vec::with_capacity(count);
@@ -110,7 +130,7 @@ fn decode_with<P: PublicKey, D: Digest>(
             });
         }
         vectors.push(
-            OutVector::new(context.epoch(), payer.clone(), entries)
+            OutVector::new(context.payment().epoch(), payer.clone(), entries)
                 .map_err(|_| invalid("invalid outgoing vector"))?,
         );
     }
@@ -144,7 +164,7 @@ pub(crate) fn encode<P: PublicKey, D: Digest>(
     header: &Header<D>,
     rows: &[AccountRow<P, D>],
     vectors: &[OutVector<P>],
-    aggregate: Option<&OperatorAggregate>,
+    aggregate: &Option<OperatorAggregate>,
 ) -> Result<Bytes, TransitionError> {
     if P::SIZE != 32
         || rows.len() != vectors.len()
@@ -159,6 +179,8 @@ pub(crate) fn encode<P: PublicKey, D: Digest>(
     rows.len().write(&mut writer);
     for row in rows {
         row.account.write(&mut writer);
+    }
+    for row in rows {
         match &row.outgoing {
             None => 0_u8.write(&mut writer),
             Some(send) => {
@@ -182,12 +204,6 @@ pub(crate) fn encode<P: PublicKey, D: Digest>(
             UInt(entry.count).write(&mut writer);
         }
     }
-    match aggregate {
-        None => 0_u8.write(&mut writer),
-        Some(signature) => {
-            1_u8.write(&mut writer);
-            signature.write(&mut writer);
-        }
-    }
+    aggregate.write(&mut writer);
     Ok(writer.freeze())
 }

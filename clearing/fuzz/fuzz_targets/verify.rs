@@ -12,7 +12,7 @@ use commonware_clearing::bajillion::{
         HigherEntryLookup, Verdict, account_lookup, adjudicate, decode_bounded,
         higher_entry_lookup,
     },
-    commitment::{Builder, MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
+    commitment::{Builder, Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{
         AckError, EntryReceipt, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
         VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
@@ -78,7 +78,6 @@ struct ChallengeCase {
 #[derive(Arbitrary, Debug)]
 struct CommitmentCase {
     opening: Opening<Digest>,
-    multi: MultiOpening<Digest>,
     range: RangeOpening<Digest>,
     predecessor_root: VectorRoot<Digest>,
     opening_values: Vec<Vec<u8>>,
@@ -681,8 +680,6 @@ fn bounded_values(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
 
 fn fuzz_commitment(mut case: CommitmentCase) {
     case.opening.proof.siblings.truncate(MAX_PROOF_DIGESTS);
-    case.multi.positions.truncate(MAX_POSITIONS);
-    case.multi.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     case.range.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     let opening_values = bounded_values(case.opening_values);
     let first = opening_values.first().map_or(&[][..], Vec::as_slice);
@@ -692,23 +689,8 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         .verify::<Sha256>(case.kind, &case.predecessor_root, first);
     let _ = case.opening.reconstruct::<Sha256>(case.kind, first);
     let _ = case
-        .multi
-        .verify::<Sha256, _>(case.kind, &case.predecessor_root, &opening_values);
-
-    // Arbitrary range openings verify, narrow, and open only with typed errors.
-    let probe_start = case.range.start.wrapping_add(u32::from(
-        case.positions.first().copied().unwrap_or_default(),
-    ));
-    let probe_count = u32::from(case.positions.get(1).copied().unwrap_or_default());
-    let _ = case
         .range
         .verify::<Sha256, _>(case.kind, &case.predecessor_root, &opening_values);
-    let _ = case
-        .range
-        .narrow::<Sha256, _>(case.kind, &opening_values, probe_start, probe_count);
-    let _ = case
-        .range
-        .open::<Sha256, _>(case.kind, &opening_values, probe_start);
     let mut builder = Builder::<Sha256>::new(case.kind, opening_values.len() as u32)
         .expect("small vector must fit the protocol bound");
     for value in &opening_values {
@@ -721,11 +703,11 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         .expect("builder received its declared length");
     let root = tree.root();
     if opening_values.is_empty() {
-        let multi = tree
-            .multi_opening(&[])
-            .expect("empty vector has a canonical empty multiproof");
+        let range = tree
+            .range_opening(0, 0)
+            .expect("empty vector has a canonical empty range proof");
         assert!(
-            multi
+            range
                 .verify::<Sha256, Vec<u8>>(case.kind, &root, &[])
                 .is_ok()
         );
@@ -754,21 +736,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     }
     positions.sort_unstable();
     positions.dedup();
-    let disclosed = positions
-        .iter()
-        .map(|&position| opening_values[position as usize].clone())
-        .collect::<Vec<_>>();
-    let multi = tree
-        .multi_opening(&positions)
-        .expect("normalized positions are canonical");
-    assert!(
-        multi
-            .verify::<Sha256, _>(case.kind, &root, &disclosed)
-            .is_ok()
-    );
-
-    // Narrowing a verified range opening reproduces the direct sub-range and single openings,
-    // and each result verifies against the same root.
     let start = positions[0];
     let end = positions[positions.len() - 1] + 1;
     let covered = &opening_values[start as usize..end as usize];
@@ -778,40 +745,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     range
         .verify::<Sha256, _>(case.kind, &root, covered)
         .expect("direct range opening verifies");
-    for (index, &sub_start) in positions.iter().enumerate() {
-        for &sub_last in &positions[index..] {
-            let sub_count = sub_last - sub_start + 1;
-            let narrowed = range
-                .narrow::<Sha256, _>(case.kind, covered, sub_start, sub_count)
-                .expect("sub-range lies inside the verified range");
-            assert_eq!(
-                narrowed,
-                tree.range_opening(sub_start, sub_count)
-                    .expect("sub-range is in bounds")
-            );
-            assert!(
-                narrowed
-                    .verify::<Sha256, _>(
-                        case.kind,
-                        &root,
-                        &opening_values[sub_start as usize..=sub_last as usize],
-                    )
-                    .is_ok()
-            );
-        }
-        let opened = range
-            .open::<Sha256, _>(case.kind, covered, sub_start)
-            .expect("position lies inside the verified range");
-        assert_eq!(
-            opened,
-            tree.opening(sub_start).expect("position is in bounds")
-        );
-        assert!(
-            opened
-                .verify::<Sha256>(case.kind, &root, &opening_values[sub_start as usize])
-                .is_ok()
-        );
-    }
 }
 
 fn fuzz_vector(case: VectorCase) {
@@ -1084,12 +1017,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     );
 
     // A complete frame binds the claimed header, canonical keys, signatures and vector data.
-    let second_key = 33
-        + 33
-        + prepared.close().rows[0]
-            .outgoing
-            .as_ref()
-            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    let second_key = 33 + 32;
     let mut duplicate = encoded.to_vec();
     duplicate.copy_within(33..65, second_key);
     assert!(posted::decode::<VerifyingKey, Digest>(duplicate.into(), &context).is_err());
@@ -1098,12 +1026,19 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         reordered.swap(33 + offset, second_key + offset);
     }
     assert!(posted::decode::<VerifyingKey, Digest>(reordered.into(), &context).is_err());
-    let vectors_start = second_key
-        + 33
-        + prepared.close().rows[1]
-            .outgoing
-            .as_ref()
-            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    let vectors_start = 33
+        + 2 * 32
+        + prepared
+            .close()
+            .rows
+            .iter()
+            .map(|row| {
+                1 + row
+                    .outgoing
+                    .as_ref()
+                    .map_or(0, |send| 1 + send.payer_signature().encode_size())
+            })
+            .sum::<usize>();
     let sender_vector = vectors_start + usize::from(prepared.close().rows[0].outgoing.is_none());
     let mut bad_index = encoded.to_vec();
     bad_index[sender_vector + 1] = 2;

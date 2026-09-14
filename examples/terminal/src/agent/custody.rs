@@ -6,7 +6,8 @@ use super::{
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
-        state::{ClaimHardFaultResponse, ClaimPendingDepositResponse, FaultRecord},
+        query::Lookup,
+        state::{ClaimHardFaultResponse, ClaimPendingDepositResponse, FaultRecord, Record},
         tx::{
             BeginHardFaultSettlementRequest, ClaimHardFaultRequest, ClaimPendingDepositRequest,
             DepositRequest, NativeTransferRequest, QueueWithdrawalRequest, SettlementTx,
@@ -40,8 +41,8 @@ pub(crate) enum WithdrawalOutcome {
     },
 }
 
-pub(super) const fn withdrawal_deadline(now: u64) -> u64 {
-    now.saturating_add(crate::protocol::WITHDRAWAL_HORIZON)
+pub(super) fn withdrawal_deadline(now: u64, timing: &crate::protocol::Timing) -> Result<u64> {
+    Ok(now.saturating_add(settlement_config(timing)?.maximum_withdrawal_notice.get()))
 }
 
 #[cfg(test)]
@@ -55,6 +56,13 @@ pub(super) fn initial_deposit_nonce() -> u64 {
 }
 
 impl Agent {
+    /// The saved authorization remains the retry authority until its claim completes.
+    pub(crate) fn pending_withdrawal_action(&self) -> Option<WithdrawalAction> {
+        self.pending_withdrawal
+            .as_ref()
+            .map(|request| *request.body().action())
+    }
+
     /// Transfers shared native funds and completes on the exact certified receipt.
     pub(crate) async fn transfer_native<E: Env>(
         &mut self,
@@ -222,9 +230,16 @@ impl Agent {
         chain: &mut Client,
     ) -> Result<ClaimPendingDepositResponse> {
         let account = self.account();
+        let request = chain.request(Lookup::Fault);
+        let terminal = match chain.recent(ctx, &request).await?.record {
+            Some(Record::Fault(FaultRecord::Faulted(_))) => false,
+            Some(Record::Fault(FaultRecord::Settling(_))) => true,
+            _ => anyhow::bail!("deposit recovery requires a certified deployment fault"),
+        };
         let claim = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
             deployment: self.deployment,
             account: account.clone(),
+            terminal,
         });
         chain
             .deliver(ctx, &claim)
@@ -232,7 +247,7 @@ impl Agent {
             .context("claim pending settlement deposit")?;
         let mut released = None;
         for _ in 0..EFFECT_ATTEMPTS {
-            if let Ok(Some(record)) = chain.refund(ctx, account.clone()).await {
+            if let Ok(Some(record)) = chain.refund(ctx, account.clone(), terminal).await {
                 released = Some(record);
                 break;
             }
@@ -389,21 +404,50 @@ impl Agent {
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
-        // One withdrawal claim intent exists per wallet, and a recorded release pins its
-        // evidence until the operator acknowledgement completes it. A new withdrawal must
-        // wait: silently skipping the open would drop the new reserve's intent instead.
         ensure!(
-            self.pending_withdrawal_claim.is_none(),
+            self.pending_withdrawal_claim.is_none() || self.pending_withdrawal.is_some(),
             "the pending withdrawal claim must complete before a new withdrawal"
         );
-        let request = match &self.pending_withdrawal {
-            Some(pending) => {
+        if let Some(request) = self.pending_withdrawal.clone() {
+            ensure!(
+                request.body().action() == &action,
+                "the pending withdrawal claim must complete before a different withdrawal"
+            );
+            let status = chain.recent_status(ctx).await?;
+            ensure!(
+                status.deployment == self.deployment,
+                "unexpected withdrawal deployment"
+            );
+            if status.height >= request.body().deadline() {
                 ensure!(
-                    pending.body().action() == &action,
-                    "another withdrawal retry is pending"
+                    !status.hard_faulted,
+                    "expired withdrawal requires hard-fault recovery"
                 );
-                pending.clone()
+                // A healthy post-deadline state excludes every outstanding obligation.
+                // Finalized boundaries distinguish completed carriage from a request never used.
+                if let Some(last) = status.last_finalized {
+                    for epoch in 0..=last {
+                        let admitted = chain
+                            .admitted(ctx, epoch)
+                            .await?
+                            .filter(|record| record.finalized)
+                            .context("finalized withdrawal history is unavailable")?;
+                        if self
+                            .holders
+                            .carried_withdrawal(ctx, chain, epoch, &admitted, &request)
+                            .await?
+                        {
+                            return Ok(WithdrawalOutcome::Applied { epoch, request });
+                        }
+                    }
+                }
+                self.store.discard_unused_withdrawal(&request)?;
+                self.pending_withdrawal = None;
+                self.pending_withdrawal_claim = None;
             }
+        }
+        let request = match &self.pending_withdrawal {
+            Some(pending) => pending.clone(),
             None => {
                 // The signed deadline is an absolute block height, so it is
                 // chosen from a recency-bounded status read: a certified tip
@@ -460,17 +504,7 @@ impl Agent {
                         .context("durably retain withdrawal opening")?;
                 }
 
-                // A withdrawal reduces the live balance mid-epoch, ahead of any
-                // predecessor root an affordability floor could be read from.
-                // Invalidate the cached signing state durably before the request can
-                // reach the operator: verified head reads re-cache only once no
-                // withdrawal is in flight, so the optimistic payment precheck never
-                // overstates spendable balance.
-                self.store
-                    .clear_context()
-                    .context("invalidate cached signing context")?;
-                self.cache = None;
-                let deadline = withdrawal_deadline(status.height);
+                let deadline = withdrawal_deadline(status.height, &chain.genesis().timing())?;
                 let request = SignedWithdrawal::sign(
                     status.deployment,
                     status.state_root.digest,
@@ -479,6 +513,11 @@ impl Agent {
                     deadline,
                     self.wallet.signer(),
                 );
+                self.store
+                    .stage_withdrawal(&request)
+                    .context("persist signed withdrawal")?;
+                self.cache = None;
+                self.pending_withdrawal_claim = Some(PendingWithdrawalClaim { evidence: None });
                 self.pending_withdrawal = Some(request.clone());
                 request
             }
@@ -508,17 +547,6 @@ impl Agent {
             });
         }
 
-        // The acknowledged epoch is display only and never trusted: the claim intent
-        // carries no epoch, and the claim binds to its finalized batch only when fetched
-        // evidence verifies locally against that batch's own claim roots.
-        self.store
-            .open_withdrawal_claim()
-            .context("open withdrawal claim")?;
-        self.pending_withdrawal_claim = Some(PendingWithdrawalClaim {
-            evidence: None,
-            result: None,
-        });
-        self.pending_withdrawal = None;
         Ok(WithdrawalOutcome::Applied {
             epoch: applied.epoch,
             request,
@@ -568,7 +596,7 @@ impl Agent {
             .last_finalized
             .map_or(Some(0), |last| last.checked_add(1))
             .context("withdrawal epoch overflow")?;
-        let bound = settlement_config(&chain.genesis().timing())
+        let bound = settlement_config(&chain.genesis().timing())?
             .max_pending_epochs
             .get();
         for offset in 0..bound {
@@ -612,18 +640,6 @@ impl Agent {
         }
         ensure!(queued, "the queued withdrawal was not certified in time");
 
-        // The request is now a chain obligation. Open the claim slot in case the operator
-        // already applied the request and only the response was lost: a close that carries it
-        // finalizes an operator-carried claim this slot recovers, while a true non-carriage
-        // expires into hard-fault recovery against the retained opening.
-        self.store
-            .open_withdrawal_claim()
-            .context("open withdrawal claim")?;
-        self.pending_withdrawal_claim = Some(PendingWithdrawalClaim {
-            evidence: None,
-            result: None,
-        });
-        self.pending_withdrawal = None;
         Ok(request)
     }
 }

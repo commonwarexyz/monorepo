@@ -243,6 +243,8 @@ pub(crate) struct Route {
 
 /// A message sent to the close pipeline [`Certifier`].
 pub(crate) enum Message {
+    /// Stop certification for this operator's canonically invalidated suffix.
+    Fence { first: u64 },
     /// Disseminate the complete dealing and assemble the exact-quorum
     /// certificate from the returned votes.
     Certify {
@@ -251,7 +253,7 @@ pub(crate) enum Message {
         header: Header<Digest>,
         message: Bytes,
         routes: Vec<Route>,
-        response: oneshot::Sender<bls12381::Certificate>,
+        response: oneshot::Sender<Result<bls12381::Certificate>>,
     },
     /// Submit the certified close and complete once the local certified
     /// state admitted the exact batch and roots.
@@ -301,7 +303,7 @@ impl Mailbox {
             routes,
             response,
         });
-        receiver.await.context("the close pipeline stopped")
+        receiver.await.map_err(|_| PipelineStopped)?
     }
 
     /// Submits the certified close and completes on certified admission.
@@ -311,9 +313,14 @@ impl Mailbox {
             request: Box::new(request),
             response,
         });
-        receiver.await.context("the close pipeline stopped")?
+        receiver.await.map_err(|_| PipelineStopped)?
     }
 }
+
+/// The pipeline owner has stopped; its durable jobs require a live owner to resume.
+#[derive(Debug, thiserror::Error)]
+#[error("the close pipeline stopped; restart the operator to resume")]
+pub(crate) struct PipelineStopped;
 
 /// Blocking close-pipeline facade for the operator's synchronous close
 /// worker thread: dissemination, certification, and admission run inside the
@@ -380,8 +387,12 @@ impl Pipeline {
         ))
     }
 
-    /// Submits the certified close and blocks until the local certified
-    /// state admitted the exact batch and roots.
+    /// Cancels this operator's invalidated suffix, including work still preparing.
+    pub(crate) fn fence(&self, first: u64) {
+        let _ = self.mailbox.sender.enqueue(Message::Fence { first });
+    }
+
+    /// Submits the certified close and blocks until certified admission.
     pub(crate) fn admit(&self, request: AdmitRequest) -> Result<()> {
         futures::executor::block_on(self.mailbox.admit(request))
     }
@@ -395,7 +406,7 @@ struct Outstanding {
     message: Bytes,
     routes: Vec<Route>,
     votes: BTreeMap<Participant, Vote>,
-    response: oneshot::Sender<bls12381::Certificate>,
+    response: oneshot::Sender<Result<bls12381::Certificate>>,
 }
 
 /// Certifier configuration.
@@ -420,6 +431,8 @@ where
     chain: C,
     mailbox: MailboxReceiver<Message>,
     outstanding: Option<Outstanding>,
+    // Preparation runs on a worker: a fence can arrive before its certification request.
+    fenced_from: Option<u64>,
 }
 
 impl<E, C> Certifier<E, C>
@@ -436,6 +449,7 @@ where
                 chain: config.chain,
                 mailbox,
                 outstanding: None,
+                fenced_from: None,
             },
             Mailbox { sender },
         )
@@ -455,14 +469,29 @@ where
         Se: Sender<PublicKey = ed25519::PublicKey>,
         Re: Receiver<PublicKey = ed25519::PublicKey>,
     {
+        let mut resend_at = self.context.current() + RESEND;
         loop {
             select! {
+                _ = self.context.sleep_until(resend_at) => {
+                    self.disseminate(&mut sender);
+                    resend_at = self.context.current() + RESEND;
+                },
                 message = self.mailbox.recv() => {
                     let Some(message) = message else {
                         return;
                     };
                     match message {
+                        Message::Fence { first } => {
+                            self.fenced_from = Some(self.fenced_from.map_or(first, |old| old.min(first)));
+                            if self.outstanding.as_ref().is_some_and(|close| close.epoch >= first) {
+                                self.outstanding.take().unwrap().response.send_lossy(Err(anyhow::anyhow!("certification is canonically fenced")));
+                            }
+                        }
                         Message::Certify { deployment, epoch, header, message, routes, response } => {
+                            if self.fenced_from.is_some_and(|first| epoch >= first) {
+                                response.send_lossy(Err(anyhow::anyhow!("certification is canonically fenced")));
+                                continue;
+                            }
                             // A replaced certification drops the stale
                             // response: its worker observes the closed
                             // channel and fails that close.
@@ -476,6 +505,7 @@ where
                                 response,
                             });
                             self.disseminate(&mut sender);
+                            resend_at = self.context.current() + RESEND;
                         }
                         Message::Admit { request, response } => {
                             let result = client::admit(
@@ -506,9 +536,6 @@ where
                         continue;
                     }
                     self.tally(ballot);
-                },
-                _ = self.context.sleep(RESEND) => {
-                    self.disseminate(&mut sender);
                 },
             }
         }
@@ -589,7 +616,7 @@ where
             .verifier
             .assemble_exact(outstanding.votes.into_values())
             .expect("exactly quorum verified votes assemble");
-        outstanding.response.send_lossy(certificate);
+        outstanding.response.send_lossy(Ok(certificate));
     }
 }
 
@@ -996,7 +1023,7 @@ mod tests {
         CheckedSender, LimitedSender,
         simulated::{Config as NetConfig, Link, Network},
     };
-    use commonware_runtime::{IoBuf, IoBufs, Quota, Runner as _, deterministic};
+    use commonware_runtime::{Clock as _, IoBuf, IoBufs, Quota, Runner as _, deterministic};
     use commonware_utils::{NZU32, NZUsize, probability, sync::Mutex};
     use std::{sync::Arc, time::SystemTime};
 
@@ -1169,6 +1196,33 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
+            let foreign_header =
+                commonware_clearing::bajillion::transition::Header::<Digest>::decode(
+                    Sha256::hash(&[b"foreign-header"]).as_ref(),
+                )
+                .unwrap();
+            let foreign = Ballot {
+                deployment: protocol.deployment(),
+                epoch: 0,
+                header: foreign_header,
+                vote: schemes[0].sign(&foreign_header).unwrap(),
+            };
+            let mut delayed_sender = validator_chans[0].0.clone();
+            let target = operator_key.clone();
+            let delayed = DaMessage::Vote(foreign.clone()).encode();
+            let delayed_replies =
+                context
+                    .child("delayed_replies")
+                    .spawn(move |context| async move {
+                        loop {
+                            context.sleep(Duration::from_millis(100)).await;
+                            delayed_sender.send(
+                                Recipients::One(target.clone()),
+                                delayed.clone(),
+                                true,
+                            );
+                        }
+                    });
             for round in 0..2 {
                 for chan in &mut validator_chans {
                     let (from, _) = chan.1.recv().await.unwrap();
@@ -1182,23 +1236,14 @@ mod tests {
                 );
             }
 
+            delayed_replies.abort();
+
             // Validator 0 returns a vote whose signature does not verify for
             // the signer it names, then a vote for a foreign header: both are
             // dropped without counting toward quorum.
             let silent = schemes[0].me().unwrap();
             let mut forged = schemes[1].sign(&header).unwrap();
             forged.signer = silent;
-            let foreign_header =
-                commonware_clearing::bajillion::transition::Header::<Digest>::decode(
-                    Sha256::hash(&[b"foreign-header"]).as_ref(),
-                )
-                .unwrap();
-            let foreign = Ballot {
-                deployment: protocol.deployment(),
-                epoch: 0,
-                header: foreign_header,
-                vote: schemes[0].sign(&foreign_header).unwrap(),
-            };
             let ballot = |ballot: Ballot| {
                 let message: DaMessage = DaMessage::Vote(ballot);
                 message.encode()

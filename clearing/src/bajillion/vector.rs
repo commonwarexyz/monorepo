@@ -354,7 +354,7 @@ impl<P: PublicKey, D: Digest> Read for OutTipLookup<P, D> {
             2 => Ok(Self::Absent {
                 predecessor: Option::<OutEntry<P>>::read(buf)?,
                 successor: Option::<OutEntry<P>>::read(buf)?,
-                opening: commitment::RangeOpening::read_bounded(buf, 2, usize::MAX)?,
+                opening: commitment::RangeOpening::read_cfg(buf, &2)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }

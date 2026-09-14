@@ -154,10 +154,6 @@ impl Genesis {
             .collect()
     }
 
-    pub(crate) fn holders_for_account(&self, _: &Key) -> anyhow::Result<Vec<SocketAddr>> {
-        self.holders()
-    }
-
     /// The committee players holding dealt shares.
     pub(crate) const fn players(&self) -> &Set<PublicKey> {
         self.identity.players()
@@ -557,6 +553,10 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
         encoded.challenge_duration >= 1,
         "the genesis challenge duration must be at least one block"
     );
+    crate::protocol::settlement_config(&Timing {
+        admission_offset: encoded.admission_offset,
+        challenge_duration: encoded.challenge_duration,
+    })?;
     let native = NativeGenesis::try_from(encoded.native)?;
     anyhow::ensure!(
         native.validate(),
@@ -1491,9 +1491,6 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), holders.len());
-        for account in accounts() {
-            assert_eq!(genesis.holders_for_account(&account.key).unwrap(), holders);
-        }
 
         let undersized = node_dir.join("undersized");
         assert!(

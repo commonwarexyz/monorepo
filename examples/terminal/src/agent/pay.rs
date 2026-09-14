@@ -83,6 +83,17 @@ impl Agent {
             .await
     }
 
+    /// Whether a draft entry belongs to the exact unresolved payment.
+    pub(crate) fn pending_payment_contains(&self, receiver: usize, amount: u64) -> bool {
+        let recipient = &self.receivers[receiver % self.receivers.len()].key;
+        self.pending_payment.as_ref().is_some_and(|pending| {
+            pending
+                .entries
+                .iter()
+                .any(|entry| &entry.recipient == recipient && entry.amount == amount)
+        })
+    }
+
     /// Resumes the durably staged pending send, when one exists.
     ///
     /// The exact staged bytes resubmit and adjudicate through the standard
@@ -134,13 +145,7 @@ impl Agent {
 
         let mut resolutions = 0;
         loop {
-            // The ledger tracks the slot's lifecycle: the send is durably marked
-            // submitted before the wire attempt, so its row never claims less than what
-            // may have reached the operator.
-            self.store
-                .mark_payment_submitted(&staged.authorization)
-                .context("mark payment submitted")?;
-            let response = operator_rpc::accept_send(
+            let response = match operator_rpc::accept_send(
                 ctx,
                 operator,
                 operator_rpc::AcceptSendRequest {
@@ -149,7 +154,20 @@ impl Agent {
                 },
             )
             .await
-            .context("submit payment")?;
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    return match self.resolve_pending(ctx, chain, operator, staged).await {
+                        Ok(PendingOutcome::Resolved(outcome)) => Ok(outcome),
+                        Ok(PendingOutcome::Live(_) | PendingOutcome::Abandoned) => {
+                            Err(error).context("submit payment")
+                        }
+                        Err(unresolved) => Err(unresolved).context(format!(
+                            "payment submission failed ({error:#}); outcome unresolved"
+                        )),
+                    };
+                }
+            };
             let context = match response {
                 operator_rpc::AcceptSendResponse::Accepted(accepted) => {
                     Self::verify_accepted(&accepted, &staged, total)?;

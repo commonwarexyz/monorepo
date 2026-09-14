@@ -77,7 +77,6 @@ const S3: [AccountState; ACCOUNT_COUNT] = [active(7), active(7), ZERO_STATE];
 // withdrawal released nothing and his tail stays in the account.
 const S3D: [AccountState; ACCOUNT_COUNT] = [active(15), active(1), ZERO_STATE];
 const S4: [AccountState; ACCOUNT_COUNT] = [ZERO_STATE, active(7), ZERO_STATE];
-const S_OFFSET: [AccountState; ACCOUNT_COUNT] = [active(10), active(3), ZERO_STATE];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Destination {
@@ -400,19 +399,18 @@ impl RegistrationId {
                 predecessor: Root::R0,
                 anchor: Anchor::Offset,
                 predecessor_state: S0,
-                deposits: [0, 0, 0],
+                deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::Offset.request()), None],
                 admission_deadline: 1,
                 challenge_deadline: 3,
             },
-            // Offset's epoch slot with the offsetting request operator-carried
-            // instead of queued. The staged deposit defers identically.
+            // The carried and queued paths include the same deposit and withdrawal.
             Self::OffsetC => Registration {
                 epoch: 0,
                 predecessor: Root::R0,
                 anchor: Anchor::OffsetC,
                 predecessor_state: S0,
-                deposits: [0, 0, 0],
+                deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
                 admission_deadline: 1,
                 challenge_deadline: 3,
@@ -567,8 +565,8 @@ impl Batch {
                 anchor: Anchor::Offset,
                 successor: Root::Offset,
                 predecessor_state: S0,
-                successor_state: S_OFFSET,
-                deposits: [0, 0, 0],
+                successor_state: S0,
+                deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::Offset.request()), None],
                 admission_deadline: 1,
                 challenge_deadline: 3,
@@ -621,7 +619,7 @@ impl Batch {
                 }),
                 payout_output: None,
             },
-            // The carried offset clears while its staged deposit stays pending.
+            // Deposit and withdrawal activity leave the account balance unchanged.
             Self::OffsetC => Candidate {
                 registration: RegistrationId::OffsetC,
                 epoch: 0,
@@ -629,8 +627,8 @@ impl Batch {
                 anchor: Anchor::OffsetC,
                 successor: Root::OffsetC,
                 predecessor_state: S0,
-                successor_state: S_OFFSET,
-                deposits: [0, 0, 0],
+                successor_state: S0,
+                deposits: [0, 2, 0],
                 withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
                 admission_deadline: 1,
                 challenge_deadline: 3,
@@ -1005,25 +1003,6 @@ impl SettlementModel {
             .map_or(state.expected_epoch, |batch| batch.candidate().epoch + 1)
     }
 
-    // Deferral keys off the sealed batch, so an operator-carried extra that
-    // exactly offsets its staged deposit defers it like a queued request does.
-    fn boundary_deposits(
-        state: &SettlementState,
-        registration: &Registration,
-    ) -> [u16; ACCOUNT_COUNT] {
-        let mut deposits = state.pending_deposits;
-        for account in Account::ALL {
-            let index = account.index();
-            if let Some(withdrawal) = registration.withdrawals[index]
-                && let WithdrawalAction::Amount(amount) = withdrawal.action
-                && amount == deposits[index]
-            {
-                deposits[index] = 0;
-            }
-        }
-        deposits
-    }
-
     fn registration_matches(state: &SettlementState, id: RegistrationId) -> bool {
         let registration = id.registration();
         let base = state
@@ -1041,7 +1020,7 @@ impl SettlementModel {
         registration.epoch == Self::next_admission_epoch(state)
             && registration.predecessor == Self::head_root(state)
             && registration.predecessor_state == Self::head_state(state)
-            && registration.deposits == Self::boundary_deposits(state, &registration)
+            && registration.deposits == state.pending_deposits
             && Self::withdrawals_match(state, &registration)
             && state.now <= registration.admission_deadline
             && ordered_deadline
@@ -1096,9 +1075,6 @@ impl SettlementModel {
         let index = request.account.index();
         let predecessor = registration.predecessor_state[index];
         let deposit = registration.deposits[index];
-        // The registration's deposits are the deferred-aware boundary, so an
-        // exactly-offsetting extra sees a zero deposit and must be coverable
-        // from the balance alone.
         let covered = match request.action {
             WithdrawalAction::Amount(amount) => {
                 amount <= predecessor.balance.saturating_add(deposit)
@@ -2164,14 +2140,13 @@ fn degraded_zero_finalized(_: &SettlementModel, state: &SettlementState) -> bool
         && state.withdrawal_reserve[Batch::B2D.index()] == 0
 }
 
-// Reachable only through the uncovered carried request: B1C admitted, a fault
-// froze R1 where Bob's balance is 9, and his outstanding amount of 10 degraded
-// to a zero terminal release with the whole balance residual.
-fn carried_offset_deferred(_: &SettlementModel, state: &SettlementState) -> bool {
+fn carried_offset_included(_: &SettlementModel, state: &SettlementState) -> bool {
     state.status[Batch::OffsetC.index()] == BatchStatus::Pending
-        && state.pending_deposits[Account::Bob.index()] == 2
+        && state.pending_deposits[Account::Bob.index()] == 0
 }
 
+// B1C was admitted before a fault froze R1. Bob's outstanding amount of 10
+// exceeds his frozen balance of 9, so the entire balance is residual.
 const fn carried_terminal_degraded(_: &SettlementModel, state: &SettlementState) -> bool {
     matches!(
         state.status[Batch::B1C.index()],
@@ -2413,8 +2388,8 @@ impl Model for SettlementModel {
                 carried_terminal_degraded,
             ),
             Property::sometimes(
-                "a carried offset defers its staged deposit",
-                carried_offset_deferred,
+                "a carried offset includes its staged deposit",
+                carried_offset_included,
             ),
             Property::sometimes("an acknowledgment-fork challenge is reachable", fork_fault),
             Property::sometimes(
@@ -2508,7 +2483,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 3_000_804);
+    assert_eq!(checker.unique_state_count(), 2_842_877);
     checker.assert_properties();
 }
 

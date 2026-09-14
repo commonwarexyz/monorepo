@@ -18,8 +18,8 @@ use crate::{
         validator::{IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
     },
     protocol::{
-        Deployment, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, genesis_balances,
-        state_config,
+        Deployment, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, WithdrawalWitness,
+        genesis_balances, state_config,
     },
     rpc,
 };
@@ -167,6 +167,73 @@ impl Read for Message {
     }
 }
 
+/// Authenticated close inputs used to rebuild a successor locally.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Replay {
+    pub(crate) context: CloseContext<Key, Digest>,
+    pub(crate) header: Header<Digest>,
+    pub(crate) roots: RootBundle<Digest>,
+    pub(crate) amounts: CloseAmounts,
+    pub(crate) deposits: DepositBatch<Key>,
+    pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
+    pub(crate) dealing: Bytes,
+}
+impl Write for Replay {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.context.write(buf);
+        self.header.write(buf);
+        self.roots.write(buf);
+        self.amounts.write(buf);
+        self.deposits.write(buf);
+        self.withdrawals.write(buf);
+        self.dealing.write(buf);
+    }
+}
+impl EncodeSize for Replay {
+    fn encode_size(&self) -> usize {
+        self.context.encode_size()
+            + self.header.encode_size()
+            + self.roots.encode_size()
+            + self.amounts.encode_size()
+            + self.deposits.encode_size()
+            + self.withdrawals.encode_size()
+            + self.dealing.encode_size()
+    }
+}
+impl Read for Replay {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            context: CloseContext::read(buf)?,
+            header: Header::read(buf)?,
+            roots: RootBundle::read(buf)?,
+            amounts: CloseAmounts::read(buf)?,
+            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_ACCOUNTS))?,
+            withdrawals: WithdrawalBatch::read_cfg(
+                buf,
+                &(
+                    RangeCfg::new(0..=MAX_WITHDRAWALS),
+                    RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+                ),
+            )?,
+            dealing: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
+        })
+    }
+}
+impl From<Sealed> for Replay {
+    fn from(record: Sealed) -> Self {
+        Self {
+            context: record.context,
+            header: record.header,
+            roots: record.roots,
+            amounts: record.amounts,
+            deposits: record.deposits,
+            withdrawals: record.withdrawals,
+            dealing: record.dealing,
+        }
+    }
+}
+
 /// The durable inputs and outputs of one fully validated state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Sealed {
@@ -283,6 +350,8 @@ pub(crate) async fn store<E: StorageContext>(
 
 /// Per-close activity proofs are independent of historical balance proofs.
 pub(crate) fn answer(
+    context: &CloseContext<Key, Digest>,
+    withdrawals: &WithdrawalBatch<Key, Digest>,
     close: &Close<Key, Digest>,
     lookup: &EvidenceLookup,
 ) -> Result<EvidenceResponse> {
@@ -299,9 +368,17 @@ pub(crate) fn answer(
         } => index
             .higher_entry_lookup::<Sha256>(payer, recipient)
             .map(EvidenceBody::CommittedEntry),
-        EvidenceLookup::WithdrawalOutput { account, .. } => index
-            .withdrawal_claim::<Sha256>(account)
-            .map(EvidenceBody::WithdrawalOutput),
+        EvidenceLookup::WithdrawalOutput { account, .. } => {
+            match index.withdrawal_claim::<Sha256>(account) {
+                Ok(claim) => Ok(EvidenceBody::WithdrawalOutput(WithdrawalWitness::new(
+                    context,
+                    close.amounts,
+                    withdrawals,
+                    claim,
+                )?)),
+                Err(error) => Err(error),
+            }
+        }
         EvidenceLookup::ExternalPayout { account, .. } => index
             .external_payout_claim::<Sha256>(account)
             .map(EvidenceBody::ExternalPayout),
@@ -421,7 +498,7 @@ struct Lane<E: StorageContext + Spawner> {
     state: Option<State<E, Sha256>>,
     next: u64,
 }
-type Recoveries = FuturesUnordered<BoxFuture<'static, (usize, usize, Option<Sealed>)>>;
+type Recoveries = FuturesUnordered<BoxFuture<'static, (usize, usize, Option<Replay>)>>;
 pub(crate) struct Serve {
     request: EvidenceRequest,
     response: oneshot::Sender<EvidenceResponse>,
@@ -574,7 +651,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         &mut self,
         lanes: &mut [Lane<E>],
         recoveries: &mut Recoveries,
-        (position, holder, saved): (usize, usize, Option<Sealed>),
+        (position, holder, saved): (usize, usize, Option<Replay>),
         sender: &mut Se,
     ) -> Result<()> {
         lanes[position].fetching = false;
@@ -672,6 +749,15 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             }
             return Ok(());
         }
+        if lane
+            .votes
+            .as_ref()
+            .unwrap()
+            .has(Identifier::Index(dealing.epoch))
+            .await?
+        {
+            return Ok(());
+        }
         let checked = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &self.scheme,
             lane.state.as_ref().unwrap(),
@@ -689,16 +775,6 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             return Ok(());
         };
         if prepared.close().header != dealing.header {
-            return Ok(());
-        }
-        if lane
-            .votes
-            .as_ref()
-            .unwrap()
-            .get(Identifier::Index(dealing.epoch))
-            .await?
-            .is_some()
-        {
             return Ok(());
         }
         let record = Self::record(
@@ -851,7 +927,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         &mut self,
         lanes: &mut [Lane<E>],
         position: usize,
-        mut fetched: Option<Sealed>,
+        mut fetched: Option<Replay>,
     ) -> Result<Option<super::state::AdmittedRootsResponse>> {
         loop {
             let deployment = *lanes[position].deployment.digest();
@@ -869,7 +945,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 .unwrap()
                 .get(Identifier::Key(&certified.batch_id.into_digest()))
                 .await?;
-            let prepared = if let Some(saved) = fetched.take().or(local) {
+            let prepared = if let Some(saved) = fetched.take().or_else(|| local.map(Replay::from)) {
                 if saved.context.deployment() != &deployment
                     || saved.context.payment().epoch() != epoch
                     || saved.header.batch_id::<Sha256>() != certified.batch_id
@@ -968,7 +1044,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                     .get(Identifier::Index(*epoch))
                     .await?)
                 .map_or(EvidenceResponse::Unsealed, |record| {
-                    EvidenceResponse::Served(Evidence::Dealing(Box::new(record)))
+                    EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into())))
                 }));
         }
         let batch = request.lookup.batch().expect("close lookup");
@@ -1013,7 +1089,12 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 body,
             }));
         }
-        answer(&record.close()?, &request.lookup)
+        answer(
+            &record.context,
+            &record.withdrawals,
+            &record.close()?,
+            &request.lookup,
+        )
     }
     fn vote<Se: Sender<PublicKey = ed25519::PublicKey>>(
         &self,
@@ -1290,8 +1371,10 @@ mod tests {
                 }
                 counted.fetch_add(1, Ordering::SeqCst);
                 let response = rpc::Response::Success {
-                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record.clone())))
-                        .encode(),
+                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(
+                        record.clone().into(),
+                    )))
+                    .encode(),
                 };
                 let _ = rpc::send_response(&mut sink, &response).await;
             }
@@ -1321,18 +1404,11 @@ mod tests {
                     epoch: 0,
                     predecessor_liability: 400,
                     deposits_root: root,
-                    staged_root: root,
+
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
                     fee: 4096,
-                    signature: protocol.sign_chain_registration(
-                        0,
-                        400,
-                        &root,
-                        &root,
-                        &withdrawals,
-                        4096,
-                    ),
+                    signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
                 },
             );
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
@@ -1439,7 +1515,7 @@ mod tests {
                     panic!("durable vote evidence")
                 };
                 assert_eq!(saved.dealing, prepared.encoded().clone());
-                assert_eq!(saved.close().unwrap().header, header);
+                assert_eq!(saved.header, header);
                 assert_eq!(
                     mailbox
                         .serve(EvidenceRequest::new(
@@ -1630,12 +1706,12 @@ mod tests {
                     epoch,
                     predecessor_liability: 400,
                     deposits_root: root,
-                    staged_root: root,
+
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
                     fee: 4096,
                     signature: protocol.sign_chain_registration(
-                        epoch, 400, &root, &root, &withdrawals, 4096,
+                        epoch, 400, &root, &withdrawals, 4096,
                     ),
                 })
             };
@@ -1666,9 +1742,6 @@ mod tests {
                     SettlementTx::Admit(AdmitRequest {
                         deployment: *deployment.digest(),
                         epoch: 0,
-                        predecessor_liability: 400,
-                        deposits: deposits.clone(),
-                        withdrawals: withdrawals.clone(),
                         header: record_b.header,
                         roots: record_b.roots,
                         amounts: record_b.amounts,
@@ -2170,8 +2243,8 @@ mod tests {
                     let root = deposits.root::<Sha256>().unwrap();
                     let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
                         deployment: *deployment.digest(), epoch, predecessor_liability: 400,
-                        deposits_root: root, staged_root: root, withdrawals: withdrawals.clone(), openings: Vec::new(), fee: 4096,
-                        signature: protocol.sign_chain_registration(epoch, 400, &root, &root, &withdrawals, 4096),
+                        deposits_root: root, withdrawals: withdrawals.clone(), openings: Vec::new(), fee: 4096,
+                        signature: protocol.sign_chain_registration(epoch, 400, &root, &withdrawals, 4096),
                     });
                     let height = [1, 2, 4][epoch as usize];
                     let registered = protocol.registration_at(epoch, deposits.clone(), withdrawals.clone(), 400, height + 10, height + 11).unwrap().context;
@@ -2197,8 +2270,7 @@ mod tests {
                     bls12381::Scheme::signer(committee().unwrap(), clearing_private(index).unwrap()).unwrap().sign(&record.header).unwrap()
                 })).unwrap();
                 SettlementTx::Admit(AdmitRequest {
-                    deployment: *record.context.deployment(), epoch: record.context.payment().epoch(), predecessor_liability: 400,
-                    deposits: record.deposits.clone(), withdrawals: record.withdrawals.clone(),
+                    deployment: *record.context.deployment(), epoch: record.context.payment().epoch(),
                     header: record.header, roots: record.roots, amounts: record.amounts, certificate,
                 })
             };
@@ -2242,7 +2314,7 @@ mod tests {
                 if !busy_start { released.await.unwrap(); }
                 }
                 let response = rpc::Response::Success {
-                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record))).encode(),
+                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into()))).encode(),
                 };
                 let send = rpc::send_response(&mut sink, &response);
                 if let Some(activate) = activate.take() {

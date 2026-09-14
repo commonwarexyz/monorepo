@@ -13,10 +13,10 @@ use commonware_clearing::bajillion::{
         AccountLookup, AckWitness, Challenge, ChangeAbsence, ChangeOpening, EntryWitness,
         HigherEntryLookup,
     },
-    commitment::{MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
+    commitment::{Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
-    settlement::SettlementChain,
+    settlement::{FinalizedClaims, SettlementChain},
     state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
         BatchId, CloseAmounts, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim,
@@ -56,7 +56,6 @@ commonware_conformance::conformance_tests! {
     CodecConformance<CloseAmounts>,
     CodecConformance<Opening<Sha256Digest>> => 1024,
     CodecConformance<RangeOpening<Sha256Digest>> => 1024,
-    CodecConformance<MultiOpening<Sha256Digest>> => 1024,
     CodecConformance<PaymentContext<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<VectorSendBody<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<SendAuthorization<VerifyingKey, Sha256Digest>> => 1024,
@@ -79,4 +78,5 @@ commonware_conformance::conformance_tests! {
     CodecConformance<ExternalPayoutClaim<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<WithdrawalClaim<Sha256Digest>> => 256,
     CodecConformance<SettlementChain<Sha256, VerifyingKey>> => 256,
+    CodecConformance<FinalizedClaims<Sha256Digest>> => 256,
 }

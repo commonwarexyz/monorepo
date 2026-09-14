@@ -24,14 +24,14 @@ use std::net::SocketAddr;
 
 /// One claim kind's wiring for the shared claim driver.
 trait ClaimChannel {
-    type Evidence: Clone + PartialEq;
-    type Release: Clone + PartialEq;
+    type Evidence: Clone;
+    type Release;
 
     /// Claim noun used by the driver's errors and contexts.
     const NOUN: &'static str;
 
-    fn pending(agent: &Agent) -> &Option<PendingClaim<Self::Evidence, Self::Release>>;
-    fn pending_mut(agent: &mut Agent) -> &mut Option<PendingClaim<Self::Evidence, Self::Release>>;
+    fn pending(agent: &Agent) -> &Option<PendingClaim<Self::Evidence>>;
+    fn pending_mut(agent: &mut Agent) -> &mut Option<PendingClaim<Self::Evidence>>;
 
     /// Returns the finalized batch the evidence names.
     fn batch(evidence: &Self::Evidence) -> BatchId<Digest>;
@@ -55,13 +55,18 @@ trait ClaimChannel {
 
     /// Fetches `wallet`'s evidence for the admitted close from its validators,
     /// verified against the admitted roots.
-    async fn fetch_window<E: Env>(
+    async fn fetch_admitted<E: Env>(
         holders: &Holders,
         ctx: &E,
         chain: &Client,
         admitted: &AdmittedRootsResponse,
         wallet: &Wallet,
     ) -> Result<Self::Evidence>;
+
+    /// A finalized zero output completes without an asset transfer.
+    fn zero_release(_: &Self::Evidence) -> Option<Self::Release> {
+        None
+    }
 
     /// The claim transaction for `evidence`.
     fn tx(deployment: Digest, evidence: &Self::Evidence) -> SettlementTx;
@@ -81,9 +86,14 @@ trait ClaimChannel {
     ) -> Result<()>;
 
     fn cache(store: &mut Store, evidence: &Self::Evidence) -> Result<()>;
-    fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()>;
+    fn completed(store: &Store, evidence: &Self::Evidence) -> Result<bool>;
+    /// A saved authorization can complete from a release delivered by another holder.
+    fn matches_intent(_: &Agent, _: &Self::Evidence) -> bool {
+        false
+    }
+
     fn complete(
-        store: &mut Store,
+        agent: &mut Agent,
         evidence: &Self::Evidence,
         release: &Self::Release,
     ) -> Result<()>;
@@ -106,46 +116,45 @@ impl ClaimChannel for WithdrawalChannel {
     }
 
     fn batch(evidence: &Self::Evidence) -> BatchId<Digest> {
-        evidence.batch_id
+        evidence.batch_id()
     }
 
-    /// Binding is full local verification: the claim must open against the finalized
-    /// batch's own withdrawal-outputs root, belong to this wallet's account, and pay the
-    /// destination this wallet signs into every withdrawal. The output amount is
-    /// deliberately unchecked: the batch may have finalized the withdrawal degraded to a
-    /// zero release, and it is still the one batch that settles this claim.
     fn bind(agent: &Agent, evidence: &Self::Evidence, roots: &ClaimRootsResponse) -> Result<()> {
-        let output = evidence
-            .claim
-            .verify::<Sha256>(&roots.withdrawal_outputs)
-            .context("verify withdrawal claim against its finalized batch")?;
         ensure!(
-            evidence.account == agent.account(),
-            "operator returned withdrawal evidence for another account"
+            agent
+                .pending_withdrawal
+                .as_ref()
+                .is_none_or(|request| evidence.witness.request == *request),
+            "withdrawal evidence names another request"
         );
+        let batch_id = evidence.witness.verify(
+            &evidence.roots,
+            &agent.deployment,
+            &agent.account(),
+            agent.account().as_ref(),
+        )?;
         ensure!(
-            output.destination().as_ref() == agent.account().as_ref(),
-            "operator returned withdrawal evidence for another destination"
+            evidence.roots.withdrawal_outputs == roots.withdrawal_outputs
+                && evidence.roots.change == roots.change,
+            "withdrawal descriptor differs from its finalized batch"
         );
-
-        // An old batch's still-present claim roots verify its evidence forever, so a
-        // completed (batch, position) must be refused here: rebinding it would close the
-        // open intent against a spent release and strand the new reserve. Like an
-        // unfinalized batch this is an availability verdict, not a completion: nothing is
-        // cached and the exact claim retries on fresh evidence.
         ensure!(
             !agent
                 .store
-                .withdrawal_claim_completed(evidence.batch_id, evidence.claim.position())?,
+                .withdrawal_claim_completed(batch_id, evidence.witness.claim.position())?,
             "operator re-served evidence for an already-completed withdrawal claim"
         );
         Ok(())
     }
 
+    fn matches_intent(agent: &Agent, evidence: &Self::Evidence) -> bool {
+        agent.pending_withdrawal.as_ref() == Some(&evidence.witness.request)
+    }
+
     fn verify_release(_: &Agent, evidence: &Self::Evidence, release: &Self::Release) -> Result<()> {
         ensure!(
-            release.destination == *evidence.claim.output().destination()
-                && release.amount == evidence.claim.output().amount(),
+            release.destination == *evidence.witness.claim.output().destination()
+                && release.amount == evidence.witness.claim.output().amount(),
             "settlement returned another withdrawal output"
         );
         Ok(())
@@ -160,7 +169,7 @@ impl ClaimChannel for WithdrawalChannel {
         .await
     }
 
-    async fn fetch_window<E: Env>(
+    async fn fetch_admitted<E: Env>(
         holders: &Holders,
         ctx: &E,
         chain: &Client,
@@ -168,21 +177,28 @@ impl ClaimChannel for WithdrawalChannel {
         wallet: &Wallet,
     ) -> Result<Self::Evidence> {
         let account = wallet.public_key();
-        let claim = holders
-            .withdrawal_claim(ctx, chain, admitted, &account, account.as_ref())
+        let witness = holders
+            .withdrawal_evidence(ctx, chain, admitted, &account, account.as_ref())
             .await?;
         Ok(operator_rpc::WithdrawalEvidenceResponse {
-            batch_id: admitted.batch_id,
-            account,
-            claim,
+            roots: admitted.roots,
+            witness,
+        })
+    }
+
+    fn zero_release(evidence: &Self::Evidence) -> Option<Self::Release> {
+        let output = evidence.witness.claim.output();
+        (output.amount() == 0).then(|| WithdrawalResponse {
+            destination: output.destination().clone(),
+            amount: 0,
         })
     }
 
     fn tx(deployment: Digest, evidence: &Self::Evidence) -> SettlementTx {
         SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment,
-            batch_id: evidence.batch_id,
-            claim: evidence.claim.clone(),
+            batch_id: evidence.batch_id(),
+            claim: evidence.witness.claim.clone(),
         })
     }
 
@@ -192,13 +208,13 @@ impl ClaimChannel for WithdrawalChannel {
         evidence: &Self::Evidence,
     ) -> Result<Option<Self::Release>> {
         let Some(record) = chain
-            .withdrawal_release(ctx, evidence.batch_id, evidence.claim.position())
+            .withdrawal_release(ctx, evidence.batch_id(), evidence.witness.claim.position())
             .await?
         else {
             return Ok(None);
         };
         ensure!(
-            record.claim == Sha256::hash(&[&evidence.claim.encode()]),
+            record.claim == Sha256::hash(&[&evidence.witness.claim.encode()]),
             "the released withdrawal position consumed other evidence"
         );
         Ok(Some(record.released))
@@ -212,11 +228,7 @@ impl ClaimChannel for WithdrawalChannel {
         operator_rpc::acknowledge_withdrawal(
             ctx,
             operator,
-            operator_rpc::AcknowledgeWithdrawalRequest {
-                batch_id: evidence.batch_id,
-                account: evidence.account.clone(),
-                claim: evidence.claim.clone(),
-            },
+            operator_rpc::AcknowledgeWithdrawalRequest::from(evidence),
         )
         .await
     }
@@ -225,16 +237,19 @@ impl ClaimChannel for WithdrawalChannel {
         store.cache_withdrawal_claim(evidence)
     }
 
-    fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()> {
-        store.record_withdrawal_result(evidence, release)
+    fn completed(store: &Store, evidence: &Self::Evidence) -> Result<bool> {
+        store.withdrawal_claim_completed(evidence.batch_id(), evidence.witness.claim.position())
     }
 
     fn complete(
-        store: &mut Store,
+        agent: &mut Agent,
         evidence: &Self::Evidence,
         release: &Self::Release,
     ) -> Result<()> {
-        store.complete_withdrawal_claim(evidence, release)
+        agent.store.complete_withdrawal_claim(evidence, release)?;
+        agent.pending_withdrawal_claim = None;
+        agent.pending_withdrawal = None;
+        Ok(())
     }
 }
 
@@ -298,13 +313,14 @@ impl ClaimChannel for PayoutChannel {
         .await
     }
 
-    async fn fetch_window<E: Env>(
+    async fn fetch_admitted<E: Env>(
         holders: &Holders,
         ctx: &E,
         chain: &Client,
         admitted: &AdmittedRootsResponse,
         wallet: &Wallet,
     ) -> Result<Self::Evidence> {
+        ensure!(admitted.finalized, "external payout has not finalized");
         let claim = holders
             .external_payout_claim(ctx, chain, admitted, &wallet.public_key())
             .await?;
@@ -360,44 +376,24 @@ impl ClaimChannel for PayoutChannel {
         store.cache_payout_claim(evidence)
     }
 
-    fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()> {
-        store.record_payout_result(evidence, release)
+    fn completed(store: &Store, evidence: &Self::Evidence) -> Result<bool> {
+        store.payout_claim_completed(evidence.batch_id, evidence.claim.position())
     }
 
     fn complete(
-        store: &mut Store,
+        agent: &mut Agent,
         evidence: &Self::Evidence,
         release: &Self::Release,
     ) -> Result<()> {
-        store.complete_payout_claim(evidence, release)
+        agent.store.complete_payout_claim(evidence, release)?;
+        agent.pending_payout_claim = None;
+        Ok(())
     }
 }
 
 impl Agent {
-    /// Resolves this wallet's open claim of `C`'s kind through the shared claim driver.
-    ///
-    /// A held copy always gets its submission before any replacement, and the cache exists
-    /// to protect a finalized reserve against the operator vanishing after finalization.
-    /// Only self-verified evidence ever enters it. The validators are the first source:
-    /// while the close carrying the reserve is inside its challenge window, they serve the
-    /// claim verified against the chain's admitted roots, so the evidence is cached before
-    /// finalization and the claim completes afterwards with no operator at all. Outside
-    /// every open window the operator's reconstruction is fetched instead, cacheable only
-    /// once the batch it names has finalized, verified against that batch's certified
-    /// claim roots. Every cached copy is therefore releasable, so poisoning and epoch lies
-    /// are structurally impossible. Bind also refuses evidence naming a (batch, position)
-    /// this wallet already completed, so a re-served old batch's spent claim can never
-    /// close a newer intent: the attempt fails like an unavailable batch and the exact
-    /// claim retries on fresh evidence.
-    ///
-    /// Claims complete on the certified release record at the claim's (batch,
-    /// position), which must have consumed exactly this evidence: that record is the
-    /// transaction's effect and the only authoritative answer. A missing release is
-    /// not a verdict (the batch may not be claimable yet, the claim may not be
-    /// included yet, and a rejection is effect-free), so the exact claim retries
-    /// later. The
-    /// operator acknowledgement that follows is a courtesy: it lets the operator retire
-    /// its own reserve bookkeeping and never holds the claim open.
+    /// Retains verified claim evidence until its exact certified release completes
+    /// the durable intent. Operator acknowledgment is optional bookkeeping.
     async fn drive_claim<C: ClaimChannel, E: Env>(
         &mut self,
         ctx: &E,
@@ -407,11 +403,10 @@ impl Agent {
         let pending = C::pending(self)
             .clone()
             .with_context(|| format!("no {} claim is pending", C::NOUN))?;
-        let recorded = pending.result.clone();
-        let evidence = match pending.evidence.clone() {
+        let evidence = match pending.evidence {
             Some(evidence) => evidence,
             None => {
-                let (fresh, roots) = match self.window_evidence::<C, E>(ctx, chain).await? {
+                let (fresh, roots) = match self.historical_evidence::<C, E>(ctx, chain).await? {
                     Some(fetched) => fetched,
                     None => {
                         let fresh = C::fetch(self.account(), ctx, operator)
@@ -440,7 +435,6 @@ impl Agent {
                     .with_context(|| format!("cache {} evidence", C::NOUN))?;
                 *C::pending_mut(self) = Some(PendingClaim {
                     evidence: Some(fresh.clone()),
-                    result: None,
                 });
                 fresh
             }
@@ -457,64 +451,50 @@ impl Agent {
             "the {} batch has not finalized, so the cached evidence waits for finalization",
             C::NOUN
         );
-        chain
-            .deliver(ctx, &C::tx(self.deployment, &evidence))
-            .await
-            .with_context(|| format!("claim settlement {}", C::NOUN))?;
-        // A read error (an unavailable snapshot, a briefly stale validator)
-        // clears with time, so the effect poll keeps polling through it. A
-        // release record consumed by other bytes fails inside C::release and
-        // is likewise retried until the budget ends: it can only appear
-        // through evidence this wallet did not submit.
-        let mut released = None;
-        for _ in 0..EFFECT_ATTEMPTS {
-            if let Ok(Some(release)) = C::release(ctx, chain, &evidence).await {
-                released = Some(release);
-                break;
+        let release = if let Some(zero) = C::zero_release(&evidence) {
+            zero
+        } else if let Ok(Some(release)) = C::release(ctx, chain, &evidence).await {
+            release
+        } else {
+            chain
+                .deliver(ctx, &C::tx(self.deployment, &evidence))
+                .await
+                .with_context(|| format!("claim settlement {}", C::NOUN))?;
+            // A read error (an unavailable snapshot, a briefly stale validator)
+            // clears with time, so the effect poll keeps polling through it. A
+            // release record consumed by other bytes fails inside C::release and
+            // is likewise retried until the budget ends: it can only appear
+            // through evidence this wallet did not submit.
+            let mut released = None;
+            for _ in 0..EFFECT_ATTEMPTS {
+                if let Ok(Some(release)) = C::release(ctx, chain, &evidence).await {
+                    released = Some(release);
+                    break;
+                }
+                ctx.sleep(POLL).await;
             }
-            ctx.sleep(POLL).await;
-        }
-        let Some(release) = released else {
-            // Not claimable yet, not included yet, or rejected without an
-            // effect: indistinguishable by design, so nothing is dropped and
-            // the exact claim retries later.
-            anyhow::bail!(
-                "the {} claim earned no certified release yet; the exact claim retries",
-                C::NOUN
-            )
+            let Some(release) = released else {
+                // Not claimable yet, not included yet, or rejected without an
+                // effect: indistinguishable by design, so nothing is dropped and
+                // the exact claim retries later.
+                anyhow::bail!(
+                    "the {} claim earned no certified release yet; the exact claim retries",
+                    C::NOUN
+                )
+            };
+            release
         };
         C::verify_release(self, &evidence, &release)?;
-        if let Some(expected) = &recorded {
-            ensure!(
-                &release == expected,
-                "settlement replayed another {} release",
-                C::NOUN
-            );
-        } else {
-            C::record(&mut self.store, &evidence, &release)
-                .with_context(|| format!("persist {} release", C::NOUN))?;
-            *C::pending_mut(self) = Some(PendingClaim {
-                evidence: Some(evidence.clone()),
-                result: Some(release.clone()),
-            });
-        }
-
-        // The acknowledgement is a courtesy to the operator's bookkeeping: settlement's
-        // release completed the claim, so an unreachable or refusing operator never holds
-        // it open.
-        let _ = C::acknowledge(ctx, operator, &evidence).await;
-        C::complete(&mut self.store, &evidence, &release)
+        C::complete(self, &evidence, &release)
             .with_context(|| format!("complete {} claim", C::NOUN))?;
-        *C::pending_mut(self) = None;
+
+        // Completion retires the durable intent before optional operator bookkeeping.
+        let _ = C::acknowledge(ctx, operator, &evidence).await;
         Ok(release)
     }
 
-    /// Fetches `C`'s evidence from the validators for a close still inside its
-    /// challenge window, with the admitted roots it verified against as the claim roots
-    /// to bind under. The windows open are the epochs admitted past the finalized head,
-    /// up to the registered one. `None` when no open window carries evidence for this
-    /// wallet.
-    async fn window_evidence<C: ClaimChannel, E: Env>(
+    /// Finds an unspent claim or the certified release of an exact saved authorization.
+    async fn historical_evidence<C: ClaimChannel, E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
@@ -527,31 +507,33 @@ impl Agent {
             status.deployment == self.deployment,
             "settlement status has an unexpected deployment"
         );
-        let Some(registration) = chain
+        let registration = chain
             .registration(ctx)
             .await
-            .context("read the registered close")?
-        else {
+            .context("read the registered close")?;
+        let Some(last) = status.last_finalized.max(registration.map(|r| r.epoch)) else {
             return Ok(None);
         };
-        let first = status
-            .last_finalized
-            .map_or(Some(0), |last| last.checked_add(1))
-            .context("epoch overflow")?;
-        for epoch in first..=registration.epoch {
+        for epoch in 0..=last {
             let Some(admitted) = chain.admitted(ctx, epoch).await? else {
                 continue;
             };
-            if admitted.finalized {
-                continue;
-            }
             if let Ok(evidence) =
-                C::fetch_window(&self.holders, ctx, chain, &admitted, &self.wallet).await
+                C::fetch_admitted(&self.holders, ctx, chain, &admitted, &self.wallet).await
             {
+                if C::completed(&self.store, &evidence)?
+                    || (!C::matches_intent(self, &evidence)
+                        && C::release(ctx, chain, &evidence).await?.is_some())
+                {
+                    continue;
+                }
                 let roots = ClaimRootsResponse {
                     withdrawal_outputs: admitted.roots.withdrawal_outputs,
                     change: admitted.roots.change,
                 };
+                if C::bind(self, &evidence, &roots).is_err() {
+                    continue;
+                }
                 return Ok(Some((evidence, roots)));
             }
         }
@@ -582,10 +564,7 @@ impl Agent {
             self.store
                 .open_payout_claim()
                 .context("open external payout claim")?;
-            self.pending_payout_claim = Some(PendingPayoutClaim {
-                evidence: None,
-                result: None,
-            });
+            self.pending_payout_claim = Some(PendingPayoutClaim { evidence: None });
         }
         self.drive_claim::<PayoutChannel, E>(ctx, chain, operator)
             .await

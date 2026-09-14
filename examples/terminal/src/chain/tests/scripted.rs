@@ -8,7 +8,7 @@ pub(super) struct Schedule {
     payment_head_before_finality: bool,
     payment_epochs: Vec<u64>,
     closes: Vec<u64>,
-    withdrawal: Option<operator_rpc::WithdrawalEvidenceResponse>,
+    withdrawal: Option<operator_rpc::AcknowledgeWithdrawalRequest>,
     payout: Option<operator_rpc::ExternalPayoutEvidenceResponse>,
 }
 
@@ -114,7 +114,15 @@ pub(super) async fn serve<L: Listener>(
             _ => {}
         }
         let payment = matches!(&request, operator_rpc::OperatorRequest::AcceptSend(_));
-        let response = match prepare_request(&context, &mut chain, &operator, &request).await {
+        let response = match prepare_request(
+            &context,
+            &mut chain,
+            &operator,
+            &request,
+            genesis.timing(),
+        )
+        .await
+        {
             Ok(Some(response)) => response,
             Ok(None) => operator_rpc::handle_decoded(&mut operator.lock(), request),
             Err(error) => rpc::error_response(format!("{error:#}")),
