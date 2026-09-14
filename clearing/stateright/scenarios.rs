@@ -61,19 +61,6 @@ const fn withdrawal_claim(batch: Batch) -> SettlementAction {
     }
 }
 
-const fn payout_claim(batch: Batch) -> SettlementAction {
-    let position = batch
-        .candidate()
-        .payout_output
-        .expect("the fixture has a payout output")
-        .position;
-    SettlementAction::ClaimPayout {
-        batch,
-        source: batch,
-        position,
-    }
-}
-
 #[test]
 fn rejected_candidate_preserves_the_exact_live_registration() {
     let model = SettlementModel::default();
@@ -735,7 +722,7 @@ fn tail_fault_precedes_and_drains_its_two_batch_clean_prefix() {
     assert_eq!(state.finalized_batches & 0b11, 0b11);
 
     drain_terminal(model, &mut state);
-    step(model, &mut state, payout_claim(Batch::B1));
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     assert_eq!(state.released, state.total_in);
 }
 
@@ -773,29 +760,40 @@ fn registration_expiry_drains_its_earlier_two_batch_prefix() {
     step(model, &mut state, SettlementAction::Finalize);
 
     drain_terminal(model, &mut state);
-    step(model, &mut state, payout_claim(Batch::B1));
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     assert_eq!(state.released, state.total_in);
 }
 
 #[test]
-fn finalized_reserve_survives_descendant_fault_and_claims_independently() {
+fn absent_recipient_credit_becomes_active_without_a_native_output() {
     let model = SettlementModel::default();
-    let mut state = admit_first_three(model);
-    step(model, &mut state, SettlementAction::Observe(6));
-    step(model, &mut state, SettlementAction::Finalize);
-    step(model, &mut state, SettlementAction::Finalize);
-    assert_eq!(state.payout_reserve[Batch::B1.index()], 1);
+    let mut state = SettlementState::default();
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B2, ChallengeKind::HigherEntry),
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    drain_terminal(model, &mut state);
-    assert_eq!(state.claimable, 1);
-    step(model, &mut state, payout_claim(Batch::B1));
+    register_and_admit(model, &mut state, Batch::B0);
+    register_and_admit(model, &mut state, Batch::B1);
+    step(model, &mut state, SettlementAction::Observe(6));
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Finalize);
+
+    assert!(!Batch::B1.candidate().predecessor_state[Account::Carol as usize].active);
+    assert!(Batch::B1.candidate().withdrawal_output.is_none());
+    assert_eq!(state.current_root, Root::R2);
+    assert_eq!(
+        state.current_state[Account::Carol as usize],
+        AccountState {
+            active: true,
+            balance: 1,
+        }
+    );
+    assert_eq!(state.current_liability, 17);
     assert_eq!(state.claimable, 0);
-    assert_eq!(state.released, state.total_in);
-    rejected(model, &state, payout_claim(Batch::B1));
+    assert_eq!(state.withdrawal_reserve, [0; 8]);
+    assert_eq!(state.custody, state.total_in);
+    assert_eq!(state.released, 0);
 }
 
 #[test]
@@ -817,7 +815,6 @@ fn finalized_withdrawal_reserve_survives_a_later_malicious_close() {
     drain_terminal(model, &mut state);
     assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
     step(model, &mut state, withdrawal_claim(Batch::B2));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.released, state.total_in);
 }
 
@@ -834,7 +831,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
     step(model, &mut state, SettlementAction::Observe(9));
     step(model, &mut state, SettlementAction::Finalize);
 
-    // Wrong positions, proof roots, and claim namespaces stutter without consuming reserves.
+    // Wrong positions and proof roots stutter without consuming reserves.
     rejected(
         model,
         &state,
@@ -871,24 +868,12 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 1,
         },
     );
-    rejected(
-        model,
-        &state,
-        SettlementAction::ClaimPayout {
-            batch: Batch::B2,
-            source: Batch::B2,
-            position: 0,
-        },
-    );
-
     // Each exact positioned output consumes only its own batch-scoped reserve.
     step(model, &mut state, withdrawal_claim(Batch::B2));
     rejected(model, &state, withdrawal_claim(Batch::B2));
     step(model, &mut state, withdrawal_claim(Batch::B3));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.withdrawal_reserve, [0; 8]);
-    assert_eq!(state.payout_reserve, [0; 8]);
-    assert_eq!(state.clean_claim_paid, 10);
+    assert_eq!(state.clean_claim_paid, 9);
 }
 
 #[test]
@@ -1223,9 +1208,8 @@ fn queued_withdrawal_behind_a_pending_prefix_expires_and_recovers() {
     step(model, &mut state, SettlementAction::Finalize);
     assert!(state.pipeline.is_empty());
     assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
-    assert_eq!(state.payout_reserve[Batch::B1.index()], 1);
     drain_terminal(model, &mut state);
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     step(model, &mut state, withdrawal_claim(Batch::B2));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.released, state.total_in);
 }

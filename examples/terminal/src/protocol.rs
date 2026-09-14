@@ -10,16 +10,15 @@ use commonware_clearing::bajillion::{
     payment::{EntryReceipt, PaymentContext, VectorAck, VectorSendBody},
     qmdb::{PreparedState, State, StateRoot},
     settlement::{EpochDeadlinePolicy, Genesis as ConfiguredGenesis, SettlementConfig},
-    state::SettlementOutput,
     transition::{
-        BatchId, ChallengeIndex, Close, CloseAmounts, CloseContext, CloseLimits, EpochContext,
-        ExternalPayoutClaim, Header, OperatorKey, OperatorSignature, OperatorVariant,
-        PreparedClose, RootBundle, Terminal, WithdrawalClaim, prepare_close_with_strategy,
+        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
+        OperatorKey, OperatorSignature, OperatorVariant, PreparedClose, RootBundle, Terminal,
+        WithdrawalClaim, prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
@@ -55,7 +54,7 @@ pub(crate) type Receipt = EntryReceipt<Key, Digest>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalWitness {
     pub(crate) context: CloseContext<Key, Digest>,
-    pub(crate) amounts: CloseAmounts,
+    pub(crate) withdrawal_total: u64,
     pub(crate) request: SignedWithdrawal<Key, Digest>,
     pub(crate) opening: Opening<Digest>,
     pub(crate) claim: WithdrawalClaim<Digest>,
@@ -64,7 +63,7 @@ pub(crate) struct WithdrawalWitness {
 impl WithdrawalWitness {
     pub(crate) fn new(
         context: &CloseContext<Key, Digest>,
-        amounts: CloseAmounts,
+        withdrawal_total: u64,
         withdrawals: &WithdrawalBatch<Key, Digest>,
         claim: WithdrawalClaim<Digest>,
     ) -> Result<Self> {
@@ -87,7 +86,7 @@ impl WithdrawalWitness {
         );
         Ok(Self {
             context: context.clone(),
-            amounts,
+            withdrawal_total,
             request,
             opening: tree.opening(claim.position())?,
             claim,
@@ -95,7 +94,7 @@ impl WithdrawalWitness {
     }
 
     pub(crate) fn batch_id(&self, roots: &RootBundle<Digest>) -> BatchId<Digest> {
-        Header::new::<Sha256, Key>(&self.context, roots, &self.amounts).batch_id::<Sha256>()
+        Header::new::<Sha256, Key>(&self.context, roots, self.withdrawal_total).batch_id::<Sha256>()
     }
 
     /// Verifies both positions and their descriptor; certification authenticates the returned batch.
@@ -137,7 +136,7 @@ impl WithdrawalWitness {
 impl Write for WithdrawalWitness {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
-        self.amounts.write(buf);
+        self.withdrawal_total.write(buf);
         self.request.write(buf);
         self.opening.write(buf);
         self.claim.write(buf);
@@ -147,7 +146,7 @@ impl Write for WithdrawalWitness {
 impl EncodeSize for WithdrawalWitness {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
-            + self.amounts.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.request.encode_size()
             + self.opening.encode_size()
             + self.claim.encode_size()
@@ -160,7 +159,7 @@ impl Read for WithdrawalWitness {
         let destination = RangeCfg::new(0..=MAX_DESTINATION_BYTES);
         Ok(Self {
             context: CloseContext::read(buf)?,
-            amounts: CloseAmounts::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
             request: SignedWithdrawal::read_cfg(buf, &destination)?,
             opening: Opening::read(buf)?,
             claim: WithdrawalClaim::read_cfg(buf, &destination)?,
@@ -226,21 +225,28 @@ const VALIDATOR_SEED_START: u64 = 10_000;
 const OPERATOR_ACK_SEED_START: u64 = 20_000;
 const VALIDATORS: usize = 4;
 
-pub(crate) const MAX_ACCOUNTS: usize = 1_024;
+/// Maximum funded accounts encoded in a deployment's authenticated bootstrap.
+pub(crate) const MAX_GENESIS_ACCOUNTS: usize = 1_024;
 /// Maximum accepted payments in one epoch, counting one per batched-send entry.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
-/// Reservation floor covering the stock operator's maximum account and entry counts.
+/// Reservation floor covering a complete close at the native activity and entry limits.
 pub(crate) const MIN_DEALING_BYTES: u32 = 256 * 1024;
-/// Bounds one encoded [`Acceptance`]: a batch send at the protocol entry limit plus one receipt
-/// per entry.
-pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_DEPOSIT_EVENTS: usize = MAX_ACCOUNTS;
-pub(crate) const MAX_WITHDRAWALS: usize = MAX_ACCOUNTS;
+/// Bounds one encoded [`Acceptance`] at [`MAX_ENTRIES`], including its shared acknowledgment
+/// and a full-depth opening per entry. The entry count uses a seven-bit varint; each opening
+/// has a one-byte sibling count and up to `u32::BITS` digests.
+pub(crate) const MAX_ACCEPTANCE_BYTES: usize = Ack::SIZE
+    + ((MAX_ENTRIES.ilog2() + 1) as usize).div_ceil(7)
+    + MAX_ENTRIES
+        * (Key::SIZE + u64::SIZE * 2 + u32::SIZE * 2 + 1 + Digest::SIZE * u32::BITS as usize);
+pub(crate) const MAX_DEPOSIT_EVENTS: usize = 1_024;
+pub(crate) const MAX_WITHDRAWALS: usize = 1_024;
+/// Each accepted entry contributes at most one payer and one recipient; boundary records
+/// contribute at most one account each. Dormant balances contribute no activity rows.
+pub(crate) const MAX_ACTIVITY_ROWS: usize =
+    2 * MAX_ACCEPTED_PAYMENTS + MAX_DEPOSIT_EVENTS + MAX_WITHDRAWALS;
 
 /// Maximum withdrawal destination length in bytes, shared by every codec that carries one.
 pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
-const MAX_ROWS: u64 = MAX_ACCOUNTS as u64 + 1;
-const MAX_SHARDS: u64 = 1_024;
 pub(crate) const INITIAL_BALANCE: u64 = 100;
 /// Largest monetary value that the SQLite operator can persist exactly.
 pub(crate) const SQLITE_U64_MAX: u64 = i64::MAX as u64;
@@ -355,12 +361,12 @@ pub(crate) fn identities() -> Vec<AccountIdentity> {
         .collect()
 }
 
-pub(crate) fn external_wallet() -> Wallet {
-    Wallet::from_seed("Eve (external)", 999)
+pub(crate) fn eve_wallet() -> Wallet {
+    Wallet::from_seed("Eve", 999)
 }
 
-pub(crate) fn external_identity() -> AccountIdentity {
-    let wallet = external_wallet();
+pub(crate) fn eve_identity() -> AccountIdentity {
+    let wallet = eve_wallet();
     AccountIdentity {
         name: wallet.name,
         key: wallet.public_key(),
@@ -592,8 +598,7 @@ pub(crate) struct SettlementResult {
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
     pub(crate) certificate: bls12381::Certificate,
-    pub(crate) amounts: CloseAmounts,
-    pub(crate) external_claims: Vec<ExternalPayoutClaim<Key, Digest>>,
+    pub(crate) withdrawal_total: u64,
     pub(crate) withdrawal_claims: Vec<WithdrawalClaim<Digest>>,
     pub(crate) rows: usize,
     pub(crate) dealing_bytes: usize,
@@ -609,9 +614,8 @@ impl Write for SettlementResult {
         self.withdrawals.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.amounts.write(buf);
+        self.withdrawal_total.write(buf);
         self.certificate.write(buf);
-        self.external_claims.write(buf);
         self.withdrawal_claims.write(buf);
         self.rows.write(buf);
         self.dealing_bytes.write(buf);
@@ -627,9 +631,8 @@ impl EncodeSize for SettlementResult {
             + self.withdrawals.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.amounts.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.certificate.encode_size()
-            + self.external_claims.encode_size()
             + self.withdrawal_claims.encode_size()
             + self.rows.encode_size()
             + self.dealing_bytes.encode_size()
@@ -654,9 +657,8 @@ impl Read for SettlementResult {
             )?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            amounts: CloseAmounts::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
             certificate: bls12381::Certificate::read_cfg(buf, &VALIDATORS)?,
-            external_claims: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACCOUNTS), ()))?,
             withdrawal_claims: Vec::read_cfg(
                 buf,
                 &(
@@ -664,7 +666,7 @@ impl Read for SettlementResult {
                     RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 ),
             )?,
-            rows: usize::read_cfg(buf, &RangeCfg::new(0..=MAX_ACCOUNTS))?,
+            rows: usize::read_cfg(buf, &RangeCfg::new(0..=MAX_ACTIVITY_ROWS))?,
             dealing_bytes: usize::read_cfg(buf, &RangeCfg::new(0..=crate::rpc::MAX_BODY_SIZE))?,
             prepare_micros: u128::read(buf)?,
             deal_micros: u128::read(buf)?,
@@ -783,7 +785,7 @@ pub(crate) fn operator_ack_key(index: u64) -> OperatorKey {
     compute_public::<OperatorVariant>(&operator_ack_signer(index))
 }
 
-/// One configured account of a deployment's genesis machine.
+/// One authenticated genesis balance allocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Account {
     pub(crate) key: Key,
@@ -797,6 +799,7 @@ pub(crate) struct Deployment {
     digest: Digest,
     pub(crate) operator: Key,
     pub(crate) operator_ack: OperatorKey,
+    /// Bootstrap allocations; any canonical key can receive credits or deposit later.
     pub(crate) accounts: Vec<Account>,
     genesis: Option<ConfiguredGenesis<Digest>>,
 }
@@ -993,7 +996,7 @@ impl Read for Deployment {
             Digest::read(buf)?,
             Key::read(buf)?,
             OperatorKey::read(buf)?,
-            Vec::<Account>::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACCOUNTS), ()))?,
+            Vec::<Account>::read_cfg(buf, &(RangeCfg::new(0..=MAX_GENESIS_ACCOUNTS), ()))?,
             StateRoot::read(buf)?,
             u64::read(buf)?,
         )
@@ -1144,12 +1147,14 @@ pub(crate) fn dealt_participant(index: usize) -> Result<Participant> {
 
 /// The anchor-bound close resource limits shared by every epoch context.
 pub(crate) const fn limits() -> CloseLimits {
+    // Every live account holds at least one unit, so the monetary bound also bounds
+    // lifetime membership. Per-close work is bounded independently by accepted activity.
     CloseLimits::new(
-        MAX_ACCOUNTS as u64,
-        MAX_ROWS,
-        MAX_ACCOUNTS as u64,
-        MAX_SHARDS,
-        MAX_SHARDS,
+        SQLITE_U64_MAX,
+        MAX_ACTIVITY_ROWS as u64,
+        MAX_WITHDRAWALS as u64,
+        MAX_ACCEPTED_PAYMENTS as u64,
+        MAX_ACCEPTED_PAYMENTS as u64,
         SQLITE_U64_MAX,
         SQLITE_U64_MAX,
         SQLITE_U64_MAX,
@@ -1525,18 +1530,7 @@ impl Protocol {
             "assembled certificate failed verification"
         );
 
-        let amounts = prepared.close().amounts;
-        let external_claims = prepared
-            .close()
-            .rows
-            .iter()
-            .filter(|row| matches!(row.output, SettlementOutput::ExternalPayout(_)))
-            .map(|row| {
-                prepared
-                    .external_payout_claim(&row.account)
-                    .context("assemble external payout claim")
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let withdrawal_total = prepared.close().withdrawal_total;
         let withdrawal_claims = withdrawals
             .requests()
             .iter()
@@ -1555,26 +1549,13 @@ impl Protocol {
                 );
                 if let WithdrawalAction::Amount(amount) = request.body().action() {
                     ensure!(
-                        claim.output().amount() == amount.get(),
+                        claim.output().amount() == 0 || claim.output().amount() == amount.get(),
                         "withdrawal claim has the wrong requested amount"
                     );
                 }
                 Ok(claim)
             })
             .collect::<Result<Vec<_>>>()?;
-
-        let claimed_payout = external_claims.iter().try_fold(0_u64, |total, claim| {
-            let payout = claim
-                .verify::<Sha256>(&prepared.close().roots.change)
-                .context("verify assembled external payout claim")?;
-            total
-                .checked_add(payout.amount)
-                .context("external payout total overflow")
-        })?;
-        ensure!(
-            amounts.payout == claimed_payout,
-            "operator payout reserve does not match its external claims"
-        );
 
         let header = prepared.close().header;
         let roots = prepared.close().roots;
@@ -1590,8 +1571,7 @@ impl Protocol {
                 header,
                 roots,
                 certificate,
-                amounts,
-                external_claims,
+                withdrawal_total,
                 withdrawal_claims,
                 rows,
                 dealing_bytes,
@@ -1778,4 +1758,116 @@ pub(crate) fn encoded_artifacts(result: &SettlementResult) -> (Vec<u8>, Vec<u8>,
         result.roots.encode().to_vec(),
         result.certificate.encode().to_vec(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_clearing::bajillion::{payment::SendAuthorization, qmdb::account_key};
+    use commonware_codec::DecodeExt as _;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::TestRng;
+
+    #[test]
+    fn certification_retains_an_unfunded_amount_withdrawal_as_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let wallet = wallets().remove(0);
+            let config = state_config("zero-withdrawal", &context, protocol.strategy().clone());
+            let state = State::<_, Sha256, Rayon>::open(context, config)
+                .await
+                .unwrap();
+            let candidate = state
+                .prepare(
+                    state.head(),
+                    vec![(
+                        account_key(&wallet.public_key()).unwrap(),
+                        NonZeroU64::new(10),
+                    )],
+                )
+                .await
+                .unwrap();
+            let state = state
+                .apply(candidate)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
+            let request = SignedWithdrawal::sign(
+                deployment(),
+                state.root().digest,
+                wallet.public_key().encode(),
+                WithdrawalAction::Amount(NonZeroU64::new(10).unwrap()),
+                50,
+                wallet.signer(),
+            );
+            let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
+            let registration = protocol
+                .registration(0, DepositBatch::empty(), withdrawals, state.liability())
+                .unwrap();
+            let vector = OutVector::new(
+                0,
+                wallet.public_key(),
+                vec![OutEntry {
+                    recipient: eve_wallet().public_key(),
+                    cumulative: 1,
+                    count: 1,
+                }],
+            )
+            .unwrap();
+            let body = VectorSendBody::new(
+                registration.context.payment(),
+                wallet.public_key(),
+                1,
+                1,
+                vector.root::<Sha256, Digest>().unwrap(),
+            );
+            let terminal = Terminal {
+                operator_signature: protocol.sign_ack_aggregate(&body),
+                authorization: SendAuthorization::sign(body, wallet.signer()),
+                vector,
+            };
+            let prepared = protocol
+                .prepare(registration, &state, vec![terminal])
+                .await
+                .unwrap();
+            let (result, successor) = protocol
+                .complete(prepared, &state, &mut TestRng::new(29))
+                .await
+                .expect("an authenticated zero release remains certifiable");
+            assert_eq!(result.withdrawal_claims.len(), 1);
+            let claim = result.withdrawal_claims[0].clone();
+            assert_eq!(claim.output().amount(), 0);
+            assert_eq!(successor.head().liability(), 10);
+            let encoded = result.encode();
+            assert_eq!(
+                SettlementResult::decode(encoded.clone()).unwrap().encode(),
+                encoded
+            );
+            let witness = WithdrawalWitness::new(
+                &result.context,
+                result.withdrawal_total,
+                &result.withdrawals,
+                claim,
+            )
+            .unwrap();
+            assert_eq!(witness.request, request);
+            assert_eq!(
+                WithdrawalWitness::decode(witness.encode()).unwrap(),
+                witness
+            );
+            assert_eq!(
+                witness
+                    .verify(
+                        &result.roots,
+                        &deployment(),
+                        &wallet.public_key(),
+                        wallet.public_key().as_ref()
+                    )
+                    .unwrap(),
+                result.header.batch_id::<Sha256>(),
+            );
+        });
+    }
 }

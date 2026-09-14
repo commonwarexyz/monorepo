@@ -458,9 +458,11 @@ impl Agent {
         Ok(PendingOutcome::Abandoned)
     }
 
-    /// Verifies the deployment-bound payment context and retains the finalized balance floor.
-    pub(super) fn verify_head(
+    /// Verifies a payment context and its finalized or admitted predecessor balance floor.
+    pub(super) async fn verify_head<E: Env>(
         &mut self,
+        ctx: &E,
+        chain: &mut Client,
         head: &operator_rpc::PaymentHeadResponse,
         status: &StatusRecord,
     ) -> Result<()> {
@@ -470,12 +472,31 @@ impl Agent {
                 && head.context.verify_anchor::<Sha256>(),
             "payment context is not bound to this deployment and operator"
         );
-        ensure!(
-            status.state_root == head.root,
-            "payer opening is not the exact settlement head"
-        );
+        let finalized_epoch = floor_epoch(status)?;
+        let epoch = head.context.payment().epoch();
+        let epoch = if epoch > finalized_epoch {
+            ensure!(
+                !status.hard_faulted,
+                "settlement is permanently hard-faulted"
+            );
+            let predecessor = chain
+                .admitted(ctx, epoch - 1)
+                .await?
+                .context("payer predecessor close has not been admitted")?;
+            ensure!(
+                predecessor.roots.successor == head.root,
+                "payer opening differs from its admitted predecessor"
+            );
+            epoch
+        } else {
+            ensure!(
+                status.state_root == head.root,
+                "payer opening is not the exact settlement head"
+            );
+            finalized_epoch
+        };
         self.retain_head(&head.root, &head.opening)?;
-        self.cache_signing(head.context.payment(), &head.root, floor_epoch(status)?)
+        self.cache_signing(head.context.payment(), &head.root, epoch)
     }
 
     /// Retains a Current membership proof for custody recovery at its exact root.
@@ -528,8 +549,8 @@ impl Agent {
     ///
     /// The operator's head is the fast path. When it is unreachable or unusable, the
     /// signing context is the chain's certified registration and the affordability
-    /// floor is the validators' opening at the certified head, so the operator is
-    /// left with nothing to do but accept the send.
+    /// floor is the validators' opening at the finalized or admitted predecessor root.
+    /// The operator only needs to accept the send.
     async fn stage_against_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -542,7 +563,7 @@ impl Agent {
             match operator_head(ctx, operator, self.account(), &self.operator).await {
                 Ok(head) => {
                     let status = staging_status(ctx, chain, self.deployment).await?;
-                    match self.stage_head(&head, &status, total) {
+                    match self.stage_head(ctx, chain, &head, &status, total).await {
                         Ok(()) => {
                             return self.stage_under(
                                 head.context.payment().clone(),
@@ -599,8 +620,10 @@ impl Agent {
 
     /// Admits the operator's head for staging: a live payer row whose live balance
     /// covers `total`, verified against the certified head and retained.
-    fn stage_head(
+    async fn stage_head<E: Env>(
         &mut self,
+        ctx: &E,
+        chain: &mut Client,
         head: &operator_rpc::PaymentHeadResponse,
         status: &StatusRecord,
         total: u64,
@@ -611,13 +634,13 @@ impl Agent {
             head.balance >= total,
             "payer has insufficient available balance"
         );
-        self.verify_head(head, status)
+        self.verify_head(ctx, chain, head, status).await
     }
 
     /// Stages without the operator's head: the signing context is the chain's
-    /// certified registration and the affordability floor is the validators'
-    /// opening at the certified head, verified, retained, and cached like an operator
-    /// head. Returns the context to sign under and the root the opening is retained at.
+    /// certified registration and the balance floor comes from its admitted predecessor
+    /// for a successor epoch, otherwise the finalized head. A completed boundary replaces older
+    /// balances before held credits can contribute to the successor's spending floor.
     async fn stage_chain_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -627,23 +650,40 @@ impl Agent {
         let status = staging_status(ctx, chain, self.deployment).await?;
         let context = registered_context(ctx, chain, &self.operator).await?;
         let account = self.account();
-        let opening = self
-            .holders
-            .validator_opening(ctx, chain, &account, &status)
-            .await?;
-        // The floor covers every close through the finalized head, so the lower bound
-        // adds only the credits held from the next epoch on.
-        let floor_epoch = status
-            .last_finalized
-            .map_or(Some(0), |last| last.checked_add(1))
-            .context("epoch overflow")?;
+        let finalized_epoch = floor_epoch(&status)?;
+        let predecessor = if context.epoch() > finalized_epoch {
+            Some(
+                chain
+                    .admitted(ctx, context.epoch() - 1)
+                    .await?
+                    .context("payer predecessor close has not been admitted")?,
+            )
+        } else {
+            None
+        };
+        let (opening, root, epoch) = match predecessor {
+            Some(admitted) => (
+                self.holders
+                    .successor_opening(ctx, chain, &account, &admitted)
+                    .await?,
+                admitted.roots.successor,
+                context.epoch(),
+            ),
+            None => (
+                self.holders
+                    .validator_opening(ctx, chain, &account, &status)
+                    .await?,
+                status.state_root,
+                finalized_epoch,
+            ),
+        };
         ensure!(
-            self.lower_bound(opening.balance.get(), floor_epoch)? >= total,
+            self.lower_bound(opening.balance.get(), epoch)? >= total,
             "payer has insufficient available balance"
         );
-        self.retain_head(&status.state_root, &opening)?;
-        self.cache_signing(&context, &status.state_root, floor_epoch)?;
-        Ok((context, status.state_root))
+        self.retain_head(&root, &opening)?;
+        self.cache_signing(&context, &root, epoch)?;
+        Ok((context, root))
     }
 
     /// Confirms the send's context is a settlement registration through a certified

@@ -6,7 +6,7 @@ use commonware_runtime::Metrics as _;
 fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
     deterministic::Runner::default().start(|runtime| async move {
         let keys = (20..25).map(SigningKey::from_seed).collect::<Vec<_>>();
-        let [payer, closed, offset, fresh, external] = keys.as_slice() else {
+        let [payer, closed, offset, fresh, recipient] = keys.as_slice() else {
             unreachable!()
         };
         let state = new_state(
@@ -83,7 +83,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 count: 1,
             },
             OutEntry {
-                recipient: external.public_key(),
+                recipient: recipient.public_key(),
                 cumulative: 10,
                 count: 1,
             },
@@ -126,7 +126,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         .await
         .unwrap();
         assert_eq!(verified.close().rows.len(), 5);
-        assert_eq!(verified.state().mutations().len(), 3);
+        assert_eq!(verified.state().mutations().len(), 4);
         assert!(
             !verified
                 .state()
@@ -134,16 +134,8 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 .iter()
                 .any(|(key, _)| key == &account_key(&offset.public_key()).unwrap())
         );
-        assert!(
-            !verified
-                .state()
-                .mutations()
-                .iter()
-                .any(|(key, _)| key == &account_key(&external.public_key()).unwrap())
-        );
-        assert_eq!(verified.close().amounts.withdrawal, 115);
-        assert_eq!(verified.close().amounts.payout, 10);
-        assert_eq!(verified.state().head().liability(), 210);
+        assert_eq!(verified.close().withdrawal_total, 115);
+        assert_eq!(verified.state().head().liability(), 220);
         let (state, close) = verified.apply::<_, Sha256>(state).await.unwrap();
         let index = Index::new(&close);
         for (account, balance) in [
@@ -151,7 +143,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             (closed, None),
             (offset, Some(100)),
             (fresh, Some(35)),
-            (external, None),
+            (recipient, Some(10)),
         ] {
             assert_eq!(
                 state
@@ -187,16 +179,13 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             .find(|row| row.account == payer.public_key())
             .unwrap();
         assert_eq!(row.output, SettlementOutput::Withdrawal(0));
-        let payout = close.external_payout_claim(&external.public_key()).unwrap();
-        assert_eq!(
-            payout.verify::<Sha256>(&close.roots.change).unwrap().amount,
-            10
-        );
-        assert!(
-            payout
-                .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                .is_err()
-        );
+        let row = close
+            .rows
+            .iter()
+            .find(|row| row.account == recipient.public_key())
+            .unwrap();
+        assert_eq!(row.output, SettlementOutput::None);
+        assert!(close.withdrawal_claim(&recipient.public_key()).is_err());
         let restored =
             Close::decode_evidence::<Sha256>(close.encode_evidence(), &context, &close.header)
                 .unwrap();
@@ -206,12 +195,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 close.withdrawal_claim(request.account()).unwrap()
             );
         }
-        assert_eq!(
-            restored
-                .external_payout_claim(&external.public_key())
-                .unwrap(),
-            payout
-        );
     });
 }
 

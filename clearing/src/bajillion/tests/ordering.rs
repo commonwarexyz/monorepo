@@ -632,7 +632,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
                 &context,
                 &retained.header,
                 &retained.roots,
-                &retained.amounts,
+                retained.withdrawal_total,
                 &genuine
             )
             .unwrap(),
@@ -652,7 +652,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
                 &context,
                 &retained.header,
                 &retained.roots,
-                &retained.amounts,
+                retained.withdrawal_total,
                 &false_absence
             ),
             Err(ChallengeError::LookupOrder)

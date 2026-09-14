@@ -256,7 +256,7 @@ fn headers_bind_every_root_amount_and_registered_context() {
         assert!(close.header.verify::<Sha256, VerifyingKey>(
             &fixture.context,
             &close.roots,
-            &close.amounts
+            close.withdrawal_total
         ));
         let foreign = Sha256::hash(&[b"changed-root"]);
         for which in 0..3 {
@@ -269,22 +269,14 @@ fn headers_bind_every_root_amount_and_registered_context() {
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
                 &fixture.context,
                 &roots,
-                &close.amounts
+                close.withdrawal_total
             ));
         }
-        for which in 0..2 {
-            let mut amounts = close.amounts;
-            if which == 0 {
-                amounts.withdrawal += 1;
-            } else {
-                amounts.payout += 1;
-            }
-            assert!(!close.header.verify::<Sha256, VerifyingKey>(
-                &fixture.context,
-                &close.roots,
-                &amounts
-            ));
-        }
+        assert!(!close.header.verify::<Sha256, VerifyingKey>(
+            &fixture.context,
+            &close.roots,
+            close.withdrawal_total + 1
+        ));
         let next = EpochContext::new::<Sha256>(
             *fixture.context.deployment(),
             EPOCH + 1,
@@ -301,11 +293,11 @@ fn headers_bind_every_root_amount_and_registered_context() {
         .bind::<Sha256, _, _>(&fixture.state, &fixture.deposits, &fixture.withdrawals)
         .await
         .unwrap();
-        assert!(
-            !close
-                .header
-                .verify::<Sha256, VerifyingKey>(&next, &close.roots, &close.amounts)
-        );
+        assert!(!close.header.verify::<Sha256, VerifyingKey>(
+            &next,
+            &close.roots,
+            close.withdrawal_total
+        ));
     });
 }
 
@@ -321,7 +313,7 @@ fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
         assert_eq!(restored.encoded(), close.encoded());
         assert_eq!(restored.header, close.header);
         assert_eq!(restored.roots, close.roots);
-        assert_eq!(restored.amounts, close.amounts);
+        assert_eq!(restored.withdrawal_total, close.withdrawal_total);
         let original = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
         let reopened = ChallengeIndex::new::<Sha256>(&fixture.context, &restored).unwrap();
         for (account, _) in &fixture.accounts {
@@ -363,12 +355,10 @@ fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
             )
             .is_err()
         );
-        let mut amounts = close.amounts;
-        amounts.payout += 1;
         let wrong = crate::bajillion::transition::Header::new::<Sha256, VerifyingKey>(
             &fixture.context,
             &close.roots,
-            &amounts,
+            close.withdrawal_total + 1,
         );
         assert!(
             Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
@@ -507,7 +497,7 @@ fn decoded_context_cannot_change_limits_or_deadlines_behind_the_signed_anchor() 
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
                 &context,
                 &close.roots,
-                &close.amounts
+                close.withdrawal_total
             ));
             let dealing = posted::decode(fixture.prepared.encoded().clone(), &context).unwrap();
             assert!(

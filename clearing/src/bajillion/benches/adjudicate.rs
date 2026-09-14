@@ -10,15 +10,15 @@ use std::hint::black_box;
 
 fn bench_adjudicate(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
-        let (context, header, roots, amounts, challenges) =
-            super::fixtures::runner().start(|runtime| async move {
+        let (context, header, roots, withdrawal_total, challenges) = super::fixtures::runner()
+            .start(|runtime| async move {
                 let fixture = active_close_fixture(runtime, profile).await;
                 let close = fixture.prepared.close();
                 (
                     fixture.context.clone(),
                     close.header,
                     close.roots,
-                    close.amounts,
+                    close.withdrawal_total,
                     proven_challenges(&fixture),
                 )
             });
@@ -47,7 +47,7 @@ fn bench_adjudicate(c: &mut Criterion) {
                                 black_box(&context),
                                 black_box(&header),
                                 black_box(&roots),
-                                black_box(&amounts),
+                                black_box(withdrawal_total),
                                 black_box(&challenge),
                             )
                             .expect("benchmark challenge is valid"),

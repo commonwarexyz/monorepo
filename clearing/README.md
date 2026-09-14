@@ -18,19 +18,21 @@ with an operator, wallets, consensus, and persistence.
 
 Every validator retains the operator's complete account state in QMDB Current Ordered with MMB.
 Each canonical 32-byte account key maps to a positive eight-byte balance; absence represents a
-non-live account. A close derives credits from the signed payer vectors and applies one canonical
-batch containing only changed balances. Deposits can create accounts, zero balances remove them,
-and payments to absent recipients become certified external payouts.
+zero balance. A close derives credits from the signed payer vectors and applies one canonical
+batch containing only changed balances. Every payment credits its recipient virtually, including
+absent keys. Positive balances create accounts and zero balances remove them; later credit
+recreates the same owner's account. A key absent from the predecessor without a sealed deposit may receive, but cannot
+originate payments or withdraw until the successor epoch.
 
 The operator sends the same dealing to every validator. It contains account identities, terminal
 payer authorizations, cumulative payment entries, and one combined operator acceptance signature.
 Each validator checks the complete account equations and reconstructs three roots: account
 activity, withdrawal outputs, and successor QMDB state. The activity and output trees provide
-compact BMT openings for challenges and payout claims. Zero-net activity still appears in the
+compact BMT openings for challenges and withdrawal claims. Zero-net activity still appears in the
 activity tree even when it needs no QMDB write. Payer-vector BMTs authenticate individual entries.
 
-The 32-byte Header binds those roots, actual withdrawal and external-payout totals, and the exact
-registered epoch context. An external settlement chain verifies an exact `2f + 1` certificate for
+The 32-byte Header binds those roots, the actual withdrawal total, and the exact registered epoch
+context. An external settlement chain verifies an exact `2f + 1` certificate for
 `n = 3f + 1` validators. Each honest signer validates the full dealing and durably retains its
 state and evidence before publishing its vote, so the certificate has at least `f + 1` honest
 holders of the entire close. Committee registration must authenticate proofs of possession.
@@ -44,7 +46,7 @@ signed. Registration starts an admission deadline; an expired registered epoch c
 forward to avoid that obligation.
 
 Settlement admits certified closes into a FIFO queue and finalizes each after its challenge
-window and predecessors. Finalization reserves withdrawals and external payouts for independent,
+window and predecessors. Finalization reserves authorized withdrawals for independent,
 once-only claims. A proven fault or missed deadline stops new work; recovery freezes the last
 finalized QMDB root after the surviving clean prefix drains. Historical Current proofs support
 forced-withdrawal intake and balance recovery, while ordinary withdrawal claims use the output

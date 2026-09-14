@@ -191,7 +191,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     assert!(first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &first_close.roots,
-        &first_close.amounts,
+        first_close.withdrawal_total,
     ));
 
     let mut foreign_roots = first_close.roots;
@@ -199,7 +199,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     assert!(!first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &foreign_roots,
-        &first_close.amounts,
+        first_close.withdrawal_total,
     ));
 
     // The accepted header authenticates the root used to check the transferred history.

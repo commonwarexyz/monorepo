@@ -165,7 +165,6 @@ fn preflight_registration_and_deposit_follow_canonical_membership() {
             Sha256::hash(&[b"preflight-registration"]),
             operator_ack_key(0),
             ed25519::PrivateKey::from_seed(98).public_key(),
-            vec![wallet.public_key()],
             1024,
             10,
             &operator_signer(0),
@@ -364,7 +363,7 @@ fn preflight_compound_claim_uses_the_source_identity_without_consuming_it() {
         let target = *native.deployments[1].deployment.digest();
         let make = |target| {
             SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                claim: FinalizedClaim::Withdrawal(claim.clone()),
+                claim: claim.clone(),
                 deposit: DepositRequest::sign(
                     native.chain_id(),
                     target,
@@ -467,7 +466,7 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
                 amount: 7,
             };
             let compound = SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                claim: FinalizedClaim::Withdrawal(claim.clone()),
+                claim: claim.clone(),
                 deposit: DepositRequest::sign(
                     native.chain_id(),
                     deployment(),

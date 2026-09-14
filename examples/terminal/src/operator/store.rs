@@ -16,7 +16,7 @@ use commonware_clearing::bajillion::{
     commitment::Opening,
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE},
     qmdb::StateRoot,
-    transition::{BatchId, EpochContext, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
+    transition::{BatchId, EpochContext, Header, RootBundle, WithdrawalClaim},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg};
@@ -35,7 +35,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
 /// one [`Receipt`] from a fixed-size acknowledgment and a bounded entry opening, so this
 /// page stays well under the RPC body limit.
@@ -162,7 +162,6 @@ pub(crate) struct StoredEntry {
     pub(crate) payer: Key,
     pub(crate) seq: u64,
     pub(crate) recipient: Key,
-    pub(crate) external: bool,
     pub(crate) amount: u64,
     pub(crate) cumulative: u64,
     pub(crate) count: u64,
@@ -224,17 +223,10 @@ pub(crate) struct AccountView {
 }
 
 #[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct PaymentView {
-    pub(crate) external: bool,
-}
-
-#[cfg(test)]
 pub(crate) struct StoreSnapshot {
     pub(crate) epoch: u64,
     pub(crate) accounts: Vec<AccountView>,
-    pub(crate) payments: Vec<PaymentView>,
-    pub(crate) reserved_payout_value: u64,
+    pub(crate) payments: Vec<StoredEntry>,
 }
 
 pub(crate) struct StoreStatus {
@@ -242,14 +234,13 @@ pub(crate) struct StoreStatus {
     pub(crate) accounts: u64,
     pub(crate) present_accounts: u64,
     pub(crate) recent_payments: u64,
-    pub(crate) reserved_payout_value: u64,
 }
 
 pub(crate) struct StoredCloseFinished {
     pub(crate) header: Header<Digest>,
     pub(crate) rows: usize,
     pub(crate) dealing_bytes: usize,
-    pub(crate) payout_total: u64,
+    pub(crate) withdrawal_total: u64,
     pub(crate) header_bytes: usize,
     pub(crate) certificate_bytes: usize,
     pub(crate) prepare_micros: u128,
@@ -292,17 +283,14 @@ struct Plan {
     epoch: u64,
     total: u64,
     payer: StoredAccount,
-    live_liability: Option<u64>,
     /// The payer's merged cumulative out vector after this batch.
     vector: OutVector<Key>,
     credits: Vec<Credit>,
 }
 
 struct Credit {
-    recipient: Key,
     amount: u64,
-    receiver: Option<StoredAccount>,
-    external: bool,
+    receiver: StoredAccount,
 }
 
 pub(crate) struct StagedDeposit {
@@ -313,8 +301,7 @@ pub(crate) struct StagedDeposit {
     pub(crate) amount: u64,
 }
 
-/// One chain-confirmed deposit event awaiting staging: the configured
-/// identity it credits and the boundary context its staging installs.
+/// One chain-confirmed deposit event awaiting staging, with its display identity and boundary context.
 pub(crate) struct Staging {
     pub(crate) identity: AccountIdentity,
     pub(crate) event: DepositEvent,
@@ -325,11 +312,6 @@ pub(crate) struct StagedWithdrawal {
     pub(crate) epoch: u64,
     pub(crate) account: Key,
     pub(crate) action: WithdrawalAction,
-}
-
-pub(crate) struct ExternalPayoutEvidence {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: ExternalPayoutClaim<Key, Digest>,
 }
 
 struct StoreLocation {
@@ -524,7 +506,6 @@ impl Store {
                  payer BLOB NOT NULL CHECK (length(payer) = 32),
                  seq INTEGER NOT NULL CHECK (seq >= 1),
                  recipient BLOB NOT NULL CHECK (length(recipient) = 32),
-                 external INTEGER NOT NULL CHECK (external IN (0, 1)),
                  amount INTEGER NOT NULL CHECK (amount > 0),
                  cumulative INTEGER NOT NULL CHECK (cumulative > 0),
                  count INTEGER NOT NULL CHECK (count > 0),
@@ -591,20 +572,9 @@ impl Store {
                  rows INTEGER NOT NULL CHECK (rows >= 0),
                  dealing_bytes INTEGER NOT NULL CHECK (dealing_bytes >= 0),
                  withdrawal_total INTEGER NOT NULL CHECK (withdrawal_total >= 0),
-                 payout_total INTEGER NOT NULL CHECK (payout_total >= 0),
                  prepare_micros INTEGER NOT NULL CHECK (prepare_micros >= 0),
                  deal_micros INTEGER NOT NULL CHECK (deal_micros >= 0),
                  seal_micros INTEGER NOT NULL CHECK (seal_micros >= 0)
-             );
-
-             CREATE TABLE IF NOT EXISTS payout_claims (
-                 epoch INTEGER NOT NULL CHECK (epoch >= 0),
-                 position INTEGER NOT NULL CHECK (position >= 0),
-                 receiver BLOB NOT NULL CHECK (length(receiver) = 32),
-                 amount INTEGER NOT NULL CHECK (amount > 0),
-                 proof BLOB NOT NULL,
-                 claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1)),
-                 PRIMARY KEY(epoch, position)
              );
 
              CREATE TABLE IF NOT EXISTS withdrawal_claims (
@@ -621,9 +591,7 @@ impl Store {
                  FOREIGN KEY(batch_id) REFERENCES settlements(batch_id)
              );
              CREATE INDEX IF NOT EXISTS withdrawal_claims_account_unclaimed
-                 ON withdrawal_claims(account) WHERE claimed = 0;
-             CREATE INDEX IF NOT EXISTS payout_claims_receiver_unclaimed
-                 ON payout_claims(receiver, epoch, position) WHERE claimed = 0;",
+                 ON withdrawal_claims(account) WHERE claimed = 0;",
             ack_size = Ack::SIZE,
             max_opening_bytes = MAX_OPENING_BYTES,
             context_size = EpochPaymentContext::SIZE,
@@ -1047,6 +1015,23 @@ impl Store {
         Self::load_epoch(&self.connection, self.epoch()?)
     }
 
+    pub(crate) fn ensure_payer_eligible(&self, account: &Key, first_unadmitted: u64) -> Result<()> {
+        let epoch = self.epoch()?;
+        eligible_account(&self.connection, epoch, account)?;
+        let pending_creation: bool = self.connection.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM account_states AS state
+             WHERE state.public_key = ?1 AND state.epoch >= ?2 AND state.epoch < ?3
+               AND state.predecessor_balance = 0
+               AND NOT EXISTS(SELECT 1 FROM deposits
+                              WHERE deposits.epoch = state.epoch AND deposits.account = state.public_key))"
+        )?.query_row(params![account.as_ref(), sql_u64(first_unadmitted, "first unadmitted epoch")?, sql_u64(epoch, "epoch")?], |row| row.get(0))?;
+        ensure!(
+            !pending_creation,
+            "recipient's first positive close is not admitted"
+        );
+        Ok(())
+    }
+
     pub(crate) fn current_account(&self, account: &Key) -> Result<Option<StoredAccount>> {
         effective_account(&self.connection, self.epoch()?, account)
     }
@@ -1106,7 +1091,7 @@ impl Store {
 
         let mut statement = connection.prepare(
             "SELECT id, length(payer), payer, seq, length(recipient), recipient,
-                    external, amount, cumulative, count, length(opening), opening
+                    amount, cumulative, count, length(opening), opening
              FROM accepted_entries WHERE epoch = ?1 ORDER BY id",
         )?;
         let entries = statement
@@ -1115,7 +1100,7 @@ impl Store {
                 let recipient = read_fixed_blob(row, 4, 5, Key::SIZE, "entry recipient")?;
 
                 // Check SQLite's scalar length before asking rusqlite to materialize the blob.
-                let opening = read_bounded_blob(row, 10, 11, MAX_OPENING_BYTES, "entry opening")?;
+                let opening = read_bounded_blob(row, 9, 10, MAX_OPENING_BYTES, "entry opening")?;
                 Ok(StoredEntry {
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
                     payer: Key::decode(payer.as_slice()).map_err(|error| {
@@ -1125,11 +1110,10 @@ impl Store {
                     recipient: Key::decode(recipient.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
-                    external: row.get::<_, i64>(6)? != 0,
-                    amount: from_sql_u64(row.get(7)?, "entry amount").map_err(to_sqlite_error)?,
-                    cumulative: from_sql_u64(row.get(8)?, "entry cumulative")
+                    amount: from_sql_u64(row.get(6)?, "entry amount").map_err(to_sqlite_error)?,
+                    cumulative: from_sql_u64(row.get(7)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
-                    count: from_sql_u64(row.get(9)?, "entry count").map_err(to_sqlite_error)?,
+                    count: from_sql_u64(row.get(8)?, "entry count").map_err(to_sqlite_error)?,
                     opening: Opening::decode(opening.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
@@ -1280,14 +1264,6 @@ impl Store {
             let seq_sql = sql_u64(seq, "batch sequence")?;
 
             upsert_account_state(transaction, epoch, &plan.payer)?;
-            if let Some(live_liability) = plan.live_liability {
-                let updated = transaction.execute(
-                    "UPDATE operator_meta SET live_liability = ?1 WHERE singleton = 1",
-                    [live_liability.to_be_bytes().as_slice()],
-                )?;
-                ensure!(updated == 1, "operator metadata disappeared during payment");
-            }
-
             let body = authorization.body().clone();
             let encoded_body = body.encode();
             let operator_signature = protocol
@@ -1324,17 +1300,15 @@ impl Store {
             )?;
             let mut insert_entry = transaction.prepare_cached(
                 "INSERT INTO accepted_entries(
-                     epoch, payer, seq, recipient, external, amount, cumulative, count, opening
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     epoch, payer, seq, recipient, amount, cumulative, count, opening
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             let mut accepted = Vec::with_capacity(plan.credits.len());
             for credit in &plan.credits {
-                if let Some(receiver) = credit.receiver.as_ref() {
-                    upsert_account_state(transaction, epoch, receiver)?;
-                }
+                upsert_account_state(transaction, epoch, &credit.receiver)?;
                 let lookup = plan
                     .vector
-                    .lookup::<Sha256, Digest>(&credit.recipient)
+                    .lookup::<Sha256, Digest>(&credit.receiver.key)
                     .context("open accepted entry")?;
                 let OutTipLookup::Present {
                     cumulative,
@@ -1347,7 +1321,7 @@ impl Store {
                 advance_edge.execute(params![
                     epoch_sql,
                     plan.payer.key.as_ref(),
-                    credit.recipient.as_ref(),
+                    credit.receiver.key.as_ref(),
                     sql_u64(cumulative, "edge cumulative credit")?,
                     sql_u64(count, "edge payment count")?,
                 ])?;
@@ -1360,15 +1334,14 @@ impl Store {
                     epoch_sql,
                     plan.payer.key.as_ref(),
                     seq_sql,
-                    credit.recipient.as_ref(),
-                    i64::from(credit.external),
+                    credit.receiver.key.as_ref(),
                     sql_u64(credit.amount, "entry amount")?,
                     sql_u64(cumulative, "entry cumulative")?,
                     sql_u64(count, "entry count")?,
                     encoded.as_ref(),
                 ])?;
                 accepted.push(AcceptedEntry {
-                    recipient: credit.recipient.clone(),
+                    recipient: credit.receiver.key.clone(),
                     cumulative,
                     count,
                     opening,
@@ -1431,8 +1404,7 @@ impl Store {
     pub(crate) fn payer_endpoint(&self, payer: &Key) -> Result<Endpoint> {
         let epoch = self.epoch()?;
         let epoch_sql = sql_u64(epoch, "epoch")?;
-        effective_account(&self.connection, epoch, payer)?
-            .context("payer is not registered in this epoch")?;
+        eligible_account(&self.connection, epoch, payer)?;
         let (seq, cumulative_debit) = payer_endpoint(&self.connection, epoch_sql, payer)?;
         Ok(Endpoint {
             cumulative_debit,
@@ -1640,8 +1612,7 @@ impl Store {
                 "withdrawals are frozen once registration publication begins"
             );
 
-            let mut account = effective_account(transaction, epoch, request.account())?
-                .context("withdrawing account is not in the live state")?;
+            let mut account = eligible_account(transaction, epoch, request.account())?;
             let applied_amount = match request.body().action() {
                 WithdrawalAction::Amount(amount) => {
                     let amount = amount.get();
@@ -1825,30 +1796,6 @@ impl Store {
         result: &SettlementResult,
         genesis_root: StateRoot<Digest>,
     ) -> Result<()> {
-        let mut external_total = 0_u64;
-        let external_claims = result
-            .external_claims
-            .iter()
-            .map(|claim| {
-                let payout = claim
-                    .verify::<Sha256>(&result.roots.change)
-                    .context("verify external payout claim")?;
-                external_total = external_total
-                    .checked_add(payout.amount)
-                    .context("external payout total overflow")?;
-                let encoded = claim.encode();
-                ensure!(
-                    encoded.len() <= MAX_CLAIM_BYTES,
-                    "external payout claim exceeds the operator bound"
-                );
-                Ok((claim.position(), payout, encoded))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            external_total == result.amounts.payout,
-            "external claims do not exhaust the finalized payout reserve"
-        );
-
         ensure!(
             result.withdrawal_claims.len() == result.withdrawals.requests().len(),
             "finalized withdrawals do not have exact claim evidence"
@@ -1875,7 +1822,7 @@ impl Store {
                 );
                 if let WithdrawalAction::Amount(amount) = request.body().action() {
                     ensure!(
-                        output.amount() == amount.get(),
+                        output.amount() == 0 || output.amount() == amount.get(),
                         "withdrawal claim has the wrong requested amount"
                     );
                 }
@@ -1891,7 +1838,7 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(
-            withdrawal_total == result.amounts.withdrawal,
+            withdrawal_total == result.withdrawal_total,
             "withdrawal claims do not exhaust the finalized reserve"
         );
         mutate(&mut self.connection, "close finalization", |transaction| {
@@ -1951,8 +1898,8 @@ impl Store {
             transaction.execute(
                 "INSERT INTO settlements(
                  epoch, batch_id, header, roots, certificate, rows, dealing_bytes,
-                 withdrawal_total, payout_total, prepare_micros, deal_micros, seal_micros
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 withdrawal_total, prepare_micros, deal_micros, seal_micros
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     epoch,
                     result.header.batch_id::<Sha256>().digest().as_ref(),
@@ -1961,8 +1908,7 @@ impl Store {
                     certificate,
                     sql_usize(result.rows, "row count")?,
                     sql_usize(result.dealing_bytes, "dealing bytes")?,
-                    sql_u64(result.amounts.withdrawal, "withdrawal total")?,
-                    sql_u64(result.amounts.payout, "payout total")?,
+                    sql_u64(result.withdrawal_total, "withdrawal total")?,
                     sql_u128(result.prepare_micros, "prepare duration")?,
                     sql_u128(result.deal_micros, "deal duration")?,
                     sql_u128(result.seal_micros, "seal duration")?,
@@ -1980,19 +1926,6 @@ impl Store {
                     result.header.batch_id::<Sha256>().digest().as_ref(),
                     i64::from(position),
                     account.as_ref(),
-                    proof.as_ref(),
-                ])?;
-            }
-            let mut insert_payout_claim = transaction.prepare_cached(
-                "INSERT INTO payout_claims(epoch, position, receiver, amount, proof)
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for (position, payout, proof) in external_claims {
-                insert_payout_claim.execute(params![
-                    epoch,
-                    i64::from(position),
-                    payout.recipient.as_ref(),
-                    sql_u64(payout.amount, "payout amount")?,
                     proof.as_ref(),
                 ])?;
             }
@@ -2110,127 +2043,6 @@ impl Store {
                     ensure!(
                         updated == 1,
                         "withdrawal acknowledgement changed concurrently"
-                    );
-                }
-                Ok(())
-            },
-        )
-    }
-
-    pub(crate) fn external_payout_evidence(
-        &self,
-        receiver: &Key,
-    ) -> Result<ExternalPayoutEvidence> {
-        let stored = self
-            .connection
-            .query_row(
-                "SELECT claims.position, length(claims.proof), claims.proof,
-                        length(settlements.roots), settlements.roots,
-                        length(claims.receiver), claims.receiver, claims.amount,
-                        length(settlements.header), settlements.header
-                 FROM payout_claims AS claims
-                 JOIN settlements USING(epoch)
-                 WHERE claims.claimed = 0 AND claims.receiver = ?1
-                 ORDER BY claims.epoch, claims.position
-                 LIMIT 1",
-                [receiver.as_ref()],
-                |row| {
-                    let proof_len = row.get::<_, i64>(1)?;
-                    if proof_len <= 0
-                        || usize::try_from(proof_len).map_or(true, |len| len > MAX_CLAIM_BYTES)
-                    {
-                        return Err(to_sqlite_error(anyhow::anyhow!(
-                            "invalid external claim length"
-                        )));
-                    }
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        read_fixed_blob(row, 3, 4, RootBundle::<Digest>::SIZE, "settlement roots")?,
-                        read_fixed_blob(row, 5, 6, Key::SIZE, "claim receiver")?,
-                        row.get::<_, i64>(7)?,
-                        read_fixed_blob(row, 8, 9, Header::<Digest>::SIZE, "header")?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("there is no unclaimed external payout for this receiver")?;
-        let position = u32::try_from(stored.0).context("claim position does not fit u32")?;
-        let claim = ExternalPayoutClaim::<Key, Digest>::decode(stored.1.as_slice())
-            .context("decode external payout claim")?;
-        ensure!(
-            claim.position() == position,
-            "stored claim position differs from its proof"
-        );
-        let roots = RootBundle::<Digest>::decode(stored.2.as_slice())
-            .context("decode settlement roots for claim")?;
-        let payout = claim
-            .verify::<Sha256>(&roots.change)
-            .context("verify external payout claim")?;
-        ensure!(
-            payout.recipient.as_ref() == stored.3.as_slice(),
-            "stored claim receiver differs from its proof"
-        );
-        ensure!(
-            payout.amount == from_sql_u64(stored.4, "claim amount")?,
-            "stored claim amount differs from its proof"
-        );
-        let header = Header::<Digest>::decode(stored.5.as_slice())
-            .context("decode external payout settlement header")?;
-        Ok(ExternalPayoutEvidence {
-            batch_id: header.batch_id::<Sha256>(),
-            claim,
-        })
-    }
-
-    pub(crate) fn acknowledge_external_payout_claim(
-        &mut self,
-        batch_id: BatchId<Digest>,
-        claim: &ExternalPayoutClaim<Key, Digest>,
-    ) -> Result<()> {
-        let proof = claim.encode();
-        ensure!(
-            !proof.is_empty() && proof.len() <= MAX_CLAIM_BYTES,
-            "external payout claim exceeds the operator bound"
-        );
-        mutate(
-            &mut self.connection,
-            "external payout acknowledgement",
-            |transaction| {
-                let claimed = transaction
-                    .query_row(
-                        "SELECT payout_claims.claimed
-                 FROM payout_claims
-                 JOIN settlements USING(epoch)
-                 WHERE settlements.batch_id = ?1
-                   AND payout_claims.position = ?2
-                   AND payout_claims.proof = ?3",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            proof.as_ref(),
-                        ],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .context("external payout acknowledgement does not match stored evidence")?;
-                if !claimed {
-                    let updated = transaction.execute(
-                        "UPDATE payout_claims
-                 SET claimed = 1
-                 WHERE epoch = (SELECT epoch FROM settlements WHERE batch_id = ?1)
-                   AND position = ?2
-                   AND proof = ?3
-                   AND claimed = 0",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            proof.as_ref(),
-                        ],
-                    )?;
-                    ensure!(
-                        updated == 1,
-                        "external payout acknowledgement changed concurrently"
                     );
                 }
                 Ok(())
@@ -2380,7 +2192,7 @@ impl Store {
             }
             "finalized" => {
                 let stored = self.connection.query_row(
-                    "SELECT length(header), header, rows, dealing_bytes, payout_total,
+                    "SELECT length(header), header, rows, dealing_bytes, withdrawal_total,
                             length(certificate), prepare_micros, deal_micros, seal_micros
                      FROM settlements WHERE epoch = ?1",
                     [epoch],
@@ -2405,7 +2217,7 @@ impl Store {
                         .context("close row count does not fit usize")?,
                     dealing_bytes: usize::try_from(from_sql_u64(stored.2, "close dealing bytes")?)
                         .context("close dealing bytes does not fit usize")?,
-                    payout_total: from_sql_u64(stored.3, "close payout total")?,
+                    withdrawal_total: from_sql_u64(stored.3, "close withdrawal total")?,
                     header_bytes: Header::<Digest>::SIZE,
                     certificate_bytes: usize::try_from(from_sql_u64(
                         stored.4,
@@ -2454,9 +2266,8 @@ impl Store {
     pub(crate) fn status(&self) -> Result<StoreStatus> {
         let epoch = self.epoch()?;
         let epoch_sql = sql_u64(epoch, "epoch")?;
-        let (accounts, present_accounts, recent_payments, reserved_payout_value) =
-            self.connection.query_row(
-                "SELECT
+        let (accounts, present_accounts, recent_payments) = self.connection.query_row(
+            "SELECT
                      (SELECT count(*) FROM account_identities),
                      (SELECT count(*) FROM account_identities AS identity
                       WHERE (SELECT state.current_balance
@@ -2464,25 +2275,21 @@ impl Store {
                              WHERE state.public_key = identity.public_key
                                AND state.epoch <= ?1
                              ORDER BY state.epoch DESC LIMIT 1) > 0),
-                     min((SELECT count(*) FROM accepted_entries WHERE epoch = ?1), 12),
-                     (SELECT coalesce(sum(amount), 0)
-                      FROM payout_claims WHERE claimed = 0)",
-                [epoch_sql],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )?;
+                     min((SELECT count(*) FROM accepted_entries WHERE epoch = ?1), 12)",
+            [epoch_sql],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         Ok(StoreStatus {
             epoch,
             accounts: from_sql_u64(accounts, "account count")?,
             present_accounts: from_sql_u64(present_accounts, "present account count")?,
             recent_payments: from_sql_u64(recent_payments, "recent payment count")?,
-            reserved_payout_value: from_sql_u64(reserved_payout_value, "reserved payout value")?,
         })
     }
 
@@ -2499,28 +2306,11 @@ impl Store {
                 present: account.current > 0,
             })
             .collect();
-        let payments = current
-            .entries
-            .into_iter()
-            .rev()
-            .take(12)
-            .map(|entry| PaymentView {
-                external: entry.external,
-            })
-            .collect();
-        let reserved_payout_value = from_sql_u64(
-            self.connection.query_row(
-                "SELECT coalesce(sum(amount), 0) FROM payout_claims WHERE claimed = 0",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?,
-            "reserved payout value",
-        )?;
+        let payments = current.entries.into_iter().rev().take(12).collect();
         Ok(StoreSnapshot {
             epoch,
             accounts,
             payments,
-            reserved_payout_value,
         })
     }
 }
@@ -2549,8 +2339,7 @@ fn validate_new_batch(
         .context("verify payer authorization")?;
     let body = authorization.body();
     let payer_key = body.payer().clone();
-    let mut payer = effective_account(connection, epoch, &payer_key)?
-        .context("payer is not a live registered account")?;
+    let mut payer = eligible_account(connection, epoch, &payer_key)?;
 
     // The wire carries per-batch deltas: strictly recipient-sorted, unique, positive, and
     // never self-crediting.
@@ -2647,39 +2436,28 @@ fn validate_new_batch(
     }
     payer.current -= total;
 
-    let mut external_total = 0_u64;
     let mut credits = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut receiver = effective_account(connection, epoch, &entry.recipient)?;
-        let external = receiver.is_none();
-        if let Some(receiver) = receiver.as_mut() {
-            receiver.current =
-                checked_sql_add(receiver.current, entry.amount, "receiver account balance")?;
-        } else {
-            external_total =
-                checked_sql_add(external_total, entry.amount, "external payment total")?;
-        }
+        let mut receiver = match effective_account(connection, epoch, &entry.recipient)? {
+            Some(receiver) => receiver,
+            None => StoredAccount {
+                name: account_name(connection, &entry.recipient)?,
+                key: entry.recipient.clone(),
+                predecessor: 0,
+                current: 0,
+            },
+        };
+        receiver.current =
+            checked_sql_add(receiver.current, entry.amount, "receiver account balance")?;
         credits.push(Credit {
-            recipient: entry.recipient.clone(),
             amount: entry.amount,
             receiver,
-            external,
         });
     }
-    let live_liability = if external_total > 0 {
-        Some(
-            metadata_live_liability(connection)?
-                .checked_sub(external_total)
-                .context("external payment exceeds live liability")?,
-        )
-    } else {
-        None
-    };
     Ok(Admission::Admit(Box::new(Plan {
         epoch,
         total,
         payer,
-        live_liability,
         vector,
         credits,
     })))
@@ -2765,7 +2543,7 @@ fn batch_entries(
     seq: u64,
 ) -> Result<Vec<StoredEntry>> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, length(recipient), recipient, external, amount, cumulative, count,
+        "SELECT id, length(recipient), recipient, amount, cumulative, count,
                 length(opening), opening
          FROM accepted_entries
          WHERE epoch = ?1 AND payer = ?2 AND seq = ?3
@@ -2780,7 +2558,7 @@ fn batch_entries(
             ],
             |row| {
                 let recipient = read_fixed_blob(row, 1, 2, Key::SIZE, "entry recipient")?;
-                let opening = read_bounded_blob(row, 7, 8, MAX_OPENING_BYTES, "entry opening")?;
+                let opening = read_bounded_blob(row, 6, 7, MAX_OPENING_BYTES, "entry opening")?;
                 Ok(StoredEntry {
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
                     payer: payer.clone(),
@@ -2788,11 +2566,10 @@ fn batch_entries(
                     recipient: Key::decode(recipient.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
-                    external: row.get::<_, i64>(3)? != 0,
-                    amount: from_sql_u64(row.get(4)?, "entry amount").map_err(to_sqlite_error)?,
-                    cumulative: from_sql_u64(row.get(5)?, "entry cumulative")
+                    amount: from_sql_u64(row.get(3)?, "entry amount").map_err(to_sqlite_error)?,
+                    cumulative: from_sql_u64(row.get(4)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
-                    count: from_sql_u64(row.get(6)?, "entry count").map_err(to_sqlite_error)?,
+                    count: from_sql_u64(row.get(5)?, "entry count").map_err(to_sqlite_error)?,
                     opening: Opening::decode(opening.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
@@ -2855,6 +2632,30 @@ fn read_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccount> {
     })
 }
 
+fn account_name(connection: &Connection, account: &Key) -> Result<String> {
+    Ok(connection
+        .prepare_cached("SELECT name FROM account_identities WHERE public_key = ?1")?
+        .query_row([account.as_ref()], |row| row.get(0))
+        .optional()?
+        .unwrap_or_else(|| "Account".to_string()))
+}
+
+fn eligible_account(connection: &Connection, epoch: u64, key: &Key) -> Result<StoredAccount> {
+    let account =
+        effective_account(connection, epoch, key)?.context("payer is absent in this epoch")?;
+    if account.predecessor == 0 {
+        let deposit: bool = connection
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1 AND account = ?2)",
+            )?
+            .query_row(params![sql_u64(epoch, "epoch")?, key.as_ref()], |row| {
+                row.get(0)
+            })?;
+        ensure!(deposit, "payer is absent at the epoch boundary");
+    }
+    Ok(account)
+}
+
 fn effective_account(
     connection: &Connection,
     epoch: u64,
@@ -2885,8 +2686,7 @@ fn effective_account(
         return Ok(None);
     };
     if version_epoch < epoch {
-        // Zero-balance accounts remain registered through the epoch that drained them, then
-        // disappear unless a later deposit creates a fresh version.
+        // A zero tail remains visible to its own epoch, then denotes absence at later boundaries.
         if account.current == 0 {
             return Ok(None);
         }
@@ -3664,8 +3464,8 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO accepted_entries(
-                         epoch, payer, seq, recipient, external, amount, cumulative, count, opening
-                     ) VALUES(0, ?1, ?2, ?3, 0, 1, 1, 1, ?4)",
+                         epoch, payer, seq, recipient, amount, cumulative, count, opening
+                     ) VALUES(0, ?1, ?2, ?3, 1, 1, 1, ?4)",
                     params![payer.as_ref(), seq, receiver.as_ref(), opening.as_ref()],
                 )
                 .unwrap();
@@ -3781,31 +3581,6 @@ mod tests {
                 .verify::<Sha256>(&fixture.context)
                 .unwrap();
         }
-    }
-
-    #[test]
-    fn payout_lookup_uses_only_outstanding_rows() {
-        let fixture = PaymentFixture::new();
-        let plans = fixture
-            .store
-            .connection
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT epoch, position FROM payout_claims
-             WHERE receiver = ?1 AND claimed = 0 ORDER BY epoch, position LIMIT 1",
-            )
-            .unwrap()
-            .query_map([fixture.receiver.public_key().as_ref()], |row| {
-                row.get::<_, String>(3)
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert!(
-            plans
-                .iter()
-                .any(|plan| plan.contains("SEARCH payout_claims")),
-            "{plans:?}"
-        );
     }
 
     #[test]

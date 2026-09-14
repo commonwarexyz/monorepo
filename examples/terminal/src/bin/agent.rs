@@ -19,7 +19,7 @@ struct Args {
     #[arg(long = "query", required = true)]
     queries: Vec<SocketAddr>,
 
-    /// Agent wallet index: 0=Alice, 1=Bob, 2=Carol, 3=Dave, 4=Eve (external).
+    /// Agent wallet index: 0=Alice, 1=Bob, 2=Carol, 3=Dave, 4=Eve.
     #[arg(long, default_value_t = 0)]
     identity: usize,
 

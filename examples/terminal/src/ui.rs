@@ -389,7 +389,7 @@ pub(crate) async fn run_with_io<E: Env>(
                             "epoch {epoch} withdrawal carried by operator: {amount}"
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {epoch} Close carried by operator; payout is finalized at epoch close"
+                            "epoch {epoch} Close carried by operator; withdrawal is finalized at epoch close"
                         )),
                     },
                     Ok(WithdrawalOutcome::Signed {
@@ -422,19 +422,6 @@ pub(crate) async fn run_with_io<E: Env>(
                 )),
                 Err(error) => state.log(format!("claim rejected: {error:#}")),
             },
-            KeyCode::Char('e') => {
-                match agent
-                    .claim_external_payout(network, chain, operator)
-                    .await
-                {
-                    Ok(payout) => state.log(format!(
-                        "external payout claimed for {}: {}",
-                        agent.name(),
-                        payout.amount
-                    )),
-                    Err(error) => state.log(format!("external claim rejected: {error:#}")),
-                }
-            }
             KeyCode::Char('s') => match agent.start_close(network, operator).await {
                 Ok(close) => {
                     if !state.pending_closes.contains(&close.epoch) {
@@ -602,13 +589,16 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         || "operator unavailable".to_string(),
         |status| {
             format!(
-                "Operator epoch {} | {}/{} live accounts | {} recent payments | close {} | reserved payouts {}{}",
+                "Operator epoch {} | {}/{} live accounts | {} recent payments | close {}{}",
                 status.epoch,
                 status.present_accounts,
                 status.accounts,
                 status.recent_payments,
-                if status.close_in_progress { "active" } else { "idle" },
-                status.reserved_payout_value,
+                if status.close_in_progress {
+                    "active"
+                } else {
+                    "idle"
+                },
                 if status.faulted { " | FENCED" } else { "" }
             )
         },
@@ -658,7 +648,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         )),
         Line::raw(staged),
         Line::raw(
-            "p pay  R retry saved payment  a stage  b pay batch  d deposit  t fund operator  r refund deposit  w withdraw  f Close  x escalate  c claim  e payout  h recover state  s cut epoch",
+            "p pay  R retry saved payment  a stage  b pay batch  d deposit  t fund operator  r refund deposit  w withdraw  f Close  x escalate  c claim withdrawal  h recover state  s cut epoch",
         ),
         Line::raw("Left/Right receiver  +/- amount  PgUp/PgDn +/-10"),
     ])
@@ -789,44 +779,57 @@ async fn finalized_deposit<E: Env>(
     anyhow::bail!("the deposit never reached the certified finalized balance {expected}")
 }
 
+/// Completes a saved withdrawal intent before the walkthrough creates more work.
+async fn complete_pending_withdrawal<E: Env>(
+    network: &E,
+    operator: SocketAddr,
+    chain: &mut Client,
+    agent: &mut Agent,
+) -> Result<()> {
+    if !agent.has_pending_withdrawal_claim() {
+        return Ok(());
+    }
+    let mut released = None;
+    let mut last = None;
+    for _ in 0..FINALIZE_ATTEMPTS {
+        match agent.claim_withdrawal(network, chain, operator).await {
+            Ok(release) => {
+                released = Some(release);
+                break;
+            }
+            Err(error) => {
+                last = Some(error);
+                if let Some(action) = agent.pending_withdrawal_action() {
+                    let _ = agent.withdraw(network, chain, operator, action).await;
+                    agent.ensure_store_usable()?;
+                }
+            }
+        }
+        network.sleep(POLL).await;
+    }
+    let Some(release) = released else {
+        return Err(last
+            .expect("a failed claim retry leaves its error")
+            .context("complete the interrupted withdrawal claim"));
+    };
+    println!(
+        "claimed the interrupted withdrawal {} against the certified release record",
+        release.amount
+    );
+    Ok(())
+}
+
 /// Runs one wallet's funded payment and claim arc with an automatic operator.
 pub(crate) async fn scripted<E: Env>(
     network: &E,
     operator: SocketAddr,
     mut chain: Client,
     mut agent: Agent,
+    mut eve: Agent,
 ) -> Result<()> {
     // A saved claim can precede delivery of its authorization. Resolve that intent
     // before starting another withdrawal in this walkthrough.
-    if agent.has_pending_withdrawal_claim() {
-        let mut released = None;
-        let mut last = None;
-        for _ in 0..FINALIZE_ATTEMPTS {
-            match agent.claim_withdrawal(network, &mut chain, operator).await {
-                Ok(release) => {
-                    released = Some(release);
-                    break;
-                }
-                Err(error) => {
-                    last = Some(error);
-                    if let Some(action) = agent.pending_withdrawal_action() {
-                        let _ = agent.withdraw(network, &mut chain, operator, action).await;
-                        agent.ensure_store_usable()?;
-                    }
-                }
-            }
-            network.sleep(POLL).await;
-        }
-        let Some(release) = released else {
-            return Err(last
-                .expect("a failed claim retry leaves its error")
-                .context("complete the interrupted withdrawal claim"));
-        };
-        println!(
-            "claimed the interrupted withdrawal {} against the certified release record",
-            release.amount
-        );
-    }
+    complete_pending_withdrawal(network, operator, &mut chain, &mut agent).await?;
 
     let mut start = None;
     for _ in 0..EFFECT_ATTEMPTS {
@@ -922,19 +925,31 @@ pub(crate) async fn scripted<E: Env>(
         batch.total,
         batch.acceptance.entries.len()
     );
-    let external_receiver = agent.receiver_count() - 1;
-    let external_payment = scripted_payment(
+    let eve_receiver = agent.receiver_count() - 1;
+    complete_pending_withdrawal(network, operator, &mut chain, &mut eve).await?;
+    let mut eve_start = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = eve.balance(network, &mut chain, operator).await {
+            eve_start = Some(balance);
+            break;
+        }
+        network.sleep(POLL).await;
+    }
+    let eve_start = eve_start.context("read Eve's verified starting balance")?;
+    let eve_expected = eve_start.checked_add(2).context("Eve balance overflow")?;
+    let eve_payment = scripted_payment(
         network,
         operator,
         &mut chain,
         &mut agent,
-        &[(external_receiver, 2)],
+        &[(eve_receiver, 2)],
     )
     .await?;
     println!(
-        "epoch {} accepted external payment #{}",
-        external_payment.epoch, external_payment.sequence
+        "epoch {} accepted payment #{} to fresh virtual receiver Eve",
+        eve_payment.epoch, eve_payment.sequence
     );
+    let eve_receipt_id = Sha256::hash(&[eve_payment.acceptance.ack.body().encode().as_ref()]);
 
     // Service relies on durably held, settlement-anchored receipts even when the
     // automatic driver has already cut their epoch.
@@ -960,10 +975,17 @@ pub(crate) async fn scripted<E: Env>(
     );
     println!("receiver durably holds this batch's verified receipt");
 
+    eve.intake_incoming(network, &mut chain, operator).await?;
+    ensure!(
+        eve.has_receipt(&payer_account, &eve_receipt_id)?,
+        "Eve holds no evidence for the accepted payment"
+    );
+    println!("Eve durably holds the fresh virtual payment receipt");
+
     let work_epoch = withdrawal
         .max(payment.epoch)
         .max(batch.epoch)
-        .max(external_payment.epoch);
+        .max(eve_payment.epoch);
     let closed = close_epoch(network, operator, &mut agent, work_epoch).await?;
     let release = agent
         .claim_withdrawal(network, &mut chain, operator)
@@ -993,26 +1015,75 @@ pub(crate) async fn scripted<E: Env>(
         let _ = std::fs::remove_file(path);
     }
 
-    let mut external = Agent::new_for(4, chain.deployment(), agent.operator())?;
-    let payout = external
-        .claim_external_payout(network, &mut chain, operator)
-        .await?;
-    println!(
-        "claimed external payout {} against the certified release record",
-        payout.amount
+    let eve_summary = eve.reconcile(network, &mut chain, operator).await?;
+    ensure!(
+        eve_summary.reconciled.contains(&eve_payment.epoch)
+            || eve.last_reconciled_epoch() == Some(eve_payment.epoch),
+        "Eve's fresh receipt has not reconciled against the finalized close"
     );
+    let mut eve_balance = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = eve.balance(network, &mut chain, operator).await
+            && balance == eve_expected
+        {
+            eve_balance = Some(balance);
+            break;
+        }
+        network.sleep(POLL).await;
+    }
+    ensure!(
+        eve_balance == Some(eve_expected),
+        "Eve's fresh receipt did not become a virtual successor balance"
+    );
+    println!("Eve's fresh receipt finalized as virtual balance {eve_expected}");
+
+    let mut eve_withdrawal = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        match eve
+            .withdraw(
+                network,
+                &mut chain,
+                operator,
+                WithdrawalAction::Amount(NonZeroU64::new(2).unwrap()),
+            )
+            .await?
+        {
+            WithdrawalOutcome::Applied { epoch, .. } => {
+                eve_withdrawal = Some(epoch);
+                break;
+            }
+            WithdrawalOutcome::Signed { .. } => network.sleep(POLL).await,
+        }
+    }
+    let eve_withdrawal = eve_withdrawal
+        .context("Eve's explicit withdrawal remains unresolved; retry keeps the saved request")?;
+    println!("epoch {eve_withdrawal} carried Eve's explicit withdrawal 2");
 
     let successor = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 1)]).await?;
     println!(
         "epoch {} accepted successor payment #{} after epoch {} finalized",
         successor.epoch, successor.sequence, closed
     );
-
     // The successor payment registered the next epoch's payment context, so
     // close that epoch too, inside its admission runway: an activated context
     // left registered would expire its admission deadline and permanently
     // hard-fault the deployment.
-    close_epoch(network, operator, &mut agent, successor.epoch).await?;
+    close_epoch(
+        network,
+        operator,
+        &mut agent,
+        successor.epoch.max(eve_withdrawal),
+    )
+    .await?;
+    let eve_release = eve.claim_withdrawal(network, &mut chain, operator).await?;
+    ensure!(
+        eve_release.amount == 2,
+        "Eve's certified withdrawal release has the wrong amount"
+    );
+    println!(
+        "claimed Eve's explicit withdrawal {} against the certified release record",
+        eve_release.amount
+    );
 
     // Every close completes only on its certified finalization, which
     // retires the registration slot, and nothing after the last close
@@ -1238,7 +1309,7 @@ pub(crate) fn fraud_arc() -> Result<()> {
 mod tests {
     use super::{
         REFRESH_BUDGET, UiState, fraud_arc, handle_hard_fault_recovery,
-        handle_pending_deposit_recovery, refresh, refresh_bounded,
+        handle_pending_deposit_recovery, refresh, refresh_bounded, render,
     };
     use crate::{
         agent::Agent,
@@ -1257,6 +1328,7 @@ mod tests {
         deterministic,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
     use std::{
         cell::{Cell, RefCell},
         net::SocketAddr,
@@ -1269,6 +1341,28 @@ mod tests {
     #[test]
     fn fraud_arc_convicts_on_a_certified_chain() {
         fraud_arc().unwrap();
+    }
+
+    #[test]
+    fn controls_offer_only_explicit_withdrawal_claims() {
+        let backend = TestBackend::new(180, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let agent = Agent::new(0).unwrap();
+        let state = UiState::new();
+
+        terminal
+            .draw(|frame| render(frame, &agent, &state))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("c claim withdrawal"), "{rendered}");
+        assert!(!rendered.contains("e payout"), "{rendered}");
     }
 
     #[test]
@@ -1396,7 +1490,6 @@ mod tests {
                 accounts: 4,
                 present_accounts: 4,
                 recent_payments: 0,
-                reserved_payout_value: 0,
                 close_in_progress: false,
                 faulted: false,
             });

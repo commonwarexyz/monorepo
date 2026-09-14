@@ -1,8 +1,9 @@
 //! Verus arithmetic model of the full-replica balance-only close.
 //!
-//! Proves successor soundness, completeness, uniqueness, and summed liability
-//! conservation for epoch-local debit and credit. A zero balance denotes absence;
-//! positive balances are the complete persistent account value.
+//! Proves successor soundness, completeness, uniqueness, receive-only creation,
+//! and summed liability conservation for epoch-local debit and credit. Every
+//! recipient credit remains virtual. A zero balance denotes absence; positive
+//! balances are the complete persistent account value.
 //!
 //! This is an out-of-band arithmetic mirror. See README.md for the production
 //! correspondence and the validation obligations outside this model.
@@ -24,7 +25,6 @@ pub enum Action {
 pub enum Output {
     None,
     Withdrawal(u64),
-    ExternalPayout(u64),
 }
 
 /// Balance available after this epoch's outgoing debit.
@@ -39,11 +39,6 @@ pub open spec fn spec_withdrawal(action: Action, tail: int) -> int {
         Action::Amount(amount) => if amount <= tail { amount as int } else { 0 },
         Action::Close => tail,
     }
-}
-
-/// Credit to an absent account without a deposit is paid out externally.
-pub open spec fn spec_payout(pred: u64, deposit: u64, credit: u64) -> int {
-    if pred != 0 || deposit != 0 { 0 } else { credit as int }
 }
 
 /// Balance and output equations for an epoch's arithmetic inputs.
@@ -62,14 +57,11 @@ pub open spec fn valid_successor(
 ) -> bool {
     let tail = spec_tail(pred, deposit, credit, debit);
     let withdrawal = spec_withdrawal(action, tail);
-    let payout = spec_payout(pred, deposit, credit);
     &&& tail >= 0
     &&& withdrawal <= u64::MAX
-    &&& succ + debit + withdrawal + payout == pred + credit + deposit
+    &&& succ + debit + withdrawal == pred + credit + deposit
     &&& output == match action {
-        Action::None => if payout != 0 { Output::ExternalPayout(payout as u64) } else {
-            Output::None
-        },
+        Action::None => Output::None,
         _ => Output::Withdrawal(withdrawal as u64),
     }
 }
@@ -106,15 +98,7 @@ pub fn derive_successor(
             tail as u64
         }
     };
-    let registered = pred != 0 || deposit != 0;
-    let payout: u64 = if registered { 0 } else { credit };
     let rest = match tail.checked_sub(withdrawal_amount as u128) {
-        Some(rest) => rest,
-        None => {
-            return None;
-        }
-    };
-    let rest = match rest.checked_sub(payout as u128) {
         Some(rest) => rest,
         None => {
             return None;
@@ -125,10 +109,45 @@ pub fn derive_successor(
     }
     let balance = rest as u64;
     let output = match action {
-        Action::None => if payout != 0 { Output::ExternalPayout(payout) } else { Output::None },
+        Action::None => Output::None,
         _ => Output::Withdrawal(withdrawal_amount),
     };
     Some((balance, output))
+}
+
+/// Credit creates a virtual balance even when the recipient was absent.
+pub proof fn absent_credit_is_virtual(credit: u64)
+    ensures
+        valid_successor(
+            0,
+            credit,
+            Output::None,
+            0,
+            credit,
+            0,
+            Action::None,
+        ),
+{
+}
+
+/// A zero monetary release remains distinguishable from no withdrawal action.
+pub proof fn zero_release_is_withdrawal(
+    pred: u64,
+    succ: u64,
+    output: Output,
+    debit: u64,
+    credit: u64,
+    deposit: u64,
+    action: Action,
+)
+    requires
+        valid_successor(pred, succ, output, debit, credit, deposit, action),
+        action != Action::None,
+        spec_withdrawal(action, spec_tail(pred, deposit, credit, debit)) == 0,
+    ensures
+        output == Output::Withdrawal(0),
+        output != Output::None,
+{
 }
 
 /// Uniqueness: the equations admit at most one successor and output.
@@ -163,9 +182,9 @@ pub struct Row {
     pub action: Action,
 }
 
-/// A withdrawal requires a registered account, as enforced by boundary validation.
+/// An absent account may receive, but cannot originate or withdraw in this epoch.
 pub open spec fn row_valid(row: Row) -> bool {
-    (row.action == Action::None || row.pred != 0 || row.deposit != 0)
+    (row.pred != 0 || row.deposit != 0 || (row.debit == 0 && row.action == Action::None))
     && valid_successor(
         row.pred,
         row.succ,
@@ -175,6 +194,20 @@ pub open spec fn row_valid(row: Row) -> bool {
         row.deposit,
         row.action,
     )
+}
+
+/// A valid absent row is receive-only and retains every credit in its successor.
+pub proof fn absent_row_is_receive_only(row: Row)
+    requires
+        row_valid(row),
+        row.pred == 0,
+        row.deposit == 0,
+    ensures
+        row.debit == 0,
+        row.action == Action::None,
+        row.output == Output::None,
+        row.succ == row.credit,
+{
 }
 
 /// Integer sum of one column over a row sequence.
@@ -196,16 +229,8 @@ pub open spec fn output_withdrawal(output: Output) -> int {
     }
 }
 
-/// The external payout reserve contribution encoded by an activity output.
-pub open spec fn output_payout(output: Output) -> int {
-    match output {
-        Output::ExternalPayout(amount) => amount as int,
-        _ => 0,
-    }
-}
-
 /// Summing every valid row's balance equation: successor balances plus gross debit,
-/// withdrawals, and payouts equal predecessor balances plus gross credit and deposits.
+/// withdrawals equal predecessor balances plus gross credit and deposits.
 pub proof fn liability_conservation(rows: Seq<Row>)
     requires
         forall|i: int| 0 <= i < rows.len() ==> row_valid(#[trigger] rows[i]),
@@ -213,10 +238,10 @@ pub proof fn liability_conservation(rows: Seq<Row>)
         row_sum(rows, |row: Row| row.succ as int) + row_sum(
             rows,
             |row: Row| row.debit as int,
-        ) + row_sum(rows, |row: Row| output_withdrawal(row.output)) + row_sum(
+        ) + row_sum(rows, |row: Row| output_withdrawal(row.output)) == row_sum(
             rows,
-            |row: Row| output_payout(row.output),
-        ) == row_sum(rows, |row: Row| row.pred as int) + row_sum(
+            |row: Row| row.pred as int,
+        ) + row_sum(
             rows,
             |row: Row| row.credit as int,
         ) + row_sum(rows, |row: Row| row.deposit as int),
@@ -235,7 +260,7 @@ pub proof fn liability_conservation(rows: Seq<Row>)
 
 /// The settlement liability equation: with gross debit equal to gross credit (payment
 /// conservation, derived from the shared vector entries), successor liability equals
-/// predecessor liability plus deposits minus the two classified output totals.
+/// predecessor liability plus deposits minus withdrawals.
 pub proof fn successor_liability(rows: Seq<Row>)
     requires
         forall|i: int| 0 <= i < rows.len() ==> row_valid(#[trigger] rows[i]),
@@ -250,7 +275,7 @@ pub proof fn successor_liability(rows: Seq<Row>)
         ) + row_sum(rows, |row: Row| row.deposit as int) - row_sum(
             rows,
             |row: Row| output_withdrawal(row.output),
-        ) - row_sum(rows, |row: Row| output_payout(row.output)),
+        ),
 {
     liability_conservation(rows);
 }
@@ -260,23 +285,16 @@ pub fn checked_successor_liability(
     predecessor: u64,
     deposits: u64,
     withdrawals: u64,
-    payouts: u64,
 ) -> (result: Option<u64>)
     ensures
-        result is Some ==> result->0 + withdrawals + payouts == predecessor + deposits,
+        result is Some ==> result->0 + withdrawals == predecessor + deposits,
         result is None ==> {
-            let successor = predecessor + deposits - withdrawals - payouts;
+            let successor = predecessor + deposits - withdrawals;
             successor < 0 || successor > u64::MAX
         },
 {
     let available = predecessor as u128 + deposits as u128;
     let successor = match available.checked_sub(withdrawals as u128) {
-        Some(remaining) => remaining,
-        None => {
-            return None;
-        }
-    };
-    let successor = match successor.checked_sub(payouts as u128) {
         Some(remaining) => remaining,
         None => {
             return None;

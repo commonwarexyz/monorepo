@@ -12,7 +12,6 @@ fn registration(native: &NativeGenesis) -> RegisterDeploymentRequest {
         Sha256::hash(&[b"startup-after-rejected-deposit"]),
         operator_ack_key(0),
         native.deployments[0].network_key.clone(),
-        vec![wallets()[0].public_key()],
         1024,
         native.registration_fee,
         &operator_signer(0),
@@ -207,7 +206,7 @@ fn dynamic_startup_skips_rejected_preregistration_deposit() {
         fixture.wait_applied(&context, &registered).await;
         let operator =
             ready_operator(&context, &source, &mut backend, entry, held, observations).await;
-        assert_eq!(operator.lock().snapshot().unwrap().accounts[0].balance, 0);
+        assert!(operator.lock().snapshot().unwrap().accounts.is_empty());
         assert_eq!(
             read(&fixture.db, &deposit_key(&deployment, &rejected.event.id)).await,
             None

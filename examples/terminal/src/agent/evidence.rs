@@ -20,7 +20,6 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, HigherEntryLookup},
     qmdb::{StateLookup, StateOpening, StateRoot, account_key},
-    transition::ExternalPayoutClaim,
 };
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
@@ -320,7 +319,7 @@ impl Holders {
                         && saved.header.verify::<Sha256, Key>(
                             &saved.context,
                             &saved.roots,
-                            &saved.amounts
+                            saved.withdrawal_total
                         ),
                     "withdrawal boundary differs from the certified close"
                 );
@@ -362,40 +361,6 @@ impl Holders {
                 "withdrawal descriptor names another admitted batch"
             );
             Ok(witness)
-        };
-        self.fetch(ctx, chain, account, lookup, accept).await
-    }
-
-    /// `account`'s external payout claim in the admitted close, verified
-    /// against the admitted change root.
-    pub(super) async fn external_payout_claim<E: Env>(
-        &self,
-        ctx: &E,
-        chain: &Client,
-        admitted: &AdmittedRootsResponse,
-        account: &Key,
-    ) -> Result<ExternalPayoutClaim<Key, Digest>> {
-        let change = admitted.roots.change;
-        let lookup = EvidenceLookup::ExternalPayout {
-            batch: admitted.batch_id.into_digest(),
-            account: account.clone(),
-        };
-        let accept = |evidence: Evidence| {
-            let Evidence::Close {
-                body: EvidenceBody::ExternalPayout(claim),
-                ..
-            } = evidence
-            else {
-                bail!("served evidence is not an external payout claim");
-            };
-            let payout = claim
-                .verify::<Sha256>(&change)
-                .context("verify the external payout claim against the admitted change root")?;
-            ensure!(
-                payout.recipient == *account,
-                "the external payout claim pays another account"
-            );
-            Ok(claim)
         };
         self.fetch(ctx, chain, account, lookup, accept).await
     }

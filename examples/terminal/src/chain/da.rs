@@ -18,8 +18,8 @@ use crate::{
         validator::{IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
     },
     protocol::{
-        Deployment, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, WithdrawalWitness,
-        genesis_balances, state_config,
+        Deployment, Key, MAX_ACTIVITY_ROWS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES,
+        MAX_WITHDRAWALS, WithdrawalWitness, genesis_balances, state_config,
     },
     rpc,
 };
@@ -31,9 +31,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     qmdb::{Mutations, State, StateLookup, StateOpening, account_key},
     serve::{Index, ServeError},
-    transition::{
-        Close, CloseAmounts, CloseContext, Header, PreparedClose, RootBundle, TransitionError,
-    },
+    transition::{Close, CloseContext, Header, PreparedClose, RootBundle, TransitionError},
 };
 use commonware_codec::{
     DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
@@ -173,7 +171,7 @@ pub(crate) struct Replay {
     pub(crate) context: CloseContext<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) amounts: CloseAmounts,
+    pub(crate) withdrawal_total: u64,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) dealing: Bytes,
@@ -183,7 +181,7 @@ impl Write for Replay {
         self.context.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.amounts.write(buf);
+        self.withdrawal_total.write(buf);
         self.deposits.write(buf);
         self.withdrawals.write(buf);
         self.dealing.write(buf);
@@ -194,7 +192,7 @@ impl EncodeSize for Replay {
         self.context.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.amounts.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.deposits.encode_size()
             + self.withdrawals.encode_size()
             + self.dealing.encode_size()
@@ -207,8 +205,8 @@ impl Read for Replay {
             context: CloseContext::read(buf)?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            amounts: CloseAmounts::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_ACCOUNTS))?,
+            withdrawal_total: u64::read(buf)?,
+            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_DEPOSIT_EVENTS))?,
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -226,7 +224,7 @@ impl From<Sealed> for Replay {
             context: record.context,
             header: record.header,
             roots: record.roots,
-            amounts: record.amounts,
+            withdrawal_total: record.withdrawal_total,
             deposits: record.deposits,
             withdrawals: record.withdrawals,
             dealing: record.dealing,
@@ -240,7 +238,7 @@ pub(crate) struct Sealed {
     pub(crate) context: CloseContext<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) amounts: CloseAmounts,
+    pub(crate) withdrawal_total: u64,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) dealing: Bytes,
@@ -254,7 +252,7 @@ impl Write for Sealed {
         self.context.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.amounts.write(buf);
+        self.withdrawal_total.write(buf);
         self.deposits.write(buf);
         self.withdrawals.write(buf);
         self.dealing.write(buf);
@@ -269,7 +267,7 @@ impl EncodeSize for Sealed {
         self.context.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.amounts.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.deposits.encode_size()
             + self.withdrawals.encode_size()
             + self.dealing.encode_size()
@@ -286,8 +284,8 @@ impl Read for Sealed {
             context: CloseContext::read(buf)?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            amounts: CloseAmounts::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_ACCOUNTS))?,
+            withdrawal_total: u64::read(buf)?,
+            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_DEPOSIT_EVENTS))?,
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -297,7 +295,7 @@ impl Read for Sealed {
             )?,
             dealing: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
             evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
-            mutations: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACCOUNTS), ((), ())))?,
+            mutations: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACTIVITY_ROWS), ((), ())))?,
             operations: u64::read(buf)?,
             predecessor_operations: u64::read(buf)?,
         })
@@ -307,7 +305,7 @@ impl Sealed {
     fn close(&self) -> Result<Close<Key, Digest>> {
         ensure!(
             self.header
-                .verify::<Sha256, Key>(&self.context, &self.roots, &self.amounts),
+                .verify::<Sha256, Key>(&self.context, &self.roots, self.withdrawal_total),
             "retained header mismatch"
         );
         let close =
@@ -315,7 +313,7 @@ impl Sealed {
         ensure!(
             close.header == self.header
                 && close.roots == self.roots
-                && close.amounts == self.amounts,
+                && close.withdrawal_total == self.withdrawal_total,
             "retained evidence mismatch"
         );
         Ok(close)
@@ -372,16 +370,13 @@ pub(crate) fn answer(
             match index.withdrawal_claim::<Sha256>(account) {
                 Ok(claim) => Ok(EvidenceBody::WithdrawalOutput(WithdrawalWitness::new(
                     context,
-                    close.amounts,
+                    close.withdrawal_total,
                     withdrawals,
                     claim,
                 )?)),
                 Err(error) => Err(error),
             }
         }
-        EvidenceLookup::ExternalPayout { account, .. } => index
-            .external_payout_claim::<Sha256>(account)
-            .map(EvidenceBody::ExternalPayout),
         _ => anyhow::bail!("balance or history lookup passed to activity service"),
     };
     Ok(match body {
@@ -390,10 +385,9 @@ pub(crate) fn answer(
             roots: close.roots,
             body,
         }),
-        Err(
-            ServeError::Absent
-            | ServeError::Transition(TransitionError::WithdrawalClaim | TransitionError::PayoutClaim),
-        ) => EvidenceResponse::Absent,
+        Err(ServeError::Absent | ServeError::Transition(TransitionError::WithdrawalClaim)) => {
+            EvidenceResponse::Absent
+        }
         Err(error) => return Err(error.into()),
     })
 }
@@ -911,7 +905,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             context,
             header: close.header,
             roots: close.roots,
-            amounts: close.amounts,
+            withdrawal_total: close.withdrawal_total,
             deposits,
             withdrawals,
             dealing: close.encoded().clone(),
@@ -1165,17 +1159,16 @@ mod tests {
         let rows = limits.max_rows() as usize;
         let entries = limits.max_total_entries() as usize;
         let integer = UInt(u64::MAX).encode_size();
-        // posted::encode charges keys and terminal signatures per row, indexed entries,
-        // and one optional aggregate. Independent maximum widths give an upper bound.
+        // Every activity row contributes a key, outgoing tag, and vector length. Native
+        // sender terminals and merged edges each consume at least one accepted entry slot.
         let payload = Header::<Digest>::SIZE
             + rows.encode_size()
-            + rows
-                * (Key::SIZE
-                    + 1
-                    + integer
+            + rows * (Key::SIZE + 1 + (limits.max_account_entries() as usize).encode_size())
+            + entries
+                * (integer
                     + commonware_cryptography_curve25519::signing::Signature::SIZE
-                    + (limits.max_account_entries() as usize).encode_size())
-            + entries * ((rows - 1).encode_size() + 2 * integer)
+                    + (rows - 1).encode_size()
+                    + 2 * integer)
             + 1
             + commonware_clearing::bajillion::transition::OperatorAggregate::SIZE;
         let message = Message::Dealing(Dealing {
@@ -1644,6 +1637,20 @@ mod tests {
             let encoded = record_b.encode();
             assert_eq!(Sealed::decode(encoded.clone()).unwrap(), record_b);
             assert!(Sealed::decode(encoded.slice(..encoded.len() - 1)).is_err());
+            let capacity = 2 * crate::protocol::MAX_ACCEPTED_PAYMENTS
+                + crate::protocol::MAX_DEPOSIT_EVENTS
+                + crate::protocol::MAX_WITHDRAWALS;
+            let mut wide = record_b.clone();
+            wide.mutations = (0..capacity)
+                .map(|index| {
+                    let wallet = crate::protocol::Wallet::from_seed("codec-owner", index as u64);
+                    (account_key(&wallet.public_key()).unwrap(), Some(std::num::NonZeroU64::MIN))
+                })
+                .collect();
+            wide.mutations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(Sealed::decode(wide.encode()).unwrap(), wide);
+            wide.mutations.push(wide.mutations[0].clone());
+            assert!(Sealed::decode(wide.encode()).is_err());
             let evidence = b.close().encode_evidence();
             assert!(
                 Close::<Key, Digest>::decode_evidence::<Sha256>(
@@ -1744,7 +1751,7 @@ mod tests {
                         epoch: 0,
                         header: record_b.header,
                         roots: record_b.roots,
-                        amounts: record_b.amounts,
+                        withdrawal_total: record_b.withdrawal_total,
                         certificate,
                     }),
                 ],
@@ -2271,7 +2278,7 @@ mod tests {
                 })).unwrap();
                 SettlementTx::Admit(AdmitRequest {
                     deployment: *record.context.deployment(), epoch: record.context.payment().epoch(),
-                    header: record.header, roots: record.roots, amounts: record.amounts, certificate,
+                    header: record.header, roots: record.roots, withdrawal_total: record.withdrawal_total, certificate,
                 })
             };
             registrations.push(admission(&first));

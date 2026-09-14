@@ -274,7 +274,7 @@ struct Active {
 /// The fixed codec tag determines only a raw scheduling class, never authority.
 const fn recovery(tag: u8) -> Option<bool> {
     match tag {
-        1 | 4..=9 => Some(true),
+        1 | 4 | 6..=9 => Some(true),
         0 | 2 | 3 | 10..=12 => Some(false),
         _ => None,
     }
@@ -595,7 +595,6 @@ where
             recovery: match &tx {
                 SettlementTx::QueueWithdrawal(_)
                 | SettlementTx::ClaimWithdrawal(_)
-                | SettlementTx::ClaimExternalPayout(_)
                 | SettlementTx::Challenge(_)
                 | SettlementTx::BeginHardFaultSettlement(_)
                 | SettlementTx::ClaimHardFault(_)

@@ -4,10 +4,7 @@ use super::{
     custody::initial_deposit_nonce,
     evidence::{Holders, unusable_head},
     pay::operator_head,
-    store::{
-        ContextCache, IncomingSummary, PendingPayment, PendingPayoutClaim, PendingWithdrawalClaim,
-        State, Store,
-    },
+    store::{ContextCache, IncomingSummary, PendingPayment, PendingWithdrawalClaim, State, Store},
 };
 use crate::{
     chain::{
@@ -15,9 +12,7 @@ use crate::{
         state::StatusRecord,
     },
     operator::rpc as operator_rpc,
-    protocol::{
-        AccountIdentity, Key, Wallet, external_identity, external_wallet, identities, wallets,
-    },
+    protocol::{AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{boundary::SignedWithdrawal, qmdb::StateOpening};
@@ -73,7 +68,6 @@ pub(crate) struct Agent {
     pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
     pub(super) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
-    pub(super) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(super) pending_close_epoch: Option<u64>,
     pub(super) receipt_count: u64,
     /// Receiver intake ledger summary and durable fetch cursor.
@@ -100,6 +94,7 @@ impl Agent {
     }
 
     /// An in-memory agent bound to this deployment and its authenticated operator.
+    #[cfg(test)]
     pub(crate) fn new_for(identity: usize, deployment: Digest, operator: Key) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
@@ -152,12 +147,12 @@ impl Agent {
         let mut wallets = wallets();
         ensure!(identity <= wallets.len(), "agent identity is out of range");
         let wallet = if identity == wallets.len() {
-            external_wallet()
+            eve_wallet()
         } else {
             wallets.remove(identity)
         };
         let mut receivers = identities();
-        receivers.push(external_identity());
+        receivers.push(eve_identity());
         Ok((wallet, receivers))
     }
 
@@ -183,7 +178,6 @@ impl Agent {
             pending_transfer: state.pending_transfer,
             pending_withdrawal: state.pending_withdrawal,
             pending_withdrawal_claim: state.pending_withdrawal_claim,
-            pending_payout_claim: state.pending_payout_claim,
             pending_close_epoch: None,
             receipt_count: state.receipt_count,
             incoming: state.incoming,
@@ -221,7 +215,7 @@ impl Agent {
         self.receivers
             .iter()
             .position(|identity| identity.key != account)
-            .expect("the receiver roster is larger than one wallet")
+            .expect("the demo receiver list is larger than one wallet")
     }
 
     pub(crate) fn receiver_name(&self, index: usize) -> &'static str {
@@ -265,7 +259,7 @@ impl Agent {
         operator_rpc::status(network, operator).await
     }
 
-    /// Reads the account head and verifies it against the certified state root.
+    /// Reads the account head against its finalized or admitted predecessor root.
     ///
     /// The operator's head is the fast path: it carries the live balance and the
     /// signing context to re-cache. When the operator is unreachable or its head fails
@@ -291,7 +285,7 @@ impl Agent {
                     let status = settlement_status(ctx, chain, self.deployment)
                         .await
                         .context("read settlement balance head")?;
-                    match self.verify_head(&head, &status) {
+                    match self.verify_head(ctx, chain, &head, &status).await {
                         Ok(()) => return Ok(head.balance),
                         Err(error) => error,
                     }
@@ -315,7 +309,11 @@ impl Agent {
     ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
         let head = operator_head(ctx, operator, self.account(), &self.operator).await?;
         let status = settlement_status(ctx, chain, self.deployment).await?;
-        self.verify_head(&head, &status)?;
+        ensure!(
+            status.state_root == head.root,
+            "payer opening is not the exact finalized head"
+        );
+        self.verify_head(ctx, chain, &head, &status).await?;
         Ok((status, head.opening))
     }
 

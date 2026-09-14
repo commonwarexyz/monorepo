@@ -34,9 +34,8 @@ use crate::{
         ingress::Mailbox as IngressMailbox,
         state::{
             Record, admitted_key, anchor_key, claim_roots_key, deposit_key, fault_key,
-            hard_fault_key, native_balance_key, native_transfer_key, payout_release_key,
-            refund_key, registration_key, registry_entry_key, registry_key, status_key,
-            withdrawal_key, withdrawal_release_key,
+            hard_fault_key, native_balance_key, native_transfer_key, refund_key, registration_key,
+            registry_entry_key, registry_key, status_key, withdrawal_key, withdrawal_release_key,
         },
         types::{Block, Database, Exclusion, Proof, StateKey},
     },
@@ -47,7 +46,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, ChangeOpening, HigherEntryLookup},
     qmdb::{Absence, StateOpening},
-    transition::{BatchId, ExternalPayoutClaim, Header, RootBundle},
+    transition::{BatchId, Header, RootBundle},
 };
 use commonware_codec::{
     Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -91,7 +90,7 @@ pub(crate) enum Lookup {
     NativeBalance { chain_id: Digest, account: Key },
     /// The bounded directory of registered deployment IDs.
     Registry { chain_id: Digest },
-    /// One immutable registered deployment and its account roster.
+    /// One immutable deployment configuration and its authenticated genesis allocations.
     RegistryEntry {
         chain_id: Digest,
         deployment: Digest,
@@ -118,8 +117,6 @@ pub(crate) enum Lookup {
     Withdrawal { account: Key },
     /// One released withdrawal by (batch, position).
     WithdrawalRelease { batch: Digest, position: u32 },
-    /// One released external payout by (batch, position).
-    PayoutRelease { batch: Digest, position: u32 },
     /// One hard-fault release by account.
     HardFault { account: Key },
     /// One deposit refund by account and settlement phase.
@@ -163,9 +160,6 @@ impl ReadRequest {
             Lookup::Withdrawal { account } => withdrawal_key(deployment, account),
             Lookup::WithdrawalRelease { batch, position } => {
                 withdrawal_release_key(deployment, &BatchId::new(*batch), *position)
-            }
-            Lookup::PayoutRelease { batch, position } => {
-                payout_release_key(deployment, &BatchId::new(*batch), *position)
             }
             Lookup::HardFault { account } => hard_fault_key(deployment, account),
             Lookup::Refund { account, terminal } => refund_key(deployment, account, *terminal),
@@ -228,11 +222,6 @@ impl Write for Lookup {
                 batch.write(buf);
                 position.write(buf);
             }
-            Self::PayoutRelease { batch, position } => {
-                8_u8.write(buf);
-                batch.write(buf);
-                position.write(buf);
-            }
             Self::HardFault { account } => {
                 9_u8.write(buf);
                 account.write(buf);
@@ -288,8 +277,7 @@ impl EncodeSize for Lookup {
             Self::Anchor { epoch } | Self::Admitted { epoch } => epoch.encode_size(),
             Self::ClaimRoots { batch } => batch.encode_size(),
             Self::Deposit { id } => id.encode_size(),
-            Self::WithdrawalRelease { batch, position }
-            | Self::PayoutRelease { batch, position } => {
+            Self::WithdrawalRelease { batch, position } => {
                 batch.encode_size() + position.encode_size()
             }
             Self::Withdrawal { account } | Self::HardFault { account } => account.encode_size(),
@@ -321,10 +309,6 @@ impl Read for Lookup {
                 account: Key::read(buf)?,
             }),
             7 => Ok(Self::WithdrawalRelease {
-                batch: Digest::read(buf)?,
-                position: u32::read(buf)?,
-            }),
-            8 => Ok(Self::PayoutRelease {
                 batch: Digest::read(buf)?,
                 position: u32::read(buf)?,
             }),
@@ -520,8 +504,6 @@ pub(crate) enum EvidenceLookup {
     GenesisState { account: Key },
     /// Complete durable close material for replay by a lagging validator.
     Dealing { epoch: u64 },
-    /// The account's external payout claim under the change root.
-    ExternalPayout { batch: Digest, account: Key },
 }
 
 impl EvidenceLookup {
@@ -534,8 +516,7 @@ impl EvidenceLookup {
             | Self::Change { batch, .. }
             | Self::CommittedEntry { batch, .. }
             | Self::Account { batch, .. }
-            | Self::WithdrawalOutput { batch, .. }
-            | Self::ExternalPayout { batch, .. } => Some(batch),
+            | Self::WithdrawalOutput { batch, .. } => Some(batch),
             Self::GenesisState { .. } | Self::Dealing { .. } => None,
         }
     }
@@ -548,8 +529,7 @@ impl EvidenceLookup {
             | Self::Change { account, .. }
             | Self::Account { account, .. }
             | Self::WithdrawalOutput { account, .. }
-            | Self::GenesisState { account }
-            | Self::ExternalPayout { account, .. } => Some(account),
+            | Self::GenesisState { account } => Some(account),
             Self::CommittedEntry { payer, .. } => Some(payer),
             Self::Dealing { .. } => None,
         }
@@ -602,11 +582,6 @@ impl Write for EvidenceLookup {
                 8_u8.write(buf);
                 epoch.write(buf);
             }
-            Self::ExternalPayout { batch, account } => {
-                9_u8.write(buf);
-                batch.write(buf);
-                account.write(buf);
-            }
         }
     }
 }
@@ -618,8 +593,7 @@ impl EncodeSize for EvidenceLookup {
             | Self::SuccessorState { batch, account }
             | Self::Change { batch, account }
             | Self::Account { batch, account }
-            | Self::WithdrawalOutput { batch, account }
-            | Self::ExternalPayout { batch, account } => {
+            | Self::WithdrawalOutput { batch, account } => {
                 batch.encode_size() + account.encode_size()
             }
             Self::CommittedEntry {
@@ -668,10 +642,6 @@ impl Read for EvidenceLookup {
             }),
             8 => Ok(Self::Dealing {
                 epoch: u64::read(buf)?,
-            }),
-            9 => Ok(Self::ExternalPayout {
-                batch: Digest::read(buf)?,
-                account: Key::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -734,8 +704,6 @@ pub(crate) enum EvidenceBody {
     CommittedEntry(HigherEntryLookup<Key, Digest>),
     /// A withdrawal request and its corresponding output claim.
     WithdrawalOutput(WithdrawalWitness),
-    /// An external payout claim.
-    ExternalPayout(ExternalPayoutClaim<Key, Digest>),
 }
 
 impl Write for EvidenceBody {
@@ -765,10 +733,6 @@ impl Write for EvidenceBody {
                 4_u8.write(buf);
                 claim.write(buf);
             }
-            Self::ExternalPayout(claim) => {
-                5_u8.write(buf);
-                claim.write(buf);
-            }
         }
     }
 }
@@ -782,7 +746,6 @@ impl EncodeSize for EvidenceBody {
             Self::Change(opening) => opening.encode_size(),
             Self::CommittedEntry(lookup) => lookup.encode_size(),
             Self::WithdrawalOutput(claim) => claim.encode_size(),
-            Self::ExternalPayout(claim) => claim.encode_size(),
         }
     }
 }
@@ -800,7 +763,6 @@ impl Read for EvidenceBody {
             2 => Ok(Self::Change(ChangeOpening::read(buf)?)),
             3 => Ok(Self::CommittedEntry(HigherEntryLookup::read(buf)?)),
             4 => Ok(Self::WithdrawalOutput(WithdrawalWitness::read(buf)?)),
-            5 => Ok(Self::ExternalPayout(ExternalPayoutClaim::read(buf)?)),
             6 => Ok(Self::StateAbsent(Absence::read_cfg(
                 buf,
                 &(MAX_PROOF_DIGESTS, (), ()),
@@ -1259,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_entry_record_rejects_non_prime_order_roster_key() {
+    fn registry_entry_record_rejects_non_prime_order_genesis_key() {
         let deployment = crate::chain::harness::native(deployments())
             .deployments
             .remove(0)
@@ -1315,10 +1277,6 @@ mod tests {
                 batch,
                 account: account.clone(),
             },
-            EvidenceLookup::ExternalPayout {
-                batch,
-                account: account.clone(),
-            },
             EvidenceLookup::GenesisState { account },
             EvidenceLookup::Dealing { epoch: 7 },
         ];
@@ -1328,7 +1286,7 @@ mod tests {
             assert_eq!(bytes.len(), request.encode_size());
             assert_eq!(EvidenceRequest::decode(bytes).unwrap(), request);
         }
-        for tag in [6, 10, 255] {
+        for tag in [6, 9, 10, 255] {
             assert!(EvidenceLookup::decode(Bytes::from(vec![tag])).is_err());
         }
     }
@@ -1346,11 +1304,11 @@ mod tests {
             .unwrap();
             let account = identities()[0].key.clone();
             let present = state.opening(account).await.unwrap();
-            let absent = crate::protocol::external_identity().key;
+            let absent = crate::protocol::eve_identity().key;
             let StateLookup::Absent(proof) =
                 state.lookup(&account_key(&absent).unwrap()).await.unwrap()
             else {
-                panic!("external account absent")
+                panic!("zero-balance account is absent")
             };
             let responses = vec![
                 EvidenceResponse::Served(Evidence::Genesis(present)),

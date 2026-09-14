@@ -484,12 +484,12 @@ fn assert_proven(
     context: &CloseContext<VerifyingKey, Digest>,
     header: &Header<Digest>,
     roots: &RootBundle<Digest>,
-    amounts: &commonware_clearing::bajillion::transition::CloseAmounts,
+    withdrawal_total: u64,
     challenge: &Challenge<VerifyingKey, Digest>,
     kind: ChallengeKind,
 ) {
     assert_eq!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge)
+        adjudicate::<Sha256, _, _>(context, header, roots, withdrawal_total, challenge)
             .expect("benchmark challenge is well formed"),
         Verdict::Proven(kind)
     );
@@ -610,7 +610,7 @@ pub(crate) fn proven_challenges(
             &fixture.context,
             &close.header,
             &close.roots,
-            &close.amounts,
+            close.withdrawal_total,
             challenge,
             *kind,
         );

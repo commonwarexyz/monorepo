@@ -44,7 +44,7 @@ use crate::{
         setup::Genesis,
         state::{
             AdmittedRootsResponse, ClaimPendingDepositResponse, ClaimRootsResponse, FaultRecord,
-            HardFaultReleaseRecord, PayoutReleaseRecord, Record, RegistrationRecord, StatusRecord,
+            HardFaultReleaseRecord, Record, RegistrationRecord, StatusRecord,
             WithdrawalReleaseRecord,
         },
         tx::{NativeTransferRequest, SettlementTx},
@@ -309,7 +309,7 @@ pub(crate) trait Chain: Send + 'static {
             match verified.record {
                 Some(Record::ClaimRoots(claims)) => Ok(Some(ClaimRootsResponse {
                     withdrawal_outputs: claims.withdrawal_root(),
-                    change: claims.change_root(),
+                    batch_id: batch,
                 })),
                 Some(_) => bail!("certified claim-roots read returned a foreign record"),
                 None => Ok(None),
@@ -401,27 +401,6 @@ pub(crate) trait Chain: Send + 'static {
             match verified.record {
                 Some(Record::WithdrawalRelease(release)) => Ok(Some(release)),
                 Some(_) => bail!("certified withdrawal-release read returned a foreign record"),
-                None => Ok(None),
-            }
-        }
-    }
-
-    /// The released external payout at (batch, position), if released.
-    fn payout_release<E: Env>(
-        &mut self,
-        ctx: &E,
-        batch: BatchId<Digest>,
-        position: u32,
-    ) -> impl Future<Output = Result<Option<PayoutReleaseRecord>>> + Send {
-        async move {
-            let request = self.request(Lookup::PayoutRelease {
-                batch: batch.into_digest(),
-                position,
-            });
-            let verified = self.read(ctx, &request).await?;
-            match verified.record {
-                Some(Record::PayoutRelease(release)) => Ok(Some(release)),
-                Some(_) => bail!("certified payout-release read returned a foreign record"),
                 None => Ok(None),
             }
         }

@@ -1,3 +1,4 @@
+mod checkpoint_proofs;
 mod core_registry;
 mod fixture;
 mod ingress_qualification;
@@ -5,6 +6,7 @@ mod native_reads;
 mod preflight;
 mod scripted;
 mod startup;
+mod virtual_balances;
 
 use super::{
     app::{App, Finalized, MAX_TIMESTAMP_DRIFT, initial_sync_target},
@@ -25,10 +27,9 @@ use super::{
     },
     tx::{
         AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest, ClaimDepositRequest,
-        ClaimHardFaultRequest, ClaimPendingDepositRequest, DepositRequest,
-        ExternalPayoutClaimRequest, FinalizedClaim, MAX_CHALLENGE_BYTES, NativeTransferRequest,
-        QueueWithdrawalRequest, RegisterDeploymentRequest, RegisterEpochRequest, SettlementTx,
-        WithdrawalClaimRequest,
+        ClaimHardFaultRequest, ClaimPendingDepositRequest, DepositRequest, MAX_CHALLENGE_BYTES,
+        NativeTransferRequest, QueueWithdrawalRequest, RegisterDeploymentRequest,
+        RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
     },
     types::{Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, Qmdb, StateKey, now},
     validator::{
@@ -791,7 +792,7 @@ fn harness_serves_validator_evidence() {
             assert_eq!(opening, state.opening(&leaf.key).unwrap());
         }
 
-        let missing = crate::protocol::external_identity().key;
+        let missing = crate::protocol::eve_identity().key;
         let EvidenceResponse::Served(Evidence::Close {
             body: EvidenceBody::StateAbsent(proof),
             ..
@@ -1091,33 +1092,19 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
         let native = native();
         let owner = operator_signer(10);
         let wallet = wallets().remove(0);
-        let mut accounts = identities()
-            .into_iter()
-            .map(|identity| identity.key)
-            .collect::<Vec<_>>();
-        accounts.sort_unstable_by(|left, right| right.cmp(left));
-        assert!(accounts.len() > 1 && accounts.windows(2).all(|pair| pair[0] > pair[1]));
         let request = RegisterDeploymentRequest::sign(
             native.chain_id(),
             Sha256::hash(&[b"new-deployment"]),
             operator_ack_key(10),
             ed25519::PrivateKey::from_seed(88_888).public_key(),
-            accounts,
             1024,
             10,
             &owner,
         );
         let request = RegisterDeploymentRequest::decode(request.encode()).unwrap();
         assert!(request.verify(&native.chain_id()));
-        assert!(request.accounts.windows(2).all(|pair| pair[0] > pair[1]));
         let expected = request.entry(&native).unwrap();
-        assert!(
-            expected
-                .deployment
-                .accounts
-                .windows(2)
-                .all(|pair| pair[0].key < pair[1].key)
-        );
+        assert!(expected.deployment.accounts.is_empty());
         assert_eq!(RegistryEntry::decode(expected.encode()).unwrap(), expected);
         let scoped = request.deployment_id();
         let registration = SettlementTx::RegisterDeployment(request.clone());
@@ -1143,25 +1130,10 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
             request.registration_id,
             request.operator_ack,
             request.network_key.clone(),
-            request.accounts.clone(),
             1024,
             9,
             &owner,
         );
-        let mut duplicate_accounts = request.accounts.clone();
-        duplicate_accounts.push(request.accounts[0].clone());
-        let duplicate = RegisterDeploymentRequest::sign(
-            native.chain_id(),
-            Sha256::hash(&[b"duplicate-registration-account"]),
-            request.operator_ack,
-            request.network_key.clone(),
-            duplicate_accounts,
-            1024,
-            10,
-            &owner,
-        );
-        assert!(duplicate.verify(&native.chain_id()));
-        let duplicate_id = duplicate.deployment_id();
         seal_native(
             &db,
             2,
@@ -1170,12 +1142,10 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
                 funding,
                 SettlementTx::RegisterDeployment(tampered),
                 SettlementTx::RegisterDeployment(wrong_fee),
-                SettlementTx::RegisterDeployment(duplicate),
             ],
         )
         .await;
         assert_eq!(read(&db, &status_key(&scoped)).await, None);
-        assert_eq!(read(&db, &status_key(&duplicate_id)).await, None);
         assert_eq!(registry(&db, &native).await.unwrap().len(), 1);
         assert_eq!(native_balance(&db, &native, &native.fee_recipient).await.unwrap(), 0);
         assert_eq!(
@@ -1196,13 +1166,7 @@ fn deployment_registration_requires_funding_and_charges_fees_once() {
         assert!(entries.contains(&scoped));
         let registered = registry_entry(&db, &native, &scoped).await.unwrap().unwrap();
         assert_eq!(registered, expected);
-        assert!(
-            registered
-                .deployment
-                .accounts
-                .iter()
-                .all(|account| account.balance == 0)
-        );
+        assert!(registered.deployment.accounts.is_empty());
         assert!(
             matches!(read(&db, &status_key(&scoped)).await, Some(Record::Status(status)) if status.custody == 0)
         );
@@ -1352,7 +1316,7 @@ fn cross_deployment_claim_deposit_is_atomic_and_replay_safe() {
         };
         let deposit = DepositRequest::sign(native.chain_id(), target, event.clone(), wallet.signer());
         let compound = ClaimDepositRequest {
-            claim: FinalizedClaim::Withdrawal(claim.clone()),
+            claim: claim.clone(),
             deposit,
         };
         let release_key = super::state::withdrawal_release_key(
@@ -1529,7 +1493,7 @@ fn unavailable_destination_preserves_the_source_claim() {
                 amount: 7,
             };
             let compound = SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                claim: FinalizedClaim::Withdrawal(claim.clone()),
+                claim: claim.clone(),
                 deposit: DepositRequest::sign(
                     native.chain_id(),
                     target,
@@ -1614,150 +1578,6 @@ fn finalized_withdrawal_credits_its_destination_once() {
         );
         assert_eq!(status(&db).await.custody, 393);
         assert_supply(&db, &native, &[]).await;
-    });
-}
-
-#[test]
-fn finalized_external_payout_credits_its_receiver_once() {
-    deterministic::Runner::default().start(|context| async move {
-        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
-        let state = genesis_cache();
-        let payer = wallets().remove(0);
-        let recipient = crate::protocol::Wallet::from_seed("external", 999);
-        let mut configured = two_deployments();
-        configured[1].accounts.push(crate::protocol::Account {
-            key: recipient.public_key(),
-            balance: 0,
-        });
-        let native = native_for(configured);
-        let target = *native.deployments[1].deployment.digest();
-        let deposits = DepositBatch::empty();
-        let withdrawals = WithdrawalBatch::empty();
-        let root = deposits.root::<Sha256>().unwrap();
-        let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
-            deployment: deployment(),
-            epoch: 0,
-            predecessor_liability: 400,
-            deposits_root: root,
-
-            withdrawals: withdrawals.clone(),
-            openings: Vec::new(),
-            fee: 4096,
-            signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
-        });
-        let registration = protocol
-            .registration_at(0, deposits, withdrawals, 400, 11, 12)
-            .unwrap();
-        let outgoing = OutVector::new(
-            0,
-            payer.public_key(),
-            vec![OutEntry {
-                recipient: recipient.public_key(),
-                cumulative: 7,
-                count: 1,
-            }],
-        )
-        .unwrap();
-        let body = VectorSendBody::new(
-            registration.context.payment(),
-            payer.public_key(),
-            1,
-            7,
-            outgoing.root::<Sha256, Digest>().unwrap(),
-        );
-        let aggregate = protocol.sign_ack_aggregate(&body);
-        let terminal = Terminal {
-            authorization: SendAuthorization::sign(body, payer.signer()),
-            vector: outgoing,
-            operator_signature: aggregate,
-        };
-        let result = deterministic::Runner::default().start(move |context| async move {
-            let config = crate::protocol::state_config("payout", &context, protocol.strategy().clone());
-            let balances = replay_state(context, config, &state.history).await;
-            let prepared = protocol.prepare(registration, &balances, vec![terminal]).await.unwrap();
-            protocol.complete(prepared, &balances, &mut TestRng::new(91)).await.unwrap().0
-        });
-        let request = ExternalPayoutClaimRequest {
-            deployment: deployment(),
-            batch_id: result.header.batch_id::<Sha256>(),
-            claim: result.external_claims[0].clone(),
-        };
-        let claim = SettlementTx::ClaimExternalPayout(request.clone());
-        for redeposit in [false, true] {
-            let prefix = if redeposit {
-                "payout_redeposit"
-            } else {
-                "payout_credit"
-            };
-            let db = open(context.child(prefix), prefix).await;
-            seal_native(
-                &db,
-                1,
-                &native,
-                &[
-                    register.clone(),
-                    SettlementTx::Admit(AdmitRequest::from(&result)),
-                    claim.clone(),
-                ],
-            )
-            .await;
-            assert_eq!(
-                native_balance(&db, &native, &recipient.public_key())
-                    .await
-                    .unwrap(),
-                0
-            );
-            for height in 2..=13 {
-                seal_native(&db, height, &native, &[]).await;
-            }
-            assert_eq!(status(&db).await.claimable, 7);
-            let event = DepositEvent {
-                id: Sha256::hash(&[b"external-redeposit"]),
-                account: recipient.public_key(),
-                amount: 7,
-            };
-            let tx = if redeposit {
-                SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                    claim: FinalizedClaim::ExternalPayout(request.clone()),
-                    deposit: DepositRequest::sign(
-                        native.chain_id(),
-                        target,
-                        event.clone(),
-                        recipient.signer(),
-                    ),
-                })
-            } else {
-                claim.clone()
-            };
-            let decoded = SettlementTx::decode(tx.encode()).unwrap();
-            assert_eq!(decoded, tx);
-            seal_native(&db, 14, &native, &[decoded, tx.clone()]).await;
-            let expected = if redeposit { 0 } else { 7 };
-            assert_eq!(
-                native_balance(&db, &native, &recipient.public_key())
-                    .await
-                    .unwrap(),
-                expected
-            );
-            if redeposit {
-                assert_eq!(
-                    read(&db, &deposit_key(&target, &event.id)).await,
-                    Some(Record::Deposit(event))
-                );
-                assert!(
-                    matches!(read(&db, &status_key(&target)).await, Some(Record::Status(status)) if status.custody == 407)
-                );
-            }
-            seal_native(&db, 15, &native, &[tx, claim.clone()]).await;
-            assert_eq!(
-                native_balance(&db, &native, &recipient.public_key())
-                    .await
-                    .unwrap(),
-                expected
-            );
-            assert_eq!(status(&db).await.claimable, 0);
-            assert_supply(&db, &native, &[recipient.public_key()]).await;
-        }
     });
 }
 
@@ -1888,7 +1708,6 @@ fn admitted_close_finalizes_at_real_heights() {
             claims.withdrawal_root(),
             fixture.result.roots.withdrawal_outputs
         );
-        assert_eq!(claims.change_root(), fixture.result.roots.change);
         assert_eq!(read(&db, &registration_key(&deployment())).await, None);
 
         // An exact admission replay after finalization lands on the
@@ -1907,7 +1726,7 @@ fn admitted_close_finalizes_at_real_heights() {
             SettlementTx::Admit(request) => request.clone(),
             _ => unreachable!(),
         };
-        conflicting.amounts.payout += 1;
+        conflicting.withdrawal_total += 1;
         let conflicting = SettlementTx::Admit(conflicting);
         seal(&db, 15, std::slice::from_ref(&conflicting)).await;
         assert_eq!(status(&db).await.custody, 401);
@@ -7389,10 +7208,6 @@ async fn walkthrough(
     // challenge window in real blocks to certified finalization.
     let finished = walkthrough_close(&context, &mut alice, operator).await?;
     anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
-    anyhow::ensure!(
-        finished.payout_total == 0,
-        "the close reserved an external payout"
-    );
     anyhow::ensure!(finished.rows > 0, "the close settled no account rows");
     let settled = alice_chain.status(&context).await?;
     anyhow::ensure!(
@@ -7508,10 +7323,6 @@ async fn walkthrough(
     // registers afterwards, so the deployment idles safely.
     let finished = walkthrough_close(&context, &mut alice, operator).await?;
     anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
-    anyhow::ensure!(
-        finished.payout_total == 0,
-        "the empty-boundary close reserved an external payout"
-    );
     let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
         summary.reconciled == vec![1],

@@ -17,12 +17,11 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{AccountKey, StateLookup, StateOpening, StateRoot, account_key},
     serve,
-    state::{AccountChange, AccountRow, SettlementOutput},
     transition::{
-        Close, CloseContext, ExternalPayoutClaim, OperatorAggregate, WithdrawalClaim,
-        WithdrawalOutput, prepare_close_with_strategy, validate_close_with_strategy,
+        Close, CloseContext, OperatorAggregate, WithdrawalClaim, WithdrawalOutput,
+        prepare_close_with_strategy, validate_close_with_strategy,
     },
-    vector::{OutEntry, OutTipLookup, OutVector},
+    vector::{OutEntry, OutTipLookup},
 };
 use commonware_codec::{Decode, DecodeExt, Encode, RangeCfg, varint::UInt};
 use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
@@ -141,7 +140,7 @@ fn challenge_bytes(
             context,
             &close.header,
             &close.roots,
-            &close.amounts,
+            close.withdrawal_total,
             &decoded
         )
         .expect("challenge verifies"),
@@ -323,64 +322,6 @@ fn withdrawal_claim_sizes(fixture: &CloseFixture, total: u32, action: Withdrawal
     );
 }
 
-// This standalone tree measures the finalized payout proof object. It does not construct
-// a close that pays an unregistered recipient or measure settlement execution.
-fn external_payout_sizes(fixture: &CloseFixture) {
-    let (leaves, _) = fixture.prepared.close().change_evidence();
-    let position = leaves.len() / 2;
-    let account = leaves[position].account().clone();
-    let row = AccountRow {
-        account: account.clone(),
-        predecessor: 0,
-        successor: 0,
-        outgoing: None,
-        output: SettlementOutput::ExternalPayout(1),
-    };
-    let root = OutVector::new(
-        fixture.context.payment().epoch(),
-        account.clone(),
-        Vec::new(),
-    )
-    .expect("empty outgoing vector")
-    .root::<Sha256, Digest>()
-    .expect("empty outgoing root");
-    let payout = AccountChange::from_row(&row, root);
-    let guards = leaves
-        .iter()
-        .enumerate()
-        .map(|(index, leaf)| if index == position { &payout } else { leaf }.guard::<Sha256>())
-        .collect::<Vec<_>>();
-    let mut builder = Builder::<Sha256>::new(
-        VectorKind::Change,
-        u32::try_from(leaves.len()).expect("activity count fits"),
-    )
-    .expect("activity count is valid");
-    builder
-        .add_values(&guards, strategy())
-        .expect("guards commit");
-    let tree = builder.build(strategy()).expect("activity tree builds");
-    let opening = tree.opening(position as u32).expect("payout opens");
-    let leaf_bytes = encoded(&payout).len();
-    let opening_bytes = encoded(&opening).len();
-    let wire = encoded(&(payout, opening));
-    let claim = ExternalPayoutClaim::<VerifyingKey, Digest>::decode(wire.clone())
-        .expect("complete payout claim decodes");
-    assert_eq!(encoded(&claim), wire);
-    assert_eq!(wire.len(), leaf_bytes + opening_bytes);
-    let verified = claim
-        .verify::<Sha256>(&tree.root())
-        .expect("payout verifies");
-    assert_eq!(verified.recipient, account);
-    assert_eq!(verified.amount, 1);
-    println!(
-        "clearing external payout claim: {} fixture=standalone_activity_tree activity_rows={} position={position} leaf_bytes={leaf_bytes} opening_bytes={opening_bytes} claim_bytes={} root_bytes={}",
-        profile_key(fixture.profile),
-        leaves.len(),
-        wire.len(),
-        encoded(&tree.root()).len(),
-    );
-}
-
 // The calculator's graph uses first-key senders and last-key recipients when sparse,
 // and the next K keys cyclically when every account sends. Sequence numbers are one.
 fn calculator_parity() {
@@ -477,17 +418,17 @@ pub(crate) fn benches(challenges_only: bool) {
             assert_eq!(certificate.signers.count(), QUORUM);
             let verifier = bls12381::Scheme::verifier(validators.committee().clone());
             assert!(verifier.verify_exact(&close.header, &certificate));
-            assert!(close.header.verify::<Sha256, _>(&fixture.context, &close.roots, &close.amounts));
+            assert!(close.header.verify::<Sha256, _>(&fixture.context, &close.roots, close.withdrawal_total));
             let header = encoded(&close.header).len();
             let roots = encoded(&close.roots).len();
             assert_eq!(roots, encoded(&close.roots.change).len() + encoded(&close.roots.withdrawal_outputs).len() + encoded(&close.roots.successor).len());
-            let amounts = encoded(&close.amounts).len();
-            let descriptor = encoded(&(close.roots, close.amounts)).len();
-            assert_eq!(descriptor, roots + amounts);
+            let withdrawal_total_bytes = encoded(&close.withdrawal_total).len();
+            let descriptor = encoded(&(close.roots, close.withdrawal_total)).len();
+            assert_eq!(descriptor, roots + withdrawal_total_bytes);
             let certificate_bytes = encoded(&certificate).len();
             let external = encoded(&(close.header, certificate.clone())).len();
             assert_eq!(external, 101);
-            let package = encoded(&(close.header, close.roots, close.amounts, certificate)).len();
+            let package = encoded(&(close.header, close.roots, close.withdrawal_total, certificate)).len();
             assert_eq!(package, header + descriptor + certificate_bytes);
 
             let ack = &fixture.acks[3];
@@ -514,8 +455,8 @@ pub(crate) fn benches(challenges_only: bool) {
                 encoded(leaf).len(), encoded(&leaf.guard::<Sha256>()).len(),
             );
             println!(
-                "clearing sizes: {} E={} rows={} validators={} identical_dealing_bytes={} dealt_egress_bytes={} integrated_commitment_bytes={} root_bundle_bytes={} close_amounts_bytes={} descriptor_bytes={} certificate_bytes={} header_certificate_bytes={} header_roots_amounts_certificate_bytes={} entry_receipt_bytes={}",
-                profile_key(profile), profile.edges(), close.rows.len(), VALIDATORS, parts.total(), egress, header, roots, amounts, descriptor, certificate_bytes, external, package, receipt_wire.len(),
+                "clearing sizes: {} E={} rows={} validators={} identical_dealing_bytes={} dealt_egress_bytes={} integrated_commitment_bytes={} root_bundle_bytes={} withdrawal_total_bytes={} descriptor_bytes={} certificate_bytes={} header_certificate_bytes={} header_roots_withdrawal_total_certificate_bytes={} entry_receipt_bytes={}",
+                profile_key(profile), profile.edges(), close.rows.len(), VALIDATORS, parts.total(), egress, header, roots, withdrawal_total_bytes, descriptor, certificate_bytes, external, package, receipt_wire.len(),
             );
 
             let omitted_ack = fixture.acks.last().expect("profile has senders");
@@ -536,7 +477,6 @@ pub(crate) fn benches(challenges_only: bool) {
             let omitted_bytes = challenge_bytes(&fixture.context, omitted.close(), &challenge, ChallengeKind::HigherAckDebit);
             println!("clearing omitted payer: {} activity_rows={} activity_absence_bytes={} challenge_bytes={omitted_bytes}", profile_key(profile), omitted.close().rows.len(), lookup_bytes);
 
-            external_payout_sizes(&fixture);
             if challenges_only {
                 return;
             }

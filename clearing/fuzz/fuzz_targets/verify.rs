@@ -20,8 +20,8 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{State, StateOpening, StateRoot, account_key},
     transition::{
-        ChallengeIndex, Close, CloseAmounts, CloseContext, CloseLimits, Header, OperatorKey,
-        OperatorSignature, OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
+        ChallengeIndex, Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature,
+        OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
         validate_close_with_strategy,
     },
     vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
@@ -317,7 +317,7 @@ fn assert_forged_entry_rejected(
                 context,
                 &close.header,
                 &close.roots,
-                &close.amounts,
+                close.withdrawal_total,
                 &forged
             ),
             Err(ChallengeError::Ack(AckError::InvalidEntryOpening))
@@ -336,11 +336,11 @@ fn exercise_challenge(
     let Close {
         header,
         roots,
-        amounts,
+        withdrawal_total,
         ..
     } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, challenge),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
@@ -351,17 +351,19 @@ fn exercise_challenge(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
+    assert!(
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unsigned).is_err()
+    );
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unscoped),
         Ok(Verdict::Proven(_))
     ));
     assert_forged_entry_rejected(context, close, challenge);
@@ -384,7 +386,7 @@ fn exercise_challenge(
         _ => mutated.len() - 1,
     };
     if let Ok(decoded) = decode_bounded::<VerifyingKey, Digest>(&mutated, maximum) {
-        let _ = adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded);
+        let _ = adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded);
     }
 }
 
@@ -397,11 +399,11 @@ fn exercise_no_contradiction(
     let Close {
         header,
         roots,
-        amounts,
+        withdrawal_total,
         ..
     } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, challenge),
         Ok(Verdict::NoContradiction)
     ));
 
@@ -410,17 +412,19 @@ fn exercise_no_contradiction(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded),
         Ok(Verdict::NoContradiction)
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
+    assert!(
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unsigned).is_err()
+    );
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unscoped),
         Ok(Verdict::Proven(_))
     ));
     assert_forged_entry_rejected(context, close, challenge);
@@ -454,13 +458,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         Sha256::hash(&[b"challenge-fuzz-committee"]),
     )
     .await;
-    let _ = adjudicate::<Sha256, _, _>(
-        &context,
-        &case.header,
-        &case.roots,
-        &CloseAmounts::default(),
-        &case.challenge,
-    );
+    let _ = adjudicate::<Sha256, _, _>(&context, &case.header, &case.roots, 0, &case.challenge);
     // One acknowledged send from the payer to the recipient forms the certified close.
     let amount = u64::from(case.amount) + 1;
     let epoch = context.payment().epoch();
@@ -1116,19 +1114,22 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         .await
     );
     let close = prepared.close();
-    for which in 0..5 {
+    for which in 0..4 {
         let mut roots = close.roots;
-        let mut amounts = close.amounts;
+        let mut withdrawal_total = close.withdrawal_total;
         let changed = Sha256::hash(&[b"wrong-header-field", &[which]]);
         match which {
             0 => roots.change.digest = changed,
             1 => roots.withdrawal_outputs.digest = changed,
             2 => roots.successor.digest = changed,
-            3 => amounts.withdrawal += 1,
-            _ => amounts.payout += 1,
+            _ => withdrawal_total += 1,
         }
-        assert!(!close.header.verify::<Sha256, _>(&context, &roots, &amounts));
-        let header = Header::new::<Sha256, _>(&context, &roots, &amounts);
+        assert!(
+            !close
+                .header
+                .verify::<Sha256, _>(&context, &roots, withdrawal_total)
+        );
+        let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
         let mut bytes = encoded.to_vec();
         bytes[..32].copy_from_slice(header.encode().as_ref());
         assert!(
@@ -1353,9 +1354,11 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         .assemble_exact(votes.into_iter().take(committee.quorum()))
         .unwrap();
     assert!(verifier.verify_exact(&prepared.close().header, &certificate));
-    let mut amounts = prepared.close().amounts;
-    amounts.payout += 1;
-    let wrong = Header::new::<Sha256, _>(&context, &prepared.close().roots, &amounts);
+    let wrong = Header::new::<Sha256, _>(
+        &context,
+        &prepared.close().roots,
+        prepared.close().withdrawal_total + 1,
+    );
     assert!(!verifier.verify_exact(&wrong, &certificate));
 }
 

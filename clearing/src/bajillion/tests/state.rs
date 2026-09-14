@@ -245,7 +245,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 &context,
                 &header,
                 &close.roots,
-                &close.amounts,
+                close.withdrawal_total,
                 &Challenge::HigherAckDebit {
                     ack: Box::new(AckWitness::from_ack(&ack)),
                     payer: Box::new(lookup)

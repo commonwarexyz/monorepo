@@ -259,7 +259,6 @@ mod tests {
                         Sha256::hash(&[b"new-registry-point", &[index]]),
                         protocol::operator_ack_key(0),
                         ed25519::PrivateKey::from_seed(2).public_key(),
-                        vec![protocol::wallets()[0].public_key()],
                         1024,
                         native.registration_fee,
                         &protocol::operator_signer(0),
@@ -314,7 +313,7 @@ mod tests {
             let handle = watch(context.child("registry"), db.clone(), native.clone(), view.clone(), recorder.clone(), committee.clone());
             let request = RegisterDeploymentRequest::sign(
                 native.chain_id(), Sha256::hash(&[b"dynamic-registration"]), protocol::operator_ack_key(0),
-                new_peer.clone(), vec![protocol::wallets()[0].public_key()], 1024,
+                new_peer.clone(), 1024,
                 native.registration_fee, &protocol::operator_signer(0),
             );
             let deployment = request.deployment_id();
@@ -336,10 +335,10 @@ mod tests {
             assert_eq!(tracked[0].0, 1);
             assert_eq!(tracked[0].1.primary, committee);
             assert_eq!(tracked[0].1.secondary, Set::from_iter_dedup([old_peer, new_peer.clone()]));
-            assert_eq!(view.get(&deployment).unwrap().deployment.accounts[0].balance, 0);
+            assert!(view.get(&deployment).unwrap().deployment.accounts.is_empty());
             let request = RegisterDeploymentRequest::sign(
                 native.chain_id(), Sha256::hash(&[b"same-peer-registration"]), protocol::operator_ack_key(0),
-                new_peer, vec![protocol::wallets()[0].public_key()], 2048,
+                new_peer, 2048,
                 native.registration_fee, &protocol::operator_signer(0),
             );
             let second = request.deployment_id();
@@ -353,7 +352,7 @@ mod tests {
             assert_eq!(recorder.0.lock().len(), 1);
             let request = RegisterDeploymentRequest::sign(
                 native.chain_id(), Sha256::hash(&[b"third-peer-registration"]), protocol::operator_ack_key(0),
-                ed25519::PrivateKey::from_seed(4).public_key(), vec![protocol::wallets()[0].public_key()], 2048,
+                ed25519::PrivateKey::from_seed(4).public_key(), 2048,
                 native.registration_fee, &protocol::operator_signer(0),
             );
             let third = request.deployment_id();

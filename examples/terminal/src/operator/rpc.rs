@@ -19,7 +19,7 @@ use commonware_clearing::bajillion::{
     commitment::VectorRoot,
     payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
-    transition::{BatchId, EpochContext, ExternalPayoutClaim, WithdrawalClaim},
+    transition::{BatchId, EpochContext, WithdrawalClaim},
     vector::OutEntry,
 };
 use commonware_codec::{
@@ -42,8 +42,6 @@ pub(crate) const METHOD_START_CLOSE: u8 = 6;
 pub(crate) const METHOD_POLL_CLOSE: u8 = 7;
 pub(crate) const METHOD_WITHDRAWAL_EVIDENCE: u8 = 8;
 pub(crate) const METHOD_ACKNOWLEDGE_WITHDRAWAL: u8 = 9;
-pub(crate) const METHOD_EXTERNAL_PAYOUT_EVIDENCE: u8 = 10;
-pub(crate) const METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT: u8 = 11;
 pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 pub(crate) const METHOD_INCOMING_PAYMENTS: u8 = 13;
 pub(crate) const METHOD_COMMITTED_ENTRY: u8 = 14;
@@ -169,7 +167,6 @@ impl Read for PollCloseRequest {
 key_request!(PaymentHeadRequest);
 key_request!(WithdrawalOpeningRequest);
 key_request!(WithdrawalEvidenceRequest);
-key_request!(ExternalPayoutEvidenceRequest);
 
 /// One submitted batch: the payer-signed vector endpoint and its per-batch delta entries,
 /// strictly recipient-sorted and unique.
@@ -237,7 +234,6 @@ pub(crate) struct StatusResponse {
     pub(crate) accounts: u64,
     pub(crate) present_accounts: u64,
     pub(crate) recent_payments: u64,
-    pub(crate) reserved_payout_value: u64,
     pub(crate) close_in_progress: bool,
     pub(crate) faulted: bool,
 }
@@ -248,7 +244,6 @@ impl Write for StatusResponse {
         self.accounts.write(buf);
         self.present_accounts.write(buf);
         self.recent_payments.write(buf);
-        self.reserved_payout_value.write(buf);
         self.close_in_progress.write(buf);
         self.faulted.write(buf);
     }
@@ -260,7 +255,6 @@ impl EncodeSize for StatusResponse {
             + self.accounts.encode_size()
             + self.present_accounts.encode_size()
             + self.recent_payments.encode_size()
-            + self.reserved_payout_value.encode_size()
             + self.close_in_progress.encode_size()
             + self.faulted.encode_size()
     }
@@ -275,7 +269,6 @@ impl Read for StatusResponse {
             accounts: u64::read(buf)?,
             present_accounts: u64::read(buf)?,
             recent_payments: u64::read(buf)?,
-            reserved_payout_value: u64::read(buf)?,
             close_in_progress: bool::read(buf)?,
             faulted: bool::read(buf)?,
         })
@@ -760,38 +753,6 @@ impl From<&WithdrawalEvidenceResponse> for AcknowledgeWithdrawalRequest {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExternalPayoutEvidenceResponse {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: ExternalPayoutClaim<Key, Digest>,
-}
-
-impl Write for ExternalPayoutEvidenceResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.claim.write(buf);
-    }
-}
-
-impl EncodeSize for ExternalPayoutEvidenceResponse {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.claim.encode_size()
-    }
-}
-
-impl Read for ExternalPayoutEvidenceResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            claim: ExternalPayoutClaim::read(buf)?,
-        })
-    }
-}
-
-pub(crate) type AcknowledgeExternalPayoutRequest = ExternalPayoutEvidenceResponse;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct StartCloseResponse {
     pub(crate) epoch: u64,
@@ -828,7 +789,7 @@ pub(crate) struct CloseFinishedResponse {
     pub(crate) header: Bytes,
     pub(crate) rows: u64,
     pub(crate) dealing_bytes: u64,
-    pub(crate) payout_total: u64,
+    pub(crate) withdrawal_total: u64,
     pub(crate) header_bytes: u64,
     pub(crate) certificate_bytes: u64,
     pub(crate) prepare_micros: u128,
@@ -842,7 +803,7 @@ impl Write for CloseFinishedResponse {
         self.header.write(buf);
         self.rows.write(buf);
         self.dealing_bytes.write(buf);
-        self.payout_total.write(buf);
+        self.withdrawal_total.write(buf);
         self.header_bytes.write(buf);
         self.certificate_bytes.write(buf);
         self.prepare_micros.write(buf);
@@ -857,7 +818,7 @@ impl EncodeSize for CloseFinishedResponse {
             + self.header.encode_size()
             + self.rows.encode_size()
             + self.dealing_bytes.encode_size()
-            + self.payout_total.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.header_bytes.encode_size()
             + self.certificate_bytes.encode_size()
             + self.prepare_micros.encode_size()
@@ -875,7 +836,7 @@ impl Read for CloseFinishedResponse {
             header: Bytes::read_cfg(buf, &RangeCfg::new(0..=MAX_CLOSE_HEADER_BYTES))?,
             rows: u64::read(buf)?,
             dealing_bytes: u64::read(buf)?,
-            payout_total: u64::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
             header_bytes: u64::read(buf)?,
             certificate_bytes: u64::read(buf)?,
             prepare_micros: u128::read(buf)?,
@@ -948,7 +909,6 @@ fn build_status(operator: &Operator) -> Result<StatusResponse> {
         accounts: status.accounts,
         present_accounts: status.present_accounts,
         recent_payments: status.recent_payments,
-        reserved_payout_value: status.reserved_payout_value,
         close_in_progress,
         faulted,
     })
@@ -964,7 +924,7 @@ fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
             header: rpc::bounded_utf8(finished.header_digest, MAX_CLOSE_HEADER_BYTES),
             rows: count(finished.rows, "close row count")?,
             dealing_bytes: count(finished.dealing_bytes, "close dealing bytes")?,
-            payout_total: finished.payout_total,
+            withdrawal_total: finished.withdrawal_total,
             header_bytes: count(finished.header_bytes, "header byte count")?,
             certificate_bytes: count(finished.certificate_bytes, "certificate byte count")?,
             prepare_micros: finished.prepare_micros,
@@ -989,8 +949,6 @@ pub(crate) enum OperatorRequest {
     PollClose(PollCloseRequest),
     WithdrawalEvidence(WithdrawalEvidenceRequest),
     AcknowledgeWithdrawal(Box<AcknowledgeWithdrawalRequest>),
-    ExternalPayoutEvidence(ExternalPayoutEvidenceRequest),
-    AcknowledgeExternalPayout(Box<AcknowledgeExternalPayoutRequest>),
     IncomingPayments(IncomingPaymentsRequest),
     CommittedEntry(CommittedEntryRequest),
 }
@@ -1035,13 +993,6 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
             .map(Box::new)
             .map(OperatorRequest::AcknowledgeWithdrawal)
             .context("decode withdrawal-acknowledgement request"),
-        METHOD_EXTERNAL_PAYOUT_EVIDENCE => ExternalPayoutEvidenceRequest::decode(body)
-            .map(OperatorRequest::ExternalPayoutEvidence)
-            .context("decode external-payout-evidence request"),
-        METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT => AcknowledgeExternalPayoutRequest::decode(body)
-            .map(Box::new)
-            .map(OperatorRequest::AcknowledgeExternalPayout)
-            .context("decode external-payout-acknowledgement request"),
         method => bail!("unknown operator RPC method {method}"),
     }
 }
@@ -1122,19 +1073,6 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
         OperatorRequest::AcknowledgeWithdrawal(_) => {
             bail!("settlement confirmation is required before acknowledging a withdrawal")
         }
-        OperatorRequest::ExternalPayoutEvidence(request) => {
-            let evidence = operator
-                .external_payout_evidence(&request.account)
-                .context("read external payout evidence")?;
-            Ok(ExternalPayoutEvidenceResponse {
-                batch_id: evidence.batch_id,
-                claim: evidence.claim,
-            }
-            .encode())
-        }
-        OperatorRequest::AcknowledgeExternalPayout(_) => {
-            bail!("settlement confirmation is required before acknowledging an external payout")
-        }
         OperatorRequest::IncomingPayments(request) => {
             let page = operator
                 .incoming_payments(&request.account, request.cursor, MAX_INCOMING_PAGE)
@@ -1183,19 +1121,6 @@ pub(crate) fn acknowledge_withdrawal_confirmed(
     match operator
         .acknowledge_withdrawal_claim(request.batch_id, &request.account, &request.claim)
         .context("acknowledge withdrawal claim")
-    {
-        Ok(()) => rpc::Response::Success { body: Bytes::new() },
-        Err(error) => rpc::error_response(format!("{error:#}")),
-    }
-}
-
-pub(crate) fn acknowledge_external_payout_confirmed(
-    operator: &mut Operator,
-    request: &AcknowledgeExternalPayoutRequest,
-) -> rpc::Response {
-    match operator
-        .acknowledge_external_payout_claim(request.batch_id, &request.claim)
-        .context("acknowledge external payout claim")
     {
         Ok(()) => rpc::Response::Success { body: Bytes::new() },
         Err(error) => rpc::error_response(format!("{error:#}")),
@@ -1384,39 +1309,6 @@ pub(crate) async fn acknowledge_withdrawal<E: Network + Clock>(
         network,
         address,
         METHOD_ACKNOWLEDGE_WITHDRAWAL,
-        request.encode(),
-    )
-    .await?;
-    anyhow::ensure!(response.is_empty(), "operator returned an unexpected body");
-    Ok(())
-}
-
-pub(crate) async fn external_payout_evidence<E: Network + Clock>(
-    network: &E,
-    address: SocketAddr,
-    request: ExternalPayoutEvidenceRequest,
-) -> Result<ExternalPayoutEvidenceResponse> {
-    ExternalPayoutEvidenceResponse::decode(
-        invoke(
-            network,
-            address,
-            METHOD_EXTERNAL_PAYOUT_EVIDENCE,
-            request.encode(),
-        )
-        .await?,
-    )
-    .context("decode external payout evidence")
-}
-
-pub(crate) async fn acknowledge_external_payout<E: Network + Clock>(
-    network: &E,
-    address: SocketAddr,
-    request: AcknowledgeExternalPayoutRequest,
-) -> Result<()> {
-    let response = invoke(
-        network,
-        address,
-        METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT,
         request.encode(),
     )
     .await?;
@@ -1633,7 +1525,6 @@ mod tests {
             accounts: 0,
             present_accounts: 0,
             recent_payments: 0,
-            reserved_payout_value: 0,
             close_in_progress: false,
             faulted: false,
         }
@@ -1838,27 +1729,6 @@ mod tests {
         ));
         assert!(error.contains("settlement confirmation"));
         assert!(operator.withdrawal_evidence(&account).is_ok());
-    }
-
-    #[test]
-    fn unconfirmed_external_payout_acknowledgement_keeps_evidence() {
-        let mut operator = operator();
-        let receiver = crate::protocol::external_identity().key;
-        operator.pay(0, operator.wallet_count(), 7).unwrap();
-        operator.start_close(0).unwrap();
-        operator.wait_for_closes().unwrap();
-        let evidence = operator.external_payout_evidence(&receiver).unwrap();
-        let acknowledgement = AcknowledgeExternalPayoutRequest {
-            batch_id: evidence.batch_id,
-            claim: evidence.claim,
-        };
-
-        let error = error_text(handle(
-            &mut operator,
-            request(METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT, acknowledgement.encode()),
-        ));
-        assert!(error.contains("settlement confirmation"));
-        assert!(operator.external_payout_evidence(&receiver).is_ok());
     }
 
     #[test]

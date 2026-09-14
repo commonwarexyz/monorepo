@@ -21,11 +21,11 @@ use commonware_clearing::bajillion::{
         BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, FinalizedClaims, HardFaultReason,
         HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig,
     },
-    state::{AccountChange, AccountRow, SettlementOutput},
+    state::SettlementOutput,
     transition::{
-        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, ExternalPayout,
-        ExternalPayoutClaim, OperatorKey, OperatorSignature, OperatorVariant, PreparedClose,
-        Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
+        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature,
+        OperatorVariant, PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput,
+        prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -106,7 +106,6 @@ type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestDeposits = DepositBatch<VerifyingKey>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
-type TestExternalPayoutClaim = ExternalPayoutClaim<VerifyingKey, Digest>;
 type TestWithdrawalClaim = WithdrawalClaim<Digest>;
 type Certificate = bls12381::Certificate;
 #[derive(Arbitrary, Debug)]
@@ -139,7 +138,7 @@ enum Action {
         tick: u8,
         mutated: bool,
     },
-    RegisterPayout {
+    RegisterCredit {
         tick: u8,
         payer: u8,
         amount: u8,
@@ -180,11 +179,6 @@ enum Action {
         claim: u8,
         mutation: u8,
     },
-    ClaimExternalPayout {
-        batch: u8,
-        claim: u8,
-        mutation: u8,
-    },
     BeginHardFaultSettlement,
     ClaimHardFault {
         account: u8,
@@ -200,8 +194,6 @@ struct Prepared {
     withdrawals: TestWithdrawals,
     withdrawal_claims: Vec<TestWithdrawalClaim>,
     withdrawal_outputs: Vec<WithdrawalOutput>,
-    external_payout_claims: Vec<TestExternalPayoutClaim>,
-    external_payouts: Vec<ExternalPayout<VerifyingKey>>,
     close: TestClose,
     successor: TestCache,
 }
@@ -215,8 +207,6 @@ struct Slot {
     withdrawals: TestWithdrawals,
     withdrawal_claims: Vec<TestWithdrawalClaim>,
     withdrawal_outputs: Vec<WithdrawalOutput>,
-    external_payout_claims: Vec<TestExternalPayoutClaim>,
-    external_payouts: Vec<ExternalPayout<VerifyingKey>>,
     header: commonware_clearing::bajillion::transition::Header<Digest>,
     certificate: bls12381::Certificate,
     successor: TestCache,
@@ -229,27 +219,17 @@ struct ModeledWithdrawalClaim {
 }
 
 #[derive(Clone)]
-struct ModeledExternalPayoutClaim {
-    claim: TestExternalPayoutClaim,
-    payout: ExternalPayout<VerifyingKey>,
-}
-
-#[derive(Clone)]
 struct FinalizedClaimBatch {
     batch_id: BatchId<Digest>,
-    change_root: VectorRoot<Digest>,
     withdrawal_root: VectorRoot<Digest>,
     withdrawals: Vec<ModeledWithdrawalClaim>,
-    payouts: Vec<ModeledExternalPayoutClaim>,
     claimed_withdrawals: BTreeSet<u32>,
-    claimed_payouts: BTreeSet<u32>,
     withdrawal_remaining: u64,
-    payout_remaining: u64,
 }
 
 impl FinalizedClaimBatch {
     fn is_live(&self) -> bool {
-        self.withdrawal_remaining != 0 || self.payout_remaining != 0
+        self.withdrawal_remaining != 0
     }
 }
 
@@ -574,12 +554,12 @@ impl Harness {
                 .await
             }
             Action::Register { tick, mutated } => self.register(*tick, *mutated).await,
-            Action::RegisterPayout {
+            Action::RegisterCredit {
                 tick,
                 payer,
                 amount,
                 mutated,
-            } => self.register_payout(*tick, *payer, *amount, *mutated).await,
+            } => self.register_credit(*tick, *payer, *amount, *mutated).await,
             Action::Admit { tick, mutated } => self.admit(*tick, *mutated).await,
             Action::Finalize { tick, early } => self.finalize(*tick, *early),
             Action::FaultUnadmitted {
@@ -611,11 +591,6 @@ impl Harness {
                 claim,
                 mutation,
             } => self.claim_withdrawal(step, *batch, *claim, *mutation),
-            Action::ClaimExternalPayout {
-                batch,
-                claim,
-                mutation,
-            } => self.claim_external_payout(step, *batch, *claim, *mutation),
             Action::BeginHardFaultSettlement => self.begin_hard_fault_settlement(),
             Action::ClaimHardFault { account, mutation } => {
                 self.claim_hard_fault(*account, *mutation).await
@@ -646,12 +621,7 @@ impl Harness {
             }
         }
         assert!(before_deposits.is_subset(&self.consumed_deposit_ids));
-        if was_settled
-            && !matches!(
-                action,
-                Action::ClaimWithdrawal { .. } | Action::ClaimExternalPayout { .. }
-            )
-        {
+        if was_settled && !matches!(action, Action::ClaimWithdrawal { .. }) {
             assert_eq!(before, after, "terminal settlement is permanent");
         }
         self.assert_invariants();
@@ -728,26 +698,7 @@ impl Harness {
                     })
                     .expect("modeled withdrawal reserve fits in u64");
                 assert_eq!(batch.withdrawal_remaining, withdrawal_remaining);
-
-                let payout_positions = batch
-                    .payouts
-                    .iter()
-                    .map(|entry| entry.claim.position())
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(payout_positions.len(), batch.payouts.len());
-                assert!(batch.claimed_payouts.is_subset(&payout_positions));
-                let payout_remaining = batch
-                    .payouts
-                    .iter()
-                    .filter(|entry| !batch.claimed_payouts.contains(&entry.claim.position()))
-                    .try_fold(0_u64, |remaining, entry| {
-                        remaining.checked_add(entry.payout.amount)
-                    })
-                    .expect("modeled payout reserve fits in u64");
-                assert_eq!(batch.payout_remaining, payout_remaining);
-                total
-                    .checked_add(batch.withdrawal_remaining)
-                    .and_then(|total| total.checked_add(batch.payout_remaining))
+                total.checked_add(batch.withdrawal_remaining)
             })
             .expect("modeled finalized reserves fit in u64");
         assert_eq!(modeled_claimable, self.claimable);
@@ -768,7 +719,7 @@ impl Harness {
             .map(|slot| PendingBatch {
                 header: slot.header,
                 roots: slot.close.roots,
-                amounts: slot.close.amounts,
+                withdrawal_total: slot.close.withdrawal_total,
                 certificate: slot.certificate.clone(),
                 successor_liability: slot.successor.liability(),
                 status: slot.status.clone(),
@@ -796,12 +747,8 @@ impl Harness {
             assert_eq!(slot.context.predecessor_liability(), predecessor_liability);
             assert_eq!(slot.close.roots.successor, slot.successor.root());
             assert_eq!(
-                slot.close.amounts.withdrawal,
+                slot.close.withdrawal_total,
                 output_total(&slot.withdrawal_outputs)
-            );
-            assert_eq!(
-                slot.close.amounts.payout,
-                payout_total(&slot.external_payouts)
             );
             predecessor_root = slot.successor.root();
             predecessor_liability = slot.successor.liability();
@@ -1154,7 +1101,7 @@ impl Harness {
             .await
     }
 
-    async fn make_payout_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
+    async fn make_credit_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
         if !self.staged_deposits.is_empty() || self.staged_withdrawals.len() > 1 {
             return None;
         }
@@ -1185,14 +1132,11 @@ impl Harness {
             .accounts
             .iter()
             .find(|key| key.public_key() == leaf.account)?;
-        let recipient = self.external_account();
-        if cache
-            .leaves()
-            .binary_search_by(|candidate| candidate.account.cmp(&recipient))
-            .is_ok()
-        {
-            return None;
-        }
+        let recipient_key = self
+            .accounts
+            .iter()
+            .find(|candidate| cache.balance(&candidate.public_key()) == 0)?;
+        let recipient = recipient_key.public_key();
 
         let deposits = DepositBatch::empty();
         let withdrawals = self.withdrawal_batch();
@@ -1224,7 +1168,7 @@ impl Harness {
                 count: 1,
             }],
         )
-        .expect("one positive payout entry is canonical");
+        .expect("one positive virtual credit is canonical");
         let body = VectorSendBody::new(
             context.payment(),
             leaf.account.clone(),
@@ -1232,20 +1176,71 @@ impl Harness {
             amount,
             out_vector
                 .root::<Sha256, Digest>()
-                .expect("bounded payout vector commits"),
+                .expect("bounded credit vector commits"),
         );
         let operator_signature = bls_ack(&self.operator_ack, &body);
         let outgoing = SendAuthorization::sign(body.clone(), payer);
+        let terminal = Terminal {
+            authorization: outgoing,
+            vector: out_vector,
+            operator_signature,
+        };
+
+        // Receiving does not make an absent-at-boundary key eligible to originate payments in the
+        // same epoch. A predecessor balance or sealed deposit remains the payer authority.
+        let recipient_vector = OutVector::new(
+            epoch,
+            recipient.clone(),
+            vec![OutEntry {
+                recipient: leaf.account.clone(),
+                cumulative: 1,
+                count: 1,
+            }],
+        )
+        .expect("one positive negative-control entry is canonical");
+        let recipient_body = VectorSendBody::new(
+            context.payment(),
+            recipient.clone(),
+            1,
+            1,
+            recipient_vector
+                .root::<Sha256, Digest>()
+                .expect("bounded negative-control vector commits"),
+        );
+        let mut ineligible = vec![
+            terminal.clone(),
+            Terminal {
+                authorization: SendAuthorization::sign(recipient_body.clone(), recipient_key),
+                vector: recipient_vector,
+                operator_signature: bls_ack(&self.operator_ack, &recipient_body),
+            },
+        ];
+        ineligible.sort_unstable_by(|left, right| {
+            left.authorization
+                .body()
+                .payer()
+                .cmp(right.authorization.body().payer())
+        });
+        assert!(
+            prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                self.state.as_ref().unwrap(),
+                &context,
+                &deposits,
+                &withdrawals,
+                ineligible,
+                &Sequential,
+            )
+            .await
+            .is_err(),
+            "an absent recipient cannot spend its same-epoch credit"
+        );
+
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
             &deposits,
             &withdrawals,
-            vec![Terminal {
-                authorization: outgoing,
-                vector: out_vector,
-                operator_signature,
-            }],
+            vec![terminal],
             &Sequential,
         )
         .await
@@ -1319,26 +1314,21 @@ impl Harness {
             .map(|claim| claim.output().clone())
             .collect::<Vec<_>>();
         assert_eq!(withdrawal_outputs.len(), withdrawals.len());
-        assert_eq!(close.amounts.withdrawal, output_total(&withdrawal_outputs));
-        let external_payouts =
-            expected_external_payouts(predecessor, &close, &deposits, &withdrawals);
-        let external_payout_claims = external_payouts
-            .iter()
-            .map(|payout| {
-                let claim = prepared
-                    .external_payout_claim(&payout.recipient)
-                    .expect("validated external payout has a canonical claim");
-                assert_eq!(
-                    claim
-                        .verify::<Sha256>(&close.roots.change)
-                        .expect("validated external payout claim verifies"),
-                    *payout
-                );
-                claim
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(close.amounts.withdrawal, output_total(&withdrawal_outputs));
-        assert_eq!(close.amounts.payout, payout_total(&external_payouts));
+        assert_eq!(close.withdrawal_total, output_total(&withdrawal_outputs));
+        for entry in close.out_vectors.iter().flat_map(|vector| vector.entries()) {
+            if predecessor.balance(&entry.recipient) == 0
+                && deposits.amount_for(&entry.recipient) == 0
+            {
+                assert!(withdrawals.request_for(&entry.recipient).is_none());
+                let row = close
+                    .rows
+                    .iter()
+                    .find(|row| row.account == entry.recipient)
+                    .expect("a first virtual credit has an authenticated row");
+                assert_eq!(row.output, SettlementOutput::None);
+                assert!(row.successor >= entry.cumulative);
+            }
+        }
         let successor = successor_snapshot(
             predecessor,
             &deposits,
@@ -1353,8 +1343,6 @@ impl Harness {
             withdrawals,
             withdrawal_claims,
             withdrawal_outputs,
-            external_payout_claims,
-            external_payouts,
             close,
             successor,
         }
@@ -1725,14 +1713,14 @@ impl Harness {
         self.register_prepared(tick, mutated, prepared).await
     }
 
-    async fn register_payout(
+    async fn register_credit(
         &mut self,
         tick: u8,
         payer: u8,
         amount: u8,
         mutated: bool,
     ) -> ActionOutcome {
-        let (prepared, unavailable) = match self.make_payout_prepared(payer, amount).await {
+        let (prepared, unavailable) = match self.make_credit_prepared(payer, amount).await {
             Some(prepared) => (prepared, false),
             None => (self.make_prepared().await, true),
         };
@@ -1817,7 +1805,7 @@ impl Harness {
             header = commonware_clearing::bajillion::transition::Header::new::<Sha256, _>(
                 &prepared.context,
                 &roots,
-                &prepared.close.amounts,
+                prepared.close.withdrawal_total,
             );
         }
         let observation = self.predict_observation(now);
@@ -1832,9 +1820,13 @@ impl Harness {
         } else {
             OutcomeClass::Error
         };
-        let result = self
-            .chain
-            .admit(now, header, roots, prepared.close.amounts, certificate);
+        let result = self.chain.admit(
+            now,
+            header,
+            roots,
+            prepared.close.withdrawal_total,
+            certificate,
+        );
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let batch_id = result
@@ -1885,8 +1877,6 @@ impl Harness {
                 withdrawals: registered.withdrawals,
                 withdrawal_claims: registered.withdrawal_claims,
                 withdrawal_outputs: registered.withdrawal_outputs,
-                external_payout_claims: registered.external_payout_claims,
-                external_payouts: registered.external_payouts,
                 header: registered.close.header,
                 certificate: retained_certificate,
                 successor: registered.successor,
@@ -1909,11 +1899,10 @@ impl Harness {
             self.advance(tick)
         };
         let observation = self.predict_observation(now);
-        let reserve = self.slots.front().map(|front| {
-            output_total(&front.withdrawal_outputs)
-                .checked_add(payout_total(&front.external_payouts))
-                .expect("authenticated reserve fits custody")
-        });
+        let reserve = self
+            .slots
+            .front()
+            .map(|front| output_total(&front.withdrawal_outputs));
         let expected = if !self.settled
             && self.slots.front().is_some_and(|front| {
                 matches!(front.status, BatchStatus::Pending)
@@ -1951,15 +1940,11 @@ impl Harness {
                 finalized.withdrawal_total,
                 output_total(&slot.withdrawal_outputs)
             );
-            assert_eq!(finalized.payout_total, payout_total(&slot.external_payouts));
             assert_eq!(
                 finalized.custody_balance,
                 self.custody
                     .checked_sub(output_total(&slot.withdrawal_outputs))
-                    .and_then(|custody| {
-                        custody.checked_sub(payout_total(&slot.external_payouts))
-                    })
-                    .expect("the model holds admitted withdrawal and payout custody")
+                    .expect("the model holds admitted withdrawal custody")
             );
         }
         self.apply_observation(now, &observation);
@@ -1971,13 +1956,8 @@ impl Harness {
             assert!(matches!(slot.status, BatchStatus::Pending));
             assert!(now > slot.context.challenge_deadline());
             assert_eq!(slot.withdrawal_claims.len(), slot.withdrawal_outputs.len());
-            assert_eq!(
-                slot.external_payout_claims.len(),
-                slot.external_payouts.len()
-            );
             let withdrawal_remaining = output_total(&slot.withdrawal_outputs);
-            let payout_remaining = payout_total(&slot.external_payouts);
-            if !slot.withdrawal_claims.is_empty() || !slot.external_payout_claims.is_empty() {
+            if !slot.withdrawal_claims.is_empty() {
                 let batch_id = slot.batch_id();
                 assert!(
                     self.finalized_claim_batches
@@ -1986,7 +1966,6 @@ impl Harness {
                 );
                 self.finalized_claim_batches.push(FinalizedClaimBatch {
                     batch_id,
-                    change_root: slot.close.roots.change,
                     withdrawal_root: slot.close.roots.withdrawal_outputs,
                     withdrawals: slot
                         .withdrawal_claims
@@ -1998,31 +1977,17 @@ impl Harness {
                             ModeledWithdrawalClaim { claim }
                         })
                         .collect(),
-                    payouts: slot
-                        .external_payout_claims
-                        .iter()
-                        .cloned()
-                        .zip(slot.external_payouts.iter().cloned())
-                        .map(|(claim, payout)| {
-                            assert_eq!(claim.recipient(), &payout.recipient);
-                            ModeledExternalPayoutClaim { claim, payout }
-                        })
-                        .collect(),
                     claimed_withdrawals: BTreeSet::new(),
-                    claimed_payouts: BTreeSet::new(),
                     withdrawal_remaining,
-                    payout_remaining,
                 });
             }
             self.custody = self
                 .custody
                 .checked_sub(withdrawal_remaining)
-                .and_then(|custody| custody.checked_sub(payout_remaining))
-                .expect("admitted withdrawals and payouts are held in custody");
+                .expect("admitted withdrawals are held in custody");
             self.claimable = self
                 .claimable
                 .checked_add(withdrawal_remaining)
-                .and_then(|claimable| claimable.checked_add(payout_remaining))
                 .expect("finalization preserves the combined custody domain");
             for request in slot.withdrawals.requests() {
                 assert_eq!(
@@ -2390,25 +2355,6 @@ impl Harness {
         Some((batch_index, usize::from(claim_selector) % claims))
     }
 
-    fn select_external_payout_claim(
-        &self,
-        batch_selector: u8,
-        claim_selector: u8,
-        live_only: bool,
-    ) -> Option<(usize, usize)> {
-        let batches = self
-            .finalized_claim_batches
-            .iter()
-            .enumerate()
-            .filter_map(|(index, batch)| {
-                (!batch.payouts.is_empty() && (!live_only || batch.is_live())).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let batch_index = *batches.get(usize::from(batch_selector) % batches.len().max(1))?;
-        let claims = self.finalized_claim_batches[batch_index].payouts.len();
-        Some((batch_index, usize::from(claim_selector) % claims))
-    }
-
     fn select_unconsumed_withdrawal_claim(
         &self,
         batch_selector: u8,
@@ -2434,40 +2380,6 @@ impl Harness {
             .enumerate()
             .filter_map(|(index, entry)| {
                 (!batch.claimed_withdrawals.contains(&entry.claim.position())).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        Some((
-            batch_index,
-            claims[usize::from(claim_selector) % claims.len()],
-        ))
-    }
-
-    fn select_unconsumed_external_payout_claim(
-        &self,
-        batch_selector: u8,
-        claim_selector: u8,
-    ) -> Option<(usize, usize)> {
-        let batches = self
-            .finalized_claim_batches
-            .iter()
-            .enumerate()
-            .filter_map(|(index, batch)| {
-                (batch.is_live()
-                    && batch
-                        .payouts
-                        .iter()
-                        .any(|entry| !batch.claimed_payouts.contains(&entry.claim.position())))
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let batch_index = *batches.get(usize::from(batch_selector) % batches.len().max(1))?;
-        let batch = &self.finalized_claim_batches[batch_index];
-        let claims = batch
-            .payouts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                (!batch.claimed_payouts.contains(&entry.claim.position())).then_some(index)
             })
             .collect::<Vec<_>>();
         Some((
@@ -2520,50 +2432,6 @@ impl Harness {
         None
     }
 
-    fn cross_external_payout_claim(
-        &self,
-        batch_selector: u8,
-        claim_selector: u8,
-    ) -> Option<(usize, usize, usize)> {
-        let mut targets = self
-            .finalized_claim_batches
-            .iter()
-            .enumerate()
-            .filter_map(|(index, batch)| batch.is_live().then_some(index))
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            targets.extend(0..self.finalized_claim_batches.len());
-        }
-        let start = usize::from(batch_selector) % targets.len().max(1);
-        for offset in 0..targets.len() {
-            let target_index = targets[(start + offset) % targets.len()];
-            let target = &self.finalized_claim_batches[target_index];
-            let claims = self
-                .finalized_claim_batches
-                .iter()
-                .enumerate()
-                .flat_map(|(source_index, source)| {
-                    source
-                        .payouts
-                        .iter()
-                        .enumerate()
-                        .filter_map(move |(claim_index, entry)| {
-                            (source_index != target_index
-                                && source.change_root != target.change_root
-                                && !target.claimed_payouts.contains(&entry.claim.position()))
-                            .then_some((source_index, claim_index))
-                        })
-                })
-                .collect::<Vec<_>>();
-            if let Some((source_index, claim_index)) =
-                claims.get(usize::from(claim_selector) % claims.len().max(1))
-            {
-                return Some((target_index, *source_index, *claim_index));
-            }
-        }
-        None
-    }
-
     fn malformed_withdrawal_submission(
         &self,
         step: u64,
@@ -2592,37 +2460,6 @@ impl Harness {
         (
             batch_id,
             malformed_withdrawal_claim(&synthetic_withdrawal_claim()),
-        )
-    }
-
-    fn malformed_external_payout_submission(
-        &self,
-        step: u64,
-        batch_selector: u8,
-        claim_selector: u8,
-    ) -> (BatchId<Digest>, TestExternalPayoutClaim) {
-        let selected = self
-            .select_unconsumed_external_payout_claim(batch_selector, claim_selector)
-            .or_else(|| self.select_external_payout_claim(batch_selector, claim_selector, false));
-        if let Some((batch_index, claim_index)) = selected {
-            let batch = &self.finalized_claim_batches[batch_index];
-            return (
-                batch.batch_id,
-                malformed_external_payout_claim(&batch.payouts[claim_index].claim),
-            );
-        }
-        let batch_id = self
-            .finalized_claim_batches
-            .iter()
-            .find(|batch| batch.is_live())
-            .or_else(|| self.finalized_claim_batches.first())
-            .map_or_else(
-                || self.unknown_claim_batch(b"malformed-payout-batch", step),
-                |batch| batch.batch_id,
-            );
-        (
-            batch_id,
-            malformed_external_payout_claim(&synthetic_external_payout_claim()),
         )
     }
 
@@ -2721,105 +2558,6 @@ impl Harness {
                 .claimable
                 .checked_sub(output.amount())
                 .expect("an authenticated withdrawal fits total claimable custody");
-        }
-        ActionOutcome::new(expected, None)
-    }
-
-    fn claim_external_payout(
-        &mut self,
-        step: u64,
-        batch_selector: u8,
-        claim_selector: u8,
-        mutation: u8,
-    ) -> ActionOutcome {
-        let canonical = |live_only| {
-            if let Some((batch_index, claim_index)) =
-                self.select_external_payout_claim(batch_selector, claim_selector, live_only)
-            {
-                let batch = &self.finalized_claim_batches[batch_index];
-                let entry = &batch.payouts[claim_index];
-                let accepted = (batch.is_live()
-                    && !batch.claimed_payouts.contains(&entry.claim.position()))
-                .then(|| (batch_index, entry.claim.position(), entry.payout.clone()));
-                (batch.batch_id, entry.claim.clone(), accepted)
-            } else {
-                (
-                    self.unknown_claim_batch(b"canonical-payout-batch", step),
-                    synthetic_external_payout_claim(),
-                    None,
-                )
-            }
-        };
-        let (batch_id, claim, accepted) = match mutation % 5 {
-            0 => canonical(true),
-            1 => canonical(false),
-            2 => {
-                let claim = self
-                    .select_external_payout_claim(batch_selector, claim_selector, false)
-                    .map_or_else(
-                        synthetic_external_payout_claim,
-                        |(batch_index, claim_index)| {
-                            self.finalized_claim_batches[batch_index].payouts[claim_index]
-                                .claim
-                                .clone()
-                        },
-                    );
-                (
-                    self.unknown_claim_batch(b"unknown-payout-batch", step),
-                    claim,
-                    None,
-                )
-            }
-            3 => {
-                if let Some((target_index, source_index, claim_index)) =
-                    self.cross_external_payout_claim(batch_selector, claim_selector)
-                {
-                    (
-                        self.finalized_claim_batches[target_index].batch_id,
-                        self.finalized_claim_batches[source_index].payouts[claim_index]
-                            .claim
-                            .clone(),
-                        None,
-                    )
-                } else {
-                    let (batch_id, claim) = self.malformed_external_payout_submission(
-                        step,
-                        batch_selector,
-                        claim_selector,
-                    );
-                    (batch_id, claim, None)
-                }
-            }
-            _ => {
-                let (batch_id, claim) =
-                    self.malformed_external_payout_submission(step, batch_selector, claim_selector);
-                (batch_id, claim, None)
-            }
-        };
-        let expected = if accepted.is_some() {
-            OutcomeClass::Success
-        } else {
-            OutcomeClass::Error
-        };
-        let result = self
-            .claims
-            .get_mut(&batch_id)
-            .ok_or(ClaimError::Unavailable)
-            .and_then(|claims| self.chain.claim_external_payout(batch_id, claims, &claim));
-        assert_eq!(OutcomeClass::of(&result), expected);
-        if let Some((batch_index, position, expected_payout)) = accepted {
-            let payout = result.expect("the oracle selected an unconsumed external payout");
-            assert_eq!(payout, expected_payout);
-            let batch = &mut self.finalized_claim_batches[batch_index];
-            assert!(batch.claimed_payouts.insert(position));
-            batch.payout_remaining = batch
-                .payout_remaining
-                .checked_sub(payout.amount)
-                .expect("an authenticated payout fits its modeled reserve");
-            self.claimable = self
-                .claimable
-                .checked_sub(payout.amount)
-                .expect("an authenticated payout fits total claimable custody");
         }
         ActionOutcome::new(expected, None)
     }
@@ -3071,86 +2809,11 @@ fn malformed_withdrawal_claim(claim: &TestWithdrawalClaim) -> TestWithdrawalClai
     malformed
 }
 
-fn synthetic_external_payout_claim() -> TestExternalPayoutClaim {
-    let account = SigningKey::from_seed(u64::MAX - 1).public_key();
-    let row = AccountRow {
-        account: account.clone(),
-        predecessor: 0,
-        successor: 0,
-        outgoing: None,
-        output: SettlementOutput::ExternalPayout(1),
-    };
-    let leaf =
-        AccountChange::from_row(&row, commitment::empty_root::<Sha256>(VectorKind::OutEntry));
-    let guard = leaf.guard::<Sha256>();
-    let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, 1)
-        .expect("one synthetic change guard is bounded");
-    builder
-        .add_encoded(guard.encode().as_ref())
-        .expect("a synthetic change guard is length-framable");
-    let tree = builder
-        .build(&Sequential)
-        .expect("one synthetic change guard commits");
-    TestExternalPayoutClaim::decode_cfg(
-        (leaf, tree.opening(0).expect("position zero is present")).encode(),
-        &(),
-    )
-    .expect("a synthetic external payout claim decodes")
-}
-
-fn malformed_external_payout_claim(claim: &TestExternalPayoutClaim) -> TestExternalPayoutClaim {
-    let mut encoded = claim.encode().to_vec();
-    let amount_last_byte = claim.recipient().encode().len() + 8;
-    encoded[amount_last_byte] ^= 1;
-    let malformed = TestExternalPayoutClaim::decode_cfg(encoded.as_slice(), &())
-        .expect("mutating a payout amount byte preserves claim structure");
-    assert_eq!(malformed.position(), claim.position());
-    assert_eq!(malformed.recipient(), claim.recipient());
-    assert_ne!(malformed, *claim);
-    malformed
-}
-
 fn output_total(outputs: &[WithdrawalOutput]) -> u64 {
     outputs
         .iter()
         .try_fold(0_u64, |total, release| total.checked_add(release.amount()))
         .expect("authenticated withdrawal outputs fit custody")
-}
-
-fn expected_external_payouts(
-    predecessor: &TestCache,
-    close: &TestClose,
-    deposits: &TestDeposits,
-    withdrawals: &TestWithdrawals,
-) -> Vec<ExternalPayout<VerifyingKey>> {
-    let mut credits = BTreeMap::<VerifyingKey, u64>::new();
-    for entry in close.out_vectors.iter().flat_map(|vector| vector.entries()) {
-        *credits.entry(entry.recipient.clone()).or_default() += entry.cumulative;
-    }
-    credits
-        .into_iter()
-        .filter(|(account, _)| {
-            predecessor.balance(account) == 0
-                && deposits.amount_for(account) == 0
-                && withdrawals.request_for(account).is_none()
-        })
-        .map(|(recipient, amount)| {
-            let row = close
-                .rows
-                .iter()
-                .find(|row| row.account == recipient)
-                .unwrap();
-            assert_eq!(row.output, SettlementOutput::ExternalPayout(amount));
-            ExternalPayout { recipient, amount }
-        })
-        .collect()
-}
-
-fn payout_total(payouts: &[ExternalPayout<VerifyingKey>]) -> u64 {
-    payouts
-        .iter()
-        .try_fold(0_u64, |total, payout| total.checked_add(payout.amount))
-        .expect("authenticated external payouts fit custody")
 }
 
 fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> OperatorSignature {
@@ -3192,9 +2855,7 @@ fn successor_snapshot(
         }
     }
     for (account, credit) in credits {
-        if let Some(balance) = expected.get_mut(&account) {
-            *balance += credit;
-        }
+        *expected.entry(account).or_default() += credit;
     }
     for request in withdrawals.requests() {
         let balance = expected.get_mut(request.account()).unwrap();
@@ -3229,7 +2890,7 @@ async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) 
     input.balances = [7; MAX_ACCOUNTS];
     let mut harness = Harness::new(&input, runtime).await;
     let actions = [
-        Action::RegisterPayout {
+        Action::RegisterCredit {
             tick: 0,
             payer: 0,
             amount: 1,
@@ -3299,12 +2960,16 @@ async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) 
             account: 1,
             mutation: 0,
         },
-        Action::ClaimExternalPayout {
+        Action::ClaimHardFault {
+            account: 2,
+            mutation: 0,
+        },
+        Action::ClaimWithdrawal {
             batch: 0,
             claim: 0,
             mutation: 0,
         },
-        Action::ClaimExternalPayout {
+        Action::ClaimWithdrawal {
             batch: 0,
             claim: 0,
             mutation: 0,
@@ -3321,8 +2986,12 @@ async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) 
             8 => assert_eq!(harness.outstanding.len(), 2),
             9 => assert!(harness.hard_fault.is_some()),
             11 | 13 => assert_eq!(harness.claimed_hard_fault_accounts.len(), 1),
-            14 => assert!(harness.settled),
-            15 | 16 => assert_eq!(harness.claimable, 0),
+            14 => assert_eq!(harness.claimed_hard_fault_accounts.len(), 2),
+            15 => {
+                assert_eq!(harness.claimed_hard_fault_accounts.len(), 3);
+                assert!(harness.settled);
+            }
+            16 | 17 => assert_eq!(harness.claimable, 0),
             _ => {}
         }
     }

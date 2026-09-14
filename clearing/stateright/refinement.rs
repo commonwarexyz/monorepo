@@ -250,11 +250,11 @@ impl RefinementDriver {
         }
         let (predecessor, balances) = match root {
             spec::Root::R1 => (spec::Root::R0, [8, 9, 0]),
-            spec::Root::R2 => (spec::Root::R1, [7, 9, 0]),
-            spec::Root::R3 => (spec::Root::R2, [7, 7, 0]),
+            spec::Root::R2 => (spec::Root::R1, [7, 9, 1]),
+            spec::Root::R3 => (spec::Root::R2, [7, 7, 1]),
             spec::Root::R2C => (spec::Root::R1, [8, 0, 0]),
-            spec::Root::R3D => (spec::Root::R2, [15, 1, 0]),
-            spec::Root::R4 => (spec::Root::R3, [0, 7, 0]),
+            spec::Root::R3D => (spec::Root::R2, [15, 1, 1]),
+            spec::Root::R4 => (spec::Root::R3, [0, 7, 1]),
             spec::Root::Offset | spec::Root::OffsetC => (spec::Root::R0, [10, 5, 0]),
             spec::Root::R0 | spec::Root::Empty => {
                 unreachable!("no successor history for this root")
@@ -294,7 +294,6 @@ impl RefinementDriver {
         match destination {
             spec::Destination::Alice => Bytes::from_static(b"alic"),
             spec::Destination::Bob => Bytes::from_static(b"bob!"),
-            spec::Destination::Carol => Bytes::from_static(b"carl"),
             spec::Destination::TooLong => Bytes::from_static(b"too-long!"),
         }
     }
@@ -564,7 +563,10 @@ impl RefinementDriver {
             .unwrap();
             assert_eq!(sealed.close().header, prepared.close().header);
             assert_eq!(sealed.close().roots, prepared.close().roots);
-            assert_eq!(sealed.close().amounts, prepared.close().amounts);
+            assert_eq!(
+                sealed.close().withdrawal_total,
+                prepared.close().withdrawal_total
+            );
             let mutations = sealed.state().mutations().to_vec();
             let (state, close) = sealed.apply::<_, Sha256>(state).await.unwrap();
             let successor = cache.extended(*state.head(), mutations);
@@ -575,7 +577,7 @@ impl RefinementDriver {
             u64::from(self.now),
             close.header,
             close.roots,
-            close.amounts,
+            close.withdrawal_total,
             certificate,
         );
         match result {
@@ -622,7 +624,7 @@ impl RefinementDriver {
                 }
             }
             spec::ChallengeKind::HigherEntry => {
-                // A retained alternative vector crediting the payout recipient above the
+                // A retained alternative vector crediting the virtual recipient above the
                 // committed terminal entry on the same edge.
                 let payer = &self.fixture.accounts[0];
                 let recipient = self.carol.public_key();
@@ -656,7 +658,7 @@ impl RefinementDriver {
                     .close
                     .rows
                     .binary_search_by(|row| row.account.cmp(&payer.public_key()))
-                    .expect("the refined payout close carries the sender row");
+                    .expect("the refined virtual-credit close carries the sender row");
                 let sender = higher_entry_lookup::<Sha256, _, _>(
                     &index,
                     &payer.public_key(),
@@ -725,10 +727,6 @@ impl RefinementDriver {
                         == candidate
                             .withdrawal_output
                             .map_or(0, |output| u64::from(output.amount))
-                    && actual.payout_total
-                        == candidate
-                            .payout_output
-                            .map_or(0, |output| u64::from(output.amount))
             })
     }
 
@@ -748,30 +746,6 @@ impl RefinementDriver {
             .chain
             .claim_withdrawal(batch_id, &claim)
             .is_ok_and(|actual| actual == expected)
-    }
-
-    fn claim_payout(&mut self, batch: spec::Batch, source: spec::Batch, position: u8) -> bool {
-        let source = self.material(source);
-        let claim = source.close.external_payout_claim(&self.carol.public_key());
-        let Ok(claim) = claim else {
-            return false;
-        };
-        if claim.position() != u32::from(position) {
-            return false;
-        }
-        let expected = source.close.rows.iter().find_map(|row| match row.output {
-            SettlementOutput::ExternalPayout(amount) => Some((row.account.clone(), amount)),
-            SettlementOutput::None | SettlementOutput::Withdrawal(_) => None,
-        });
-        let batch_id = self.material(batch).id;
-        self.fixture
-            .chain
-            .claim_external_payout(batch_id, &claim)
-            .is_ok_and(|actual| {
-                expected.is_some_and(|(recipient, amount)| {
-                    actual.recipient == recipient && actual.amount == amount
-                })
-            })
     }
 
     fn apply_production(&mut self, action: spec::SettlementAction) -> bool {
@@ -804,11 +778,6 @@ impl RefinementDriver {
                 source,
                 position,
             } => self.claim_withdrawal(batch, source, position),
-            spec::SettlementAction::ClaimPayout {
-                batch,
-                source,
-                position,
-            } => self.claim_payout(batch, source, position),
             spec::SettlementAction::ClaimDeposit(account) => {
                 let index = account.index();
                 let expected = match self.state.terminal {
@@ -1019,7 +988,10 @@ impl RefinementDriver {
             let material = self.material(*expected);
             assert_eq!(actual.batch.header, material.close.header);
             assert_eq!(actual.batch.roots, material.close.roots);
-            assert_eq!(actual.batch.amounts, material.close.amounts);
+            assert_eq!(
+                actual.batch.withdrawal_total,
+                material.close.withdrawal_total
+            );
             assert_eq!(actual.admitted.context, material.context);
             assert_eq!(actual.batch.roots.successor, material.successor.root());
             assert_eq!(
@@ -1088,27 +1060,20 @@ impl RefinementDriver {
                 continue;
             };
             let withdrawal = u64::from(self.state.withdrawal_reserve[batch.index()]);
-            let payout = u64::from(self.state.payout_reserve[batch.index()]);
             let actual = chain
                 .claimable_batches
                 .get(&material.id)
-                .filter(|claims| claims.withdrawal_remaining != 0 || claims.payout_remaining != 0);
-            assert_eq!(actual.is_some(), withdrawal != 0 || payout != 0);
+                .filter(|claims| claims.withdrawal_remaining != 0);
+            assert_eq!(actual.is_some(), withdrawal != 0);
             if let Some(actual) = actual {
-                assert_eq!(actual.change_root, material.close.roots.change);
                 assert_eq!(
                     actual.withdrawal_outputs,
                     material.close.roots.withdrawal_outputs
                 );
                 assert_eq!(actual.withdrawal_remaining, withdrawal);
-                assert_eq!(actual.payout_remaining, payout);
                 assert_eq!(
                     actual.claimed_withdrawals.iter().next().copied(),
                     self.state.claimed_withdrawals[batch.index()].map(u32::from)
-                );
-                assert_eq!(
-                    actual.claimed_payouts.iter().next().copied(),
-                    self.state.claimed_payouts[batch.index()].map(u32::from)
                 );
             }
         }
@@ -1309,15 +1274,14 @@ fn action_bit(action: spec::SettlementAction) -> u16 {
         spec::SettlementAction::Challenge(_) => 5,
         spec::SettlementAction::Finalize => 6,
         spec::SettlementAction::ClaimWithdrawal { .. } => 7,
-        spec::SettlementAction::ClaimPayout { .. } => 8,
-        spec::SettlementAction::ClaimDeposit(_) => 9,
-        spec::SettlementAction::BeginTerminal => 10,
-        spec::SettlementAction::ClaimState(_) => 11,
+        spec::SettlementAction::ClaimDeposit(_) => 8,
+        spec::SettlementAction::BeginTerminal => 9,
+        spec::SettlementAction::ClaimState(_) => 10,
     };
     1 << position
 }
 
-const ALL_ACTIONS: u16 = (1 << 12) - 1;
+const ALL_ACTIONS: u16 = (1 << 11) - 1;
 
 fn challenge_kind_matches(actual: ChallengeKind, expected: spec::ChallengeKind) -> bool {
     matches!(
@@ -1354,6 +1318,43 @@ fn queue_refined(driver: &mut RefinementDriver, id: spec::WithdrawalId) {
     driver.step(spec::SettlementAction::QueueWithdrawal(attempt));
 }
 
+#[test]
+fn absent_recipient_credit_refines_to_a_virtual_successor_without_a_reserve() {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    register_and_admit_refined(&mut driver, spec::Batch::B1);
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::Observe(7));
+    driver.step(spec::SettlementAction::Finalize);
+
+    let carol = driver.state.current_state[spec::Account::Carol.index()];
+    assert!(carol.active);
+    assert_eq!(carol.balance, 1);
+    let material = driver.material(spec::Batch::B1);
+    let row = material
+        .close
+        .rows
+        .iter()
+        .find(|row| row.account == driver.carol.public_key())
+        .expect("the new virtual recipient is committed in the close");
+    assert_eq!(row.predecessor, 0);
+    assert_eq!(row.successor, 1);
+    assert_eq!(row.output, SettlementOutput::None);
+    assert_eq!(material.close.withdrawal_total, 0);
+    let claims = driver
+        .fixture
+        .chain
+        .claimable_batches
+        .get(&material.id)
+        .unwrap();
+    assert_eq!(claims.withdrawal_remaining, 0);
+    assert!(claims.claimed_withdrawals.is_empty());
+}
+
 fn challenge_refined(driver: &mut RefinementDriver, batch: spec::Batch, kind: spec::ChallengeKind) {
     let proven = crate::bajillion::model::challenge::adjudicated_proven_challenges(batch)
         .into_iter()
@@ -1386,11 +1387,6 @@ fn clean_profile() -> RefinementDriver {
         source: spec::Batch::B2,
         position: 0,
     });
-    driver.step(spec::SettlementAction::ClaimPayout {
-        batch: spec::Batch::B1,
-        source: spec::Batch::B1,
-        position: 0,
-    });
     driver.step(spec::SettlementAction::ClaimWithdrawal {
         batch: spec::Batch::B2,
         source: spec::Batch::B2,
@@ -1401,20 +1397,10 @@ fn clean_profile() -> RefinementDriver {
         source: spec::Batch::B3,
         position: 0,
     });
-    driver.step(spec::SettlementAction::ClaimPayout {
-        batch: spec::Batch::B1,
-        source: spec::Batch::B1,
-        position: 1,
-    });
     driver.step(spec::SettlementAction::ClaimWithdrawal {
         batch: spec::Batch::B2,
         source: spec::Batch::B2,
         position: 0,
-    });
-    driver.step(spec::SettlementAction::ClaimPayout {
-        batch: spec::Batch::B1,
-        source: spec::Batch::B1,
-        position: 1,
     });
     driver
 }

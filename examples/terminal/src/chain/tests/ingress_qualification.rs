@@ -485,7 +485,7 @@ fn cross_target_claims_share_the_source_reservation() {
             .unwrap();
         let compound = |target| {
             SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                claim: FinalizedClaim::Withdrawal(claim.clone()),
+                claim: claim.clone(),
                 deposit: DepositRequest::sign(
                     native.chain_id(),
                     target,

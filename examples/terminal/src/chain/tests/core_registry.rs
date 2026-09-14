@@ -2,7 +2,7 @@ use super::*;
 use crate::chain::state::{Machine, machine_key};
 
 #[test]
-fn registry_enumeration_excludes_account_rosters() {
+fn registry_enumeration_excludes_genesis_allocations() {
     deterministic::Runner::default().start(|context| async move {
         let db = open(context.child("registry_directory"), "registry-directory").await;
         let native = native_for(two_deployments());
@@ -59,7 +59,7 @@ fn registry_enumeration_excludes_account_rosters() {
         assert_eq!(
             get_calls() - before,
             5,
-            "native trials read no deployment rosters or machines"
+            "native trials read no deployment configurations or machines"
         );
     });
 }
@@ -79,7 +79,6 @@ fn directory_preserves_accepted_registrations_across_blocks() {
                     Sha256::hash(&[&id.to_le_bytes()]),
                     operator_ack_key(0),
                     ed25519::PrivateKey::from_seed(88_888).public_key(),
-                    vec![wallets().remove(0).public_key()],
                     1024,
                     fee,
                     &owner,
@@ -154,7 +153,6 @@ fn registration_and_deposit_share_an_atomic_directory_update() {
                 Sha256::hash(&[salt]),
                 operator_ack_key(0),
                 ed25519::PrivateKey::from_seed(88_888).public_key(),
-                vec![wallet.public_key()],
                 1024,
                 10,
                 &owner,
@@ -318,7 +316,7 @@ fn registration_and_deposit_share_an_atomic_directory_update() {
 }
 
 #[test]
-fn outsider_deposits_preserve_native_funds_and_finalized_claims() {
+fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
     deterministic::Runner::default().start(|context| async move {
         let db = open(context.child("outsider_registry"), "outsider-registry").await;
         let (register, admit, claim) = withdrawal_fixture();
@@ -343,7 +341,7 @@ fn outsider_deposits_preserve_native_funds_and_finalized_claims() {
         assert_eq!(status(&db).await.claimable, 7);
         let initial = native_balance(&db, &native, &account).await.unwrap();
         let event = DepositEvent {
-            id: Sha256::hash(&[b"outsider-point-roster"]),
+            id: Sha256::hash(&[b"non-bootstrap-deposit"]),
             account: account.clone(),
             amount: 7,
         };
@@ -364,7 +362,7 @@ fn outsider_deposits_preserve_native_funds_and_finalized_claims() {
         finalized.record(13, Digest::EMPTY, db.read().await.root(), 13);
         assert_eq!(
             crate::chain::state::preflight(&db, &finalized, &native, &Timing::DEFAULT, &direct).await.unwrap(),
-            crate::chain::state::Preflight::Unavailable
+            crate::chain::state::Preflight::Eligible { action: None }
         );
         let release = super::super::state::withdrawal_release_key(
             &deployment(),
@@ -378,21 +376,24 @@ fn outsider_deposits_preserve_native_funds_and_finalized_claims() {
             &[
                 direct,
                 SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                    claim: FinalizedClaim::Withdrawal(claim.clone()),
+                    claim: claim.clone(),
                     deposit,
                 }),
             ],
         )
         .await;
-        assert_eq!(read(&db, &deposit_key(&target, &event.id)).await, None);
+        assert_eq!(
+            read(&db, &deposit_key(&target, &event.id)).await,
+            Some(Record::Deposit(event))
+        );
         assert_eq!(read(&db, &release).await, None);
         assert_eq!(status(&db).await.claimable, 7);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),
-            initial
+            initial - 7
         );
         assert!(
-            matches!(read(&db, &status_key(&target)).await, Some(Record::Status(status)) if status.custody == target_custody)
+            matches!(read(&db, &status_key(&target)).await, Some(Record::Status(status)) if status.custody == target_custody + 7)
         );
         assert_supply(&db, &native, &[]).await;
         seal_native(&db, 15, &native, &[SettlementTx::ClaimWithdrawal(claim)]).await;
@@ -403,7 +404,7 @@ fn outsider_deposits_preserve_native_funds_and_finalized_claims() {
         assert_eq!(status(&db).await.claimable, 0);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),
-            initial + 7
+            initial
         );
         assert_supply(&db, &native, &[]).await;
     });
@@ -441,13 +442,11 @@ fn untouched_registered_deployment_expires_without_transactions() {
 #[test]
 fn runtime_registration_uses_the_trusted_empty_qmdb_head() {
     let native = native();
-    let wallet = wallets().remove(0);
     let request = RegisterDeploymentRequest::sign(
         native.chain_id(),
         Sha256::hash(&[b"empty-head-contract"]),
         operator_ack_key(0),
         ed25519::PrivateKey::from_seed(99).public_key(),
-        vec![wallet.public_key()],
         1024,
         10,
         &operator_signer(0),
@@ -464,15 +463,12 @@ fn runtime_registration_uses_the_trusted_empty_qmdb_head() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(entry.deployment.accounts[0].key, wallet.public_key());
+    assert!(entry.deployment.accounts.is_empty());
     assert_eq!(RegistryEntry::decode(entry.encode()).unwrap(), entry);
     let encoded = entry.encode();
     for end in 0..encoded.len() {
         assert!(RegistryEntry::decode(encoded.slice(..end)).is_err());
     }
-    let mut duplicate = request;
-    duplicate.accounts.push(wallet.public_key());
-    assert!(duplicate.entry(&native).is_err());
     let mut rebound = entry.deployment.clone();
     rebound.rebind(Sha256::hash(&[b"another-full-identity"]));
     assert_ne!(rebound.digest(), entry.deployment.digest());

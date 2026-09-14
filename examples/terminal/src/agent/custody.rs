@@ -320,14 +320,6 @@ impl Agent {
                     configured.deployment.operator == self.operator,
                     "deposit deployment belongs to another operator"
                 );
-                ensure!(
-                    configured
-                        .deployment
-                        .accounts
-                        .iter()
-                        .any(|entry| entry.key == account),
-                    "account is not configured in the deposit deployment"
-                );
 
                 let event = DepositEvent {
                     id: Sha256::hash(&[

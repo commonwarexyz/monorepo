@@ -61,7 +61,7 @@ pub(crate) struct PendingPayment {
 }
 
 /// An operator-claimed signing context paired with an independently authenticated floor.
-/// `epoch` is the first epoch the retained finalized balance does not include.
+/// `epoch` is the first epoch the retained balance does not include.
 #[derive(Clone)]
 pub(crate) struct ContextCache {
     pub(crate) context: PaymentContext<Key, Digest>,
@@ -69,15 +69,12 @@ pub(crate) struct ContextCache {
     pub(crate) epoch: u64,
 }
 
-/// An open claim intent with replaceable, locally verified evidence.
+/// An open withdrawal intent with replaceable, locally verified evidence.
 /// Its batch identity is authenticated when evidence becomes available.
 #[derive(Clone)]
-pub(crate) struct PendingClaim<E> {
-    pub(crate) evidence: Option<E>,
+pub(crate) struct PendingWithdrawalClaim {
+    pub(crate) evidence: Option<operator_rpc::WithdrawalEvidenceResponse>,
 }
-
-pub(crate) type PendingWithdrawalClaim = PendingClaim<operator_rpc::WithdrawalEvidenceResponse>;
-pub(crate) type PendingPayoutClaim = PendingClaim<operator_rpc::ExternalPayoutEvidenceResponse>;
 
 pub(crate) struct State {
     /// The durable optimistic signing state, absent for a fresh wallet or after an
@@ -88,7 +85,6 @@ pub(crate) struct State {
     pub(crate) pending_deposit: Option<DepositRequest>,
     pub(crate) pending_transfer: Option<NativeTransferRequest>,
     pub(crate) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
-    pub(crate) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(crate) receipt_count: u64,
     /// Receiver intake state: the durable fetch cursor and the verified-credit ledger summary.
     pub(crate) incoming: IncomingSummary,
@@ -151,13 +147,6 @@ pub(crate) enum ReconcileOutcome {
     Unenforceable = 3,
 }
 
-#[derive(Clone, Copy)]
-#[repr(i64)]
-enum ClaimKind {
-    Withdrawal = 1,
-    ExternalPayout = 2,
-}
-
 /// The ledger records every concluded payment as `Accepted` (operator receipts held),
 /// `Finalized` (exact outgoing body authenticated in finalized activity), or `Abandoned`.
 #[derive(Clone, Copy)]
@@ -199,6 +188,7 @@ impl Store {
         Self::from_connection(connection, false, account, deployment, operator)
     }
 
+    #[cfg(test)]
     pub(crate) fn in_memory(
         account: &Key,
         deployment: &Digest,
@@ -376,10 +366,14 @@ impl Store {
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(transaction.execute(
-                "DELETE FROM agent_pending_claims WHERE kind = ?1 AND request = ?2 AND evidence IS NULL",
-                params![ClaimKind::Withdrawal as i64, request.encode().as_ref()],
-            )? == 1, "unused withdrawal differs from its pending intent");
+            ensure!(
+                transaction.execute(
+                    "DELETE FROM agent_pending_claims
+                 WHERE singleton = 1 AND request = ?1 AND evidence IS NULL",
+                    [request.encode().as_ref()],
+                )? == 1,
+                "unused withdrawal differs from its pending intent"
+            );
             transaction
                 .commit()
                 .map_err(|source| CommitUnknown::new("unused withdrawal", source))?;
@@ -392,14 +386,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn open_withdrawal_claim(&mut self) -> Result<()> {
         self.ensure_usable()?;
-        let result = open_claim_transaction(&mut self.connection, ClaimKind::Withdrawal);
-        self.finish_mutation(result)
-    }
-
-    /// Opens the external-payout-claim intent. Opening is idempotent.
-    pub(crate) fn open_payout_claim(&mut self) -> Result<()> {
-        self.ensure_usable()?;
-        let result = open_claim_transaction(&mut self.connection, ClaimKind::ExternalPayout);
+        let result = open_claim_transaction(&mut self.connection);
         self.finish_mutation(result)
     }
 
@@ -413,13 +400,14 @@ impl Store {
         let batch = evidence.batch_id().encode();
         let position = i64::from(evidence.witness.claim.position());
         let encoded = evidence.encode();
+        let request = evidence.witness.request.encode();
         ensure_claim_bound(encoded.as_ref(), "withdrawal evidence")?;
         let result = cache_claim_transaction(
             &mut self.connection,
-            ClaimKind::Withdrawal,
             batch.as_ref(),
             position,
             encoded.as_ref(),
+            request.as_ref(),
         );
         self.finish_mutation(result)
     }
@@ -433,7 +421,6 @@ impl Store {
         self.ensure_usable()?;
         claim_completed(
             &self.connection,
-            ClaimKind::Withdrawal,
             batch_id.encode().as_ref(),
             i64::from(position),
         )
@@ -453,66 +440,6 @@ impl Store {
         ensure_claim_bound(evidence.as_ref(), "withdrawal evidence")?;
         let result = complete_claim_transaction(
             &mut self.connection,
-            ClaimKind::Withdrawal,
-            batch.as_ref(),
-            position,
-            evidence.as_ref(),
-        );
-        self.finish_mutation(result)
-    }
-
-    /// Replaces cached external-payout evidence, excluding completed positions.
-    pub(crate) fn cache_payout_claim(
-        &mut self,
-        evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        validate_payout_evidence(evidence, &self.account)?;
-        let batch = evidence.batch_id.encode();
-        let position = i64::from(evidence.claim.position());
-        let encoded = evidence.encode();
-        ensure_claim_bound(encoded.as_ref(), "external-payout evidence")?;
-        let result = cache_claim_transaction(
-            &mut self.connection,
-            ClaimKind::ExternalPayout,
-            batch.as_ref(),
-            position,
-            encoded.as_ref(),
-        );
-        self.finish_mutation(result)
-    }
-
-    /// Whether an external-payout claim against this exact (batch, position) already
-    /// completed.
-    pub(crate) fn payout_claim_completed(
-        &self,
-        batch_id: BatchId<Digest>,
-        position: u32,
-    ) -> Result<bool> {
-        self.ensure_usable()?;
-        claim_completed(
-            &self.connection,
-            ClaimKind::ExternalPayout,
-            batch_id.encode().as_ref(),
-            i64::from(position),
-        )
-    }
-
-    pub(crate) fn complete_payout_claim(
-        &mut self,
-        evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-        payout: &chain_state::ExternalPayoutResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        validate_payout_evidence(evidence, &self.account)?;
-        validate_payout_result(payout, &self.account)?;
-        let batch = evidence.batch_id.encode();
-        let position = i64::from(evidence.claim.position());
-        let evidence = evidence.encode();
-        ensure_claim_bound(evidence.as_ref(), "external-payout evidence")?;
-        let result = complete_claim_transaction(
-            &mut self.connection,
-            ClaimKind::ExternalPayout,
             batch.as_ref(),
             position,
             evidence.as_ref(),
@@ -1262,22 +1189,20 @@ fn initialize_schema(
          );
 
          CREATE TABLE agent_pending_claims (
-             kind INTEGER PRIMARY KEY CHECK (kind IN (1, 2)),
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
              evidence BLOB CHECK (
                  evidence IS NULL OR length(evidence) BETWEEN 1 AND {max_claim_size}
              ),
              request BLOB CHECK (
-                 request IS NULL OR (
-                     kind = 1 AND length(request) BETWEEN 1 AND {max_claim_size}
-                 )
-             )
+                 request IS NULL OR length(request) BETWEEN 1 AND {max_claim_size}
+             ),
+             FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
          );
 
          CREATE TABLE agent_completed_claims (
-             kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
              batch BLOB NOT NULL CHECK (length(batch) = {batch_id_size}),
              position INTEGER NOT NULL CHECK (position >= 0),
-             PRIMARY KEY (kind, batch, position)
+             PRIMARY KEY (batch, position)
          );
 
          CREATE TABLE agent_payments (
@@ -1422,8 +1347,7 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
             "pending deposit belongs to another deployment"
         );
     }
-    let (pending_withdrawal_claim, pending_payout_claim, pending_withdrawal) =
-        read_pending_claims(connection, account)?;
+    let (pending_withdrawal_claim, pending_withdrawal) = read_pending_claim(connection, account)?;
     if let Some(pending) = &pending_payment {
         validate_authorization(
             &pending.authorization,
@@ -1448,7 +1372,6 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
         pending_deposit,
         pending_transfer: read_pending_transfer(connection, account)?,
         pending_withdrawal_claim,
-        pending_payout_claim,
         receipt_count,
         incoming,
         last_reconciled_epoch,
@@ -1721,86 +1644,57 @@ fn read_pending_deposit(connection: &Connection, account: &Key) -> Result<Option
 }
 
 #[allow(clippy::type_complexity)]
-fn read_pending_claims(
+fn read_pending_claim(
     connection: &Connection,
     account: &Key,
 ) -> Result<(
     Option<PendingWithdrawalClaim>,
-    Option<PendingPayoutClaim>,
     Option<SignedWithdrawal<Key, Digest>>,
 )> {
     let mut statement = connection.prepare(
-        "SELECT kind, length(evidence), evidence, length(request), request
-         FROM agent_pending_claims ORDER BY kind LIMIT 3",
+        "SELECT singleton, length(evidence), evidence, length(request), request
+         FROM agent_pending_claims ORDER BY singleton LIMIT 2",
     )?;
     let mut rows = statement.query([])?;
-    let mut withdrawal = None;
-    let mut payout = None;
-    let mut pending_request = None;
-    while let Some(row) = rows.next()? {
-        let kind = row.get::<_, i64>(0)?;
-        let evidence = read_optional_bounded_blob(
-            row,
-            1,
-            2,
-            MAX_PENDING_CLAIM_BYTES,
-            "pending claim evidence",
-        )?;
-        let request =
-            read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?;
-        match kind {
-            value if value == ClaimKind::Withdrawal as i64 => {
-                ensure!(
-                    withdrawal.is_none(),
-                    "multiple withdrawal claims are pending"
-                );
-                let evidence = evidence
-                    .map(|encoded| {
-                        operator_rpc::WithdrawalEvidenceResponse::decode(encoded.as_slice())
-                    })
-                    .transpose()?;
-                if let Some(evidence) = &evidence {
-                    validate_withdrawal_evidence(connection, evidence, account)?;
-                }
-                pending_request = request
-                    .map(|encoded| {
-                        SignedWithdrawal::decode_cfg(
-                            encoded.as_slice(),
-                            &(..=MAX_DESTINATION_BYTES).into(),
-                        )
-                    })
-                    .transpose()?;
-                if let Some(request) = &pending_request {
-                    validate_pending_withdrawal(connection, account, request)?;
-                    ensure!(
-                        evidence
-                            .as_ref()
-                            .is_none_or(|evidence| evidence.witness.request == *request),
-                        "withdrawal evidence differs from the pending request"
-                    );
-                }
-                withdrawal = Some(PendingClaim { evidence });
-            }
-            value if value == ClaimKind::ExternalPayout as i64 => {
-                ensure!(payout.is_none(), "multiple external payouts are pending");
-                ensure!(
-                    request.is_none(),
-                    "external payout has a withdrawal request"
-                );
-                let evidence = evidence
-                    .map(|encoded| {
-                        operator_rpc::ExternalPayoutEvidenceResponse::decode(encoded.as_slice())
-                    })
-                    .transpose()?;
-                if let Some(evidence) = &evidence {
-                    validate_payout_evidence(evidence, account)?;
-                }
-                payout = Some(PendingClaim { evidence });
-            }
-            _ => anyhow::bail!("pending claim kind is not canonical"),
-        }
+    let Some(row) = rows.next()? else {
+        return Ok((None, None));
+    };
+    ensure!(
+        row.get::<_, i64>(0)? == 1,
+        "agent database pending claim singleton is not canonical"
+    );
+    let evidence = read_optional_bounded_blob(
+        row,
+        1,
+        2,
+        MAX_PENDING_CLAIM_BYTES,
+        "pending withdrawal evidence",
+    )?
+    .map(|encoded| operator_rpc::WithdrawalEvidenceResponse::decode(encoded.as_slice()))
+    .transpose()?;
+    if let Some(evidence) = &evidence {
+        validate_withdrawal_evidence(connection, evidence, account)?;
     }
-    Ok((withdrawal, payout, pending_request))
+    let request =
+        read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
+            .map(|encoded| {
+                SignedWithdrawal::decode_cfg(encoded.as_slice(), &(..=MAX_DESTINATION_BYTES).into())
+            })
+            .transpose()?;
+    if let Some(request) = &request {
+        validate_pending_withdrawal(connection, account, request)?;
+        ensure!(
+            evidence
+                .as_ref()
+                .is_none_or(|evidence| evidence.witness.request == *request),
+            "withdrawal evidence differs from the pending request"
+        );
+    }
+    ensure!(
+        rows.next()?.is_none(),
+        "agent database has multiple pending withdrawal claims"
+    );
+    Ok((Some(PendingWithdrawalClaim { evidence }), request))
 }
 
 fn validate_pending_withdrawal(
@@ -1873,28 +1767,6 @@ fn validate_withdrawal_result(
         result.destination == *evidence.witness.claim.output().destination()
             && result.amount == evidence.witness.claim.output().amount(),
         "pending withdrawal result differs from its evidence"
-    );
-    Ok(())
-}
-
-fn validate_payout_evidence(
-    evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-    account: &Key,
-) -> Result<()> {
-    ensure!(
-        evidence.claim.recipient() == account,
-        "pending external-payout evidence belongs to another account"
-    );
-    Ok(())
-}
-
-fn validate_payout_result(
-    result: &chain_state::ExternalPayoutResponse,
-    account: &Key,
-) -> Result<()> {
-    ensure!(
-        &result.receiver == account,
-        "pending external payout belongs to another account"
     );
     Ok(())
 }
@@ -2515,8 +2387,8 @@ fn record_reconcile_transaction(
 fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
-        "INSERT INTO agent_pending_claims (kind, evidence, request) VALUES (?1, NULL, ?2)",
-        params![ClaimKind::Withdrawal as i64, request],
+        "INSERT INTO agent_pending_claims (singleton, evidence, request) VALUES (1, NULL, ?1)",
+        [request],
     )?;
     transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
@@ -2525,15 +2397,16 @@ fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> 
     Ok(())
 }
 
-fn open_claim_transaction(connection: &mut Connection, kind: ClaimKind) -> Result<()> {
+#[cfg(test)]
+fn open_claim_transaction(connection: &mut Connection) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin claim intent open")?;
     transaction.execute(
-        "INSERT INTO agent_pending_claims (kind, evidence, request)
-         VALUES (?1, NULL, NULL)
-         ON CONFLICT(kind) DO NOTHING",
-        [kind as i64],
+        "INSERT INTO agent_pending_claims (singleton, evidence, request)
+         VALUES (1, NULL, NULL)
+         ON CONFLICT(singleton) DO NOTHING",
+        [],
     )?;
     transaction
         .commit()
@@ -2543,24 +2416,25 @@ fn open_claim_transaction(connection: &mut Connection, kind: ClaimKind) -> Resul
 
 fn cache_claim_transaction(
     connection: &mut Connection,
-    kind: ClaimKind,
     batch: &[u8],
     position: i64,
     evidence: &[u8],
+    request: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin claim evidence cache")?;
     ensure!(
-        !claim_completed(&transaction, kind, batch, position)?,
+        !claim_completed(&transaction, batch, position)?,
         "claim evidence names an already-completed (batch, position)"
     );
     ensure!(
         transaction.execute(
-            "UPDATE agent_pending_claims SET evidence = ?1 WHERE kind = ?2",
-            params![evidence, kind as i64],
+            "UPDATE agent_pending_claims SET evidence = ?1
+             WHERE singleton = 1 AND (request IS NULL OR request = ?2)",
+            params![evidence, request],
         )? == 1,
-        "no claim intent is open"
+        "withdrawal evidence differs from the pending request"
     );
     transaction
         .commit()
@@ -2569,11 +2443,10 @@ fn cache_claim_transaction(
 }
 
 /// Completes the claim: the intent deletion and the durable record of the
-/// consumed (kind, batch, position) commit in one transaction, so evidence
-/// against a spent release can never rebind to a later intent of this kind.
+/// consumed `(batch, position)` commit in one transaction, so evidence
+/// against a spent release can never rebind to a later intent.
 fn complete_claim_transaction(
     connection: &mut Connection,
-    kind: ClaimKind,
     batch: &[u8],
     position: i64,
     evidence: &[u8],
@@ -2584,8 +2457,8 @@ fn complete_claim_transaction(
     ensure!(
         transaction.execute(
             "DELETE FROM agent_pending_claims
-             WHERE kind = ?1 AND evidence = ?2",
-            params![kind as i64, evidence],
+             WHERE singleton = 1 AND evidence = ?1",
+            [evidence],
         )? == 1,
         "pending claim completion does not match durable evidence"
     );
@@ -2594,8 +2467,8 @@ fn complete_claim_transaction(
     // so the deleted intent's key is never already recorded: a conflicting
     // insert aborts the completion loudly instead of masking that breach.
     transaction.execute(
-        "INSERT INTO agent_completed_claims (kind, batch, position) VALUES (?1, ?2, ?3)",
-        params![kind as i64, batch, position],
+        "INSERT INTO agent_completed_claims (batch, position) VALUES (?1, ?2)",
+        params![batch, position],
     )?;
     transaction
         .commit()
@@ -2603,18 +2476,13 @@ fn complete_claim_transaction(
     Ok(())
 }
 
-fn claim_completed(
-    connection: &Connection,
-    kind: ClaimKind,
-    batch: &[u8],
-    position: i64,
-) -> Result<bool> {
+fn claim_completed(connection: &Connection, batch: &[u8], position: i64) -> Result<bool> {
     Ok(connection.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM agent_completed_claims
-             WHERE kind = ?1 AND batch = ?2 AND position = ?3
+             WHERE batch = ?1 AND position = ?2
          )",
-        params![kind as i64, batch, position],
+        params![batch, position],
         |row| row.get(0),
     )?)
 }

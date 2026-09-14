@@ -19,8 +19,8 @@ use commonware_clearing::bajillion::{
     settlement::{FinalizedClaims, SettlementChain},
     state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
-        BatchId, CloseAmounts, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim,
-        Header, RootBundle, WithdrawalClaim, WithdrawalOutput,
+        BatchId, CloseContext, CloseLimits, EpochContext, Header, RootBundle, WithdrawalClaim,
+        WithdrawalOutput,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -53,7 +53,6 @@ commonware_conformance::conformance_tests! {
     CodecConformance<VectorRoot<Sha256Digest>>,
     CodecConformance<RootBundle<Sha256Digest>>,
     CodecConformance<StateRoot<Sha256Digest>>,
-    CodecConformance<CloseAmounts>,
     CodecConformance<Opening<Sha256Digest>> => 1024,
     CodecConformance<RangeOpening<Sha256Digest>> => 1024,
     CodecConformance<PaymentContext<VerifyingKey, Sha256Digest>> => 1024,
@@ -75,7 +74,6 @@ commonware_conformance::conformance_tests! {
     CodecConformance<EpochContext<VerifyingKey, Sha256Digest>>,
     CodecConformance<CloseContext<VerifyingKey, Sha256Digest>>,
     CodecConformance<WithdrawalOutput> => 1024,
-    CodecConformance<ExternalPayoutClaim<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<WithdrawalClaim<Sha256Digest>> => 256,
     CodecConformance<SettlementChain<Sha256, VerifyingKey>> => 256,
     CodecConformance<FinalizedClaims<Sha256Digest>> => 256,

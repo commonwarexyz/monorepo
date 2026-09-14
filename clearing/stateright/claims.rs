@@ -1,106 +1,12 @@
 use stateright::{Checker, Model, Property};
 
-const CLAIM_KINDS: usize = 2;
 const BATCHES: usize = 2;
 const POSITIONS: usize = 2;
-const CLAIMS: usize = CLAIM_KINDS * BATCHES * POSITIONS;
+const CLAIMS: usize = BATCHES * POSITIONS;
 const DESTINATIONS: usize = 3;
-const INITIAL_RESERVES: [[u16; BATCHES]; CLAIM_KINDS] = [[5, 12], [24, 36]];
-const INITIAL_CUSTODY: u16 = 77;
+const INITIAL_RESERVES: [u16; BATCHES] = [5, 12];
+const INITIAL_CUSTODY: u16 = 17;
 const VALID_CLAIM_MASK: u16 = (1u16 << CLAIMS) - 1;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum ClaimKind {
-    WithdrawalOutput,
-    ExternalPayout,
-}
-
-impl ClaimKind {
-    const ALL: [Self; CLAIM_KINDS] = [Self::WithdrawalOutput, Self::ExternalPayout];
-
-    const fn index(self) -> usize {
-        match self {
-            Self::WithdrawalOutput => 0,
-            Self::ExternalPayout => 1,
-        }
-    }
-
-    const fn root_role(self) -> RootRole {
-        match self {
-            Self::WithdrawalOutput => RootRole::WithdrawalOutput,
-            Self::ExternalPayout => RootRole::Change,
-        }
-    }
-
-    const fn root_identity(self, batch_id: BatchId) -> RootIdentity {
-        match (self, batch_id) {
-            (Self::WithdrawalOutput, BatchId::A) => RootIdentity::WithdrawalA,
-            (Self::WithdrawalOutput, BatchId::B) => RootIdentity::WithdrawalB,
-            (Self::ExternalPayout, BatchId::A) => RootIdentity::ChangeA,
-            (Self::ExternalPayout, BatchId::B) => RootIdentity::ChangeB,
-        }
-    }
-
-    const fn root(self, batch_id: BatchId) -> AuthenticatedRoot {
-        AuthenticatedRoot {
-            role: self.root_role(),
-            identity: self.root_identity(batch_id),
-        }
-    }
-
-    const fn outputs(self, batch_id: BatchId) -> [ClaimOutput; POSITIONS] {
-        match (self, batch_id) {
-            (Self::WithdrawalOutput, BatchId::A) => [
-                ClaimOutput {
-                    position: 0,
-                    destination: Destination::Alice,
-                    amount: 2,
-                },
-                ClaimOutput {
-                    position: 1,
-                    destination: Destination::Bob,
-                    amount: 3,
-                },
-            ],
-            (Self::WithdrawalOutput, BatchId::B) => [
-                ClaimOutput {
-                    position: 0,
-                    destination: Destination::Carol,
-                    amount: 5,
-                },
-                ClaimOutput {
-                    position: 1,
-                    destination: Destination::Alice,
-                    amount: 7,
-                },
-            ],
-            (Self::ExternalPayout, BatchId::A) => [
-                ClaimOutput {
-                    position: 0,
-                    destination: Destination::Bob,
-                    amount: 11,
-                },
-                ClaimOutput {
-                    position: 1,
-                    destination: Destination::Carol,
-                    amount: 13,
-                },
-            ],
-            (Self::ExternalPayout, BatchId::B) => [
-                ClaimOutput {
-                    position: 0,
-                    destination: Destination::Alice,
-                    amount: 17,
-                },
-                ClaimOutput {
-                    position: 1,
-                    destination: Destination::Bob,
-                    amount: 19,
-                },
-            ],
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum BatchId {
@@ -115,6 +21,42 @@ impl BatchId {
         match self {
             Self::A => 0,
             Self::B => 1,
+        }
+    }
+
+    const fn root(self) -> WithdrawalRoot {
+        match self {
+            Self::A => WithdrawalRoot::A,
+            Self::B => WithdrawalRoot::B,
+        }
+    }
+
+    const fn outputs(self) -> [ClaimOutput; POSITIONS] {
+        match self {
+            Self::A => [
+                ClaimOutput {
+                    position: 0,
+                    destination: Destination::Alice,
+                    amount: 2,
+                },
+                ClaimOutput {
+                    position: 1,
+                    destination: Destination::Bob,
+                    amount: 3,
+                },
+            ],
+            Self::B => [
+                ClaimOutput {
+                    position: 0,
+                    destination: Destination::Carol,
+                    amount: 5,
+                },
+                ClaimOutput {
+                    position: 1,
+                    destination: Destination::Alice,
+                    amount: 7,
+                },
+            ],
         }
     }
 }
@@ -137,23 +79,9 @@ impl Destination {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum RootRole {
-    WithdrawalOutput,
-    Change,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum RootIdentity {
-    WithdrawalA,
-    WithdrawalB,
-    ChangeA,
-    ChangeB,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct AuthenticatedRoot {
-    role: RootRole,
-    identity: RootIdentity,
+enum WithdrawalRoot {
+    A,
+    B,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -165,26 +93,24 @@ struct ClaimOutput {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct OutputOpening {
-    root: AuthenticatedRoot,
+    root: WithdrawalRoot,
     position: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Claim {
-    kind: ClaimKind,
     batch_id: BatchId,
     output: ClaimOutput,
     opening: OutputOpening,
 }
 
 impl Claim {
-    const fn canonical(kind: ClaimKind, batch_id: BatchId, position: u8) -> Self {
+    const fn canonical(batch_id: BatchId, position: u8) -> Self {
         Self {
-            kind,
             batch_id,
-            output: kind.outputs(batch_id)[position as usize],
+            output: batch_id.outputs()[position as usize],
             opening: OutputOpening {
-                root: kind.root(batch_id),
+                root: batch_id.root(),
                 position,
             },
         }
@@ -193,15 +119,13 @@ impl Claim {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ClaimKey {
-    kind: ClaimKind,
     batch_id: BatchId,
     output_position: u8,
 }
 
 impl ClaimKey {
     const fn index(self) -> usize {
-        (self.kind.index() * BATCHES + self.batch_id.index()) * POSITIONS
-            + self.output_position as usize
+        self.batch_id.index() * POSITIONS + self.output_position as usize
     }
 
     const fn bit(self) -> u16 {
@@ -211,7 +135,7 @@ impl ClaimKey {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ClaimState {
-    reserves: [[u16; BATCHES]; CLAIM_KINDS],
+    reserves: [u16; BATCHES],
     claimable: u16,
     custody: u16,
     released: u16,
@@ -246,15 +170,14 @@ impl ClaimModel {
     fn apply(state: &mut ClaimState, claim: Claim) -> bool {
         let position = usize::from(claim.output.position);
         if position >= POSITIONS
-            || claim.output != claim.kind.outputs(claim.batch_id)[position]
-            || claim.opening.root != claim.kind.root(claim.batch_id)
+            || claim.output != claim.batch_id.outputs()[position]
+            || claim.opening.root != claim.batch_id.root()
             || claim.opening.position != claim.output.position
         {
             return false;
         }
 
         let key = ClaimKey {
-            kind: claim.kind,
             batch_id: claim.batch_id,
             output_position: claim.output.position,
         };
@@ -262,10 +185,9 @@ impl ClaimModel {
             return false;
         }
 
-        let kind = claim.kind.index();
         let batch = claim.batch_id.index();
         let amount = claim.output.amount;
-        let Some(reserve) = state.reserves[kind][batch].checked_sub(amount) else {
+        let Some(reserve) = state.reserves[batch].checked_sub(amount) else {
             return false;
         };
 
@@ -285,7 +207,7 @@ impl ClaimModel {
         let Some(released_to) = state.released_to[destination].checked_add(amount) else {
             return false;
         };
-        state.reserves[kind][batch] = reserve;
+        state.reserves[batch] = reserve;
         state.claimable = claimable;
         state.custody = custody;
         state.released = released;
@@ -295,13 +217,12 @@ impl ClaimModel {
         true
     }
 
-    const fn expected_reserve(state: &ClaimState, kind: ClaimKind, batch_id: BatchId) -> u16 {
-        let outputs = kind.outputs(batch_id);
+    const fn expected_reserve(state: &ClaimState, batch_id: BatchId) -> u16 {
+        let outputs = batch_id.outputs();
         let mut total = 0;
         let mut position = 0;
         while position < POSITIONS {
             let key = ClaimKey {
-                kind,
                 batch_id,
                 output_position: position as u8,
             };
@@ -315,17 +236,14 @@ impl ClaimModel {
 
     fn expected_releases(state: &ClaimState) -> [u16; DESTINATIONS] {
         let mut releases = [0; DESTINATIONS];
-        for kind in ClaimKind::ALL {
-            for batch_id in BatchId::ALL {
-                for output in kind.outputs(batch_id) {
-                    let key = ClaimKey {
-                        kind,
-                        batch_id,
-                        output_position: output.position,
-                    };
-                    if state.consumed & key.bit() != 0 {
-                        releases[output.destination.index()] += output.amount;
-                    }
+        for batch_id in BatchId::ALL {
+            for output in batch_id.outputs() {
+                let key = ClaimKey {
+                    batch_id,
+                    output_position: output.position,
+                };
+                if state.consumed & key.bit() != 0 {
+                    releases[output.destination.index()] += output.amount;
                 }
             }
         }
@@ -339,12 +257,9 @@ fn custody_is_conserved(_: &ClaimModel, state: &ClaimState) -> bool {
 }
 
 fn reserves_are_exact(_: &ClaimModel, state: &ClaimState) -> bool {
-    ClaimKind::ALL.into_iter().all(|kind| {
-        BatchId::ALL.into_iter().all(|batch_id| {
-            state.reserves[kind.index()][batch_id.index()]
-                == ClaimModel::expected_reserve(state, kind, batch_id)
-        })
-    }) && state.claimable == state.reserves.iter().flatten().copied().sum::<u16>()
+    BatchId::ALL.into_iter().all(|batch_id| {
+        state.reserves[batch_id.index()] == ClaimModel::expected_reserve(state, batch_id)
+    }) && state.claimable == state.reserves.iter().copied().sum::<u16>()
 }
 
 fn consumed_keys_are_exact(_: &ClaimModel, state: &ClaimState) -> bool {
@@ -366,32 +281,23 @@ fn releases_are_exact(_: &ClaimModel, state: &ClaimState) -> bool {
     state.released_to == releases && state.released == releases.into_iter().sum::<u16>()
 }
 
-const fn key(kind: ClaimKind, batch_id: BatchId, output_position: u8) -> ClaimKey {
+const fn key(batch_id: BatchId, output_position: u8) -> ClaimKey {
     ClaimKey {
-        kind,
         batch_id,
         output_position,
     }
 }
 
 const fn multiple_positions_in_one_batch(_: &ClaimModel, state: &ClaimState) -> bool {
-    state.consumed & key(ClaimKind::WithdrawalOutput, BatchId::A, 0).bit() != 0
-        && state.consumed & key(ClaimKind::WithdrawalOutput, BatchId::A, 1).bit() != 0
+    state.consumed & key(BatchId::A, 0).bit() != 0 && state.consumed & key(BatchId::A, 1).bit() != 0
 }
 
 const fn same_position_across_batches(_: &ClaimModel, state: &ClaimState) -> bool {
-    state.consumed & key(ClaimKind::ExternalPayout, BatchId::A, 0).bit() != 0
-        && state.consumed & key(ClaimKind::ExternalPayout, BatchId::B, 0).bit() != 0
-}
-
-const fn same_tuple_across_kinds(_: &ClaimModel, state: &ClaimState) -> bool {
-    state.consumed & key(ClaimKind::WithdrawalOutput, BatchId::A, 0).bit() != 0
-        && state.consumed & key(ClaimKind::ExternalPayout, BatchId::A, 0).bit() != 0
+    state.consumed & key(BatchId::A, 0).bit() != 0 && state.consumed & key(BatchId::B, 0).bit() != 0
 }
 
 fn reverse_position_order(_: &ClaimModel, state: &ClaimState) -> bool {
-    state.last == Some(key(ClaimKind::WithdrawalOutput, BatchId::B, 0))
-        && state.consumed & key(ClaimKind::WithdrawalOutput, BatchId::B, 1).bit() != 0
+    state.last == Some(key(BatchId::B, 0)) && state.consumed & key(BatchId::B, 1).bit() != 0
 }
 
 const fn every_claim_drains(_: &ClaimModel, state: &ClaimState) -> bool {
@@ -410,15 +316,11 @@ impl Model for ClaimModel {
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
-        for kind in ClaimKind::ALL {
-            for batch_id in BatchId::ALL {
-                for position in 0..POSITIONS as u8 {
-                    let key = key(kind, batch_id, position);
-                    if state.consumed & key.bit() == 0 {
-                        actions.push(ClaimAction::Claim(Claim::canonical(
-                            kind, batch_id, position,
-                        )));
-                    }
+        for batch_id in BatchId::ALL {
+            for position in 0..POSITIONS as u8 {
+                let key = key(batch_id, position);
+                if state.consumed & key.bit() == 0 {
+                    actions.push(ClaimAction::Claim(Claim::canonical(batch_id, position)));
                 }
             }
         }
@@ -434,12 +336,9 @@ impl Model for ClaimModel {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             Property::always("claim custody is conserved", custody_is_conserved),
+            Property::always("each batch reserve is exact", reserves_are_exact),
             Property::always(
-                "each namespace and batch reserve is exact",
-                reserves_are_exact,
-            ),
-            Property::always(
-                "consumed identities are exact kind-batch-position tuples",
+                "consumed identities are exact batch-position tuples",
                 consumed_keys_are_exact,
             ),
             Property::always(
@@ -455,14 +354,10 @@ impl Model for ClaimModel {
                 same_position_across_batches,
             ),
             Property::sometimes(
-                "the same batch-position tuple claims independently across kinds",
-                same_tuple_across_kinds,
-            ),
-            Property::sometimes(
                 "positions may claim in reverse order",
                 reverse_position_order,
             ),
-            Property::sometimes("all claim namespaces fully drain", every_claim_drains),
+            Property::sometimes("all withdrawal claims fully drain", every_claim_drains),
         ]
     }
 }
@@ -482,26 +377,18 @@ fn assert_rejected_without_mutation(state: &ClaimState, claim: Claim) {
 fn claim_checker_exhausts_every_claim_ordering() {
     let checker = ClaimModel.checker().threads(1).spawn_bfs().join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 1_025);
+    assert_eq!(checker.unique_state_count(), 33);
     checker.assert_properties();
 }
 
 #[test]
 fn claims_reject_inexact_identity_and_replay_without_mutation() {
     let state = ClaimState::default();
-    let canonical = Claim::canonical(ClaimKind::WithdrawalOutput, BatchId::A, 0);
+    let canonical = Claim::canonical(BatchId::A, 0);
 
-    let mut wrong_kind = canonical;
-    wrong_kind.kind = ClaimKind::ExternalPayout;
-    assert_rejected_without_mutation(&state, wrong_kind);
-
-    let mut wrong_root_role = canonical;
-    wrong_root_role.opening.root.role = RootRole::Change;
-    assert_rejected_without_mutation(&state, wrong_root_role);
-
-    let mut wrong_root_identity = canonical;
-    wrong_root_identity.opening.root.identity = RootIdentity::WithdrawalB;
-    assert_rejected_without_mutation(&state, wrong_root_identity);
+    let mut wrong_root = canonical;
+    wrong_root.opening.root = WithdrawalRoot::B;
+    assert_rejected_without_mutation(&state, wrong_root);
 
     let mut wrong_batch = canonical;
     wrong_batch.batch_id = BatchId::B;
@@ -535,31 +422,31 @@ fn claims_reject_inexact_identity_and_replay_without_mutation() {
 }
 
 #[test]
-fn claim_namespaces_update_custody_independently_and_atomically() {
+fn withdrawal_claims_update_custody_independently_and_atomically() {
     let mut state = ClaimState::default();
-    let withdrawal = Claim::canonical(ClaimKind::WithdrawalOutput, BatchId::A, 0);
-    let payout = Claim::canonical(ClaimKind::ExternalPayout, BatchId::A, 0);
+    let first = Claim::canonical(BatchId::A, 0);
+    let second = Claim::canonical(BatchId::B, 0);
 
-    assert!(ClaimModel::apply(&mut state, withdrawal));
-    assert_eq!(state.reserves, [[3, 12], [24, 36]]);
-    assert_eq!(state.claimable, 75);
-    assert_eq!(state.custody, 75);
+    assert!(ClaimModel::apply(&mut state, first));
+    assert_eq!(state.reserves, [3, 12]);
+    assert_eq!(state.claimable, 15);
+    assert_eq!(state.custody, 15);
     assert_eq!(state.released, 2);
     assert_eq!(state.released_to, [2, 0, 0]);
 
-    assert!(ClaimModel::apply(&mut state, payout));
-    assert_eq!(state.reserves, [[3, 12], [13, 36]]);
-    assert_eq!(state.claimable, 64);
-    assert_eq!(state.custody, 64);
-    assert_eq!(state.released, 13);
-    assert_eq!(state.released_to, [2, 11, 0]);
-    assert_rejected_without_mutation(&state, payout);
+    assert!(ClaimModel::apply(&mut state, second));
+    assert_eq!(state.reserves, [3, 7]);
+    assert_eq!(state.claimable, 10);
+    assert_eq!(state.custody, 10);
+    assert_eq!(state.released, 7);
+    assert_eq!(state.released_to, [2, 0, 5]);
+    assert_rejected_without_mutation(&state, second);
 
     let underfunded = ClaimState {
         custody: 1,
         ..ClaimState::default()
     };
-    assert_rejected_without_mutation(&underfunded, withdrawal);
+    assert_rejected_without_mutation(&underfunded, first);
 }
 
 #[test]
@@ -571,15 +458,15 @@ fn claim_always_properties_have_direct_negative_controls() {
     assert!(!custody_is_conserved(&ClaimModel, &wrong_custody));
 
     let wrong_reserve = ClaimState {
-        reserves: [[4, 12], [24, 36]],
+        reserves: [4, 12],
         claimable: INITIAL_CUSTODY - 1,
         ..ClaimState::default()
     };
     assert!(!reserves_are_exact(&ClaimModel, &wrong_reserve));
 
     let invalid_last = ClaimState {
-        consumed: key(ClaimKind::WithdrawalOutput, BatchId::A, 0).bit(),
-        last: Some(key(ClaimKind::ExternalPayout, BatchId::B, 1)),
+        consumed: key(BatchId::A, 0).bit(),
+        last: Some(key(BatchId::B, 1)),
         ..ClaimState::default()
     };
     assert!(!consumed_keys_are_exact(&ClaimModel, &invalid_last));

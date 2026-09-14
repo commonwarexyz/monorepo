@@ -45,6 +45,7 @@ mod challenges;
 mod ordering;
 mod rotation;
 mod state;
+mod virtual_balances;
 mod wire;
 
 const EPOCH: u64 = 7;
@@ -360,7 +361,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
                     &fixture.context,
                     &close.header,
                     &close.roots,
-                    &close.amounts,
+                    close.withdrawal_total,
                     &Challenge::HigherAckDebit {
                         ack: Box::new(AckWitness::from_ack(ack)),
                         payer: Box::new(payer)

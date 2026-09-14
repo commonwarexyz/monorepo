@@ -1,14 +1,15 @@
 //! Application orchestration across wallets, SQLite, and the clearing protocol.
 
 use super::store::{
-    AcceptedBatch, CloseRejected, EpochData, ExternalPayoutEvidence, IncomingPayment,
-    MutationFailed, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
-    StoredCloseOutcome,
+    AcceptedBatch, CloseRejected, EpochData, IncomingPayment, MutationFailed, SendVerdict,
+    StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus, StoredCloseOutcome,
 };
 #[cfg(test)]
 use super::store::{AccountView, Endpoint, StoreSnapshot};
 #[cfg(test)]
-use crate::protocol::{MAX_DESTINATION_BYTES, PreparedEpoch, Wallet, accounts, wallets};
+use crate::protocol::{
+    MAX_DESTINATION_BYTES, PreparedEpoch, Wallet, accounts, eve_identity, wallets,
+};
 use crate::{
     chain::{
         node::Pipeline,
@@ -19,8 +20,8 @@ use crate::{
         Account, AccountIdentity, Ack, Deployment, DepositEvent, Entry, EpochRegistration, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, Protocol, SettlementResult, Timing,
         WithdrawalEvidence, WithdrawalWitness, ensure_amount_withdrawal_horizon,
-        ensure_balance_intake_horizon, ensure_close_horizon, external_identity, identities,
-        openable_epoch_after, short_digest,
+        ensure_balance_intake_horizon, ensure_close_horizon, identities, openable_epoch_after,
+        short_digest,
     },
     store::CommitUnknown,
 };
@@ -34,9 +35,7 @@ use commonware_clearing::bajillion::{
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
     settlement::Genesis,
-    transition::{
-        BatchId, ChallengeIndex, EpochContext, ExternalPayoutClaim, Terminal, WithdrawalClaim,
-    },
+    transition::{BatchId, ChallengeIndex, EpochContext, Terminal, WithdrawalClaim},
     vector::{OutEntry, OutVector},
 };
 #[cfg(test)]
@@ -124,7 +123,7 @@ pub(crate) struct CloseFinished {
     pub(crate) header_digest: String,
     pub(crate) rows: usize,
     pub(crate) dealing_bytes: usize,
-    pub(crate) payout_total: u64,
+    pub(crate) withdrawal_total: u64,
     pub(crate) header_bytes: usize,
     pub(crate) certificate_bytes: usize,
     pub(crate) prepare_micros: u128,
@@ -156,7 +155,6 @@ pub(crate) struct Operator {
     identities: Vec<AccountIdentity>,
     #[cfg(test)]
     wallets: Vec<Wallet>,
-    external: AccountIdentity,
     /// Close pipeline over the operator node's DA channel and local chain
     /// backend. `None` runs the in-process harness certification instead.
     pipeline: Option<Pipeline>,
@@ -322,7 +320,6 @@ impl Operator {
             identities,
             #[cfg(test)]
             wallets: wallets(),
-            external: external_identity(),
             pipeline,
             genesis_root: configured_genesis_root,
             registration,
@@ -366,7 +363,7 @@ impl Operator {
         let payer = payer % self.wallets.len();
         let receiver_index = receiver % self.receiver_count();
         let receiver = if receiver_index == self.wallets.len() {
-            self.external.key.clone()
+            eve_identity().key
         } else {
             self.wallets[receiver_index].public_key()
         };
@@ -403,9 +400,19 @@ impl Operator {
         )
     }
 
+    // SQL cutover projects successor balances before certification and admission complete.
+    // A key created only by those credits waits for admission before originating payments or withdrawals.
+    fn ensure_payer_eligible(&self, account: &Key) -> Result<()> {
+        let first_unadmitted = self.certified_tip()?.map_or(Ok(0), |(epoch, _)| {
+            epoch.checked_add(1).context("admitted epoch overflow")
+        })?;
+        self.store.ensure_payer_eligible(account, first_unadmitted)
+    }
+
     pub(crate) fn payment_head(&self, account: &Key) -> Result<PaymentHead> {
         self.ensure_operating()?;
         self.ensure_balance_intake_horizon()?;
+        self.ensure_payer_eligible(account)?;
         let state = self
             .store
             .current_account(account)?
@@ -494,11 +501,9 @@ impl Operator {
         entries: Vec<Entry>,
     ) -> Result<SendOutcome> {
         self.ensure_operating()?;
-        self.validate_recipients(&entries)?;
 
-        // A replay lookup is the only pre-mutation probe: the store transaction fully
-        // validates a new batch before any mutation, so validating here too would repeat
-        // the same signature checks on every accepted payment.
+        // Exact replays remain readable after an account drains or its epoch closes.
+        // The store transaction validates new authorizations before any mutation.
         if let Some(accepted) = self.store.accepted_batch(&authorization, &entries)? {
             return Ok(SendOutcome::Accepted(accepted));
         }
@@ -526,6 +531,7 @@ impl Operator {
             });
         }
         self.ensure_balance_intake_horizon()?;
+        self.ensure_payer_eligible(body.payer())?;
         let result = self.store.accept_send(
             self.registration.context.payment(),
             &self.protocol,
@@ -555,7 +561,6 @@ impl Operator {
         entries: &[Entry],
     ) -> Result<bool> {
         self.ensure_operating()?;
-        self.validate_recipients(entries)?;
         let context = self.registration.context.payment();
         let body = authorization.body();
         let rebound = VectorSendBody::new(
@@ -568,6 +573,10 @@ impl Operator {
         if rebound != *body {
             return Ok(false);
         }
+        if self.store.accepted_batch(authorization, entries)?.is_some() {
+            return Ok(false);
+        }
+        self.ensure_payer_eligible(body.payer())?;
         let required = self.store.chain_deadlines(context.epoch())?.is_none()
             && self
                 .store
@@ -641,8 +650,11 @@ impl Operator {
                 .identities
                 .iter()
                 .find(|identity| identity.key == event.account)
-                .context("deposit account is not a configured operator identity")?
-                .clone();
+                .cloned()
+                .unwrap_or(AccountIdentity {
+                    name: "Account",
+                    key: event.account.clone(),
+                });
             let replacement = registration_with_deposit(
                 &self.protocol,
                 &registration,
@@ -701,6 +713,7 @@ impl Operator {
     pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalOpening> {
         self.ensure_operating()?;
         self.ensure_close_horizon()?;
+        self.ensure_payer_eligible(account)?;
         Ok(WithdrawalOpening {
             root: self
                 .balances
@@ -818,26 +831,6 @@ impl Operator {
         Ok(Some(staged))
     }
 
-    pub(crate) fn external_payout_evidence(
-        &self,
-        receiver: &Key,
-    ) -> Result<ExternalPayoutEvidence> {
-        self.ensure_store_usable()?;
-        self.store.external_payout_evidence(receiver)
-    }
-
-    pub(crate) fn acknowledge_external_payout_claim(
-        &mut self,
-        batch_id: BatchId<Digest>,
-        claim: &ExternalPayoutClaim<Key, Digest>,
-    ) -> Result<()> {
-        self.ensure_store_usable()?;
-        let result = self
-            .store
-            .acknowledge_external_payout_claim(batch_id, claim);
-        self.guard_store(result)
-    }
-
     /// Cuts the registered epoch, opens its successor, and schedules close construction.
     pub(crate) fn start_close(&mut self, expected_epoch: u64) -> Result<CloseStarted> {
         if self.close_already_started(expected_epoch)? {
@@ -929,7 +922,7 @@ impl Operator {
                 header_digest: short_digest(close.header.digest()),
                 rows: close.rows,
                 dealing_bytes: close.dealing_bytes,
-                payout_total: close.payout_total,
+                withdrawal_total: close.withdrawal_total,
                 header_bytes: close.header_bytes,
                 certificate_bytes: close.certificate_bytes,
                 prepare_micros: close.prepare_micros,
@@ -1202,20 +1195,6 @@ impl Operator {
         ensure_close_horizon(self.registration.context.payment().epoch())
     }
 
-    fn validate_recipients(&self, entries: &[Entry]) -> Result<()> {
-        for entry in entries {
-            ensure!(
-                entry.recipient == self.external.key
-                    || self
-                        .identities
-                        .iter()
-                        .any(|identity| identity.key == entry.recipient),
-                "payment receiver is neither a registered account nor the configured external receiver"
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) fn withdrawal_evidence(&self, account: &Key) -> Result<WithdrawalEvidence> {
         self.ensure_store_usable()?;
         let (epoch, claim) = self.store.withdrawal_evidence(account)?;
@@ -1227,7 +1206,7 @@ impl Operator {
             roots: result.roots,
             witness: WithdrawalWitness::new(
                 &result.context,
-                result.amounts,
+                result.withdrawal_total,
                 &result.withdrawals,
                 claim,
             )?,
@@ -1633,7 +1612,7 @@ impl Operator {
             header_digest: short_digest(result.header.digest()),
             rows: result.rows,
             dealing_bytes: result.dealing_bytes,
-            payout_total: result.amounts.payout,
+            withdrawal_total: result.withdrawal_total,
             header_bytes: result.header.encode_size(),
             certificate_bytes: result.certificate.encode_size(),
             prepare_micros: result.prepare_micros,
@@ -1928,8 +1907,8 @@ pub(super) fn assemble_epoch(
             "stored entry credits its own payer"
         );
         ensure!(
-            stored.external == !accounts.contains_key(&stored.recipient),
-            "stored receiver classification is inconsistent"
+            accounts.contains_key(&stored.recipient),
+            "stored receiver has no virtual balance row"
         );
         let edge = edges
             .entry((stored.payer.clone(), stored.recipient.clone()))
@@ -2023,6 +2002,10 @@ pub(super) fn assemble_epoch(
         let deposit = registration.deposits.amount_for(&account.key);
         let withdrawal = registration.withdrawals.request_for(&account.key);
         let stored_withdrawal = stored_withdrawals.get(&account.key).copied();
+        ensure!(
+            account.predecessor > 0 || deposit > 0 || (totals.debit == 0 && withdrawal.is_none()),
+            "absent boundary account originated activity"
+        );
         ensure!(
             withdrawal == stored_withdrawal.map(|stored| &stored.request),
             "registration withdrawal differs from SQLite"

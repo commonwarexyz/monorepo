@@ -33,7 +33,7 @@ The chain has one trusted constant: the genesis threshold identity dealt to the 
 setup. Everything a wallet or an operator relies on is proven against it. The genesis also
 fixes the native supply, initial deployments, fee and resource policy, and chain-wide timing.
 Initial deployment identities bind that configuration and the fresh consensus identity.
-Later registrations bind their chain, keys, account roster, and resource reservation.
+Later registrations bind their chain, keys, and resource reservation.
 Their empty QMDB genesis comes from trusted network policy, and they start with zero custody.
 Each deployment's registered configuration is immutable.
 
@@ -75,8 +75,8 @@ head reads and before withdrawal authorization are SQLite-backed. Openings are r
 full root so a later hard fault can freeze an older finalized root. A staged deposit survives
 an agent restart and is retried with the same event id, which the chain's custody record
 consumes exactly once, so no second custody can move. Withdrawal authorization retries remain
-process-local, so that workflow alone does not promise exactly-once behavior across an agent
-restart. Replay protection is domain state rather than a history of transaction hashes: every
+durable through operator acknowledgment and queue confirmation, until the exact request's
+certified completion is proven. Replay protection is domain state rather than a history of transaction hashes: every
 transaction carries a natural idempotence key (a deposit id, an account queue slot, an epoch,
 a claim position), so no account nonces exist, a duplicate inclusion lands on its variant's
 guard as a no-op or typed conflict, and response-loss retries complete on the same effect
@@ -107,7 +107,7 @@ PAYMENT
    |
    +-- no cached context (fresh wallet, or invalidated by a withdrawal) => one head
        read: context, live state, and a StateOpening verified against settlement's
-       exact finalized root, then cached. this fallback also covers a local floor
+       exact finalized or admitted predecessor root, then cached. this fallback also covers a local floor
        that cannot prove affordability, and its live-balance precheck refuses a truly
        unaffordable send before anything is staged
    +-- stale context => typed corrective rejection carrying the operator's live
@@ -157,8 +157,8 @@ DEPOSIT OR WITHDRAWAL AUTHORIZATION
              hard-fault recovery
 
  Amount: wallet signs (state root, destination, exact amount, deadline)
- Close:  wallet signs (state root, destination, deadline); the amountless request sweeps
-         the authenticated epoch-tail balance and removes the account
+ Close:  wallet signs (state root, destination, deadline); the amountless request drains
+         the authenticated epoch-tail balance. Later credit recreates the balance
 
 CLEAN CLOSE
 
@@ -169,7 +169,6 @@ operator prepare -> deal -> validators validate the complete dealing
           -> FINALIZED
                 |
                 +-- withdrawal output + one opening -> destination, amount
-                +-- external payout + one opening   -> receiver, amount
                 +-- successor state becomes the next finalized head
 
  Epochs register and finalize in exact order: e, e+1, e+2. A retry may repeat e,
@@ -199,24 +198,25 @@ OPERATOR FAULT
       +-- pending Close  -> full frozen balance to destination
       +-- no withdrawal  -> full frozen balance to account
 
- Invalid external sends create no payout reserve; their payer recovers instead.
- Finalized withdrawal and external-payout reserves remain independently claimable.
+ Invalidated first credits create no frozen-root entitlement for their recipients.
+ Finalized withdrawal reserves remain independently claimable.
  Exact retries return the original result; conflicting replays fail closed.
 ```
 
-Recovery does not recreate unavailable evidence. On every verified head read, balance poll,
-and fresh withdrawal, the agent retains its payer opening against settlement's exact finalized
-root, and each optimistically staged payment pins one retained opening as its recovery
-evidence. Recovery uses an opening only when its full root is later frozen. A carried withdrawal is invisible to
+Recovery does not recreate unavailable evidence. The agent retains authenticated balance
+openings by their full root, and each staged payment pins the opening authorizing its spend.
+Recovery uses an opening only when its full root is later frozen. An invalidated first credit
+can leave a pending-root opening without any entitlement at the surviving frozen root.
+A carried withdrawal is invisible to
 settlement until its close registers, so it gains the deadline-fault guarantee only once that close
 is admitted. If the operator disappears or censors first, the signer queues the exact signed
 request at settlement instead. The next registered close must then carry the queued request
 verbatim, and only an operator that stalls entirely lets the obligation expire into hard-fault
 recovery. A frozen root the agent never observed is opened by the committee instead: the
 validators retaining a sealed dealing at that root serve the leaf, and recovery verifies it against
-the frozen state root before claiming. An account reactivated by a current-epoch deposit cannot pay
-until it appears in a later epoch-predecessor state, because the current frozen root has no live
-payer leaf to retain. Challenges still require the exact retained acknowledgment evidence.
+the frozen state root before claiming. A wallet funded by a current-epoch deposit obtains its
+spendable balance proof when that credit enters an admitted predecessor state. Challenges still
+require the exact retained acknowledgment evidence.
 
 Receiver enforcement flow. A wallet that provides a service is the party an omitted credit harms,
 so it enforces its own preconfirmations. It fetches the entry receipts crediting it from the
@@ -261,10 +261,10 @@ without it.
 | Flow | Operator RPC (fast path) | Validator query servers (certified) | Validator evidence (committee) | Local state |
 | --- | --- | --- | --- | --- |
 | Pay | `accept_send`, `payment_head` for a fresh stage, and an optional `accepted_batch` receipts fetch once a lost acceptance resolves against the finalized endpoint | `anchor` for the send's epoch, `status` to stage or resolve, and `registration` for the signing context when the operator serves no usable head | the wallet's leaf at the certified head when the operator's head is unreachable or fails verification: the affordability floor for staging, the endpoint for resolution | cached (epoch, anchor), cumulative debit, staged send, held receipts |
-| Balance and head opening | `payment_head` | `status`, whose finalized state root the served opening is verified against | the wallet's leaf at the certified head when the operator's head is unreachable or fails verification | the opening retained by root, the signing context re-cached from an operator head |
+| Balance and head opening | `payment_head` | `status` and the exact predecessor's `admitted` record, whose root authenticates the opening | the wallet's leaf at the certified head when the operator's head is unreachable or fails verification | the opening retained by root, the signing context re-cached from an operator head |
 | Withdraw | `withdrawal_opening` only when no opening for the head root is retained, then `apply_withdrawal` | `recent_status` | the head opening when the operator serves none | retained head opening, the pending signed request |
 | Escalate | none | `deliver` QueueWithdrawal, `withdrawal` record | none | the pending signed request and its locally retained opening |
-| Claims | `withdrawal_evidence` or `external_payout_evidence` only when no admitted close is inside its window, then a courtesy `acknowledge_*` the claim never waits on | `status`, `registration`, and `admitted` for the open windows, `claim_roots`, `deliver` claim, `withdrawal_release` or `payout_release` record | the withdrawal output or external payout claim from the admitted close's holders inside its window, verified against the admitted roots and cached | cached evidence and the claim intent slot |
+| Claims | `withdrawal_evidence` only when no admitted close is inside its window, then a courtesy `acknowledge_withdrawal` the claim never waits on | `status`, `registration`, and `admitted` for the open windows, `claim_roots`, `deliver` claim, and the exact `withdrawal_release` record | the withdrawal output from the admitted close's holders inside its window, verified against the admitted roots and cached | cached evidence and the exact signed withdrawal |
 | Receipt intake | `incoming_payments` | `anchor` per receipt epoch | none | held receipts and the durable cursor |
 | Reconcile | `committed_entry` only when every holder declines | `status`, `admitted`, `deliver` Challenge, `fault` record | the payer's committed terminal entry from the committee, verified against the admitted change root | held receipts, the durable per-epoch outcome |
 | Native balance and transfer | none | native balance, `deliver` transfer, and the exact transfer effect | none | the staged signed transfer |
@@ -276,7 +276,7 @@ without it.
 
 Distributed certification sends the same complete dealing to every committee member. The
 header commits the epoch payment anchor, the activity root, the withdrawal-output root,
-the successor QMDB balance root, and the withdrawal and payout totals. Validators derive
+the successor QMDB balance root, and the withdrawal total. Validators derive
 these commitments from the keyed inputs and their own predecessor state, then validate the
 whole dealing before voting. Balance storage contains only positive current balances;
 zero balances are authenticated absence. The separate settlement-record QMDB continues to
@@ -383,7 +383,7 @@ cargo run --release -p commonware-terminal --bin terminal-operator -- \
 ```
 
 **4. Start wallet agents.** `--identity` picks the wallet (`0` Alice, `1` Bob, `2` Carol, `3` Dave,
-`4` Eve, who is unregistered and only receives), `--operator` names the operator's RPC address,
+`4` Eve, who starts without a virtual balance), `--operator` names the operator's RPC address,
 and `--deployment` selects its genesis index or full registered deployment ID.
 `--query` takes one or more validator query servers; one suffices and more give failover.
 The defaults are operator `127.0.0.1:7001`, deployment `0`, identity `0`, and the genesis at
@@ -407,7 +407,7 @@ selected amount, `a` stages the selected entry into a draft batch and `b` sends 
 entry as one batched payment, `d` deposits the selected amount, `w` signs a withdrawal of the
 selected amount for the operator to carry and `f` signs an amountless account Close, `x`
 escalates a signed withdrawal into settlement's queue when the operator will not carry it, `s`
-starts the epoch close, `c` claims a finalized withdrawal, `e` claims an external payout, `r`
+starts the epoch close, `c` claims a finalized withdrawal, `r`
 refunds an expired pending deposit, and `h` runs hard-fault recovery. The activity feed logs
 every enforcement event as it happens.
 
@@ -439,10 +439,11 @@ is durable, so starting the demo over requires deleting the chain's `./data` dir
 (validator and operator storage), every `terminal-operator-*.sqlite`, and every
 `terminal-agent-*.sqlite` (or passing fresh paths) before starting again.
 
-Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
-four are registered accounts in every deployment (setup writes the same demo account set into
-each deployment's genesis, but every deployment's balances, epochs, custody, and fault domain
-are its own). Eve demonstrates an unregistered receiver claiming an external payout. Run more
+Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve`. The first
+four receive authenticated genesis allocations in every initial deployment. Every deployment's
+balances, epochs, custody, and fault domain are independent. Eve demonstrates receiving virtual
+credit without an existing balance, then explicitly withdrawing it. These demo identities do
+not restrict recipient keys or deposit owners. Run more
 agent processes with different identities and deployments to exercise independently owned
 wallets. Each identity defaults to `terminal-agent-<deployment>-<identity>.sqlite`; pass
 `--database` to choose an explicit wallet database path.
@@ -468,7 +469,7 @@ replay a no-op. The depositor needs no separate notification to the operator.
 
 Genesis allocates finite native balances to demo wallets and initial operators. A deposit
 signs its chain, deployment, event ID, account, and amount. Execution debits native
-funds and records custody atomically. Finalized withdrawal and payout claims, deposit refunds,
+funds and records custody atomically. Finalized withdrawal claims, deposit refunds,
 and hard-fault releases return funds to that native ledger.
 
 A withdrawal is authorized against a certified state root and carried into an epoch close.
@@ -480,11 +481,21 @@ destination and amount at the request's position under the withdrawal-output roo
 output is independently claimed with that destination, amount, and one Merkle opening. A Close
 stays pending and leaves the account usable for the rest of the epoch. Its output is the
 predecessor balance plus deposits and incoming credits minus outgoing debits. That tail may be
-zero, in which case the Close completes without creating payout work.
+zero, in which case the Close completes without releasing native funds.
 
-Payments to an absent identity become claimable external payouts rather than receiver-sized
-settlement output. This includes Eve and a configured account removed by Close until a later
-deposit reactivates it. Each receiver claims independently with `e`.
+Every payment credits its recipient's virtual balance and conserves the deployment's liability.
+A canonical public key can receive without a native account, deposit, or prior balance.
+An account absent from the predecessor and without a sealed deposit receives pending credit
+but cannot spend it until its first close is admitted. Eligible accounts can reuse incoming
+credit in the same epoch. Only an owner-authorized withdrawal creates a native output, so a
+recipient can accumulate many payments before one exit. A zero balance deletes the QMDB leaf;
+later credit recreates it under the same owner key.
+
+Each epoch admits at most 1,024 payment entries, 1,024 deposit events, and 1,024 withdrawals.
+Together these can touch at most 4,096 distinct accounts; close construction, retained
+evidence, and journal replay use that activity bound. Dormant positive balances do not consume
+the epoch's activity capacity. The 1,024-account genesis limit applies only to bootstrap
+allocations.
 
 Before returning an epoch's first operator-signed receipt, the operator submits an
 operator-signed registration transaction containing exactly the boundary material it
@@ -507,8 +518,8 @@ Deposit and withdrawal deadlines are independent: if one expires while a clean a
 remains challengeable, the fault is recorded, the clean FIFO front still finalizes after its
 window, and terminal recovery preserves both its claim reserves and its successor state.
 
-SQLite atomically derives every pending Close tail, projects closed accounts inactive at zero
-balance, records the close job, and opens the successor under a root-independent payment
+SQLite atomically derives every pending Close tail, records positive successor balances and
+zero-balance deletions, records the close job, and opens the successor under a root-independent payment
 context. The cut visits Close authorizations rather than all accounts, and unchanged SQL
 balance versions remain shared. A background worker prepares the close against its persisted
 QMDB predecessor, distributes the complete dealing, collects the exact-quorum certificate,
@@ -519,13 +530,14 @@ projections; the independent QMDB history and close evidence remain available fo
 receiver reconciliation.
 
 The scripted walkthrough deposits and waits for that credit to enter finalized state,
-hands the operator a withdrawal to carry, pays an internal receiver,
-pays a two-receiver batch under one signature, and pays an external receiver. A receiver then
+hands the operator a withdrawal to carry, pays a funded receiver,
+pays a two-receiver batch under one signature, and credits Eve's new virtual balance. A receiver then
 durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
 before the epoch is cut, the walkthrough starts an asynchronous close certified by the live
-committee, claims the finalized withdrawal and external payout, and reconciles the receiver's
-finalized credit as evidence-backed. It then opens the registered successor with one payment,
-closes that epoch inside its admission runway, and proves with a certified read that no live
+committee, claims the finalized withdrawal, and reconciles the receiver's
+finalized credit as evidence-backed. Eve explicitly authorizes a later withdrawal and claims
+it after its close finalizes. The walkthrough closes each epoch inside its admission runway
+and proves with a certified read that no live
 obligation outlasts the run, so the deployment idles safely afterward. It ends with a
 self-contained fraud arc on a throwaway in-process single-validator chain with locally
 simulated certification: the assembled omitting close is registered and admitted as real
@@ -563,7 +575,7 @@ through its own record. Retrying registration uses the saved request and complet
 exact certified entry.
 
 Select the new operator with `--deployment <printed-deployment-ID>` and
-`--operator 127.0.0.1:7003`. It starts with the demo account roster and no clearing balances.
+`--operator 127.0.0.1:7003`. It starts with an empty virtual balance state.
 Deposit native funds with `d`; the operator observes the finalized deposit and closes the
 funding epoch. Payments become available after that credit enters finalized account state.
 
@@ -587,6 +599,10 @@ The demo cuts corners a production deployment must not:
   are drop-ins from the reshare example: replace the constant scheme provider and the direct
   simplex engine with its orchestrator, probe, and reshare actors.
 - Peer QMDB state sync is a documented no-op pending a glue extension: a late joiner replays
-  finalized blocks through marshal backfill, and the reshare example's qmdb resolver actor is
-  the drop-in server.
+  finalized blocks through marshal backfill. Settlement-machine decode budgets follow the
+  encoded record size. Each private checkpoint has an adjacent fixed-size record in the same
+  atomic QMDB batch, leaving no key in the checkpoint's ordered absence-proof interval.
+  Ordinary certified reads therefore carry bounded public records. Adding peer state sync
+  requires framing suitable for whole journal operations; the current 4 MiB peer message
+  limit cannot carry every valid local operation.
 - Marshal's finalization and block archives are never pruned.

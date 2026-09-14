@@ -455,7 +455,11 @@ pub(crate) fn run_agent(
             return Ok(false);
         }
         if scripted {
-            Box::pin(ui::scripted(&context, operator, chain, agent)).await?;
+            let eve_database =
+                database.with_file_name(format!("terminal-agent-{selected}-4.sqlite"));
+            let eve = Agent::open_for(&eve_database, 4, selected, agent.operator())
+                .context("initialize Eve's SQLite agent")?;
+            Box::pin(ui::scripted(&context, operator, chain, agent, eve)).await?;
         } else {
             Box::pin(ui::run(&context, operator, chain, agent)).await?;
         }
@@ -578,25 +582,6 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
                 "settlement returned another withdrawal output"
             );
             return Ok(Some(operator_rpc::acknowledge_withdrawal_confirmed(
-                &mut operator.lock(),
-                request,
-            )));
-        }
-        operator_rpc::OperatorRequest::AcknowledgeExternalPayout(request) => {
-            let release = chain
-                .payout_release(ctx, request.batch_id, request.claim.position())
-                .await
-                .context("confirm settlement external payout claim")?
-                .context("external-payout batch is not claimable yet")?;
-            ensure!(
-                release.claim == Sha256::hash(&[&request.claim.encode()]),
-                "settlement rejected the external payout claim"
-            );
-            ensure!(
-                &release.released.receiver == request.claim.recipient(),
-                "settlement returned another external payout receiver"
-            );
-            return Ok(Some(operator_rpc::acknowledge_external_payout_confirmed(
                 &mut operator.lock(),
                 request,
             )));

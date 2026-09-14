@@ -2,7 +2,7 @@
 
 use super::store::{EpochData, EpochReader};
 use crate::protocol::{
-    Account, EpochRegistration, Key, MAX_ACCOUNTS, PreparedEpoch, Protocol, SettlementResult,
+    Account, EpochRegistration, Key, MAX_ACTIVITY_ROWS, PreparedEpoch, Protocol, SettlementResult,
     state_config,
 };
 use anyhow::{Context as _, Result, ensure};
@@ -451,7 +451,7 @@ async fn recover<E: Context + Spawner>(
     configured: Option<Genesis<Digest>>,
     #[cfg(test)] recovery: &mut Recovery,
 ) -> Result<State<E, Sha256, Rayon>> {
-    // The immutable genesis encoding binds this journal to its configured accounts.
+    // The immutable genesis encoding binds this journal to its genesis allocations.
     let matches: Option<bool> = journal
         .query_row(
             "SELECT mutations = ?1 FROM batches WHERE sequence = 0",
@@ -549,7 +549,7 @@ async fn recover<E: Context + Spawner>(
         let root = StateRoot::decode(root.as_slice()).context("decode accepted balance root")?;
         let mutations = Mutations::decode_cfg(
             bytes.as_slice(),
-            &(RangeCfg::new(0..=MAX_ACCOUNTS), ((), ())),
+            &(RangeCfg::new(0..=MAX_ACTIVITY_ROWS), ((), ())),
         )
         .context("decode missing balance checkpoint")?;
         #[cfg(test)]
@@ -618,7 +618,7 @@ fn record(
     Ok(())
 }
 
-/// Native commit owns durable replay; genesis mutations still bind the configured accounts.
+/// Native commit owns durable replay; genesis mutations still bind the genesis allocations.
 fn retire_replay(journal: &Connection, sequence: u64) -> Result<()> {
     journal.execute(
         "UPDATE batches SET mutations = x'' WHERE sequence > 0 AND sequence <= ?1

@@ -710,7 +710,6 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
         Digest::random(&mut rng),
         compute_public::<MinSig>(&ack),
         signing_key.public_key(),
-        accounts().into_iter().map(|account| account.key).collect(),
         args.max_dealing_bytes,
         genesis.native.registration_fee,
         &clearing,

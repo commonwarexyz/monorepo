@@ -8,8 +8,7 @@ pub(super) struct Schedule {
     payment_head_before_finality: bool,
     payment_epochs: Vec<u64>,
     closes: Vec<u64>,
-    withdrawal: Option<operator_rpc::AcknowledgeWithdrawalRequest>,
-    payout: Option<operator_rpc::ExternalPayoutEvidenceResponse>,
+    withdrawal: Vec<operator_rpc::AcknowledgeWithdrawalRequest>,
 }
 
 async fn tick(context: &deterministic::Context) {
@@ -73,25 +72,32 @@ pub(super) async fn serve<L: Listener>(
                     tick(&context).await;
                 }
             }
-            operator_rpc::OperatorRequest::ApplyWithdrawal(_) => {
-                let status = verifier.status(&context).await.unwrap();
-                let opening = operator
-                    .lock()
-                    .payment_head(&alice.account())
-                    .unwrap()
-                    .opening;
-                assert_eq!(opening.account, alice.account());
-                opening.verify::<Sha256>(&status.state_root).unwrap();
-                let finished = matches!(
-                    operator.lock().poll_close(0),
-                    Ok(Some(CloseEvent::Finished(_)))
-                );
-                let mut schedule = schedule.lock();
-                schedule.withdrawals += 1;
-                schedule.withdrawal_after_finality = status.last_finalized == Some(0)
-                    && !status.hard_faulted
-                    && opening.balance.get() == 120
-                    && finished;
+            operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
+                let first = {
+                    let mut schedule = schedule.lock();
+                    let first = schedule.withdrawals == 0;
+                    schedule.withdrawals += 1;
+                    first
+                };
+                if first {
+                    assert_eq!(request.request.account(), &alice.account());
+                    let status = verifier.status(&context).await.unwrap();
+                    let opening = operator
+                        .lock()
+                        .payment_head(&alice.account())
+                        .unwrap()
+                        .opening;
+                    assert_eq!(opening.account, alice.account());
+                    opening.verify::<Sha256>(&status.state_root).unwrap();
+                    let finished = matches!(
+                        operator.lock().poll_close(0),
+                        Ok(Some(CloseEvent::Finished(_)))
+                    );
+                    schedule.lock().withdrawal_after_finality = status.last_finalized == Some(0)
+                        && !status.hard_faulted
+                        && opening.balance.get() == 120
+                        && finished;
+                }
             }
             operator_rpc::OperatorRequest::StartClose(request) => {
                 let expected = schedule.lock().payment_epochs.last().copied().unwrap_or(0);
@@ -106,10 +112,7 @@ pub(super) async fn serve<L: Listener>(
                 schedule.lock().closes.push(request.expected_epoch);
             }
             operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
-                schedule.lock().withdrawal = Some((**request).clone());
-            }
-            operator_rpc::OperatorRequest::AcknowledgeExternalPayout(request) => {
-                schedule.lock().payout = Some((**request).clone());
+                schedule.lock().withdrawal.push((**request).clone());
             }
             _ => {}
         }
@@ -164,12 +167,13 @@ pub(super) async fn run(
     )?;
     let alice = Agent::new(0)?;
     let eve = Agent::new(4)?;
+    let eve_account = eve.account();
     let chain_id = genesis.native.chain_id();
     let alice_start = chain
         .native_balance(&context, chain_id, alice.account())
         .await?;
     let eve_start = chain
-        .native_balance(&context, chain_id, eve.account())
+        .native_balance(&context, chain_id, eve_account.clone())
         .await?;
     let script_chain = Client::new(
         &genesis,
@@ -177,17 +181,24 @@ pub(super) async fn run(
         queries,
         context.child("script_client"),
     )?;
-    Box::pin(crate::ui::scripted(&context, operator, script_chain, alice)).await?;
+    Box::pin(crate::ui::scripted(
+        &context,
+        operator,
+        script_chain,
+        alice,
+        eve,
+    ))
+    .await?;
 
-    let (epochs, closes, withdrawal, payout) = {
+    let (epochs, closes, withdrawals) = {
         let schedule = schedule.lock();
         anyhow::ensure!(
             schedule.payment_head_before_finality,
             "next payment must race the preceding close's finality"
         );
         anyhow::ensure!(
-            schedule.withdrawals == 1,
-            "expected exactly one withdrawal intent"
+            schedule.withdrawals == 2,
+            "expected exactly two withdrawal intents"
         );
         anyhow::ensure!(
             schedule.withdrawal_after_finality,
@@ -196,13 +207,13 @@ pub(super) async fn run(
         (
             schedule.payment_epochs.clone(),
             schedule.closes.clone(),
-            schedule
-                .withdrawal
-                .clone()
-                .context("withdrawal acknowledgement")?,
-            schedule.payout.clone().context("payout acknowledgement")?,
+            schedule.withdrawal.clone(),
         )
     };
+    anyhow::ensure!(
+        withdrawals.len() == 2,
+        "expected exactly two withdrawal acknowledgements"
+    );
     anyhow::ensure!(
         epochs.len() == 4,
         "script must accept exactly four payments"
@@ -215,23 +226,19 @@ pub(super) async fn run(
         closes == vec![0, epochs[2], epochs[3]],
         "close requests must identify each completed work arc: {closes:?}"
     );
-    let release = chain
-        .withdrawal_release(&context, withdrawal.batch_id, withdrawal.claim.position())
-        .await?
-        .context("certified withdrawal release")?;
-    anyhow::ensure!(
-        release.released.amount == 3
-            && release.released.destination == Agent::new(0)?.account().encode(),
-        "incorrect withdrawal release"
-    );
-    let release = chain
-        .payout_release(&context, payout.batch_id, payout.claim.position())
-        .await?
-        .context("certified external payout release")?;
-    anyhow::ensure!(
-        release.released.amount == 2 && release.released.receiver == eve.account(),
-        "incorrect external payout release"
-    );
+    for (withdrawal, (amount, account)) in withdrawals
+        .iter()
+        .zip([(3, Agent::new(0)?.account()), (2, eve_account.clone())])
+    {
+        let release = chain
+            .withdrawal_release(&context, withdrawal.batch_id, withdrawal.claim.position())
+            .await?
+            .context("certified withdrawal release")?;
+        anyhow::ensure!(
+            release.released.amount == amount && release.released.destination == account.encode(),
+            "incorrect withdrawal release"
+        );
+    }
     let status = chain.status(&context).await?;
     anyhow::ensure!(
         status.last_finalized == Some(epochs[3])
@@ -273,7 +280,7 @@ pub(super) async fn run(
     );
     anyhow::ensure!(
         chain
-            .native_balance(&context, chain_id, eve.account())
+            .native_balance(&context, chain_id, eve_account.clone())
             .await?
             == eve_start + 2,
         "incorrect Eve native delta"

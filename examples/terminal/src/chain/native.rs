@@ -1,6 +1,6 @@
 //! Native asset ownership and the bounded operator registry.
 
-use crate::protocol::{Account, Deployment, Key, MAX_ACCOUNTS, chain_id};
+use crate::protocol::{Account, Deployment, Key, MAX_GENESIS_ACCOUNTS, chain_id};
 use bytes::{Buf, BufMut};
 use commonware_clearing::bajillion::qmdb::StateRoot;
 use commonware_codec::{EncodeSize, Error, Read, ReadExt as _, Write};
@@ -93,7 +93,7 @@ impl NativeGenesis {
             if !deployments.insert(entry.deployment.digest())
                 || entry.max_dealing_bytes == 0
                 || entry.max_dealing_bytes > self.max_dealing_bytes
-                || entry.deployment.accounts.len() > MAX_ACCOUNTS
+                || entry.deployment.accounts.len() > MAX_GENESIS_ACCOUNTS
             {
                 return false;
             }

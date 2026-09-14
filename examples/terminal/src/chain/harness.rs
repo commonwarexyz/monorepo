@@ -432,7 +432,7 @@ impl Node {
                                         context: retained.context.clone(),
                                         header: close.header,
                                         roots: close.roots,
-                                        amounts: close.amounts,
+                                        withdrawal_total: close.withdrawal_total,
                                         deposits: retained.deposits.clone(),
                                         withdrawals: retained.withdrawals.clone(),
                                         dealing: close.encoded().clone(),

@@ -6,7 +6,7 @@ use commonware_clearing::bajillion::{
     qmdb::{self, State, StateHead, StateOpening, account_key},
     settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
     transition::{
-        CloseAmounts, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
+        CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
         prepare_close_with_strategy, validate_close_with_strategy,
     },
 };
@@ -122,7 +122,7 @@ struct AdmissionFixture {
     withdrawals: TestWithdrawals,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    amounts: CloseAmounts,
+    withdrawal_total: u64,
     certificate: bls12381::Certificate,
 }
 
@@ -135,7 +135,7 @@ struct AdmitInput {
     chain: TestChain,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    amounts: CloseAmounts,
+    withdrawal_total: u64,
     certificate: bls12381::Certificate,
 }
 
@@ -361,7 +361,7 @@ async fn admission_fixture(
             withdrawals,
             header: close.header,
             roots: close.roots,
-            amounts: close.amounts,
+            withdrawal_total: close.withdrawal_total,
             certificate,
         },
     )
@@ -373,14 +373,14 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         withdrawals,
         header,
         roots,
-        amounts,
+        withdrawal_total,
         certificate,
     } = admission;
     chain
         .register_close(0, context, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     chain
-        .admit(0, header, roots, amounts, certificate)
+        .admit(0, header, roots, withdrawal_total, certificate)
         .expect("benchmark close can be admitted");
 }
 
@@ -515,7 +515,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         withdrawals,
         header,
         roots,
-        amounts,
+        withdrawal_total,
         certificate,
     } = source.admission.clone();
     chain
@@ -525,7 +525,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         chain,
         header,
         roots,
-        amounts,
+        withdrawal_total,
         certificate,
     }
 }
@@ -612,7 +612,7 @@ fn bench_admit(c: &mut Criterion) {
                         let mut input = admit_input(&source);
                         let start = Instant::now();
                         let batch = input.chain.admit(
-                            black_box(0), input.header, input.roots, input.amounts, input.certificate,
+                            black_box(0), input.header, input.roots, input.withdrawal_total, input.certificate,
                         ).expect("benchmark close can be admitted");
                         elapsed += start.elapsed();
                         black_box(batch);

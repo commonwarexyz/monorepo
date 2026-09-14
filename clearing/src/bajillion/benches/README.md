@@ -16,7 +16,7 @@ COMMONWARE_CLEARING_PROFILE=0 COMMONWARE_CLEARING_BENCH=sizes \
 
 Select `verify-ack`, `assemble-certificate`, `verify-certificate`, `verify-claim`, `adjudicate`, or `settlement` for receipt/authorization, certificate and acceptance checks. Add `-- --test` to exercise a Criterion group without a measurement run. `sizes` is untimed encoded-artifact verification. Sizes come from actual Rust encodings; the compiled activity/output BMT wrappers determine their wire lengths.
 
-`challenge-sizes` runs the same real close preparation and validation, packet/receipt checks, and complete challenge artifacts, plus a standalone external-payout proof tree. It skips withdrawal-output trees, Current application/historical queries, and calculator cases. This explicit selector is not included again in the default suite. The payout proof object excludes its finalized-batch identifier and transaction framing; its tree fixture does not measure a full external-payout transition.
+`challenge-sizes` runs the same real close preparation and validation, packet/receipt checks, and complete challenge artifacts. It skips withdrawal-output trees, Current application/historical queries, and calculator cases. This explicit selector is not included again in the default suite.
 
 `state-sizes` checks complete Current exclusion encodings across native bootstrap, empty genesis, funding, deletion of all accounts, native reopen, and an earlier empty root. It verifies zero liability uses absent CommitFloor metadata and binds historical requests to the retained root and operation count. This selector is untimed.
 

@@ -2,10 +2,11 @@
 //!
 //! Genesis fixes the native supply, resource prices, timing policy, and initial deployments.
 //! The certified registry authorizes later deployments with immutable operator identities,
-//! account enrollment, peer identities, and dealing limits. Registry and native-account keys
-//! use the immutable chain domain; clearing records use their deployment domain.
+//! peer identities, and dealing limits. Funded genesis allocations bootstrap virtual balances.
+//! Registry and native-account keys use the immutable chain domain; clearing records use
+//! their deployment domain.
 //! A bounded digest directory enumerates immutable registration point records. Deadline work
-//! uses deployment IDs and machines; routed transactions load their complete account rosters.
+//! uses deployment IDs and machines; routed transactions load their immutable configurations.
 //!
 //! Native deposits debit their signing account and credit clearing custody atomically. A
 //! finalized clearing output creates a claim reserve; claiming it consumes the proof position
@@ -43,14 +44,15 @@ use crate::{
         native::{MAX_DEPLOYMENTS, NativeGenesis, RegistryEntry},
         tx::{
             AdmitRequest, ChallengeRequest, ClaimHardFaultRequest, ClaimPendingDepositRequest,
-            ExternalPayoutClaimRequest, FinalizedClaim, NativeTransferRequest,
-            QueueWithdrawalRequest, RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
+            NativeTransferRequest, QueueWithdrawalRequest, RegisterEpochRequest, SettlementTx,
+            WithdrawalClaimRequest,
         },
         types::{Batch, Database, KEY_BYTES, Qmdb, Sealed, StateKey},
     },
     protocol::{
-        Deployment, DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing,
-        committee, epoch_context_at, settlement_config, verify_chain_registration_signature,
+        Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, SQLITE_U64_MAX,
+        Timing, committee, epoch_context_at, settlement_config,
+        verify_chain_registration_signature,
     },
 };
 use bytes::{Buf, BufMut, Bytes};
@@ -63,7 +65,7 @@ use commonware_clearing::bajillion::{
         Bounds, ClaimError, DepositRefund, FinalizedClaims, HardFaultReason, HardFaultRelease,
         HardFaultSettlement, Registered, SettlementChain, SettlementError,
     },
-    transition::{BatchId, ExternalPayout, RootBundle, WithdrawalOutput},
+    transition::{BatchId, RootBundle, WithdrawalOutput},
 };
 use commonware_codec::{
     Decode, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
@@ -77,20 +79,6 @@ use commonware_runtime::Spawner;
 use commonware_storage::{Context as StorageContext, mmr, qmdb::Error as QmdbError};
 use std::collections::BTreeMap;
 use tracing::debug;
-
-/// Decode bounds for the persisted settlement machine.
-///
-/// Enrollment and the withdrawal notice window bound active epochs and replay state.
-/// Finalized claims live in independent per-batch records. Decoding requires state
-/// written by this node or synced under a certified root.
-const MACHINE_BOUNDS: Bounds = Bounds {
-    committee: 16,
-    items: 1 << 20,
-    destination: MAX_DESTINATION_BYTES,
-};
-
-/// Maximum encoded bytes accepted for the persisted machine record.
-const MAX_MACHINE_BYTES: usize = 1 << 24;
 
 /// Native withdrawals require a canonical public key with a stable credit destination.
 fn eligible(destination: &Bytes) -> bool {
@@ -109,15 +97,14 @@ enum Domain {
     Withdrawal = 5,
     Registration = 6,
     WithdrawalRelease = 7,
-    PayoutRelease = 8,
     HardFault = 9,
     Refund = 10,
     Fault = 11,
-    Machine = 12,
     Registry = 13,
     NativeBalance = 14,
     NativeTransfer = 15,
     RegistryEntry = 16,
+    Machine = 254,
 }
 
 /// Derives one state key: the domain-tagged digest of the deployment digest
@@ -179,17 +166,6 @@ pub(crate) fn withdrawal_release_key(
     derive(deployment, Domain::WithdrawalRelease, &payload)
 }
 
-/// Key of one deployment's released external payout by (batch, position).
-pub(crate) fn payout_release_key(
-    deployment: &Digest,
-    batch_id: &BatchId<Digest>,
-    position: u32,
-) -> StateKey {
-    let mut payload = batch_id.encode().to_vec();
-    payload.extend_from_slice(&position.to_be_bytes());
-    derive(deployment, Domain::PayoutRelease, &payload)
-}
-
 /// Key of one deployment's hard-fault release by account.
 pub(crate) fn hard_fault_key(deployment: &Digest, account: &Key) -> StateKey {
     derive(deployment, Domain::HardFault, &account.encode())
@@ -212,6 +188,16 @@ pub(crate) fn fault_key(deployment: &Digest) -> StateKey {
 /// Key of one deployment's machine singleton.
 pub(crate) fn machine_key(deployment: &Digest) -> StateKey {
     derive(deployment, Domain::Machine, &[])
+}
+
+/// The immediate successor of the private checkpoint key. No 33-byte key lies
+/// between this pair, so an ordered absence proof cannot carry the checkpoint.
+/// The trailing bytes 254 and 255 are reserved for this pair.
+pub(crate) fn machine_guard_key(deployment: &Digest) -> StateKey {
+    let mut bytes = [0; KEY_BYTES];
+    bytes.copy_from_slice(machine_key(deployment).as_ref());
+    bytes[KEY_BYTES - 1] = u8::MAX;
+    StateKey::new(bytes)
 }
 
 /// Key of the chain's bounded authenticated operator registry.
@@ -261,7 +247,7 @@ where
     )
 }
 
-/// Reads one complete immutable registration without loading unrelated account rosters.
+/// Reads one complete immutable registration without loading unrelated deployment configurations.
 #[cfg(test)]
 pub(crate) async fn registry_entry<E>(
     db: &Database<E>,
@@ -451,24 +437,24 @@ impl Read for RegistrationRecord {
     }
 }
 
-/// The claim roots of one finalized batch, against which claimants verify
-/// operator-served evidence locally before caching it.
+/// The finalized batch identity authenticates the complete close descriptor; its output
+/// root verifies withdrawal openings before claimants cache operator-served evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ClaimRootsResponse {
     pub(crate) withdrawal_outputs: VectorRoot<Digest>,
-    pub(crate) change: VectorRoot<Digest>,
+    pub(crate) batch_id: BatchId<Digest>,
 }
 
 impl Write for ClaimRootsResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.withdrawal_outputs.write(buf);
-        self.change.write(buf);
+        self.batch_id.write(buf);
     }
 }
 
 impl EncodeSize for ClaimRootsResponse {
     fn encode_size(&self) -> usize {
-        self.withdrawal_outputs.encode_size() + self.change.encode_size()
+        self.withdrawal_outputs.encode_size() + self.batch_id.encode_size()
     }
 }
 
@@ -478,7 +464,7 @@ impl Read for ClaimRootsResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             withdrawal_outputs: VectorRoot::read(buf)?,
-            change: VectorRoot::read(buf)?,
+            batch_id: BatchId::read(buf)?,
         })
     }
 }
@@ -575,46 +561,6 @@ impl Read for WithdrawalResponse {
         Ok(Self {
             amount: u64::read(buf)?,
             destination: Bytes::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
-        })
-    }
-}
-
-/// One released external payout.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExternalPayoutResponse {
-    pub(crate) receiver: Key,
-    pub(crate) amount: u64,
-}
-
-impl From<ExternalPayout<Key>> for ExternalPayoutResponse {
-    fn from(payout: ExternalPayout<Key>) -> Self {
-        Self {
-            receiver: payout.recipient,
-            amount: payout.amount,
-        }
-    }
-}
-
-impl Write for ExternalPayoutResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.receiver.write(buf);
-        self.amount.write(buf);
-    }
-}
-
-impl EncodeSize for ExternalPayoutResponse {
-    fn encode_size(&self) -> usize {
-        self.receiver.encode_size() + self.amount.encode_size()
-    }
-}
-
-impl Read for ExternalPayoutResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            receiver: Key::read(buf)?,
-            amount: u64::read(buf)?,
         })
     }
 }
@@ -1024,38 +970,6 @@ impl Read for WithdrawalReleaseRecord {
     }
 }
 
-/// One released external payout, keyed by (batch, position).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PayoutReleaseRecord {
-    /// Digest of the exact claim that consumed the position.
-    pub(crate) claim: Digest,
-    pub(crate) released: ExternalPayoutResponse,
-}
-
-impl Write for PayoutReleaseRecord {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.claim.write(buf);
-        self.released.write(buf);
-    }
-}
-
-impl EncodeSize for PayoutReleaseRecord {
-    fn encode_size(&self) -> usize {
-        self.claim.encode_size() + self.released.encode_size()
-    }
-}
-
-impl Read for PayoutReleaseRecord {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            claim: Digest::read(buf)?,
-            released: ExternalPayoutResponse::read(buf)?,
-        })
-    }
-}
-
 /// One hard-fault release, keyed by account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HardFaultReleaseRecord {
@@ -1104,13 +1018,14 @@ pub(crate) enum Record {
     Withdrawal(SignedWithdrawal<Key, Digest>),
     Registration(RegistrationRecord),
     WithdrawalRelease(WithdrawalReleaseRecord),
-    PayoutRelease(PayoutReleaseRecord),
     HardFault(HardFaultReleaseRecord),
     Refund(ClaimPendingDepositResponse),
     Fault(FaultRecord),
     /// The encoded settlement [`Machine`]. Held as bytes so the record stays
     /// cheap to clone and compare. [`execute`] decodes it explicitly.
     Machine(Bytes),
+    /// Owns the outgoing absence-proof interval of a private checkpoint.
+    MachineGuard,
 }
 
 impl Write for Record {
@@ -1164,10 +1079,6 @@ impl Write for Record {
                 7_u8.write(buf);
                 record.write(buf);
             }
-            Self::PayoutRelease(record) => {
-                8_u8.write(buf);
-                record.write(buf);
-            }
             Self::HardFault(record) => {
                 9_u8.write(buf);
                 record.write(buf);
@@ -1184,6 +1095,7 @@ impl Write for Record {
                 12_u8.write(buf);
                 encoded.write(buf);
             }
+            Self::MachineGuard => 17_u8.write(buf),
         }
     }
 }
@@ -1203,11 +1115,11 @@ impl EncodeSize for Record {
             Self::Withdrawal(record) => record.encode_size(),
             Self::Registration(record) => record.encode_size(),
             Self::WithdrawalRelease(record) => record.encode_size(),
-            Self::PayoutRelease(record) => record.encode_size(),
             Self::HardFault(record) => record.encode_size(),
             Self::Refund(record) => record.encode_size(),
             Self::Fault(record) => record.encode_size(),
             Self::Machine(encoded) => encoded.encode_size(),
+            Self::MachineGuard => 0,
         }
     }
 }
@@ -1232,7 +1144,7 @@ impl Read for Record {
             2 => Ok(Self::Admitted(AdmittedRootsResponse::read(buf)?)),
             3 => Ok(Self::ClaimRoots(FinalizedClaims::read_cfg(
                 buf,
-                &(..=MAX_ACCOUNTS).into(),
+                &(..=MAX_WITHDRAWALS).into(),
             )?)),
             4 => Ok(Self::Deposit(DepositEvent::read(buf)?)),
             5 => Ok(Self::Withdrawal(SignedWithdrawal::read_cfg(
@@ -1241,14 +1153,14 @@ impl Read for Record {
             )?)),
             6 => Ok(Self::Registration(RegistrationRecord::read(buf)?)),
             7 => Ok(Self::WithdrawalRelease(WithdrawalReleaseRecord::read(buf)?)),
-            8 => Ok(Self::PayoutRelease(PayoutReleaseRecord::read(buf)?)),
             9 => Ok(Self::HardFault(HardFaultReleaseRecord::read(buf)?)),
             10 => Ok(Self::Refund(ClaimPendingDepositResponse::read(buf)?)),
             11 => Ok(Self::Fault(FaultRecord::read(buf)?)),
-            12 => Ok(Self::Machine(Bytes::read_cfg(
-                buf,
-                &RangeCfg::new(0..=MAX_MACHINE_BYTES),
-            )?)),
+            12 => {
+                let bytes = RangeCfg::new(0..=buf.remaining());
+                Ok(Self::Machine(Bytes::read_cfg(buf, &bytes)?))
+            }
+            17 => Ok(Self::MachineGuard),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -1275,8 +1187,6 @@ enum TxOutcome {
 /// Typed rejection reasons.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Reject {
-    /// The account is not enrolled in the target deployment.
-    UnknownAccount,
     /// A deposit id was reused for another event.
     DepositConflict,
     /// An account already queued another withdrawal.
@@ -1516,8 +1426,15 @@ impl Read for Machine {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        // Every retained native item has a nonempty encoding. The checkpoint's byte length
+        // bounds collection decoding; block execution owns its semantic validity.
+        let bounds = Bounds {
+            committee: 16,
+            items: buf.remaining(),
+            destination: MAX_DESTINATION_BYTES,
+        };
         Ok(Self {
-            chain: SettlementChain::read_cfg(buf, &MACHINE_BOUNDS)?,
+            chain: SettlementChain::read_cfg(buf, &bounds)?,
             height: u64::read(buf)?,
             timestamp: u64::read(buf)?,
         })
@@ -1641,9 +1558,6 @@ impl Machine {
             SettlementTx::ClaimWithdrawal(request) => {
                 self.claim_withdrawal(config, request, view).await?
             }
-            SettlementTx::ClaimExternalPayout(request) => {
-                self.claim_external_payout(config, request, view).await?
-            }
             SettlementTx::Challenge(request) => {
                 self.challenge(config, height, request, view).await?
             }
@@ -1658,14 +1572,6 @@ impl Machine {
     }
 
     fn deposit(&mut self, config: &Deployment, height: u64, event: &DepositEvent) -> Step {
-        if !config
-            .accounts
-            .iter()
-            .any(|account| account.key == event.account)
-        {
-            return Step::rejected(Reject::UnknownAccount);
-        }
-
         // The example operator persists monetary values in SQLite INTEGER
         // columns. Apply that deployment-wide domain before settlement takes
         // custody so operator credit cannot fail.
@@ -1900,7 +1806,7 @@ impl Machine {
             height,
             request.header,
             request.roots,
-            request.amounts,
+            request.withdrawal_total,
             request.certificate.clone(),
         ) {
             Ok(batch_id) => batch_id,
@@ -2070,41 +1976,6 @@ impl Machine {
         ]))
     }
 
-    async fn claim_external_payout<E>(
-        &mut self,
-        config: &Deployment,
-        request: &ExternalPayoutClaimRequest,
-        view: &View<'_, E>,
-    ) -> Result<Step, QmdbError<mmr::Family>>
-    where
-        E: StorageContext + Spawner,
-    {
-        let key = claim_roots_key(config.digest(), &request.batch_id);
-        let mut claims = match view.get(&key).await? {
-            Some(Record::ClaimRoots(claims)) => claims,
-            None => return Ok(Step::outcome(TxOutcome::Unavailable)),
-            Some(_) => unreachable!("the claim key holds a finalized claim record"),
-        };
-        let payout =
-            match self
-                .chain
-                .claim_external_payout(request.batch_id, &mut claims, &request.claim)
-            {
-                Ok(payout) => payout,
-                Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
-            };
-        Ok(Step::applied(vec![
-            (key, Some(Record::ClaimRoots(claims))),
-            (
-                payout_release_key(config.digest(), &request.batch_id, request.claim.position()),
-                Some(Record::PayoutRelease(PayoutReleaseRecord {
-                    claim: Sha256::hash(&[&request.claim.encode()]),
-                    released: payout.into(),
-                })),
-            ),
-        ]))
-    }
-
     /// The status record for a block at `height` with `timestamp`.
     const fn status(&self, deployment: Digest, height: u64, timestamp: u64) -> StatusRecord {
         StatusRecord {
@@ -2161,10 +2032,6 @@ fn released_credits(step: &Step) -> Vec<(Key, i128)> {
                     .expect("accepted destination is a canonical account key");
                 credits.push((account, i128::from(record.released.amount)));
             }
-            Some(Record::PayoutRelease(record)) => credits.push((
-                record.released.receiver.clone(),
-                i128::from(record.released.amount),
-            )),
             Some(Record::Refund(record)) => {
                 credits.push((record.account.clone(), i128::from(record.amount)))
             }
@@ -2283,7 +2150,6 @@ where
         if entries.len() >= native.max_deployments as usize
             || request.max_dealing_bytes == 0
             || request.max_dealing_bytes > native.max_dealing_bytes
-            || request.accounts.len() > crate::protocol::MAX_ACCOUNTS
         {
             return Ok(Step::rejected(Reject::RegistryLimit));
         }
@@ -2318,12 +2184,7 @@ where
         if !request.deposit.verify(chain_id) {
             return Ok(Step::rejected(Reject::Signature));
         }
-        let claim_tx = match &request.claim {
-            FinalizedClaim::Withdrawal(claim) => SettlementTx::ClaimWithdrawal(claim.clone()),
-            FinalizedClaim::ExternalPayout(claim) => {
-                SettlementTx::ClaimExternalPayout(claim.clone())
-            }
-        };
+        let claim_tx = SettlementTx::ClaimWithdrawal(request.claim.clone());
         let source = match route(deployments, &claim_tx) {
             Ok(index) => index,
             Err(outcome) => return Ok(Step::outcome(outcome)),
@@ -2552,21 +2413,11 @@ where
                 request.claim.position(),
             )))
         }
-        SettlementTx::ClaimExternalPayout(request) => {
-            Some(ProofAction::Effect(payout_release_key(
-                &request.deployment,
-                &request.batch_id,
-                request.claim.position(),
-            )))
-        }
-        SettlementTx::ClaimDeposit(request) => Some(ProofAction::Effect(match &request.claim {
-            FinalizedClaim::Withdrawal(claim) => {
-                withdrawal_release_key(&claim.deployment, &claim.batch_id, claim.claim.position())
-            }
-            FinalizedClaim::ExternalPayout(claim) => {
-                payout_release_key(&claim.deployment, &claim.batch_id, claim.claim.position())
-            }
-        })),
+        SettlementTx::ClaimDeposit(request) => Some(ProofAction::Effect(withdrawal_release_key(
+            &request.claim.deployment,
+            &request.claim.batch_id,
+            request.claim.claim.position(),
+        ))),
         _ => None,
     };
     Ok(Preflight::Eligible { action })
@@ -2747,10 +2598,14 @@ where
                 timestamp,
             ))),
         );
+
+        // Both records enter the same atomic batch. The guard must exist at
+        // every root containing a checkpoint, including speculative branches.
         writes.insert(
             machine_key(deployment),
             Some(Record::Machine(machine.encode())),
         );
+        writes.insert(machine_guard_key(deployment), Some(Record::MachineGuard));
     }
     let mut batch = batch;
     for (key, value) in writes {
@@ -2764,7 +2619,84 @@ mod codec_tests {
     use super::*;
     use crate::protocol::identities;
     use bytes::BytesMut;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_codec::FixedSize as _;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    #[test]
+    fn machine_checkpoint_record_uses_available_bytes() {
+        let mut malformed = vec![12_u8];
+        commonware_codec::varint::UInt(u32::MAX).write(&mut malformed);
+        malformed.extend_from_slice(&[0; 3]);
+        assert!(Record::decode(Bytes::from(malformed)).is_err());
+
+        let record = Record::Machine(Bytes::from_static(&[0; 3]));
+        let encoded = record.encode();
+        assert_eq!(Record::decode(encoded.clone()).unwrap(), record);
+        assert!(Record::decode(encoded.slice(..encoded.len() - 1)).is_err());
+    }
+
+    #[test]
+    fn machine_checkpoint_decodes_large_replay_history() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut deployment = crate::protocol::deployments().remove(0);
+            deployment.generate(context.child("genesis")).await.unwrap();
+            let owner = identities()[0].key.clone();
+            let count = (1 << 20) + 1;
+            let mut config = settlement_config(&Timing::DEFAULT).unwrap();
+            config.max_deposit_ids = std::num::NonZeroUsize::new(count).unwrap();
+            let mut machine = Machine {
+                chain: SettlementChain::new(
+                    *deployment.digest(),
+                    deployment.operator.clone(),
+                    committee().unwrap(),
+                    deployment.genesis(),
+                    0,
+                    config,
+                )
+                .unwrap(),
+                height: 0,
+                timestamp: 0,
+            };
+            let empty = machine.encode();
+            let ids_offset = deployment.digest().encode_size()
+                + deployment.operator.encode_size()
+                + committee().unwrap().encode_size()
+                + deployment.genesis().root().encode_size()
+                + 3 * u64::SIZE;
+            assert_eq!(empty[ids_offset], 0);
+            let mut malformed = empty[..ids_offset].to_vec();
+            commonware_codec::varint::UInt(u32::MAX).write(&mut malformed);
+            malformed.extend_from_slice(&empty[ids_offset + 1..]);
+            assert!(Machine::decode(Bytes::from(malformed)).is_err());
+
+            for index in 0..count {
+                machine
+                    .chain
+                    .record_deposit(0, Sha256::hash(&[&index.to_le_bytes()]), owner.clone(), 1)
+                    .unwrap();
+            }
+            let encoded = machine.encode();
+            assert!(encoded.len() > 1 << 24);
+            let record = Record::Machine(encoded.clone());
+            let Record::Machine(checkpoint) = Record::decode(record.encode()).unwrap() else {
+                panic!("machine checkpoint record");
+            };
+            assert_eq!(checkpoint, encoded);
+            let mut decoded = Machine::decode(checkpoint).unwrap();
+            assert_eq!(decoded.encode(), encoded);
+            for index in [0, count - 1] {
+                assert!(matches!(
+                    decoded.chain.record_deposit(
+                        0,
+                        Sha256::hash(&[&index.to_le_bytes()]),
+                        owner.clone(),
+                        1
+                    ),
+                    Err(SettlementError::DuplicateDeposit)
+                ));
+            }
+        });
+    }
 
     #[test]
     fn applied_trial_reads_finish_with_a_queued_writer() {
@@ -2797,7 +2729,7 @@ mod codec_tests {
     }
 
     #[test]
-    fn registry_directory_is_bounded_unique_and_independent_of_rosters() {
+    fn registry_directory_is_bounded_unique_and_independent_of_genesis_allocations() {
         for count in [0, 1, MAX_DEPLOYMENTS] {
             let ids = (0..count)
                 .map(|index| Sha256::hash(&[&index.to_le_bytes()]))
@@ -2845,7 +2777,7 @@ mod codec_tests {
             withdrawal_outputs: VectorRoot {
                 digest: Sha256::hash(&[b"anchored-record-outputs"]),
             },
-            change,
+            batch_id,
         };
         assert_eq!(ClaimRootsResponse::decode(roots.encode()).unwrap(), roots);
         let mut trailing = roots.encode().to_vec();

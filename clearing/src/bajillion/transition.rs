@@ -145,35 +145,7 @@ impl<D: Digest> Read for RootBundle<D> {
     }
 }
 
-/// Separate reserves that settlement cannot derive from the registered request amounts.
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct CloseAmounts {
-    /// Actual releases to registered withdrawal destinations.
-    pub withdrawal: u64,
-    /// Credits released directly to external recipients.
-    pub payout: u64,
-}
-impl Write for CloseAmounts {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.withdrawal.write(writer);
-        self.payout.write(writer);
-    }
-}
-impl FixedSize for CloseAmounts {
-    const SIZE: usize = 16;
-}
-impl Read for CloseAmounts {
-    type Cfg = ();
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            withdrawal: u64::read(reader)?,
-            payout: u64::read(reader)?,
-        })
-    }
-}
-
-/// Digest of the exact registered context, predecessor, roots, and release amounts.
+/// Digest of the exact registered context, predecessor, roots, and withdrawal total.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
@@ -183,7 +155,7 @@ impl<D: Digest> Header<D> {
     pub fn new<H: Hasher<Digest = D>, P: PublicKey>(
         context: &CloseContext<P, D>,
         roots: &RootBundle<D>,
-        amounts: &CloseAmounts,
+        withdrawal_total: u64,
     ) -> Self {
         Self(H::hash(&[
             HEADER_ROOT_HASH_NAMESPACE,
@@ -192,7 +164,7 @@ impl<D: Digest> Header<D> {
             roots.change.digest.as_ref(),
             roots.withdrawal_outputs.digest.as_ref(),
             roots.successor.digest.as_ref(),
-            amounts.encode().as_ref(),
+            withdrawal_total.encode().as_ref(),
         ]))
     }
     /// Checks the complete close descriptor against this digest.
@@ -200,9 +172,10 @@ impl<D: Digest> Header<D> {
         &self,
         context: &CloseContext<P, D>,
         roots: &RootBundle<D>,
-        amounts: &CloseAmounts,
+        withdrawal_total: u64,
     ) -> bool {
-        context.epoch.verify_anchor::<H>() && *self == Self::new::<H, P>(context, roots, amounts)
+        context.epoch.verify_anchor::<H>()
+            && *self == Self::new::<H, P>(context, roots, withdrawal_total)
     }
     /// Returns the underlying digest.
     pub const fn digest(&self) -> &D {
@@ -307,7 +280,7 @@ impl CloseLimits {
         self.max_total_entries
     }
 
-    /// Returns the gross payment limit applied independently to debit, credit, and payout.
+    /// Returns the maximum total value of payments in the epoch.
     pub const fn max_payment_total(&self) -> u64 {
         self.max_payment_total
     }
@@ -744,15 +717,6 @@ impl<P: PublicKey, D: Digest> Read for CloseContext<P, D> {
     }
 }
 
-/// One external payout derived from a certified receive by an absent account.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalPayout<P: PublicKey> {
-    /// Recipient account, interpreted by the embedding asset adapter.
-    pub recipient: P,
-    /// Exact value released to the recipient.
-    pub amount: u64,
-}
-
 /// Validator-derived settlement output for one canonical withdrawal request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalOutput {
@@ -819,102 +783,6 @@ impl arbitrary::Arbitrary<'_> for WithdrawalOutput {
         Ok(Self {
             destination: Bytes::copy_from_slice(u.bytes(len)?),
             amount: u.arbitrary()?,
-        })
-    }
-}
-
-/// Membership claim for one external payout in the activity tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalPayoutClaim<P: PublicKey, D: Digest> {
-    leaf: AccountChange<P, D>,
-    opening: commitment::Opening<D>,
-}
-
-impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
-    pub(crate) const fn new(leaf: AccountChange<P, D>, opening: commitment::Opening<D>) -> Self {
-        Self { leaf, opening }
-    }
-
-    /// Returns the claimed change-vector position.
-    #[must_use]
-    pub const fn position(&self) -> u32 {
-        self.opening.position
-    }
-
-    /// Returns the payout recipient.
-    #[must_use]
-    pub const fn recipient(&self) -> &P {
-        self.leaf.account()
-    }
-
-    /// Verifies this claim against an already authenticated finalized change root.
-    ///
-    /// Validators derive the compact output while validating the full changed row. This method
-    /// therefore proves inclusion and classification, not the row relation independently.
-    ///
-    /// The embedding must bind `change_root` to the finalized batch and consume the tuple of that
-    /// batch identifier and [`Self::position`] atomically with the payout.
-    pub fn verify<H>(
-        &self,
-        change_root: &VectorRoot<D>,
-    ) -> Result<ExternalPayout<P>, TransitionError>
-    where
-        H: Hasher<Digest = D>,
-    {
-        self.opening.verify::<H>(
-            VectorKind::Change,
-            change_root,
-            self.leaf.guard::<H>().encode().as_ref(),
-        )?;
-        let SettlementOutput::ExternalPayout(amount) = self.leaf.output() else {
-            return Err(TransitionError::PayoutClaim);
-        };
-        if amount == 0 {
-            return Err(TransitionError::PayoutClaim);
-        }
-        Ok(ExternalPayout {
-            recipient: self.leaf.account().clone(),
-            amount,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for ExternalPayoutClaim<P, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.leaf.write(writer);
-        self.opening.write(writer);
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for ExternalPayoutClaim<P, D> {
-    fn encode_size(&self) -> usize {
-        self.leaf.encode_size() + self.opening.encode_size()
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for ExternalPayoutClaim<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            leaf: AccountChange::read(reader)?,
-            opening: commitment::Opening::read(reader)?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for ExternalPayoutClaim<P, D>
-where
-    P: PublicKey,
-    D: Digest,
-    AccountChange<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            leaf: u.arbitrary()?,
-            opening: u.arbitrary()?,
         })
     }
 }
@@ -1027,8 +895,8 @@ pub struct Close<P: PublicKey, D: Digest> {
     pub header: Header<D>,
     /// State and claim commitments.
     pub roots: RootBundle<D>,
-    /// Certified settlement reserves.
-    pub amounts: CloseAmounts,
+    /// Certified total released by authorized withdrawals.
+    pub withdrawal_total: u64,
     /// Canonical account activity; balances are transient derivation results.
     pub rows: Vec<AccountRow<P, D>>,
     /// Terminal vectors aligned with activity rows.
@@ -1047,7 +915,7 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
     pub fn encode_evidence(&self) -> Bytes {
         let mut writer = bytes::BytesMut::new();
         self.roots.write(&mut writer);
-        self.amounts.write(&mut writer);
+        self.withdrawal_total.write(&mut writer);
         self.encoded.write(&mut writer);
         for row in &self.rows {
             row.predecessor.write(&mut writer);
@@ -1069,11 +937,9 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
         expected: &Header<D>,
     ) -> Result<Self, TransitionError> {
         let roots = RootBundle::read(&mut encoded)?;
-        let amounts = CloseAmounts::read(&mut encoded)?;
-        validate_header::<H, P, D>(context, expected, &roots, &amounts)?;
-        if amounts.withdrawal > context.limits().max_withdrawal_total()
-            || amounts.payout > context.limits().max_payment_total()
-        {
+        let withdrawal_total = u64::read(&mut encoded)?;
+        validate_header::<H, P, D>(context, expected, &roots, withdrawal_total)?;
+        if withdrawal_total > context.limits().max_withdrawal_total() {
             return Err(TransitionError::CloseLimit);
         }
         let available = encoded.remaining();
@@ -1091,24 +957,15 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
         let mut rows = Vec::with_capacity(dealing.rows.len());
         let mut vectors = Vec::with_capacity(dealing.rows.len());
         let mut leaves = Vec::with_capacity(dealing.rows.len());
-        let mut payout = 0_u64;
         let mut withdrawal_amounts = Vec::new();
         let mut withdrawal_rows = Vec::new();
         for input in dealing.rows {
             let predecessor = u64::read(&mut encoded)?;
             let successor = u64::read(&mut encoded)?;
             let output = SettlementOutput::read(&mut encoded)?;
-            match output {
-                SettlementOutput::ExternalPayout(amount) => {
-                    payout = payout
-                        .checked_add(amount)
-                        .ok_or(TransitionError::Arithmetic)?;
-                }
-                SettlementOutput::Withdrawal(amount) => {
-                    withdrawal_rows.push(rows.len());
-                    withdrawal_amounts.push(amount);
-                }
-                SettlementOutput::None => {}
+            if let SettlementOutput::Withdrawal(amount) = output {
+                withdrawal_rows.push(rows.len());
+                withdrawal_amounts.push(amount);
             }
             let root = input.vector.root::<H, D>()?;
             let debit = input.vector.totals()?.0;
@@ -1128,9 +985,6 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
             leaves.push(AccountChange::from_row(&row, root));
             rows.push(row);
             vectors.push(input.vector);
-        }
-        if payout != amounts.payout {
-            return Err(TransitionError::SettlementOutput);
         }
         let bound = context
             .limits()
@@ -1154,7 +1008,7 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
                 .ok_or(TransitionError::Arithmetic)?;
             outputs.push(output);
         }
-        if withdrawal != amounts.withdrawal || encoded.has_remaining() {
+        if withdrawal != withdrawal_total || encoded.has_remaining() {
             return Err(TransitionError::SettlementOutput);
         }
         let guards = leaves
@@ -1178,7 +1032,7 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
         Ok(Self {
             header: *expected,
             roots,
-            amounts,
+            withdrawal_total,
             rows,
             out_vectors: vectors,
             encoded: dealing.encoded,
@@ -1215,18 +1069,6 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
             self.withdrawals[index].clone(),
             self.withdrawal_tree.opening(index as u32)?,
         ))
-    }
-    /// Opens a positive external payout.
-    pub fn external_payout_claim(
-        &self,
-        account: &P,
-    ) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
-        match self.changes.change_parts(account)? {
-            ChangeParts::Present { leaf, proof } if matches!(leaf.output(),SettlementOutput::ExternalPayout(amount) if amount>0) => {
-                Ok(ExternalPayoutClaim::new(leaf, proof))
-            }
-            _ => Err(TransitionError::PayoutClaim),
-        }
     }
 }
 
@@ -1267,13 +1109,6 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
     pub fn withdrawal_claim(&self, account: &P) -> Result<WithdrawalClaim<D>, TransitionError> {
         self.close.withdrawal_claim(account)
     }
-    /// Opens an external payout from the retained close.
-    pub fn external_payout_claim(
-        &self,
-        account: &P,
-    ) -> Result<ExternalPayoutClaim<P, D>, TransitionError> {
-        self.close.external_payout_claim(account)
-    }
 }
 
 /// Whole activity-tree lookup material, shared by prepared and validated closes.
@@ -1289,7 +1124,7 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         context: &CloseContext<P, D>,
         close: &Close<P, D>,
     ) -> Result<Self, TransitionError> {
-        validate_header::<H, P, D>(context, &close.header, &close.roots, &close.amounts)?;
+        validate_header::<H, P, D>(context, &close.header, &close.roots, close.withdrawal_total)?;
         if close.changes.tree.root() != close.roots.change {
             return Err(TransitionError::ChangeRoot);
         }
@@ -1602,7 +1437,7 @@ where
                 .ok_or(TransitionError::CloseLimit)?;
         }
     }
-    let mut amounts = CloseAmounts::default();
+    let mut withdrawal_total = 0_u64;
     let mut rows = Vec::with_capacity(input.len());
     let mut vectors = Vec::with_capacity(input.len());
     let mut updates = Vec::new();
@@ -1617,8 +1452,10 @@ where
         if input.outgoing.is_none() && in_count == 0 && deposit == 0 && request.is_none() {
             return Err(TransitionError::AccountActivity);
         }
-        let registered = predecessor != 0 || deposit != 0;
-        if !registered && (credit == 0 || request.is_some() || debit != 0) {
+
+        // Only a predecessor balance or sealed deposit authorizes this epoch's spending.
+        let eligible = predecessor != 0 || deposit != 0;
+        if !eligible && (request.is_some() || debit != 0) {
             return Err(TransitionError::AccountActivity);
         }
         let tail = (u128::from(predecessor) + u128::from(deposit) + u128::from(credit))
@@ -1633,26 +1470,17 @@ where
             }
             _ => 0,
         };
-        let payout = if registered { 0 } else { credit };
         let successor = tail
             .checked_sub(u128::from(withdrawal))
-            .and_then(|n| n.checked_sub(u128::from(payout)))
             .and_then(|n| u64::try_from(n).ok())
             .ok_or(TransitionError::BalanceEquation)?;
         let output = if request.is_some() {
             SettlementOutput::Withdrawal(withdrawal)
-        } else if payout > 0 {
-            SettlementOutput::ExternalPayout(payout)
         } else {
             SettlementOutput::None
         };
-        amounts.withdrawal = amounts
-            .withdrawal
+        withdrawal_total = withdrawal_total
             .checked_add(withdrawal)
-            .ok_or(TransitionError::Arithmetic)?;
-        amounts.payout = amounts
-            .payout
-            .checked_add(payout)
             .ok_or(TransitionError::Arithmetic)?;
         let send_root = input.vector.root::<H, D>()?;
         let outgoing = input.outgoing.map(|(seq, signature)| {
@@ -1716,12 +1544,17 @@ where
         withdrawal_outputs: withdrawal_tree.root(),
         successor: candidate.root(),
     };
-    let liability =
-        validate_close_amounts::<H, P, D>(context, deposits, withdrawals, &roots, &amounts)?;
+    let liability = validate_close_amounts::<H, P, D>(
+        context,
+        deposits,
+        withdrawals,
+        &roots,
+        withdrawal_total,
+    )?;
     if candidate.head().liability() != liability {
         return Err(TransitionError::LiabilityEquation);
     }
-    let header = Header::new::<H, P>(context, &roots, &amounts);
+    let header = Header::new::<H, P>(context, &roots, withdrawal_total);
     let encoded = match encoded {
         Some(encoded) => encoded,
         None => posted::encode(&header, &rows, &vectors, &aggregate)?,
@@ -1730,7 +1563,7 @@ where
         close: Close {
             header,
             roots,
-            amounts,
+            withdrawal_total,
             rows,
             out_vectors: vectors,
             encoded,
@@ -1822,9 +1655,9 @@ pub fn validate_header<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     context: &CloseContext<P, D>,
     header: &Header<D>,
     roots: &RootBundle<D>,
-    amounts: &CloseAmounts,
+    withdrawal_total: u64,
 ) -> Result<(), TransitionError> {
-    if header.verify::<H, P>(context, roots, amounts) {
+    if header.verify::<H, P>(context, roots, withdrawal_total) {
         Ok(())
     } else {
         Err(TransitionError::HeaderRoot)
@@ -1836,17 +1669,15 @@ pub fn validate_close_amounts<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     roots: &RootBundle<D>,
-    amounts: &CloseAmounts,
+    withdrawal_total: u64,
 ) -> Result<u64, TransitionError> {
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
     let limits = context.limits();
-    if amounts.withdrawal > limits.max_withdrawal_total()
-        || amounts.payout > limits.max_payment_total()
-    {
+    if withdrawal_total > limits.max_withdrawal_total() {
         return Err(TransitionError::CloseLimit);
     }
     if withdrawals.is_empty()
-        && (amounts.withdrawal != 0
+        && (withdrawal_total != 0
             || roots.withdrawal_outputs
                 != commitment::empty_root::<H>(VectorKind::WithdrawalOutput))
     {
@@ -1855,8 +1686,7 @@ pub fn validate_close_amounts<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     checked_successor_liability(
         context.predecessor_liability(),
         deposits.total(),
-        amounts.withdrawal,
-        amounts.payout,
+        withdrawal_total,
     )
 }
 pub(crate) fn validate_boundary_roots<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
@@ -1899,11 +1729,9 @@ pub(crate) fn checked_successor_liability(
     predecessor: u64,
     deposits: u64,
     withdrawals: u64,
-    payouts: u64,
 ) -> Result<u64, TransitionError> {
     let value = (u128::from(predecessor) + u128::from(deposits))
         .checked_sub(u128::from(withdrawals))
-        .and_then(|n| n.checked_sub(u128::from(payouts)))
         .ok_or(TransitionError::LiabilityEquation)?;
     u64::try_from(value).map_err(|_| TransitionError::LiabilityOverflow)
 }
@@ -1984,9 +1812,6 @@ pub enum TransitionError {
     /// No valid withdrawal claim exists for the account.
     #[error("invalid withdrawal claim")]
     WithdrawalClaim,
-    /// No positive external payout exists for the account.
-    #[error("invalid external payout claim")]
-    PayoutClaim,
     /// Registration deadlines are not ordered.
     #[error("invalid deadline order")]
     DeadlineOrder,

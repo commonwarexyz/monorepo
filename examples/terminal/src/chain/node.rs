@@ -647,7 +647,7 @@ impl Policy for Observed {
 ///
 /// Deposits are chain state, so the operator learns them from its own
 /// follower rather than from a wallet report: any party's deposit to a
-/// configured account is credited without that party's cooperation. The
+/// canonical account is credited without that party's cooperation. The
 /// observer stages a block's applied deposits durably (one immediate SQLite
 /// transaction per deposit-carrying block, deduplicated by deposit id)
 /// BEFORE fulfilling the block's acknowledgement. Staging is
