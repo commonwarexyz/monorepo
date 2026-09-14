@@ -360,13 +360,11 @@ We benchmarked the Commonware Library's [initial implementation](https://github.
 
 ::: {.image-caption}
 Figure 6: Encoded sizes and processing times, measured on an AWS c8a.4xlarge with 16 workers and in-memory storage. Close timings are medians of ten successive closes after one warmup, starting from signed endpoints with no deposits or withdrawals. Validator totals include decoding, signature checks, balance reads, root construction, and application. Certificate verification uses one CPU thread. Durable commit and networking are excluded.
+
+SSD measurement: 100 GiB EBS gp3 volume at its default 3,000 IOPS and 125 MiB/s, with a 4 MiB QMDB cache. The full dataset fits in the host's 32 GiB of RAM. The timing excludes networking and the accepted-close journal.
 :::
 
 With a million live accounts and only 1,024 senders paying the same 512 recipients, each validator receives 105 KB. Decoding, verification, and application take 8.69 ms with in-memory storage. On an EBS gp3 SSD, the same work takes 20.5 ms including QMDB commit.
-
-::: {.image-caption}
-SSD measurement: 100 GiB EBS gp3 volume at its default 3,000 IOPS and 125 MiB/s, with a 4 MiB QMDB cache. The full dataset fits in the host's 32 GiB of RAM. The timing excludes networking and the accepted-close journal.
-:::
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
