@@ -64,8 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, HandoffProposal, Heightable,
-        Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, HandoffPolicy, HandoffProposal,
+        Heightable, Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -5033,6 +5033,7 @@ mod tests {
             // recovery staging.
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
+            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Pipeline);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -5043,23 +5044,17 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            let optimistic_rx = marshaled
-                .propose_handoff(ctx.clone(), default_leader())
-                .await;
-            assert_eq!(
-                optimistic_rx.await.expect("optimistic decision missing"),
-                HandoffProposal::WaitForParentCertification,
-                "application deferral must precede cached proposal reuse"
-            );
-
             let commitment = marshaled
-                .propose(ctx)
+                .propose_handoff(ctx)
                 .await
                 .await
-                .expect("propose must return a commitment");
+                .expect("handoff proposal must return a decision");
+            let HandoffProposal::Proposed(commitment) = commitment else {
+                panic!("application accepted handoff but marshal deferred");
+            };
             assert_eq!(
                 commitment, commitment_a,
-                "propose must reuse the block marshal already persisted for this round"
+                "handoff must reuse the block marshal already persisted for this round"
             );
 
             // The relay broadcast must find the recovered proposal staged and

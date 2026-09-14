@@ -34,7 +34,6 @@ pub enum Message<D: Digest, P: PublicKey> {
     },
     ProposeHandoff {
         context: Context<D, P>,
-        outgoing_leader: P,
         response: oneshot::Sender<HandoffProposal<D>>,
     },
     Verify {
@@ -94,14 +93,10 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn propose_handoff(
         &mut self,
         context: Self::Context,
-        outgoing_leader: <Self::Context as crate::HandoffContext>::PublicKey,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
-        self.sender.send_lossy(Message::ProposeHandoff {
-            context,
-            outgoing_leader,
-            response,
-        });
+        self.sender
+            .send_lossy(Message::ProposeHandoff { context, response });
         receiver
     }
 
@@ -143,8 +138,7 @@ type Latency = (f64, f64);
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
 /// Observer invoked on every handoff proposal request.
-type HandoffProposeObserver<H, P> =
-    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, P) + Send + 'static>;
+type HandoffProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
@@ -494,14 +488,13 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     }
                     Message::ProposeHandoff {
                         context,
-                        outgoing_leader,
                         response,
                     } => {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
                         if let Some(observer) = &self.handoff_propose_observer {
-                            observer(context.clone(), outgoing_leader);
+                            observer(context.clone());
                         }
                         if !self.accept_handoffs {
                             response.send_lossy(HandoffProposal::WaitForParentCertification);

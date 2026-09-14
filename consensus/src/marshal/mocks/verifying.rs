@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, HandoffPolicy, marshal::ancestry::Ancestry};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -23,6 +23,8 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// Policy returned for pipelined handoff proposals.
+    pub handoff_policy: HandoffPolicy,
     _phantom: PhantomData<S>,
 }
 
@@ -32,6 +34,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            handoff_policy: HandoffPolicy::WaitForParentCertification,
             _phantom: PhantomData,
         }
     }
@@ -41,6 +44,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result,
+            handoff_policy: HandoffPolicy::WaitForParentCertification,
             _phantom: PhantomData,
         }
     }
@@ -50,6 +54,12 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.propose_result = Some(block);
         self
     }
+
+    /// Configure the policy returned for pipelined handoffs.
+    pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
+        self.handoff_policy = policy;
+        self
+    }
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -57,6 +67,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            handoff_policy: HandoffPolicy::WaitForParentCertification,
             _phantom: PhantomData,
         }
     }
@@ -82,6 +93,13 @@ where
         self.propose_result.clone()
     }
 
+    async fn handoff_policy(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+    ) -> HandoffPolicy {
+        self.handoff_policy
+    }
+
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
@@ -98,6 +116,7 @@ where
 pub struct GatedVerifyingApp<B, S> {
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    handoff_policy: HandoffPolicy,
     _phantom: PhantomData<(B, S)>,
 }
 
@@ -111,11 +130,18 @@ impl<B, S> GatedVerifyingApp<B, S> {
             Self {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
+                handoff_policy: HandoffPolicy::WaitForParentCertification,
                 _phantom: PhantomData,
             },
             started_rx,
             release_tx,
         )
+    }
+
+    /// Configure the policy returned for pipelined handoffs.
+    pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
+        self.handoff_policy = policy;
+        self
     }
 }
 
@@ -137,6 +163,13 @@ where
         _input: Self::Input,
     ) -> Option<Self::Block> {
         None
+    }
+
+    async fn handoff_policy(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+    ) -> HandoffPolicy {
+        self.handoff_policy
     }
 
     async fn verify(

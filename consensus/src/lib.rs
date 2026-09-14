@@ -174,12 +174,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
-    /// Context metadata required to request a pipelined handoff proposal.
-    pub trait HandoffContext {
-        /// Identity key of a proposal's leader.
-        type PublicKey: PublicKey;
-    }
-
     /// An application's response to a pipelined handoff proposal request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffProposal<D> {
@@ -207,10 +201,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
-            _outgoing_leader: <Self::Context as HandoffContext>::PublicKey,
         ) -> impl Future<Output = oneshot::Receiver<HandoffProposal<Self::Digest>>> + Send
-        where
-            Self::Context: HandoffContext,
         {
             #[allow(clippy::async_yields_async)]
             async move {
@@ -319,7 +310,7 @@ stability_scope!(ALPHA {
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
-    use commonware_cryptography::certificate::{Scheme, Verifier};
+    use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
@@ -369,7 +360,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Decide whether to build on a parent that has not yet been certified.
         ///
-        /// `outgoing_leader` identifies the leader that proposed the uncertified parent.
         /// Returning [`HandoffPolicy::Pipeline`] allows the marshal to continue through its
         /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
         /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
@@ -382,7 +372,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn handoff_policy(
             &mut self,
             _context: (E, Self::Context),
-            _outgoing_leader: <Self::SigningScheme as Verifier>::PublicKey,
         ) -> impl Future<Output = HandoffPolicy> + Send {
             async move { HandoffPolicy::WaitForParentCertification }
         }
