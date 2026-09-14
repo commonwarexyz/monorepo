@@ -1,8 +1,10 @@
 //! SQLite ownership boundary for the operator.
 
+#[cfg(test)]
+use crate::protocol::INITIAL_BALANCE;
 use crate::{
     protocol::{
-        Acceptance, AcceptedEntry, AccountIdentity, Ack, DepositEvent, Entry, INITIAL_BALANCE, Key,
+        Acceptance, AcceptedEntry, Account, AccountIdentity, Ack, DepositEvent, Entry, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES, MAX_ENTRIES,
         MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult, encoded_artifacts,
     },
@@ -10,15 +12,11 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction},
-    commitment::{Opening, VectorRoot},
+    boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction},
+    commitment::Opening,
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE},
-    settlement::SettlementChain,
-    state::AccountState,
-    transition::{
-        BatchId, EpochContext, ExternalPayoutClaim, Header, OperatorSignature, RootBundle,
-        WithdrawalClaim,
-    },
+    qmdb::StateRoot,
+    transition::{BatchId, EpochContext, Header, RootBundle, WithdrawalClaim},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg};
@@ -31,23 +29,13 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 10;
-/// Finalized epochs whose closes stay exactly reconstructable, counted back from the latest
-/// finalized epoch.
-///
-/// Finalizing epoch `e` prunes only the account-state versions that reconstructing epochs
-/// below `e - RETAINED_EPOCHS` needed, so `committed_entry` still serves every finalized
-/// epoch above that. This is the receiver reconciliation contract: a receiver that
-/// reconciles a finalized epoch before `RETAINED_EPOCHS` further epochs finalize always
-/// finds the honest operator's committed-side evidence, and treats a refusal for an older
-/// epoch as unavailability rather than withholding.
-pub(crate) const RETAINED_EPOCHS: u64 = 4;
+const SCHEMA_VERSION: i64 = 17;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
 /// one [`Receipt`] from a fixed-size acknowledgment and a bounded entry opening, so this
 /// page stays well under the RPC body limit.
@@ -58,32 +46,23 @@ const MAX_OPENING_BYTES: usize = 1_024;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 const MAX_WITHDRAWAL_BYTES: usize = 512;
+const MAX_RESULT_BYTES: usize =
+    crate::rpc::MAX_BODY_SIZE + MAX_WITHDRAWALS * (MAX_CLAIM_BYTES + MAX_WITHDRAWAL_BYTES) + 4096;
 const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
             length(state.public_key), state.public_key,
-            state.predecessor_balance, state.predecessor_debit, state.predecessor_credit,
-            state.predecessor_receipts, state.predecessor_active,
-            state.current_balance, state.current_debit,
-            state.current_credit, state.current_receipts
+            state.predecessor_balance, state.current_balance
      FROM account_states AS state
      JOIN account_identities AS identity USING(public_key)
      WHERE state.public_key = ?1 AND state.epoch <= ?2
      ORDER BY state.epoch DESC LIMIT 1";
 
 // Starting from the identity catalog performs one indexed history probe per account. `CROSS JOIN`
-// keeps SQLite from reversing that loop and walking every version accumulated across epochs.
+// fixes that loop order instead of scanning every version accumulated across epochs.
 const EPOCH_ACCOUNTS_SQL: &str = "SELECT identity.name,
                     length(state.public_key), state.public_key,
                     CASE WHEN state.epoch = ?1
                          THEN state.predecessor_balance ELSE state.current_balance END,
-                    CASE WHEN state.epoch = ?1
-                         THEN state.predecessor_debit ELSE state.current_debit END,
-                    CASE WHEN state.epoch = ?1
-                         THEN state.predecessor_credit ELSE state.current_credit END,
-                    CASE WHEN state.epoch = ?1
-                         THEN state.predecessor_receipts ELSE state.current_receipts END,
-                    CASE WHEN state.epoch = ?1 THEN state.predecessor_active ELSE 1 END,
-                    state.current_balance, state.current_debit,
-                    state.current_credit, state.current_receipts
+                    state.current_balance
              FROM account_identities AS identity
              CROSS JOIN account_states AS state
              WHERE state.rowid = (
@@ -96,19 +75,6 @@ const EPOCH_ACCOUNTS_SQL: &str = "SELECT identity.name,
              )
                AND (state.epoch = ?1 OR state.current_balance > 0)
              ORDER BY state.public_key";
-const PRUNE_FINALIZED_ACCOUNT_STATES_SQL: &str = "DELETE FROM account_states
-    WHERE rowid IN (
-        SELECT old.rowid
-        FROM account_states AS finalized
-        JOIN account_states AS old
-          ON old.public_key = finalized.public_key
-         AND old.epoch < finalized.epoch
-        WHERE finalized.epoch = ?1
-        UNION ALL
-        SELECT finalized.rowid
-        FROM account_states AS finalized
-        WHERE finalized.epoch = ?1 AND finalized.current_balance = 0
-    )";
 static NEXT_EPHEMERAL_DATABASE: AtomicU64 = AtomicU64::new(0);
 
 type EpochPaymentContext = PaymentContext<Key, Digest>;
@@ -174,15 +140,8 @@ fn mutate<T>(
 pub(crate) struct StoredAccount {
     pub(crate) name: String,
     pub(crate) key: Key,
-    pub(crate) predecessor: AccountState,
-    pub(crate) current: AccountState,
-}
-
-/// One accepted batch acknowledgment: the dual-signed endpoint and its aggregable
-/// BLS countersignature, retained for the close's per-slice aggregates.
-pub(crate) struct StoredAck {
-    pub(crate) ack: Ack,
-    pub(crate) aggregate: OperatorSignature,
+    pub(crate) predecessor: u64,
+    pub(crate) current: u64,
 }
 
 /// One credited entry of an accepted batch, with its stable acceptance-order cursor and
@@ -192,7 +151,6 @@ pub(crate) struct StoredEntry {
     pub(crate) payer: Key,
     pub(crate) seq: u64,
     pub(crate) recipient: Key,
-    pub(crate) external: bool,
     pub(crate) amount: u64,
     pub(crate) cumulative: u64,
     pub(crate) count: u64,
@@ -214,7 +172,7 @@ pub(crate) struct IncomingPayment {
     pub(crate) receipt: Receipt,
 }
 
-/// One payer's accepted endpoint in the live epoch: its lifetime cumulative debit, its
+/// One payer's accepted endpoint in the live epoch: its epoch cumulative debit, its
 /// epoch-local batch sequence (zero when none), and its cumulative out vector.
 pub(crate) struct Endpoint {
     pub(crate) cumulative_debit: u64,
@@ -226,18 +184,12 @@ pub(crate) struct EpochData {
     pub(crate) epoch: u64,
     pub(crate) accounts: Vec<StoredAccount>,
     /// Accepted batch acknowledgments in (payer, seq) order.
-    pub(crate) acks: Vec<StoredAck>,
+    pub(crate) acks: Vec<Ack>,
     /// The credited-entry serving log in acceptance order.
     pub(crate) entries: Vec<StoredEntry>,
     /// The live cumulative out vectors in (payer, recipient) order.
     pub(crate) edges: Vec<StoredEdge>,
     pub(crate) deposits: Vec<DepositEvent>,
-    /// Deposit events parked past this epoch: their aggregates are exactly offset by this
-    /// epoch's withdrawals, so the chain defers them whole and this epoch's account state
-    /// never credits them. A `carried_from` marks the epoch a row was first staged in,
-    /// and repeated exact offsets chain the park forward one epoch at a time, so a row
-    /// belongs to the staged set of every epoch from its origin through its landing.
-    pub(crate) carried: Vec<DepositEvent>,
     pub(crate) withdrawals: Vec<StoredWithdrawal>,
     /// Chain-assigned deadlines, once adopted from the epoch's certified
     /// registration record. Durable because recovery must rebuild the exact
@@ -247,7 +199,7 @@ pub(crate) struct EpochData {
 
 pub(crate) struct StoredWithdrawal {
     pub(crate) request: SignedWithdrawal<Key, Digest>,
-    /// `None` keeps a Close tail live before cutover. Cutover atomically records its derived tail.
+    /// `None` defers the output amount until cutover resolves the epoch tail.
     pub(crate) applied_amount: Option<u64>,
 }
 
@@ -260,17 +212,10 @@ pub(crate) struct AccountView {
 }
 
 #[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct PaymentView {
-    pub(crate) external: bool,
-}
-
-#[cfg(test)]
 pub(crate) struct StoreSnapshot {
     pub(crate) epoch: u64,
     pub(crate) accounts: Vec<AccountView>,
-    pub(crate) payments: Vec<PaymentView>,
-    pub(crate) reserved_payout_value: u64,
+    pub(crate) payments: Vec<StoredEntry>,
 }
 
 pub(crate) struct StoreStatus {
@@ -278,14 +223,13 @@ pub(crate) struct StoreStatus {
     pub(crate) accounts: u64,
     pub(crate) present_accounts: u64,
     pub(crate) recent_payments: u64,
-    pub(crate) reserved_payout_value: u64,
 }
 
 pub(crate) struct StoredCloseFinished {
     pub(crate) header: Header<Digest>,
     pub(crate) rows: usize,
-    pub(crate) slices: usize,
-    pub(crate) payout_total: u64,
+    pub(crate) dealing_bytes: usize,
+    pub(crate) withdrawal_total: u64,
     pub(crate) header_bytes: usize,
     pub(crate) certificate_bytes: usize,
     pub(crate) prepare_micros: u128,
@@ -328,17 +272,14 @@ struct Plan {
     epoch: u64,
     total: u64,
     payer: StoredAccount,
-    live_liability: Option<u64>,
     /// The payer's merged cumulative out vector after this batch.
     vector: OutVector<Key>,
     credits: Vec<Credit>,
 }
 
 struct Credit {
-    recipient: Key,
     amount: u64,
-    receiver: Option<StoredAccount>,
-    external: bool,
+    receiver: StoredAccount,
 }
 
 pub(crate) struct StagedDeposit {
@@ -349,8 +290,7 @@ pub(crate) struct StagedDeposit {
     pub(crate) amount: u64,
 }
 
-/// One chain-confirmed deposit event awaiting staging: the configured
-/// identity it credits and the boundary context its staging installs.
+/// One chain-confirmed deposit event awaiting staging, with its display identity and boundary context.
 pub(crate) struct Staging {
     pub(crate) identity: AccountIdentity,
     pub(crate) event: DepositEvent,
@@ -363,20 +303,11 @@ pub(crate) struct StagedWithdrawal {
     pub(crate) action: WithdrawalAction,
 }
 
-pub(crate) struct WithdrawalEvidence {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) account: Key,
-    pub(crate) claim: WithdrawalClaim<Digest>,
-}
-
-pub(crate) struct ExternalPayoutEvidence {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: ExternalPayoutClaim<Key, Digest>,
-}
-
 struct StoreLocation {
     path: PathBuf,
     ephemeral: bool,
+    failure: OnceLock<String>,
+    _lock: fs::File,
 }
 
 impl Drop for StoreLocation {
@@ -386,7 +317,10 @@ impl Drop for StoreLocation {
         }
 
         // Normal shutdown drops the final shared source after its foreground or worker connection.
-        for suffix in ["", "-wal", "-shm"] {
+        let mut proof_path = OsString::from(self.path.as_os_str());
+        proof_path.push(".qmdb");
+        let _ = fs::remove_dir_all(PathBuf::from(proof_path));
+        for suffix in ["", "-wal", "-shm", ".lock"] {
             let mut path = OsString::from(self.path.as_os_str());
             path.push(suffix);
             let _ = fs::remove_file(PathBuf::from(path));
@@ -399,7 +333,8 @@ struct StoreSource(Arc<StoreLocation>);
 
 impl StoreSource {
     fn new(path: &Path) -> Result<Self> {
-        if path == Path::new(":memory:") {
+        let ephemeral = path == Path::new(":memory:");
+        let path = if ephemeral {
             // SQLite cannot use WAL for an in-memory database. Reserve a process-local temporary
             // file so background close readers never block successor writes through shared-cache
             // table locks.
@@ -410,10 +345,7 @@ impl StoreSource {
                 match OpenOptions::new().write(true).create_new(true).open(&path) {
                     Ok(file) => {
                         drop(file);
-                        return Ok(Self(Arc::new(StoreLocation {
-                            path,
-                            ephemeral: true,
-                        })));
+                        break path;
                     }
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                     Err(error) => {
@@ -421,14 +353,31 @@ impl StoreSource {
                     }
                 }
             }
-        }
+        } else {
+            path.to_owned()
+        };
+        let mut lock_path = OsString::from(path.as_os_str());
+        lock_path.push(".lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_path))?;
+        lock.try_lock()
+            .context("another operator owns this store")?;
         Ok(Self(Arc::new(StoreLocation {
-            path: path.to_owned(),
-            ephemeral: false,
+            path,
+            ephemeral,
+            failure: OnceLock::new(),
+            _lock: lock,
         })))
     }
 
     fn connect(&self) -> Result<Connection> {
+        if let Some(failure) = self.0.failure.get() {
+            anyhow::bail!("the SQLite store is unusable: {failure}");
+        }
         Connection::open(&self.0.path)
             .with_context(|| format!("open SQLite operator at {}", self.0.path.display()))
     }
@@ -440,9 +389,91 @@ pub(crate) struct EpochReader {
 }
 
 impl EpochReader {
+    /// A mutable storage failure fences every connection sharing this operator store.
+    pub(super) fn fence_storage_failure(&self, error: &anyhow::Error) {
+        if error.chain().any(|cause| {
+            cause.downcast_ref::<MutationFailed>().is_some()
+                || cause.downcast_ref::<CommitUnknown>().is_some()
+                || matches!(
+                    cause.downcast_ref::<rusqlite::Error>(),
+                    Some(rusqlite::Error::SqliteFailure(..))
+                )
+        }) {
+            let _ = self
+                .source
+                .0
+                .failure
+                .set(format!("{error:#}; restart the operator"));
+        }
+    }
+
+    pub(super) fn proof_connection(&self) -> Result<Connection> {
+        let connection = self.source.connect()?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(connection)
+    }
+
+    /// Retains reconstruction inputs until native commit and certified finality both cover them.
+    pub(super) fn prune_proof_inputs(&self, applied_checkpoint: u64) -> Result<()> {
+        let Some(epoch) = applied_checkpoint.checked_sub(1) else {
+            return Ok(());
+        };
+        let mut connection = self.proof_connection()?;
+        let result = mutate(
+            &mut connection,
+            "retire proof reconstruction inputs",
+            |transaction| {
+                let finalized: Option<i64> = transaction.query_row(
+                    "SELECT MAX(epoch) FROM close_jobs WHERE status = 'finalized' AND epoch <= ?1",
+                    [sql_u64(epoch, "proof checkpoint epoch")?],
+                    |row| row.get(0),
+                )?;
+                let Some(finalized) = finalized else {
+                    return Ok(());
+                };
+                transaction.execute(
+                    "DELETE FROM account_states AS old
+                 WHERE old.epoch <= ?1 AND (
+                     EXISTS(SELECT 1 FROM account_states AS newer
+                            WHERE newer.public_key = old.public_key
+                              AND newer.epoch > old.epoch AND newer.epoch <= ?1)
+                     OR old.current_balance = 0)",
+                    [finalized],
+                )?;
+                transaction.execute("DELETE FROM out_entries WHERE epoch <= ?1", [finalized])?;
+                Ok(())
+            },
+        );
+        if let Err(error) = &result {
+            self.fence_storage_failure(error);
+        }
+        result
+    }
+
+    pub(crate) fn stored_result(&self, epoch: u64) -> Result<Option<SettlementResult>> {
+        stored_result(&self.source.connect()?, epoch)
+    }
+
+    /// Commits the certified result before its admission can have an uncertain outcome.
+    pub(crate) fn record_result(
+        &self,
+        result: &SettlementResult,
+        genesis_root: StateRoot<Digest>,
+    ) -> Result<()> {
+        let mut connection = self.source.connect()?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;",
+        )?;
+        let result = record_result(&mut connection, result, genesis_root);
+        if let Err(error) = &result {
+            self.fence_storage_failure(error);
+        }
+        result
+    }
+
     /// Loads a current or still-closing epoch.
-    ///
-    /// Finalized epochs below the retention window may have had their balance versions pruned.
     pub(crate) fn load(&self, epoch: u64) -> Result<EpochData> {
         let connection = self.source.connect()?;
         connection.execute_batch(
@@ -467,10 +498,38 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub(crate) fn storage_fault(&self) -> Option<&str> {
+        self.source.0.failure.get().map(String::as_str)
+    }
+
+    #[cfg(test)]
     pub(crate) fn open(path: &Path, identities: &[AccountIdentity]) -> Result<Self> {
+        let accounts = identities
+            .iter()
+            .map(|identity| Account {
+                key: identity.key.clone(),
+                balance: INITIAL_BALANCE,
+            })
+            .collect::<Vec<_>>();
+        Self::open_configured(path, identities, &accounts)
+    }
+
+    pub(crate) fn open_configured(
+        path: &Path,
+        identities: &[AccountIdentity],
+        accounts: &[Account],
+    ) -> Result<Self> {
+        ensure!(
+            identities.len() == accounts.len()
+                && identities
+                    .iter()
+                    .zip(accounts)
+                    .all(|(identity, account)| identity.key == account.key),
+            "configured account identities differ from the deployment"
+        );
         let source = StoreSource::new(path)?;
         let connection = source.connect()?;
-        Self::from_connection(connection, source, identities)
+        Self::from_connection(connection, source, identities, accounts)
     }
 
     #[cfg(test)]
@@ -482,6 +541,7 @@ impl Store {
         connection: Connection,
         source: StoreSource,
         identities: &[AccountIdentity],
+        accounts: &[Account],
     ) -> Result<Self> {
         let schema = format!(
             "PRAGMA foreign_keys = ON;
@@ -492,6 +552,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS operator_meta (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  schema_version INTEGER NOT NULL,
+                 genesis_accounts BLOB NOT NULL,
+                 genesis_root BLOB,
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  live_liability BLOB NOT NULL CHECK (length(live_liability) = 8),
                  deposit_events INTEGER NOT NULL CHECK (
@@ -504,21 +566,14 @@ impl Store {
 
              CREATE TABLE IF NOT EXISTS account_identities (
                  public_key BLOB PRIMARY KEY CHECK (length(public_key) = 32),
-                 name TEXT NOT NULL UNIQUE
+                 name TEXT NOT NULL
              );
 
              CREATE TABLE IF NOT EXISTS account_states (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  public_key BLOB NOT NULL CHECK (length(public_key) = 32),
                  predecessor_balance INTEGER NOT NULL CHECK (predecessor_balance >= 0),
-                 predecessor_debit INTEGER NOT NULL CHECK (predecessor_debit >= 0),
-                 predecessor_credit INTEGER NOT NULL CHECK (predecessor_credit >= 0),
-                 predecessor_receipts INTEGER NOT NULL CHECK (predecessor_receipts >= 0),
-                 predecessor_active INTEGER NOT NULL CHECK (predecessor_active IN (0, 1)),
                  current_balance INTEGER NOT NULL CHECK (current_balance >= 0),
-                 current_debit INTEGER NOT NULL CHECK (current_debit >= 0),
-                 current_credit INTEGER NOT NULL CHECK (current_credit >= 0),
-                 current_receipts INTEGER NOT NULL CHECK (current_receipts >= 0),
                  PRIMARY KEY(epoch, public_key),
                  FOREIGN KEY(public_key) REFERENCES account_identities(public_key)
              );
@@ -531,11 +586,8 @@ impl Store {
                  seq INTEGER NOT NULL CHECK (seq >= 1),
                  cumulative_debit INTEGER NOT NULL CHECK (cumulative_debit >= 0),
                  ack BLOB NOT NULL CHECK (length(ack) = {ack_size}),
-                 aggregate BLOB NOT NULL CHECK (length(aggregate) = {aggregate_size}),
                  PRIMARY KEY(epoch, payer, seq)
              );
-             CREATE INDEX IF NOT EXISTS acks_payer_seq
-                 ON acks(payer, seq);
 
              CREATE TABLE IF NOT EXISTS out_entries (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
@@ -552,7 +604,6 @@ impl Store {
                  payer BLOB NOT NULL CHECK (length(payer) = 32),
                  seq INTEGER NOT NULL CHECK (seq >= 1),
                  recipient BLOB NOT NULL CHECK (length(recipient) = 32),
-                 external INTEGER NOT NULL CHECK (external IN (0, 1)),
                  amount INTEGER NOT NULL CHECK (amount > 0),
                  cumulative INTEGER NOT NULL CHECK (cumulative > 0),
                  count INTEGER NOT NULL CHECK (count > 0),
@@ -570,11 +621,7 @@ impl Store {
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 32),
                  account BLOB NOT NULL CHECK (length(account) = 32),
-                 amount INTEGER NOT NULL CHECK (amount > 0),
-                 carried_from INTEGER CHECK (
-                     carried_from IS NULL
-                     OR (carried_from >= 0 AND carried_from < epoch)
-                 )
+                 amount INTEGER NOT NULL CHECK (amount > 0)
              );
              CREATE INDEX IF NOT EXISTS deposits_epoch_sequence
                  ON deposits(epoch, sequence);
@@ -596,16 +643,18 @@ impl Store {
 
              CREATE TABLE IF NOT EXISTS registrations (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
-                 admission_deadline INTEGER NOT NULL CHECK (admission_deadline >= 0),
-                 challenge_deadline INTEGER NOT NULL CHECK (
+                 admission_deadline INTEGER CHECK (admission_deadline >= 0),
+                 challenge_deadline INTEGER CHECK (
                      challenge_deadline > admission_deadline
-                 )
+                 ),
+                 CHECK ((admission_deadline IS NULL) = (challenge_deadline IS NULL))
              );
 
              CREATE TABLE IF NOT EXISTS close_jobs (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
                  status TEXT NOT NULL CHECK (status IN ('closing', 'finalized', 'failed')),
                  payment_context BLOB NOT NULL CHECK (length(payment_context) = {context_size}),
+                 result BLOB CHECK (result IS NULL OR length(result) <= {max_result_bytes}),
                  error TEXT CHECK (
                      error IS NULL OR length(CAST(error AS BLOB)) <= {max_close_error_bytes}
                  )
@@ -620,23 +669,11 @@ impl Store {
                  roots BLOB NOT NULL,
                  certificate BLOB NOT NULL,
                  rows INTEGER NOT NULL CHECK (rows >= 0),
-                 slices INTEGER NOT NULL CHECK (slices >= 0),
-                 dealing_slices INTEGER NOT NULL CHECK (dealing_slices >= 0),
+                 dealing_bytes INTEGER NOT NULL CHECK (dealing_bytes >= 0),
                  withdrawal_total INTEGER NOT NULL CHECK (withdrawal_total >= 0),
-                 payout_total INTEGER NOT NULL CHECK (payout_total >= 0),
                  prepare_micros INTEGER NOT NULL CHECK (prepare_micros >= 0),
                  deal_micros INTEGER NOT NULL CHECK (deal_micros >= 0),
                  seal_micros INTEGER NOT NULL CHECK (seal_micros >= 0)
-             );
-
-             CREATE TABLE IF NOT EXISTS payout_claims (
-                 epoch INTEGER NOT NULL CHECK (epoch >= 0),
-                 position INTEGER NOT NULL CHECK (position >= 0),
-                 receiver BLOB NOT NULL CHECK (length(receiver) = 32),
-                 amount INTEGER NOT NULL CHECK (amount > 0),
-                 proof BLOB NOT NULL,
-                 claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1)),
-                 PRIMARY KEY(epoch, position)
              );
 
              CREATE TABLE IF NOT EXISTS withdrawal_claims (
@@ -654,8 +691,8 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS withdrawal_claims_account_unclaimed
                  ON withdrawal_claims(account) WHERE claimed = 0;",
+            max_result_bytes = MAX_RESULT_BYTES,
             ack_size = Ack::SIZE,
-            aggregate_size = OperatorSignature::SIZE,
             max_opening_bytes = MAX_OPENING_BYTES,
             context_size = EpochPaymentContext::SIZE,
             max_deposit_events = MAX_DEPOSIT_EVENTS,
@@ -682,39 +719,54 @@ impl Store {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?;
+        let mut genesis_accounts = accounts
+            .iter()
+            .map(|account| (account.key.clone(), account.balance))
+            .collect::<Vec<_>>();
+        genesis_accounts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let genesis_accounts = genesis_accounts.encode();
         match metadata {
-            Some((version, _)) => ensure!(
-                version == SCHEMA_VERSION,
-                "unsupported clearing operator schema version {version}"
-            ),
+            Some((version, _)) => {
+                ensure!(
+                    version == SCHEMA_VERSION,
+                    "unsupported clearing operator schema version {version}"
+                );
+                let matches: bool = connection.query_row(
+                    "SELECT genesis_accounts = ?1 FROM operator_meta WHERE singleton = 1",
+                    [genesis_accounts.as_ref()],
+                    |row| row.get(0),
+                )?;
+                ensure!(matches, "operator store has the wrong genesis allocations");
+            }
             None => {
                 let transaction = connection.unchecked_transaction()?;
-                let initial_liability = u64::try_from(identities.len())
-                    .context("wallet count does not fit u64")?
-                    .checked_mul(INITIAL_BALANCE)
-                    .context("initial liability overflow")?;
+                let initial_liability = accounts.iter().try_fold(0_u64, |total, account| {
+                    sql_u64(account.balance, "initial balance")?;
+                    total
+                        .checked_add(account.balance)
+                        .context("initial liability overflow")
+                })?;
                 transaction.execute(
                     "INSERT INTO operator_meta(
-                         singleton, schema_version, epoch, live_liability, deposit_events
-                     ) VALUES(1, ?1, 0, ?2, 0)",
-                    params![SCHEMA_VERSION, initial_liability.to_be_bytes().as_slice()],
+                         singleton, schema_version, genesis_accounts, epoch, live_liability, deposit_events
+                     ) VALUES(1, ?1, ?2, 0, ?3, 0)",
+                    params![SCHEMA_VERSION, genesis_accounts.as_ref(), initial_liability.to_be_bytes().as_slice()],
                 )?;
-                for identity in identities {
+                for (identity, account) in identities.iter().zip(accounts) {
                     let key = identity.key.clone();
-                    let balance = sql_u64(INITIAL_BALANCE, "initial balance")?;
+                    let balance = sql_u64(account.balance, "initial balance")?;
                     transaction.execute(
                         "INSERT INTO account_identities(public_key, name) VALUES(?1, ?2)",
                         params![key.as_ref(), identity.name],
                     )?;
-                    transaction.execute(
-                        "INSERT INTO account_states(
-                             epoch, public_key,
-                             predecessor_balance, predecessor_debit, predecessor_credit,
-                             predecessor_receipts, predecessor_active,
-                             current_balance, current_debit, current_credit, current_receipts
-                         ) VALUES(0, ?1, ?2, 0, 0, 0, 1, ?2, 0, 0, 0)",
-                        params![key.as_ref(), balance],
-                    )?;
+                    if balance > 0 {
+                        transaction.execute(
+                            "INSERT INTO account_states(
+                                 epoch, public_key, predecessor_balance, current_balance
+                             ) VALUES(0, ?1, ?2, ?2)",
+                            params![key.as_ref(), balance],
+                        )?;
+                    }
                 }
                 transaction.commit()?;
             }
@@ -737,24 +789,56 @@ impl Store {
         metadata_epoch(&self.connection)
     }
 
-    /// Returns the cached liability of the current account state without constructing its BMT.
+    pub(crate) fn bind_genesis(&mut self, root: StateRoot<Digest>) -> Result<()> {
+        mutate(&mut self.connection, "genesis binding", |transaction| {
+            let matches: Option<bool> = transaction.query_row(
+                "SELECT genesis_root = ?1 FROM operator_meta WHERE singleton = 1",
+                [root.encode().as_ref()],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                matches != Some(false),
+                "operator store has the wrong genesis root"
+            );
+            transaction.execute(
+                "UPDATE operator_meta SET genesis_root = ?1 WHERE singleton = 1 AND genesis_root IS NULL",
+                [root.encode().as_ref()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn stored_result(&self, epoch: u64) -> Result<Option<SettlementResult>> {
+        stored_result(&self.connection, epoch)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_result(
+        &mut self,
+        result: &SettlementResult,
+        genesis_root: StateRoot<Digest>,
+    ) -> Result<()> {
+        record_result(&mut self.connection, result, genesis_root)
+    }
+
+    /// Returns the cached liability of the current account state.
     pub(crate) fn current_liability(&self) -> Result<u64> {
         metadata_live_liability(&self.connection)
     }
 
-    /// Projects the successor liability by sweeping only accounts with a pending Close.
+    /// Projects successor liability after resolving deferred withdrawal outputs.
     pub(crate) fn successor_liability(&self) -> Result<u64> {
         let epoch = self.epoch()?;
-        let close_total = pending_close_accounts(&self.connection, epoch)?
+        let pending_total = pending_withdrawals(&self.connection, epoch)?
             .into_iter()
-            .try_fold(0_u64, |total, (_, account)| {
+            .try_fold(0_u64, |total, (_, amount)| {
                 total
-                    .checked_add(account.current.balance)
-                    .context("Close tail total overflow")
+                    .checked_add(amount)
+                    .context("pending withdrawal total overflow")
             })?;
         self.current_liability()?
-            .checked_sub(close_total)
-            .context("Close tails exceed live liability")
+            .checked_sub(pending_total)
+            .context("pending withdrawals exceed live liability")
     }
 
     pub(crate) fn current_deposit_events(&self) -> Result<usize> {
@@ -868,6 +952,15 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub(crate) fn outgoing_entry_count(&self, epoch: u64) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM out_entries WHERE epoch = ?1",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get(0),
+        )?)
+    }
+
+    #[cfg(test)]
     pub(crate) fn account_version_count(&self) -> Result<u64> {
         let rows = self
             .connection
@@ -924,7 +1017,6 @@ impl Store {
             .map_err(Into::into)
     }
 
-    #[cfg(test)]
     pub(crate) fn database_path(&self) -> PathBuf {
         self.source.0.path.clone()
     }
@@ -960,13 +1052,34 @@ impl Store {
         })
     }
 
-    /// Returns the chain-assigned deadlines adopted for `epoch`.
+    /// Records the boundary's publication before signed registration bytes can escape.
+    pub(crate) fn begin_registration(&mut self, expected: &EpochPaymentContext) -> Result<()> {
+        mutate(
+            &mut self.connection,
+            "prepare registration",
+            |transaction| {
+                let epoch = metadata_epoch(transaction)?;
+                ensure!(epoch == expected.epoch(), "registration context is stale");
+                ensure!(
+                    metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                    "registration anchor is stale"
+                );
+                transaction.execute(
+                    "INSERT OR IGNORE INTO registrations(epoch) VALUES(?1)",
+                    [sql_u64(epoch, "epoch")?],
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    /// Returns the chain-assigned deadlines, excluding unadopted publications.
     pub(crate) fn chain_deadlines(&self, epoch: u64) -> Result<Option<(u64, u64)>> {
         let deadlines = self
             .connection
             .query_row(
                 "SELECT admission_deadline, challenge_deadline
-                 FROM registrations WHERE epoch = ?1",
+                 FROM registrations WHERE epoch = ?1 AND admission_deadline IS NOT NULL",
                 [sql_u64(epoch, "epoch")?],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -1048,22 +1161,29 @@ impl Store {
         Self::load_epoch(&self.connection, self.epoch()?)
     }
 
+    pub(crate) fn ensure_payer_eligible(&self, account: &Key, first_unadmitted: u64) -> Result<()> {
+        let epoch = self.epoch()?;
+        eligible_account(&self.connection, epoch, account)?;
+        let pending_creation: bool = self.connection.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM account_states AS state
+             WHERE state.public_key = ?1 AND state.epoch >= ?2 AND state.epoch < ?3
+               AND state.predecessor_balance = 0
+               AND NOT EXISTS(SELECT 1 FROM deposits
+                              WHERE deposits.epoch = state.epoch AND deposits.account = state.public_key))"
+        )?.query_row(params![account.as_ref(), sql_u64(first_unadmitted, "first unadmitted epoch")?, sql_u64(epoch, "epoch")?], |row| row.get(0))?;
+        ensure!(
+            !pending_creation,
+            "recipient's first positive close is not admitted"
+        );
+        Ok(())
+    }
+
     pub(crate) fn current_account(&self, account: &Key) -> Result<Option<StoredAccount>> {
         effective_account(&self.connection, self.epoch()?, account)
     }
 
     pub(crate) fn has_current_work(&self) -> Result<bool> {
-        let epoch = sql_u64(self.epoch()?, "epoch")?;
-        self.connection
-            .query_row(
-                "SELECT
-                     EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
-                     OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
-                     OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)",
-                [epoch],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(Into::into)
+        epoch_has_work(&self.connection, self.epoch()?)
     }
 
     fn load_epoch(connection: &Connection, epoch: u64) -> Result<EpochData> {
@@ -1083,14 +1203,16 @@ impl Store {
             "epoch payment count exceeds its configured bound"
         );
         let mut statement = connection.prepare(
-            "SELECT length(ack), ack, length(aggregate), aggregate
+            "SELECT length(ack), ack, seq, cumulative_debit, length(payer), payer
              FROM acks WHERE epoch = ?1 ORDER BY payer, seq",
         )?;
         let acks = statement
             .query_map([epoch_sql], |row| {
                 Ok((
                     read_fixed_blob(row, 0, 1, Ack::SIZE, "acknowledgment")?,
-                    read_fixed_blob(row, 2, 3, OperatorSignature::SIZE, "aggregate signature")?,
+                    from_sql_u64(row.get(2)?, "ack sequence").map_err(to_sqlite_error)?,
+                    from_sql_u64(row.get(3)?, "ack debit").map_err(to_sqlite_error)?,
+                    read_fixed_blob(row, 4, 5, Key::SIZE, "acknowledgment payer")?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1100,18 +1222,22 @@ impl Store {
         );
         let acks = acks
             .into_iter()
-            .map(|(ack, aggregate)| {
-                Ok(StoredAck {
-                    ack: Ack::decode(ack.as_slice()).context("decode stored acknowledgment")?,
-                    aggregate: OperatorSignature::decode(aggregate.as_slice())
-                        .context("decode stored aggregate signature")?,
-                })
+            .map(|(ack, seq, debit, payer)| {
+                let ack = Ack::decode(ack.as_slice()).context("decode stored acknowledgment")?;
+                ensure!(
+                    ack.body().epoch() == epoch
+                        && ack.body().seq() == seq
+                        && ack.body().cumulative_debit() == debit
+                        && ack.body().payer().as_ref() == payer.as_slice(),
+                    "stored acknowledgment metadata differs from its signed body"
+                );
+                Ok(ack)
             })
             .collect::<Result<Vec<_>>>()?;
 
         let mut statement = connection.prepare(
             "SELECT id, length(payer), payer, seq, length(recipient), recipient,
-                    external, amount, cumulative, count, length(opening), opening
+                    amount, cumulative, count, length(opening), opening
              FROM accepted_entries WHERE epoch = ?1 ORDER BY id",
         )?;
         let entries = statement
@@ -1120,7 +1246,7 @@ impl Store {
                 let recipient = read_fixed_blob(row, 4, 5, Key::SIZE, "entry recipient")?;
 
                 // Check SQLite's scalar length before asking rusqlite to materialize the blob.
-                let opening = read_bounded_blob(row, 10, 11, MAX_OPENING_BYTES, "entry opening")?;
+                let opening = read_bounded_blob(row, 9, 10, MAX_OPENING_BYTES, "entry opening")?;
                 Ok(StoredEntry {
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
                     payer: Key::decode(payer.as_slice()).map_err(|error| {
@@ -1130,11 +1256,10 @@ impl Store {
                     recipient: Key::decode(recipient.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
-                    external: row.get::<_, i64>(6)? != 0,
-                    amount: from_sql_u64(row.get(7)?, "entry amount").map_err(to_sqlite_error)?,
-                    cumulative: from_sql_u64(row.get(8)?, "entry cumulative")
+                    amount: from_sql_u64(row.get(6)?, "entry amount").map_err(to_sqlite_error)?,
+                    cumulative: from_sql_u64(row.get(7)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
-                    count: from_sql_u64(row.get(9)?, "entry count").map_err(to_sqlite_error)?,
+                    count: from_sql_u64(row.get(8)?, "entry count").map_err(to_sqlite_error)?,
                     opening: Opening::decode(opening.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
@@ -1166,9 +1291,9 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let read_deposits = |filter: &str| -> Result<Vec<DepositEvent>> {
+        let deposits = {
             let count = connection.query_row(
-                &format!("SELECT count(*) FROM deposits WHERE {filter}"),
+                "SELECT count(*) FROM deposits WHERE epoch = ?1",
                 [epoch_sql],
                 |row| row.get::<_, i64>(0),
             )?;
@@ -1177,11 +1302,11 @@ impl Store {
                 count <= MAX_DEPOSIT_EVENTS,
                 "epoch deposit event count exceeds its configured bound"
             );
-            let mut statement = connection.prepare(&format!(
+            let mut statement = connection.prepare(
                 "SELECT length(event_id), event_id, length(account), account, amount
-                 FROM deposits WHERE {filter} ORDER BY sequence"
-            ))?;
-            let deposits = statement
+                 FROM deposits WHERE epoch = ?1 ORDER BY sequence",
+            )?;
+            statement
                 .query_map([epoch_sql], |row| {
                     let event_id = read_fixed_blob(row, 0, 1, Digest::SIZE, "deposit id")?;
                     let account = read_fixed_blob(row, 2, 3, Key::SIZE, "deposit account")?;
@@ -1196,15 +1321,8 @@ impl Store {
                             .map_err(to_sqlite_error)?,
                     })
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(deposits)
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let deposits = read_deposits("epoch = ?1")?;
-
-        // A parked row's staged history is the contiguous epochs from its origin through
-        // its landing, so this epoch's parked set stays addressable after cutover credits
-        // it onward, and even after a later epoch parks it again.
-        let carried = read_deposits("carried_from <= ?1 AND epoch > ?1")?;
         let withdrawal_count = connection.query_row(
             "SELECT count(*) FROM withdrawals WHERE epoch = ?1",
             [epoch_sql],
@@ -1243,7 +1361,7 @@ impl Store {
         let deadlines = connection
             .query_row(
                 "SELECT admission_deadline, challenge_deadline
-                 FROM registrations WHERE epoch = ?1",
+                 FROM registrations WHERE epoch = ?1 AND admission_deadline IS NOT NULL",
                 [epoch_sql],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -1262,7 +1380,6 @@ impl Store {
             entries,
             edges,
             deposits,
-            carried,
             withdrawals,
             deadlines,
         })
@@ -1293,23 +1410,11 @@ impl Store {
             let seq_sql = sql_u64(seq, "batch sequence")?;
 
             upsert_account_state(transaction, epoch, &plan.payer)?;
-            if let Some(live_liability) = plan.live_liability {
-                let updated = transaction.execute(
-                    "UPDATE operator_meta SET live_liability = ?1 WHERE singleton = 1",
-                    [live_liability.to_be_bytes().as_slice()],
-                )?;
-                ensure!(updated == 1, "operator metadata disappeared during payment");
-            }
-
-            // Countersign the accepted endpoint twice: the P-typed half completes the
-            // transferable dual-signed acknowledgment, and the aggregable BLS half feeds
-            // the close's per-slice aggregates.
             let body = authorization.body().clone();
             let encoded_body = body.encode();
             let operator_signature = protocol
                 .operator()
                 .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, encoded_body.as_ref());
-            let aggregate = protocol.sign_ack_aggregate(&body);
             let ack = Ack::from_raw_unchecked(
                 body,
                 authorization.payer_signature().clone(),
@@ -1317,8 +1422,8 @@ impl Store {
             );
             transaction
                 .prepare_cached(
-                    "INSERT INTO acks(epoch, payer, seq, cumulative_debit, ack, aggregate)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO acks(epoch, payer, seq, cumulative_debit, ack)
+                     VALUES(?1, ?2, ?3, ?4, ?5)",
                 )?
                 .execute(params![
                     epoch_sql,
@@ -1326,7 +1431,6 @@ impl Store {
                     seq_sql,
                     sql_u64(ack.body().cumulative_debit(), "cumulative debit")?,
                     ack.encode().as_ref(),
-                    aggregate.encode().as_ref(),
                 ])?;
 
             // Every credited entry lands in this one transaction: the payer debit, each
@@ -1342,17 +1446,15 @@ impl Store {
             )?;
             let mut insert_entry = transaction.prepare_cached(
                 "INSERT INTO accepted_entries(
-                     epoch, payer, seq, recipient, external, amount, cumulative, count, opening
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     epoch, payer, seq, recipient, amount, cumulative, count, opening
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             let mut accepted = Vec::with_capacity(plan.credits.len());
             for credit in &plan.credits {
-                if let Some(receiver) = credit.receiver.as_ref() {
-                    upsert_account_state(transaction, epoch, receiver)?;
-                }
+                upsert_account_state(transaction, epoch, &credit.receiver)?;
                 let lookup = plan
                     .vector
-                    .lookup::<Sha256, Digest>(&credit.recipient)
+                    .lookup::<Sha256, Digest>(&credit.receiver.key)
                     .context("open accepted entry")?;
                 let OutTipLookup::Present {
                     cumulative,
@@ -1365,7 +1467,7 @@ impl Store {
                 advance_edge.execute(params![
                     epoch_sql,
                     plan.payer.key.as_ref(),
-                    credit.recipient.as_ref(),
+                    credit.receiver.key.as_ref(),
                     sql_u64(cumulative, "edge cumulative credit")?,
                     sql_u64(count, "edge payment count")?,
                 ])?;
@@ -1378,15 +1480,14 @@ impl Store {
                     epoch_sql,
                     plan.payer.key.as_ref(),
                     seq_sql,
-                    credit.recipient.as_ref(),
-                    i64::from(credit.external),
+                    credit.receiver.key.as_ref(),
                     sql_u64(credit.amount, "entry amount")?,
                     sql_u64(cumulative, "entry cumulative")?,
                     sql_u64(count, "entry count")?,
                     encoded.as_ref(),
                 ])?;
                 accepted.push(AcceptedEntry {
-                    recipient: credit.recipient.clone(),
+                    recipient: credit.receiver.key.clone(),
                     cumulative,
                     count,
                     opening,
@@ -1449,26 +1550,19 @@ impl Store {
     pub(crate) fn payer_endpoint(&self, payer: &Key) -> Result<Endpoint> {
         let epoch = self.epoch()?;
         let epoch_sql = sql_u64(epoch, "epoch")?;
-        let account = effective_account(&self.connection, epoch, payer)?
-            .context("payer is not in the current live state")?;
-        ensure!(
-            account.current.active,
-            "payer is not in the current live state"
-        );
+        eligible_account(&self.connection, epoch, payer)?;
+        let (seq, cumulative_debit) = payer_endpoint(&self.connection, epoch_sql, payer)?;
         Ok(Endpoint {
-            cumulative_debit: account.current.cumulative_debit,
-            seq: payer_sequence(&self.connection, epoch_sql, payer)?,
+            cumulative_debit,
+            seq,
             entries: out_entries_for(&self.connection, epoch_sql, payer)?,
         })
     }
 
     /// Serves accepted entry receipts crediting `receiver` in acceptance order after `after`.
     ///
-    /// Each served row reassembles one [`Receipt`] from its batch's stored acknowledgment and
-    /// the entry's stored opening. Every retained epoch is served: the operator keeps its
-    /// serving-log rows across finalization (only account-state versions shadowed or zeroed
-    /// below the retention window are pruned), so a receiver can fetch the credits of the
-    /// open epoch and every closed epoch this database still holds.
+    /// Each receipt uses its batch's stored acknowledgment and entry opening. This immutable
+    /// log remains available across finalization and operational cache pruning.
     pub(crate) fn incoming_payments(
         &self,
         receiver: &Key,
@@ -1517,14 +1611,6 @@ impl Store {
             .collect()
     }
 
-    /// Loads a specific retained epoch for committed-side evidence reconstruction.
-    ///
-    /// The load is exact for the current epoch and for every finalized epoch within
-    /// [`RETAINED_EPOCHS`] of the latest finalized one.
-    pub(crate) fn load_at(&self, epoch: u64) -> Result<EpochData> {
-        Self::load_epoch(&self.connection, epoch)
-    }
-
     /// Stages one finalized block's chain-confirmed deposit events in one
     /// immediate transaction: either every credit lands together with the
     /// boundary context it chains to, or none do and the block is
@@ -1569,11 +1655,79 @@ impl Store {
         Ok(staged)
     }
 
+    pub(crate) fn discard_unregistered_withdrawals(
+        &mut self,
+        expected: &EpochPaymentContext,
+        replacement: &EpochPaymentContext,
+        discarded: &[SignedWithdrawal<Key, Digest>],
+    ) -> Result<()> {
+        mutate(
+            &mut self.connection,
+            "unregistered withdrawal",
+            |transaction| {
+                let epoch = metadata_epoch(transaction)?;
+                ensure!(
+                    epoch == expected.epoch()
+                        && epoch == replacement.epoch()
+                        && expected.operator() == replacement.operator()
+                        && metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                    "unregistered withdrawal context changed"
+                );
+                let epoch_sql = sql_u64(epoch, "epoch")?;
+                let adopted: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1 AND admission_deadline IS NOT NULL)
+                 OR EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
+                 OR EXISTS(SELECT 1 FROM close_jobs WHERE epoch = ?1)",
+                [epoch_sql], |row| row.get(0))?;
+                ensure!(
+                    !adopted,
+                    "an adopted withdrawal boundary cannot be discarded"
+                );
+                let mut liability = metadata_live_liability(transaction)?;
+                for request in discarded {
+                    let (amount, encoded) = transaction.query_row(
+                    "SELECT applied_amount, length(encoded), encoded FROM withdrawals WHERE epoch = ?1 AND account = ?2",
+                    params![epoch_sql, request.account().as_ref()], |row| Ok((row.get::<_, Option<i64>>(0)?,
+                        read_bounded_blob(row, 1, 2, MAX_WITHDRAWAL_BYTES, "unregistered withdrawal")?)))?;
+                    ensure!(
+                        encoded.as_slice() == request.encode().as_ref(),
+                        "unregistered withdrawal request changed"
+                    );
+                    validate_applied_withdrawal(request, amount)?;
+                    if let Some(amount) = amount {
+                        let amount = from_sql_u64(amount, "withdrawal amount")?;
+                        let mut account = effective_account(transaction, epoch, request.account())?
+                            .context("withdrawal account is absent")?;
+                        account.current =
+                            checked_sql_add(account.current, amount, "restored balance")?;
+                        upsert_account_state(transaction, epoch, &account)?;
+                        liability = liability
+                            .checked_add(amount)
+                            .context("restored liability overflow")?;
+                    }
+                    transaction.execute(
+                        "DELETE FROM withdrawals WHERE epoch = ?1 AND account = ?2",
+                        params![epoch_sql, request.account().as_ref()],
+                    )?;
+                }
+                transaction.execute("DELETE FROM registrations WHERE epoch = ?1", [epoch_sql])?;
+                transaction.execute("UPDATE operator_meta SET payment_context = ?1, live_liability = ?2 WHERE singleton = 1",
+                params![replacement.encode().as_ref(), liability.to_be_bytes().as_slice()])?;
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn withdrawals_frozen(&self) -> Result<bool> {
+        withdrawals_frozen(&self.connection, self.epoch()?)
+    }
+
     pub(crate) fn stage_withdrawal(
         &mut self,
         request: &SignedWithdrawal<Key, Digest>,
         expected: &EpochPaymentContext,
         replacement: &EpochPaymentContext,
+        queued: bool,
     ) -> Result<StagedWithdrawal> {
         ensure!(
             expected.epoch() == replacement.epoch()
@@ -1600,88 +1754,46 @@ impl Store {
                 metadata_payment_context(transaction)?.as_ref() == Some(expected),
                 "withdrawal anchor is stale"
             );
-            let accepted: i64 = transaction.query_row(
-                "SELECT count(*) FROM acks WHERE epoch = ?1",
-                [sql_u64(epoch, "epoch")?],
-                |row| row.get(0),
-            )?;
 
-            // The boundary is committed by the epoch's on-chain registration,
-            // which the first receipt triggers before it is released. A
-            // nonzero batch count therefore means the committed boundary
-            // may no longer move, so intake freezes here.
+            // A registration may reach settlement before its read-back or first receipt.
+            // Published withdrawal boundaries remain fixed across those crash cuts.
             ensure!(
-                accepted == 0,
-                "withdrawals are frozen once the first payment registers the epoch boundary"
+                !withdrawals_frozen(transaction, epoch)?,
+                "withdrawals are frozen once registration publication begins"
             );
 
-            let mut account = effective_account(transaction, epoch, request.account())?
-                .context("withdrawing account is not in the live state")?;
-            let mut deferred_total = 0_u64;
-            let mut deferred_events = 0_usize;
+            let mut account = if queued {
+                match effective_account(transaction, epoch, request.account())? {
+                    Some(account) => account,
+                    None => StoredAccount {
+                        name: account_name(transaction, request.account())?,
+                        key: request.account().clone(),
+                        predecessor: 0,
+                        current: 0,
+                    },
+                }
+            } else {
+                let account = eligible_account(transaction, epoch, request.account())?;
+                ensure!(
+                    account.predecessor > 0,
+                    "withdrawal account is absent from the epoch predecessor"
+                );
+                account
+            };
             let applied_amount = match request.body().action() {
-                WithdrawalAction::Amount(amount) => {
-                    let amount = amount.get();
-                    let staged = staged_account_deposits(transaction, epoch, request.account())?;
-
-                    // The operator may never refuse or fail to represent any shape a
-                    // permissionless settlement path can force into the registration: the
-                    // chain's queue accepts an exact offset of a carried-in aggregate and
-                    // defers it again, so intake must park it again, not refuse it.
-                    if SettlementChain::<Sha256, Key>::withdrawal_defers_deposit(
-                        request,
-                        staged.included_total,
-                    ) {
-                        // The exact offset defers now: park the aggregate for the
-                        // successor epoch and remove its credit, mirroring the chain's
-                        // boundary rule. Parking preserves a row's origin so every epoch
-                        // of its staged history stays addressable.
-                        let successor = epoch.checked_add(1).context("epoch overflow")?;
-                        let parked = transaction.execute(
-                            "UPDATE deposits
-                             SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
-                             WHERE account = ?3 AND epoch = ?2",
-                            params![
-                                sql_u64(successor, "epoch")?,
-                                sql_u64(epoch, "epoch")?,
-                                request.account().as_ref(),
-                            ],
-                        )?;
-                        ensure!(
-                            parked == staged.included_events,
-                            "staged deposit rows changed during deferral"
-                        );
-                        account.current.balance = account
-                            .current
-                            .balance
-                            .checked_sub(staged.included_total)
-                            .context("deferred aggregate exceeds the live balance")?;
-                        deferred_total = staged.included_total;
-                        deferred_events = staged.included_events;
-                    } else if amount > staged.included_total {
-                        // A later deposit can complete the exact offset, deferring the
-                        // whole aggregate, so the amount must stay coverable without it.
-                        let uncovered = account
-                            .current
-                            .balance
-                            .checked_sub(staged.included_total)
-                            .context("staged deposits exceed the live balance")?;
-                        ensure!(
-                            uncovered >= amount,
-                            "withdrawal exceeds the balance available without its deposit aggregate"
-                        );
-                    }
-                    ensure!(
-                        account.current.balance >= amount,
-                        "withdrawal exceeds the live balance"
-                    );
-                    account.current.balance -= amount;
-                    account.current.active = account.current.balance > 0;
-                    upsert_account_state(transaction, epoch, &account)?;
-                    Some(amount)
+                WithdrawalAction::Amount(amount) if account.current >= amount.get() => {
+                    account.current -= amount.get();
+                    Some(amount.get())
+                }
+                WithdrawalAction::Amount(_) => {
+                    ensure!(queued, "withdrawal exceeds the live balance");
+                    None
                 }
                 WithdrawalAction::Close => None,
             };
+
+            // A queued authorization for an absent account still belongs to this epoch's boundary.
+            upsert_account_state(transaction, epoch, &account)?;
             transaction.execute(
                 "INSERT INTO withdrawals(epoch, account, request_id, applied_amount, encoded)
              VALUES(?1, ?2, ?3, ?4, ?5)",
@@ -1699,20 +1811,14 @@ impl Store {
                 Some(amount) => {
                     let live_liability = metadata_live_liability(transaction)?
                         .checked_sub(amount)
-                        .context("withdrawal exceeds live liability")?
-                        .checked_sub(deferred_total)
-                        .context("deferred aggregate exceeds live liability")?;
-                    let deposit_events = metadata_deposit_events(transaction)?
-                        .checked_sub(deferred_events)
-                        .context("deferred deposit event count underflow")?;
+                        .context("withdrawal exceeds live liability")?;
                     transaction.execute(
                         "UPDATE operator_meta
-                     SET payment_context = ?1, live_liability = ?2, deposit_events = ?3
+                     SET payment_context = ?1, live_liability = ?2
                      WHERE singleton = 1",
                         params![
                             replacement.encode().as_ref(),
                             live_liability.to_be_bytes().as_slice(),
-                            sql_usize(deposit_events, "deposit event count")?,
                         ],
                     )?;
                 }
@@ -1779,134 +1885,50 @@ impl Store {
                 "successor context does not extend the closing epoch"
             );
             let epoch_sql = sql_u64(epoch, "epoch")?;
-            let work: i64 = transaction.query_row(
-                "SELECT
-                 EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
-                 OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
-                 OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)",
-                [epoch_sql],
-                |row| row.get(0),
-            )?;
             ensure!(
-                work != 0,
-                "there are no payments, deposits, or withdrawals to close"
+                epoch_has_work(transaction, epoch)?,
+                "there is nothing to close"
             );
 
-            let closing_accounts = pending_close_accounts(transaction, epoch)?;
-            let close_total = closing_accounts
-                .iter()
-                .try_fold(0_u64, |total, (_, account)| {
-                    total
-                        .checked_add(account.current.balance)
-                        .context("Close tail total overflow")
-                })?;
+            let pending = pending_withdrawals(transaction, epoch)?;
+            let pending_total = pending.iter().try_fold(0_u64, |total, (_, amount)| {
+                total
+                    .checked_add(*amount)
+                    .context("pending withdrawal total overflow")
+            })?;
             let successor_liability = metadata_live_liability(transaction)?
-                .checked_sub(close_total)
-                .context("Close tails exceed live liability")?;
+                .checked_sub(pending_total)
+                .context("pending withdrawals exceed live liability")?;
             ensure!(
                 successor_liability == successor.predecessor_liability(),
                 "successor context has the wrong predecessor liability"
             );
 
-            let mut apply_close = transaction.prepare_cached(
+            let mut apply_withdrawal = transaction.prepare_cached(
                 "UPDATE withdrawals SET applied_amount = ?1
                  WHERE epoch = ?2 AND account = ?3 AND applied_amount IS NULL",
             )?;
-            for (request, mut account) in closing_accounts {
-                let tail = account.current.balance;
-                account.current.balance = 0;
-                account.current.active = false;
+            for (mut account, amount) in pending {
+                account.current -= amount;
                 upsert_account_state(transaction, epoch, &account)?;
-                let updated = apply_close.execute(params![
-                    sql_u64(tail, "Close tail")?,
+                let updated = apply_withdrawal.execute(params![
+                    sql_u64(amount, "withdrawal output")?,
                     epoch_sql,
-                    request.account().as_ref(),
+                    account.key.as_ref(),
                 ])?;
-                ensure!(updated == 1, "pending Close disappeared during cutover");
+                ensure!(
+                    updated == 1,
+                    "pending withdrawal disappeared during cutover"
+                );
             }
 
-            // Deferred aggregates were parked as the successor's rows at intake, whatever
-            // epoch first staged them. Credit them now so the successor opens with those
-            // deposits staged, exactly as the chain carries an exactly offset deposit
-            // into its next boundary.
-            let carried = {
-                let mut statement = transaction.prepare(
-                    "SELECT length(account), account, sum(amount), count(*)
-                     FROM deposits WHERE carried_from <= ?1 AND epoch > ?1
-                     GROUP BY account ORDER BY account",
-                )?;
-                statement
-                    .query_map([epoch_sql], |row| {
-                        let account =
-                            read_fixed_blob(row, 0, 1, Key::SIZE, "carried deposit account")?;
-                        Ok((account, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            let mut carried_records = Vec::with_capacity(carried.len());
-            let mut carried_total = 0_u64;
-            let mut carried_events = 0_usize;
-            for (encoded_account, amount, count) in carried {
-                let key = Key::decode(encoded_account.as_slice())
-                    .context("decode carried deposit account")?;
-                let amount = from_sql_u64(amount, "carried deposit amount")?;
-                let count = usize::try_from(count).context("invalid carried deposit count")?;
-                let account = match effective_account(transaction, next_epoch, &key)? {
-                    Some(mut account) => {
-                        account.current.balance = checked_sql_add(
-                            account.current.balance,
-                            amount,
-                            "carried deposit balance",
-                        )?;
-                        account
-                    }
-                    None => {
-                        let name: String = transaction
-                            .prepare_cached(
-                                "SELECT name FROM account_identities WHERE public_key = ?1",
-                            )?
-                            .query_row([key.as_ref()], |row| row.get(0))?;
-                        StoredAccount {
-                            name,
-                            key: key.clone(),
-                            predecessor: AccountState::default(),
-                            current: AccountState {
-                                balance: amount,
-                                active: true,
-                                ..AccountState::default()
-                            },
-                        }
-                    }
-                };
-                upsert_account_state(transaction, next_epoch, &account)?;
-                carried_records
-                    .push(DepositRecord::new(key, amount).context("carried deposit record")?);
-                carried_total = checked_sql_add(carried_total, amount, "carried deposit total")?;
-                carried_events = carried_events
-                    .checked_add(count)
-                    .context("carried deposit count overflow")?;
-            }
             ensure!(
-                carried_events <= MAX_DEPOSIT_EVENTS,
-                "carried deposit events exceed the epoch bound"
+                successor.deposit_root() == &DepositBatch::<Key>::empty().root::<Sha256>()?,
+                "successor context must start without deposits"
             );
-            let carried_root = DepositBatch::new(carried_records)
-                .context("aggregate carried deposits")?
-                .root::<Sha256>()
-                .context("commit carried deposit boundary")?;
-            ensure!(
-                successor.deposit_root() == &carried_root,
-                "successor context does not stage the carried deposits"
-            );
-            let live_liability = checked_sql_add(
-                successor_liability,
-                carried_total,
-                "successor live liability",
-            )?;
 
-            // Close projections and the epoch transition share one commit. Unchanged accounts remain
-            // copy-on-write, so cutover work is proportional to the number of Close authorizations
-            // and carried deposits.
+            // Withdrawal outputs and epoch rotation share one commit. Other accounts
+            // retain their existing copy-on-write rows.
             transaction.execute(
                 "INSERT INTO close_jobs(epoch, status, payment_context)
              VALUES(?1, 'closing', ?2)",
@@ -1914,13 +1936,12 @@ impl Store {
             )?;
             transaction.execute(
                 "UPDATE operator_meta
-             SET epoch = ?1, live_liability = ?2, payment_context = ?3, deposit_events = ?4
+             SET epoch = ?1, live_liability = ?2, payment_context = ?3, deposit_events = 0
              WHERE singleton = 1",
                 params![
                     sql_u64(next_epoch, "epoch")?,
-                    live_liability.to_be_bytes().as_slice(),
+                    successor_liability.to_be_bytes().as_slice(),
                     successor.payment().encode().as_ref(),
-                    sql_usize(carried_events, "carried deposit count")?,
                 ],
             )?;
             Ok(())
@@ -1939,32 +1960,8 @@ impl Store {
     pub(crate) fn finish_close(
         &mut self,
         result: &SettlementResult,
-        genesis_root: VectorRoot<Digest>,
+        genesis_root: StateRoot<Digest>,
     ) -> Result<()> {
-        let mut external_total = 0_u64;
-        let external_claims = result
-            .external_claims
-            .iter()
-            .map(|claim| {
-                let payout = claim
-                    .verify::<Sha256>(&result.roots.change)
-                    .context("verify external payout claim")?;
-                external_total = external_total
-                    .checked_add(payout.amount)
-                    .context("external payout total overflow")?;
-                let encoded = claim.encode();
-                ensure!(
-                    encoded.len() <= MAX_CLAIM_BYTES,
-                    "external payout claim exceeds the operator bound"
-                );
-                Ok((claim.position(), payout, encoded))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            external_total == result.finalized.payout_total,
-            "external claims do not exhaust the finalized payout reserve"
-        );
-
         ensure!(
             result.withdrawal_claims.len() == result.withdrawals.requests().len(),
             "finalized withdrawals do not have exact claim evidence"
@@ -1991,7 +1988,7 @@ impl Store {
                 );
                 if let WithdrawalAction::Amount(amount) = request.body().action() {
                     ensure!(
-                        output.amount() == amount.get(),
+                        output.amount() == 0 || output.amount() == amount.get(),
                         "withdrawal claim has the wrong requested amount"
                     );
                 }
@@ -2007,11 +2004,11 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(
-            withdrawal_total == result.finalized.withdrawal_total,
+            withdrawal_total == result.withdrawal_total,
             "withdrawal claims do not exhaust the finalized reserve"
         );
         mutate(&mut self.connection, "close finalization", |transaction| {
-            let epoch = sql_u64(result.epoch, "epoch")?;
+            let epoch = sql_u64(result.context.payment().epoch(), "epoch")?;
             let status: Option<String> = transaction
                 .query_row(
                     "SELECT status FROM close_jobs WHERE epoch = ?1",
@@ -2023,18 +2020,19 @@ impl Store {
                 status.as_deref() == Some("closing"),
                 "close job is not pending"
             );
-            if close_payment_context(transaction, epoch)? != result.payment_context {
+            if close_payment_context(transaction, epoch)? != *result.context.payment() {
                 return Err(CloseRejected("close result has the wrong payment context").into());
             }
-            if result.epoch == 0 {
-                if result.predecessor_root != genesis_root {
+            if result.context.payment().epoch() == 0 {
+                if *result.context.predecessor_root() != genesis_root {
                     return Err(CloseRejected(
                         "genesis close does not extend the configured predecessor root",
                     )
                     .into());
                 }
             } else {
-                let predecessor = sql_u64(result.epoch - 1, "predecessor epoch")?;
+                let predecessor =
+                    sql_u64(result.context.payment().epoch() - 1, "predecessor epoch")?;
                 let roots_len: Option<i64> = transaction
                     .query_row(
                         "SELECT length(roots) FROM settlements WHERE epoch = ?1",
@@ -2055,7 +2053,7 @@ impl Store {
                 )?;
                 let roots = RootBundle::<Digest>::decode(roots.as_slice())
                     .map_err(|_| CloseRejected("predecessor settlement roots are malformed"))?;
-                if roots.successor != result.predecessor_root {
+                if roots.successor != *result.context.predecessor_root() {
                     return Err(CloseRejected(
                         "close result does not extend its predecessor state root",
                     )
@@ -2065,20 +2063,18 @@ impl Store {
             let (header, roots, certificate) = encoded_artifacts(result);
             transaction.execute(
                 "INSERT INTO settlements(
-                 epoch, batch_id, header, roots, certificate, rows, slices, dealing_slices,
-                 withdrawal_total, payout_total, prepare_micros, deal_micros, seal_micros
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 epoch, batch_id, header, roots, certificate, rows, dealing_bytes,
+                 withdrawal_total, prepare_micros, deal_micros, seal_micros
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     epoch,
-                    result.finalized.batch_id.digest().as_ref(),
+                    result.header.batch_id::<Sha256>().digest().as_ref(),
                     header,
                     roots,
                     certificate,
                     sql_usize(result.rows, "row count")?,
-                    sql_usize(result.slices, "slice count")?,
-                    sql_usize(result.dealing_slices, "dealing slice count")?,
-                    sql_u64(result.finalized.withdrawal_total, "withdrawal total")?,
-                    sql_u64(result.finalized.payout_total, "payout total")?,
+                    sql_usize(result.dealing_bytes, "dealing bytes")?,
+                    sql_u64(result.withdrawal_total, "withdrawal total")?,
                     sql_u128(result.prepare_micros, "prepare duration")?,
                     sql_u128(result.deal_micros, "deal duration")?,
                     sql_u128(result.seal_micros, "seal duration")?,
@@ -2093,22 +2089,9 @@ impl Store {
                     continue;
                 }
                 insert_withdrawal_claim.execute(params![
-                    result.finalized.batch_id.digest().as_ref(),
+                    result.header.batch_id::<Sha256>().digest().as_ref(),
                     i64::from(position),
                     account.as_ref(),
-                    proof.as_ref(),
-                ])?;
-            }
-            let mut insert_payout_claim = transaction.prepare_cached(
-                "INSERT INTO payout_claims(epoch, position, receiver, amount, proof)
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for (position, payout, proof) in external_claims {
-                insert_payout_claim.execute(params![
-                    epoch,
-                    i64::from(position),
-                    payout.recipient.as_ref(),
-                    sql_u64(payout.amount, "payout amount")?,
                     proof.as_ref(),
                 ])?;
             }
@@ -2119,26 +2102,18 @@ impl Store {
                 [epoch],
             )?;
 
-            // Only finalized history authorizes deletion, and it is deferred by the retention
-            // window: the epoch pruned here is the oldest one that has fallen out of it. Retire
-            // the versions it shadows and remove its finalized zero-balance account versions
-            // without relying on a successor. Every finalized epoch above it still reconstructs
-            // exactly, since no version they read is older than a version at that epoch.
-            if let Some(pruned) = result.epoch.checked_sub(RETAINED_EPOCHS) {
-                transaction.execute(
-                    PRUNE_FINALIZED_ACCOUNT_STATES_SQL,
-                    [sql_u64(pruned, "pruned epoch")?],
-                )?;
-            }
             Ok(())
         })
     }
 
-    pub(crate) fn withdrawal_evidence(&self, account: &Key) -> Result<WithdrawalEvidence> {
+    pub(crate) fn withdrawal_evidence(
+        &self,
+        account: &Key,
+    ) -> Result<(u64, WithdrawalClaim<Digest>)> {
         let encoded = self
             .connection
             .query_row(
-                "SELECT length(settlements.header), settlements.header,
+                "SELECT settlements.epoch,
                         withdrawal_claims.position,
                         length(withdrawal_claims.proof), withdrawal_claims.proof
                  FROM withdrawal_claims
@@ -2148,11 +2123,12 @@ impl Store {
                  LIMIT 1",
                 [account.as_ref()],
                 |row| {
-                    let header = read_fixed_blob(row, 0, 1, Header::<Digest>::SIZE, "header")?;
-                    let position = u32::try_from(row.get::<_, i64>(2)?).map_err(|_| {
+                    let epoch =
+                        from_sql_u64(row.get(0)?, "withdrawal epoch").map_err(to_sqlite_error)?;
+                    let position = u32::try_from(row.get::<_, i64>(1)?).map_err(|_| {
                         to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim position"))
                     })?;
-                    let proof_len = usize::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+                    let proof_len = usize::try_from(row.get::<_, i64>(2)?).map_err(|_| {
                         to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim length"))
                     })?;
                     if proof_len == 0 || proof_len > MAX_CLAIM_BYTES {
@@ -2160,13 +2136,11 @@ impl Store {
                             "invalid withdrawal claim length"
                         )));
                     }
-                    Ok((header, position, row.get::<_, Vec<u8>>(4)?))
+                    Ok((epoch, position, row.get::<_, Vec<u8>>(3)?))
                 },
             )
             .optional()?
             .context("there is no finalized withdrawal claim for this account")?;
-        let header = Header::<Digest>::decode(encoded.0.as_slice())
-            .context("decode withdrawal settlement header")?;
         let claim = WithdrawalClaim::<Digest>::decode_cfg(
             encoded.2.as_slice(),
             &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
@@ -2176,11 +2150,7 @@ impl Store {
             claim.position() == encoded.1,
             "stored withdrawal claim has the wrong position"
         );
-        Ok(WithdrawalEvidence {
-            batch_id: header.batch_id::<Sha256>(),
-            account: account.clone(),
-            claim,
-        })
+        Ok((encoded.0, claim))
     }
 
     pub(crate) fn acknowledge_withdrawal_claim(
@@ -2242,127 +2212,6 @@ impl Store {
         )
     }
 
-    pub(crate) fn external_payout_evidence(
-        &self,
-        receiver: &Key,
-    ) -> Result<ExternalPayoutEvidence> {
-        let stored = self
-            .connection
-            .query_row(
-                "SELECT claims.position, length(claims.proof), claims.proof,
-                        length(settlements.roots), settlements.roots,
-                        length(claims.receiver), claims.receiver, claims.amount,
-                        length(settlements.header), settlements.header
-                 FROM payout_claims AS claims
-                 JOIN settlements USING(epoch)
-                 WHERE claims.claimed = 0 AND claims.receiver = ?1
-                 ORDER BY claims.epoch, claims.position
-                 LIMIT 1",
-                [receiver.as_ref()],
-                |row| {
-                    let proof_len = row.get::<_, i64>(1)?;
-                    if proof_len <= 0
-                        || usize::try_from(proof_len).map_or(true, |len| len > MAX_CLAIM_BYTES)
-                    {
-                        return Err(to_sqlite_error(anyhow::anyhow!(
-                            "invalid external claim length"
-                        )));
-                    }
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        read_fixed_blob(row, 3, 4, RootBundle::<Digest>::SIZE, "settlement roots")?,
-                        read_fixed_blob(row, 5, 6, Key::SIZE, "claim receiver")?,
-                        row.get::<_, i64>(7)?,
-                        read_fixed_blob(row, 8, 9, Header::<Digest>::SIZE, "header")?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("there is no unclaimed external payout for this receiver")?;
-        let position = u32::try_from(stored.0).context("claim position does not fit u32")?;
-        let claim = ExternalPayoutClaim::<Key, Digest>::decode(stored.1.as_slice())
-            .context("decode external payout claim")?;
-        ensure!(
-            claim.position() == position,
-            "stored claim position differs from its proof"
-        );
-        let roots = RootBundle::<Digest>::decode(stored.2.as_slice())
-            .context("decode settlement roots for claim")?;
-        let payout = claim
-            .verify::<Sha256>(&roots.change)
-            .context("verify external payout claim")?;
-        ensure!(
-            payout.recipient.as_ref() == stored.3.as_slice(),
-            "stored claim receiver differs from its proof"
-        );
-        ensure!(
-            payout.amount == from_sql_u64(stored.4, "claim amount")?,
-            "stored claim amount differs from its proof"
-        );
-        let header = Header::<Digest>::decode(stored.5.as_slice())
-            .context("decode external payout settlement header")?;
-        Ok(ExternalPayoutEvidence {
-            batch_id: header.batch_id::<Sha256>(),
-            claim,
-        })
-    }
-
-    pub(crate) fn acknowledge_external_payout_claim(
-        &mut self,
-        batch_id: BatchId<Digest>,
-        claim: &ExternalPayoutClaim<Key, Digest>,
-    ) -> Result<()> {
-        let proof = claim.encode();
-        ensure!(
-            !proof.is_empty() && proof.len() <= MAX_CLAIM_BYTES,
-            "external payout claim exceeds the operator bound"
-        );
-        mutate(
-            &mut self.connection,
-            "external payout acknowledgement",
-            |transaction| {
-                let claimed = transaction
-                    .query_row(
-                        "SELECT payout_claims.claimed
-                 FROM payout_claims
-                 JOIN settlements USING(epoch)
-                 WHERE settlements.batch_id = ?1
-                   AND payout_claims.position = ?2
-                   AND payout_claims.proof = ?3",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            proof.as_ref(),
-                        ],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .context("external payout acknowledgement does not match stored evidence")?;
-                if !claimed {
-                    let updated = transaction.execute(
-                        "UPDATE payout_claims
-                 SET claimed = 1
-                 WHERE epoch = (SELECT epoch FROM settlements WHERE batch_id = ?1)
-                   AND position = ?2
-                   AND proof = ?3
-                   AND claimed = 0",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            proof.as_ref(),
-                        ],
-                    )?;
-                    ensure!(
-                        updated == 1,
-                        "external payout acknowledgement changed concurrently"
-                    );
-                }
-                Ok(())
-            },
-        )
-    }
-
     pub(crate) fn fail_close(&mut self, epoch: u64, error: &str) -> Result<()> {
         let mut end = error.len().min(MAX_CLOSE_ERROR_BYTES);
         while !error.is_char_boundary(end) {
@@ -2394,7 +2243,7 @@ impl Store {
             .transpose()
     }
 
-    pub(crate) fn latest_finalized_root(&self) -> Result<Option<(u64, VectorRoot<Digest>)>> {
+    pub(crate) fn latest_finalized_root(&self) -> Result<Option<(u64, StateRoot<Digest>)>> {
         let stored = self
             .connection
             .query_row(
@@ -2420,11 +2269,11 @@ impl Store {
         )))
     }
 
-    pub(crate) fn next_closing_epoch(&self) -> Result<Option<u64>> {
+    pub(crate) fn closing_epoch_from(&self, first: u64) -> Result<Option<u64>> {
         self.connection
             .query_row(
-                "SELECT epoch FROM close_jobs WHERE status = 'closing' ORDER BY epoch LIMIT 1",
-                [],
+                "SELECT epoch FROM close_jobs WHERE status = 'closing' AND epoch >= ?1 ORDER BY epoch LIMIT 1",
+                [sql_u64(first, "first closing epoch")?],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -2432,13 +2281,23 @@ impl Store {
             .transpose()
     }
 
-    pub(crate) fn pending_close_count(&self) -> Result<usize> {
-        let count = self.connection.query_row(
-            "SELECT count(*) FROM close_jobs WHERE status = 'closing'",
-            [],
-            |row| row.get::<_, i64>(0),
+    pub(crate) fn pending_epochs(&self) -> Result<Vec<u64>> {
+        let mut query = self.connection.prepare_cached(
+            "SELECT epoch FROM close_jobs WHERE status = 'closing' ORDER BY epoch",
         )?;
-        usize::try_from(count).context("pending close count does not fit usize")
+        query
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .map(|epoch| from_sql_u64(epoch?, "closing epoch"))
+            .collect()
+    }
+
+    pub(crate) fn current_entry_count(&self) -> Result<usize> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM accepted_entries WHERE epoch = ?1",
+            [sql_u64(self.epoch()?, "epoch")?],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).context("entry count does not fit usize")
     }
 
     /// Returns whether the exact epoch already has a durable close job.
@@ -2486,7 +2345,7 @@ impl Store {
             }
             "finalized" => {
                 let stored = self.connection.query_row(
-                    "SELECT length(header), header, rows, slices, payout_total,
+                    "SELECT length(header), header, rows, dealing_bytes, withdrawal_total,
                             length(certificate), prepare_micros, deal_micros, seal_micros
                      FROM settlements WHERE epoch = ?1",
                     [epoch],
@@ -2509,9 +2368,9 @@ impl Store {
                     header,
                     rows: usize::try_from(from_sql_u64(stored.1, "close row count")?)
                         .context("close row count does not fit usize")?,
-                    slices: usize::try_from(from_sql_u64(stored.2, "close slice count")?)
-                        .context("close slice count does not fit usize")?,
-                    payout_total: from_sql_u64(stored.3, "close payout total")?,
+                    dealing_bytes: usize::try_from(from_sql_u64(stored.2, "close dealing bytes")?)
+                        .context("close dealing bytes does not fit usize")?,
+                    withdrawal_total: from_sql_u64(stored.3, "close withdrawal total")?,
                     header_bytes: Header::<Digest>::SIZE,
                     certificate_bytes: usize::try_from(from_sql_u64(
                         stored.4,
@@ -2560,9 +2419,8 @@ impl Store {
     pub(crate) fn status(&self) -> Result<StoreStatus> {
         let epoch = self.epoch()?;
         let epoch_sql = sql_u64(epoch, "epoch")?;
-        let (accounts, present_accounts, recent_payments, reserved_payout_value) =
-            self.connection.query_row(
-                "SELECT
+        let (accounts, present_accounts, recent_payments) = self.connection.query_row(
+            "SELECT
                      (SELECT count(*) FROM account_identities),
                      (SELECT count(*) FROM account_identities AS identity
                       WHERE (SELECT state.current_balance
@@ -2570,25 +2428,21 @@ impl Store {
                              WHERE state.public_key = identity.public_key
                                AND state.epoch <= ?1
                              ORDER BY state.epoch DESC LIMIT 1) > 0),
-                     min((SELECT count(*) FROM accepted_entries WHERE epoch = ?1), 12),
-                     (SELECT coalesce(sum(amount), 0)
-                      FROM payout_claims WHERE claimed = 0)",
-                [epoch_sql],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )?;
+                     min((SELECT count(*) FROM accepted_entries WHERE epoch = ?1), 12)",
+            [epoch_sql],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         Ok(StoreStatus {
             epoch,
             accounts: from_sql_u64(accounts, "account count")?,
             present_accounts: from_sql_u64(present_accounts, "present account count")?,
             recent_payments: from_sql_u64(recent_payments, "recent payment count")?,
-            reserved_payout_value: from_sql_u64(reserved_payout_value, "reserved payout value")?,
         })
     }
 
@@ -2601,32 +2455,15 @@ impl Store {
             .into_iter()
             .map(|account| AccountView {
                 name: account.name,
-                balance: account.current.balance,
-                present: account.current.balance > 0,
+                balance: account.current,
+                present: account.current > 0,
             })
             .collect();
-        let payments = current
-            .entries
-            .into_iter()
-            .rev()
-            .take(12)
-            .map(|entry| PaymentView {
-                external: entry.external,
-            })
-            .collect();
-        let reserved_payout_value = from_sql_u64(
-            self.connection.query_row(
-                "SELECT coalesce(sum(amount), 0) FROM payout_claims WHERE claimed = 0",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?,
-            "reserved payout value",
-        )?;
+        let payments = current.entries.into_iter().rev().take(12).collect();
         Ok(StoreSnapshot {
             epoch,
             accounts,
             payments,
-            reserved_payout_value,
         })
     }
 }
@@ -2655,8 +2492,7 @@ fn validate_new_batch(
         .context("verify payer authorization")?;
     let body = authorization.body();
     let payer_key = body.payer().clone();
-    let mut payer = effective_account(connection, epoch, &payer_key)?
-        .context("payer is not a live registered account")?;
+    let mut payer = eligible_account(connection, epoch, &payer_key)?;
 
     // The wire carries per-batch deltas: strictly recipient-sorted, unique, positive, and
     // never self-crediting.
@@ -2676,12 +2512,20 @@ fn validate_new_batch(
         ensure!(entry.amount > 0, "batch entry amount must be positive");
         total = checked_sql_add(total, entry.amount, "batch total")?;
     }
+    let gross = connection
+        .prepare_cached("SELECT COALESCE(SUM(amount), 0) FROM accepted_entries WHERE epoch = ?1")?
+        .query_row([epoch_sql], |row| row.get::<_, i64>(0))?;
+    checked_sql_add(
+        from_sql_u64(gross, "epoch gross payment")?,
+        total,
+        "epoch gross payment",
+    )?;
 
     // Endpoint discipline: the signed body must extend the payer's accepted state by
     // exactly this batch. The replay probe already ran, so a re-signed accepted sequence
     // is wallet equivocation and fails closed, while a skipped or mismatched endpoint
     // earns the corrective rejection carrying the operator's current view.
-    let prior_seq = payer_sequence(connection, epoch_sql, &payer_key)?;
+    let (prior_seq, prior_debit) = payer_endpoint(connection, epoch_sql, &payer_key)?;
     ensure!(
         body.seq() > prior_seq,
         "batch sequence is already bound to another accepted endpoint"
@@ -2689,21 +2533,17 @@ fn validate_new_batch(
     let expected_seq = prior_seq
         .checked_add(1)
         .context("batch sequence overflow")?;
-    let expected_debit = checked_sql_add(
-        payer.current.cumulative_debit,
-        total,
-        "payer cumulative debit",
-    )?;
+    let expected_debit = checked_sql_add(prior_debit, total, "payer cumulative debit")?;
     let current = out_entries_for(connection, epoch_sql, &payer_key)?;
     if body.seq() != expected_seq || body.cumulative_debit() != expected_debit {
         return Ok(Admission::Stale(Endpoint {
-            cumulative_debit: payer.current.cumulative_debit,
+            cumulative_debit: prior_debit,
             seq: prior_seq,
             entries: current,
         }));
     }
     ensure!(
-        payer.current.balance >= total,
+        payer.current >= total,
         "payer has insufficient available balance"
     );
 
@@ -2742,57 +2582,35 @@ fn validate_new_batch(
         .context("commit merged out vector")?;
     if send_root != body.send_root() {
         return Ok(Admission::Stale(Endpoint {
-            cumulative_debit: payer.current.cumulative_debit,
+            cumulative_debit: prior_debit,
             seq: prior_seq,
             entries: current,
         }));
     }
-    payer.current.cumulative_debit = expected_debit;
-    payer.current.balance -= total;
+    payer.current -= total;
 
-    let mut external_total = 0_u64;
     let mut credits = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut receiver = effective_account(connection, epoch, &entry.recipient)?;
-        let external = receiver.is_none();
-        if let Some(receiver) = receiver.as_mut() {
-            receiver.current.balance = checked_sql_add(
-                receiver.current.balance,
-                entry.amount,
-                "receiver account balance",
-            )?;
-            receiver.current.cumulative_credit = checked_sql_add(
-                receiver.current.cumulative_credit,
-                entry.amount,
-                "receiver cumulative credit",
-            )?;
-            receiver.current.receipt_count =
-                checked_sql_add(receiver.current.receipt_count, 1, "receiver receipt count")?;
-        } else {
-            external_total =
-                checked_sql_add(external_total, entry.amount, "external payment total")?;
-        }
+        let mut receiver = match effective_account(connection, epoch, &entry.recipient)? {
+            Some(receiver) => receiver,
+            None => StoredAccount {
+                name: account_name(connection, &entry.recipient)?,
+                key: entry.recipient.clone(),
+                predecessor: 0,
+                current: 0,
+            },
+        };
+        receiver.current =
+            checked_sql_add(receiver.current, entry.amount, "receiver account balance")?;
         credits.push(Credit {
-            recipient: entry.recipient.clone(),
             amount: entry.amount,
             receiver,
-            external,
         });
     }
-    let live_liability = if external_total > 0 {
-        Some(
-            metadata_live_liability(connection)?
-                .checked_sub(external_total)
-                .context("external payment exceeds live liability")?,
-        )
-    } else {
-        None
-    };
     Ok(Admission::Admit(Box::new(Plan {
         epoch,
         total,
         payer,
-        live_liability,
         vector,
         credits,
     })))
@@ -2803,18 +2621,18 @@ fn find_accepted_batch(
     authorization: &SendAuthorization<Key, Digest>,
     entries: &[Entry],
 ) -> Result<Option<AcceptedBatch>> {
-    // The body binds its own epoch through the anchor, so the accepted row is keyed by
-    // (payer, seq) across every retained epoch and matched by exact body equality.
+    // The signed epoch selects one immutable accepted row; body equality also binds its anchor.
     let body = authorization.body();
     let mut statement = connection.prepare_cached(
         "SELECT epoch, length(ack), ack
-         FROM acks WHERE payer = ?1 AND seq = ?2",
+         FROM acks WHERE payer = ?1 AND seq = ?2 AND epoch = ?3",
     )?;
-    let rows = statement
-        .query_map(
+    let stored_ack = statement
+        .query_row(
             params![
                 body.payer().as_ref(),
-                sql_u64(body.seq(), "batch sequence")?
+                sql_u64(body.seq(), "batch sequence")?,
+                sql_u64(body.epoch(), "batch epoch")?
             ],
             |row| {
                 Ok((
@@ -2822,48 +2640,52 @@ fn find_accepted_batch(
                     read_fixed_blob(row, 1, 2, Ack::SIZE, "acknowledgment")?,
                 ))
             },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (epoch, encoded) in rows {
-        let ack = Ack::decode(encoded.as_slice()).context("decode stored acknowledgment")?;
-        if ack.body() != body {
-            continue;
-        }
-        let epoch = from_sql_u64(epoch, "acknowledgment epoch")?;
-        let stored = batch_entries(connection, epoch, body.payer(), body.seq())?;
+        )
+        .optional()?;
+    let Some((epoch, encoded)) = stored_ack else {
+        return Ok(None);
+    };
+    let ack = Ack::decode(encoded.as_slice()).context("decode stored acknowledgment")?;
+    if ack.body() != body {
+        return Ok(None);
+    }
+    ensure!(
+        ack.payer_signature() == authorization.payer_signature(),
+        "retry does not match the accepted payer signature"
+    );
+    let epoch = from_sql_u64(epoch, "acknowledgment epoch")?;
+    let stored = batch_entries(connection, epoch, body.payer(), body.seq())?;
 
-        // An exact replay carries the accepted deltas: the signed root determines them
-        // from the payer's prior vector, so a divergent claim is not this batch.
+    // An exact replay carries the accepted deltas: the signed root determines them
+    // from the payer's prior vector, so a divergent claim is not this batch.
+    ensure!(
+        stored.len() == entries.len(),
+        "authorization is bound to another accepted batch"
+    );
+    let mut total = 0_u64;
+    let mut accepted = Vec::with_capacity(stored.len());
+    for (row, entry) in stored.into_iter().zip(entries) {
         ensure!(
-            stored.len() == entries.len(),
+            row.recipient == entry.recipient && row.amount == entry.amount,
             "authorization is bound to another accepted batch"
         );
-        let mut total = 0_u64;
-        let mut accepted = Vec::with_capacity(stored.len());
-        for (row, entry) in stored.into_iter().zip(entries) {
-            ensure!(
-                row.recipient == entry.recipient && row.amount == entry.amount,
-                "authorization is bound to another accepted batch"
-            );
-            total = checked_sql_add(total, row.amount, "accepted batch total")?;
-            accepted.push(AcceptedEntry {
-                recipient: row.recipient,
-                cumulative: row.cumulative,
-                count: row.count,
-                opening: row.opening,
-            });
-        }
-        return Ok(Some(AcceptedBatch {
-            epoch,
-            sequence: body.seq(),
-            total,
-            acceptance: Acceptance {
-                ack,
-                entries: accepted,
-            },
-        }));
+        total = checked_sql_add(total, row.amount, "accepted batch total")?;
+        accepted.push(AcceptedEntry {
+            recipient: row.recipient,
+            cumulative: row.cumulative,
+            count: row.count,
+            opening: row.opening,
+        });
     }
-    Ok(None)
+    Ok(Some(AcceptedBatch {
+        epoch,
+        sequence: body.seq(),
+        total,
+        acceptance: Acceptance {
+            ack,
+            entries: accepted,
+        },
+    }))
 }
 
 /// Reads one accepted batch's serving-log rows in acceptance order.
@@ -2874,7 +2696,7 @@ fn batch_entries(
     seq: u64,
 ) -> Result<Vec<StoredEntry>> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, length(recipient), recipient, external, amount, cumulative, count,
+        "SELECT id, length(recipient), recipient, amount, cumulative, count,
                 length(opening), opening
          FROM accepted_entries
          WHERE epoch = ?1 AND payer = ?2 AND seq = ?3
@@ -2889,7 +2711,7 @@ fn batch_entries(
             ],
             |row| {
                 let recipient = read_fixed_blob(row, 1, 2, Key::SIZE, "entry recipient")?;
-                let opening = read_bounded_blob(row, 7, 8, MAX_OPENING_BYTES, "entry opening")?;
+                let opening = read_bounded_blob(row, 6, 7, MAX_OPENING_BYTES, "entry opening")?;
                 Ok(StoredEntry {
                     sequence: from_sql_u64(row.get(0)?, "entry cursor").map_err(to_sqlite_error)?,
                     payer: payer.clone(),
@@ -2897,11 +2719,10 @@ fn batch_entries(
                     recipient: Key::decode(recipient.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry recipient: {error}"))
                     })?,
-                    external: row.get::<_, i64>(3)? != 0,
-                    amount: from_sql_u64(row.get(4)?, "entry amount").map_err(to_sqlite_error)?,
-                    cumulative: from_sql_u64(row.get(5)?, "entry cumulative")
+                    amount: from_sql_u64(row.get(3)?, "entry amount").map_err(to_sqlite_error)?,
+                    cumulative: from_sql_u64(row.get(4)?, "entry cumulative")
                         .map_err(to_sqlite_error)?,
-                    count: from_sql_u64(row.get(6)?, "entry count").map_err(to_sqlite_error)?,
+                    count: from_sql_u64(row.get(5)?, "entry count").map_err(to_sqlite_error)?,
                     opening: Opening::decode(opening.as_slice()).map_err(|error| {
                         to_sqlite_error(anyhow::anyhow!("decode entry opening: {error}"))
                     })?,
@@ -2912,12 +2733,23 @@ fn batch_entries(
     Ok(rows)
 }
 
-/// Reads one payer's highest accepted batch sequence in `epoch`, zero when none.
-fn payer_sequence(connection: &Connection, epoch: i64, payer: &Key) -> Result<u64> {
-    let seq = connection
-        .prepare_cached("SELECT coalesce(max(seq), 0) FROM acks WHERE epoch = ?1 AND payer = ?2")?
-        .query_row(params![epoch, payer.as_ref()], |row| row.get::<_, i64>(0))?;
-    from_sql_u64(seq, "batch sequence")
+/// Reads the last accepted sequence and debit in this epoch, or the empty endpoint.
+fn payer_endpoint(connection: &Connection, epoch: i64, payer: &Key) -> Result<(u64, u64)> {
+    let endpoint = connection
+        .prepare_cached(
+            "SELECT seq, cumulative_debit FROM acks
+                         WHERE epoch = ?1 AND payer = ?2 ORDER BY seq DESC LIMIT 1",
+        )?
+        .query_row(params![epoch, payer.as_ref()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .optional()?;
+    endpoint.map_or(Ok((0, 0)), |(seq, debit)| {
+        Ok((
+            from_sql_u64(seq, "batch sequence")?,
+            from_sql_u64(debit, "epoch debit")?,
+        ))
+    })
 }
 
 /// Reads one payer's live cumulative out vector in canonical recipient order.
@@ -2948,27 +2780,33 @@ fn read_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAccount> {
         name: row.get(0)?,
         key: Key::decode(key.as_slice())
             .map_err(|error| to_sqlite_error(anyhow::anyhow!("decode account key: {error}")))?,
-        predecessor: AccountState {
-            balance: from_sql_u64(row.get(3)?, "predecessor balance").map_err(to_sqlite_error)?,
-            cumulative_debit: from_sql_u64(row.get(4)?, "predecessor debit")
-                .map_err(to_sqlite_error)?,
-            cumulative_credit: from_sql_u64(row.get(5)?, "predecessor credit")
-                .map_err(to_sqlite_error)?,
-            receipt_count: from_sql_u64(row.get(6)?, "predecessor receipts")
-                .map_err(to_sqlite_error)?,
-            active: row.get::<_, i64>(7)? != 0,
-        },
-        current: AccountState {
-            balance: from_sql_u64(row.get(8)?, "current balance").map_err(to_sqlite_error)?,
-            cumulative_debit: from_sql_u64(row.get(9)?, "current debit")
-                .map_err(to_sqlite_error)?,
-            cumulative_credit: from_sql_u64(row.get(10)?, "current credit")
-                .map_err(to_sqlite_error)?,
-            receipt_count: from_sql_u64(row.get(11)?, "current receipts")
-                .map_err(to_sqlite_error)?,
-            active: from_sql_u64(row.get(8)?, "current balance").map_err(to_sqlite_error)? > 0,
-        },
+        predecessor: from_sql_u64(row.get(3)?, "predecessor balance").map_err(to_sqlite_error)?,
+        current: from_sql_u64(row.get(4)?, "current balance").map_err(to_sqlite_error)?,
     })
+}
+
+fn account_name(connection: &Connection, account: &Key) -> Result<String> {
+    Ok(connection
+        .prepare_cached("SELECT name FROM account_identities WHERE public_key = ?1")?
+        .query_row([account.as_ref()], |row| row.get(0))
+        .optional()?
+        .unwrap_or_else(|| "Account".to_string()))
+}
+
+fn eligible_account(connection: &Connection, epoch: u64, key: &Key) -> Result<StoredAccount> {
+    let account =
+        effective_account(connection, epoch, key)?.context("payer is absent in this epoch")?;
+    if account.predecessor == 0 {
+        let deposit: bool = connection
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1 AND account = ?2)",
+            )?
+            .query_row(params![sql_u64(epoch, "epoch")?, key.as_ref()], |row| {
+                row.get(0)
+            })?;
+        ensure!(deposit, "payer is absent at the epoch boundary");
+    }
+    Ok(account)
 }
 
 fn effective_account(
@@ -2981,18 +2819,9 @@ fn effective_account(
         .prepare_cached(EFFECTIVE_ACCOUNT_SQL)?
         .query_row(params![account.as_ref(), epoch_sql], |row| {
             let key = read_fixed_blob(row, 2, 3, Key::SIZE, "account key")?;
-            let predecessor = AccountState {
-                balance: from_sql_u64(row.get(4)?, "predecessor balance")
-                    .map_err(to_sqlite_error)?,
-                cumulative_debit: from_sql_u64(row.get(5)?, "predecessor debit")
-                    .map_err(to_sqlite_error)?,
-                cumulative_credit: from_sql_u64(row.get(6)?, "predecessor credit")
-                    .map_err(to_sqlite_error)?,
-                receipt_count: from_sql_u64(row.get(7)?, "predecessor receipts")
-                    .map_err(to_sqlite_error)?,
-                active: row.get::<_, i64>(8)? != 0,
-            };
-            let balance = from_sql_u64(row.get(9)?, "current balance").map_err(to_sqlite_error)?;
+            let predecessor =
+                from_sql_u64(row.get(4)?, "predecessor balance").map_err(to_sqlite_error)?;
+            let balance = from_sql_u64(row.get(5)?, "current balance").map_err(to_sqlite_error)?;
             Ok((
                 from_sql_u64(row.get(0)?, "account state epoch").map_err(to_sqlite_error)?,
                 StoredAccount {
@@ -3001,16 +2830,7 @@ fn effective_account(
                         to_sqlite_error(anyhow::anyhow!("decode account key: {error}"))
                     })?,
                     predecessor,
-                    current: AccountState {
-                        balance,
-                        cumulative_debit: from_sql_u64(row.get(10)?, "current debit")
-                            .map_err(to_sqlite_error)?,
-                        cumulative_credit: from_sql_u64(row.get(11)?, "current credit")
-                            .map_err(to_sqlite_error)?,
-                        receipt_count: from_sql_u64(row.get(12)?, "current receipts")
-                            .map_err(to_sqlite_error)?,
-                        active: balance > 0,
-                    },
+                    current: balance,
                 },
             ))
         })
@@ -3019,9 +2839,8 @@ fn effective_account(
         return Ok(None);
     };
     if version_epoch < epoch {
-        // Zero-balance accounts remain registered through the epoch that drained them, then
-        // disappear unless a later deposit creates a fresh version.
-        if account.current.balance == 0 {
+        // A zero tail remains visible to its own epoch, then denotes absence at later boundaries.
+        if account.current == 0 {
             return Ok(None);
         }
         account.predecessor = account.current;
@@ -3046,38 +2865,21 @@ fn upsert_account_state(
     ensure!(name == account.name, "account label does not match its key");
     transaction
         .prepare_cached(
-            "INSERT INTO account_states(
-             epoch, public_key,
-             predecessor_balance, predecessor_debit, predecessor_credit,
-             predecessor_receipts, predecessor_active,
-             current_balance, current_debit, current_credit, current_receipts
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-         ON CONFLICT(epoch, public_key) DO UPDATE SET
-             current_balance = excluded.current_balance,
-             current_debit = excluded.current_debit,
-             current_credit = excluded.current_credit,
-             current_receipts = excluded.current_receipts",
+            "INSERT INTO account_states(epoch, public_key, predecessor_balance, current_balance)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(epoch, public_key) DO UPDATE SET
+                 current_balance = excluded.current_balance",
         )?
         .execute(params![
             sql_u64(epoch, "epoch")?,
             account.key.as_ref(),
-            sql_u64(account.predecessor.balance, "predecessor balance")?,
-            sql_u64(account.predecessor.cumulative_debit, "predecessor debit")?,
-            sql_u64(account.predecessor.cumulative_credit, "predecessor credit")?,
-            sql_u64(account.predecessor.receipt_count, "predecessor receipts")?,
-            i64::from(account.predecessor.active),
-            sql_u64(account.current.balance, "current balance")?,
-            sql_u64(account.current.cumulative_debit, "current debit")?,
-            sql_u64(account.current.cumulative_credit, "current credit")?,
-            sql_u64(account.current.receipt_count, "current receipts")?,
+            sql_u64(account.predecessor, "predecessor balance")?,
+            sql_u64(account.current, "current balance")?,
         ])?;
     Ok(())
 }
 
-fn pending_close_accounts(
-    connection: &Connection,
-    epoch: u64,
-) -> Result<Vec<(SignedWithdrawal<Key, Digest>, StoredAccount)>> {
+fn pending_withdrawals(connection: &Connection, epoch: u64) -> Result<Vec<(StoredAccount, u64)>> {
     let epoch_sql = sql_u64(epoch, "epoch")?;
     let encoded = {
         let mut statement = connection.prepare(
@@ -3089,11 +2891,11 @@ fn pending_close_accounts(
         statement
             .query_map([epoch_sql], |row| {
                 let length = usize::try_from(row.get::<_, i64>(0)?).map_err(|_| {
-                    to_sqlite_error(anyhow::anyhow!("invalid encoded Close length"))
+                    to_sqlite_error(anyhow::anyhow!("invalid encoded withdrawal length"))
                 })?;
                 if length == 0 || length > MAX_WITHDRAWAL_BYTES {
                     return Err(to_sqlite_error(anyhow::anyhow!(
-                        "invalid encoded Close length"
+                        "invalid encoded withdrawal length"
                     )));
                 }
                 row.get::<_, Vec<u8>>(1)
@@ -3108,105 +2910,16 @@ fn pending_close_accounts(
                 encoded.as_slice(),
                 &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
             )
-            .context("decode pending Close")?;
-            ensure!(
-                matches!(request.body().action(), WithdrawalAction::Close),
-                "only Close may have a pending applied amount"
-            );
+            .context("decode pending withdrawal")?;
             request
                 .verify_signature()
-                .context("verify pending Close authorization")?;
+                .context("verify pending withdrawal authorization")?;
             let account = effective_account(connection, epoch, request.account())?
-                .context("pending Close account is not represented in its epoch")?;
-            Ok((request, account))
+                .context("pending withdrawal account is not represented in its epoch")?;
+            let amount = withdrawal_amount(request.body().action(), account.current);
+            Ok((account, amount))
         })
         .collect()
-}
-
-/// One account's staged deposit shape for the current epoch.
-struct StagedAccountDeposits {
-    /// Aggregate of rows the current epoch's boundary includes.
-    included_total: u64,
-    /// Number of included rows.
-    included_events: usize,
-    /// Aggregate of rows parked for the successor epoch.
-    parked_total: u64,
-    /// Number of parked rows.
-    parked_events: usize,
-}
-
-fn staged_account_deposits(
-    connection: &Connection,
-    epoch: u64,
-    account: &Key,
-) -> Result<StagedAccountDeposits> {
-    let epoch_sql = sql_u64(epoch, "epoch")?;
-    let mut statement = connection.prepare(
-        "SELECT amount, epoch FROM deposits
-         WHERE account = ?1 AND (epoch = ?2 OR (carried_from <= ?2 AND epoch > ?2))",
-    )?;
-    let rows = statement
-        .query_map(params![account.as_ref(), epoch_sql], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut staged = StagedAccountDeposits {
-        included_total: 0,
-        included_events: 0,
-        parked_total: 0,
-        parked_events: 0,
-    };
-    for (amount, row_epoch) in rows {
-        let amount = from_sql_u64(amount, "deposit amount")?;
-        if row_epoch == epoch_sql {
-            staged.included_total =
-                checked_sql_add(staged.included_total, amount, "staged deposit aggregate")?;
-            staged.included_events += 1;
-        } else {
-            staged.parked_total =
-                checked_sql_add(staged.parked_total, amount, "parked deposit aggregate")?;
-            staged.parked_events += 1;
-        }
-    }
-    Ok(staged)
-}
-
-fn epoch_withdrawal(
-    connection: &Connection,
-    epoch: u64,
-    account: &Key,
-) -> Result<Option<SignedWithdrawal<Key, Digest>>> {
-    connection
-        .query_row(
-            "SELECT length(encoded), encoded
-             FROM withdrawals WHERE epoch = ?1 AND account = ?2",
-            params![sql_u64(epoch, "epoch")?, account.as_ref()],
-            |row| read_bounded_blob(row, 0, 1, MAX_WITHDRAWAL_BYTES, "encoded withdrawal"),
-        )
-        .optional()?
-        .map(|encoded| {
-            SignedWithdrawal::<Key, Digest>::decode_cfg(
-                encoded.as_slice(),
-                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-            )
-            .context("decode staged withdrawal")
-        })
-        .transpose()
-}
-
-/// Whether an aggregate exactly offset by the account's staged withdrawal defers whole to
-/// the successor epoch, the chain's boundary rule.
-fn deposit_defers(
-    connection: &Connection,
-    epoch: u64,
-    account: &Key,
-    aggregate: u64,
-) -> Result<bool> {
-    Ok(
-        epoch_withdrawal(connection, epoch, account)?.is_some_and(|request| {
-            SettlementChain::<Sha256, Key>::withdrawal_defers_deposit(&request, aggregate)
-        }),
-    )
 }
 
 /// Stages one chain-confirmed deposit event inside an open transaction: the
@@ -3230,134 +2943,45 @@ fn stage_event(
         deposit_events < MAX_DEPOSIT_EVENTS,
         "deposit event capacity is exhausted"
     );
+
+    // Settlement rejects deposits during an active registration. A confirmed event
+    // therefore precedes any registration of this boundary and invalidates a pending
+    // request with an older deposit root. It remains stageable before read-back.
     let accepted: i64 = transaction.query_row(
         "SELECT count(*) FROM acks WHERE epoch = ?1",
         [sql_u64(epoch, "epoch")?],
         |row| row.get(0),
     )?;
-
-    // The boundary is committed by the epoch's on-chain registration, which
-    // the first receipt triggers before it is released. A nonzero batch
-    // count therefore means the committed boundary may no longer move, so
-    // intake freezes here.
     ensure!(
         accepted == 0,
         "deposits are frozen once the first payment registers the epoch boundary"
     );
     let key = staging.identity.key.clone();
-    let staged = staged_account_deposits(transaction, epoch, &key)?;
-    let aggregate = checked_sql_add(
-        checked_sql_add(
-            staged.included_total,
-            staged.parked_total,
-            "account deposit total",
-        )?,
-        amount,
-        "account deposit total",
-    )?;
-
-    // The chain's boundary rule decides where this event lands: an aggregate
-    // exactly offset by the account's staged withdrawal defers whole to the
-    // successor epoch, and a grown aggregate that no longer offsets returns.
-    // Storage stays normalized so an epoch's rows and account state carry exactly
-    // its boundary-included deposits.
-    let defers = deposit_defers(transaction, epoch, &key, aggregate)?;
-    let successor = epoch.checked_add(1).context("epoch overflow")?;
-    let account = effective_account(transaction, epoch, &key)?;
-    let (landing_epoch, account, live_liability, deposit_events) = if defers {
-        // Parking preserves a row's origin so every epoch of its staged history
-        // stays addressable, and a carried-in row parks onward like a fresh one.
-        let parked = transaction.execute(
-            "UPDATE deposits
-             SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
-             WHERE account = ?3 AND epoch = ?2",
-            params![
-                sql_u64(successor, "epoch")?,
-                sql_u64(epoch, "epoch")?,
-                key.as_ref(),
-            ],
-        )?;
-        ensure!(
-            parked == staged.included_events,
-            "staged deposit rows changed during deferral"
-        );
-        let mut account = account.context("deferring account is not in the live state")?;
-        account.current.balance = account
-            .current
-            .balance
-            .checked_sub(staged.included_total)
-            .context("deferred aggregate exceeds the live balance")?;
-        let live_liability = metadata_live_liability(transaction)?
-            .checked_sub(staged.included_total)
-            .context("deferred aggregate exceeds live liability")?;
-        let deposit_events = deposit_events
-            .checked_sub(staged.included_events)
-            .context("deferred deposit event count underflow")?;
-        (successor, account, live_liability, deposit_events)
+    let account = if let Some(mut account) = effective_account(transaction, epoch, &key)? {
+        account.current = checked_sql_add(account.current, amount, "deposit account balance")?;
+        account
     } else {
-        let returned = if staged.parked_total > 0 {
-            // The grown aggregate no longer offsets the withdrawal exactly, so
-            // the parked rows return to this epoch's boundary with their credit.
-            // A row this epoch first staged loses its mark, and a carried-in row
-            // keeps its origin.
-            let unparked = transaction.execute(
-                "UPDATE deposits
-                 SET epoch = ?1,
-                     carried_from = CASE
-                         WHEN carried_from = ?1 THEN NULL ELSE carried_from
-                     END
-                 WHERE account = ?2 AND carried_from <= ?1 AND epoch > ?1",
-                params![sql_u64(epoch, "epoch")?, key.as_ref()],
-            )?;
-            ensure!(
-                unparked == staged.parked_events,
-                "parked deposit rows changed during return"
-            );
-            staged.parked_total
-        } else {
-            0
-        };
-        let credit = checked_sql_add(returned, amount, "deposit credit")?;
-        let account = if let Some(mut account) = account {
-            account.current.balance =
-                checked_sql_add(account.current.balance, credit, "deposit account balance")?;
-            account
-        } else {
-            StoredAccount {
-                name: staging.identity.name.to_string(),
-                key: key.clone(),
-                predecessor: AccountState::default(),
-                current: AccountState {
-                    balance: credit,
-                    active: true,
-                    ..AccountState::default()
-                },
-            }
-        };
-        let live_liability = checked_sql_add(
-            metadata_live_liability(transaction)?,
-            credit,
-            "live liability",
-        )?;
-        let deposit_events = deposit_events
-            .checked_add(staged.parked_events)
-            .and_then(|count| count.checked_add(1))
-            .context("deposit event count overflow")?;
-        ensure!(
-            deposit_events <= MAX_DEPOSIT_EVENTS,
-            "deposit event capacity is exhausted"
-        );
-        (epoch, account, live_liability, deposit_events)
+        StoredAccount {
+            name: staging.identity.name.to_string(),
+            key: key.clone(),
+            predecessor: 0,
+            current: amount,
+        }
     };
+    let live_liability = checked_sql_add(
+        metadata_live_liability(transaction)?,
+        amount,
+        "live liability",
+    )?;
+    let deposit_events = deposit_events + 1;
     transaction.execute(
-        "INSERT INTO deposits(epoch, event_id, account, amount, carried_from)
-     VALUES(?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO deposits(epoch, event_id, account, amount)
+     VALUES(?1, ?2, ?3, ?4)",
         params![
-            sql_u64(landing_epoch, "epoch")?,
+            sql_u64(epoch, "epoch")?,
             event.id.as_ref(),
             key.as_ref(),
             amount_sql,
-            defers.then(|| sql_u64(epoch, "epoch")).transpose()?,
         ],
     )?;
     upsert_account_state(transaction, epoch, &account)?;
@@ -3372,11 +2996,31 @@ fn stage_event(
         ],
     )?;
     Ok(StagedDeposit {
-        epoch: landing_epoch,
+        epoch,
         id: event.id,
         account: event.account.clone(),
         amount,
     })
+}
+
+fn withdrawals_frozen(connection: &Connection, epoch: u64) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+/// Resolves a withdrawal against its available epoch tail.
+pub(super) const fn withdrawal_amount(action: &WithdrawalAction, tail: u64) -> u64 {
+    match action {
+        WithdrawalAction::Amount(amount) if amount.get() <= tail => amount.get(),
+        WithdrawalAction::Amount(_) => 0,
+        WithdrawalAction::Close => tail,
+    }
 }
 
 fn validate_applied_withdrawal(
@@ -3388,12 +3032,27 @@ fn validate_applied_withdrawal(
         .transpose()?;
     match request.body().action() {
         WithdrawalAction::Amount(amount) => ensure!(
-            applied_amount == Some(amount.get()),
-            "ordinary withdrawal has an inconsistent applied amount"
+            applied_amount.is_none_or(|applied| applied == 0 || applied == amount.get()),
+            "withdrawal has an inconsistent applied amount"
         ),
         WithdrawalAction::Close => {}
     }
     Ok(applied_amount)
+}
+
+// A published registration must close even if no receipt followed its preparation.
+fn epoch_has_work(connection: &Connection, epoch: u64) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT
+             EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn metadata_epoch(connection: &Connection) -> Result<u64> {
@@ -3498,6 +3157,72 @@ fn close_payment_context(transaction: &Transaction<'_>, epoch: i64) -> Result<Ep
     decode_payment_context(&encoded)
 }
 
+fn stored_result(connection: &Connection, epoch: u64) -> Result<Option<SettlementResult>> {
+    let encoded = connection
+        .query_row(
+            "SELECT length(result), result FROM close_jobs WHERE epoch = ?1 AND result IS NOT NULL",
+            [sql_u64(epoch, "close epoch")?],
+            |row| read_bounded_blob(row, 0, 1, MAX_RESULT_BYTES, "retained close result"),
+        )
+        .optional()?;
+    encoded
+        .map(|bytes| {
+            SettlementResult::decode(bytes.as_slice()).context("decode retained close result")
+        })
+        .transpose()
+}
+
+fn record_result(
+    connection: &mut Connection,
+    result: &SettlementResult,
+    genesis_root: StateRoot<Digest>,
+) -> Result<()> {
+    let encoded = result.encode();
+    ensure!(
+        encoded.len() <= MAX_RESULT_BYTES,
+        "certified close result exceeds its bound"
+    );
+    mutate(connection, "certified close retention", |transaction| {
+        let epoch = result.context.payment().epoch();
+        if let Some(stored) = stored_result(transaction, epoch)? {
+            ensure!(
+                stored.encode() == encoded,
+                "certified close result conflicts with retained result"
+            );
+            return Ok(());
+        }
+        let status: String = transaction.query_row(
+            "SELECT status FROM close_jobs WHERE epoch = ?1",
+            [sql_u64(epoch, "close epoch")?],
+            |row| row.get(0),
+        )?;
+        ensure!(status == "closing", "certified close job is not pending");
+        ensure!(
+            close_payment_context(transaction, sql_u64(epoch, "close epoch")?)?
+                == *result.context.payment(),
+            "certified close has the wrong payment context"
+        );
+        let predecessor = match epoch.checked_sub(1) {
+            Some(epoch) => {
+                stored_result(transaction, epoch)?
+                    .context("certified predecessor result is unavailable")?
+                    .roots
+                    .successor
+            }
+            None => genesis_root,
+        };
+        ensure!(
+            result.context.predecessor_root() == &predecessor,
+            "certified close does not extend the retained predecessor"
+        );
+        transaction.execute(
+            "UPDATE close_jobs SET result = ?1 WHERE epoch = ?2",
+            params![encoded.as_ref(), sql_u64(epoch, "close epoch")?],
+        )?;
+        Ok(())
+    })
+}
+
 fn decode_payment_context(encoded: &[u8]) -> Result<EpochPaymentContext> {
     EpochPaymentContext::decode(encoded).context("decode stored payment context")
 }
@@ -3544,7 +3269,29 @@ mod tests {
     };
     use commonware_cryptography::{Hasher as _, Signer as _};
     use commonware_cryptography_curve25519::signing::SigningKey;
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU64, NonZeroUsize};
+
+    #[test]
+    fn non_wal_sqlite_sources_are_rejected() {
+        let source = StoreSource::new(Path::new(":memory:")).unwrap();
+        let path = source.0.path.clone();
+        let mut lock_path = OsString::from(path.as_os_str());
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        assert!(path.exists());
+        assert!(lock_path.exists());
+        let error = Store::from_connection(
+            Connection::open_in_memory().unwrap(),
+            source,
+            &identities(),
+            &crate::protocol::accounts(),
+        )
+        .err()
+        .expect("non-WAL database was accepted");
+        assert!(format!("{error:#}").contains("WAL"));
+        assert!(!path.exists());
+        assert!(!lock_path.exists());
+    }
 
     #[test]
     fn mutation_helper_reports_rollback_failure() {
@@ -3604,6 +3351,32 @@ mod tests {
                 protocol: Protocol::new(NonZeroUsize::MIN).unwrap(),
                 payer: SigningKey::from_seed(101),
                 receiver: SigningKey::from_seed(102),
+            }
+        }
+
+        fn reopen(self) -> Self {
+            let Self {
+                store,
+                context,
+                protocol,
+                payer,
+                receiver,
+            } = self;
+            let source = store.source.clone();
+            drop(store);
+            let store = Store::from_connection(
+                source.connect().unwrap(),
+                source,
+                &identities(),
+                &crate::protocol::accounts(),
+            )
+            .unwrap();
+            Self {
+                store,
+                context,
+                protocol,
+                payer,
+                receiver,
             }
         }
 
@@ -3709,6 +3482,225 @@ mod tests {
     }
 
     #[test]
+    fn epoch_endpoint_resets_at_cutover_and_preserves_old_retry() {
+        let mut fixture = PaymentFixture::new();
+        let (send, entries) = fixture.send(1);
+        let first = accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send.clone(),
+            &entries,
+        ));
+        let successor = epoch_context(
+            1,
+            &DepositBatch::empty(),
+            &WithdrawalBatch::empty(),
+            fixture.store.successor_liability().unwrap(),
+        )
+        .unwrap();
+        fixture
+            .store
+            .rotate_epoch(0, &fixture.context, &successor)
+            .unwrap();
+        fixture = fixture.reopen();
+        let endpoint = fixture
+            .store
+            .payer_endpoint(&fixture.payer.public_key())
+            .unwrap();
+        assert_eq!((endpoint.seq, endpoint.cumulative_debit), (0, 0));
+        assert!(endpoint.entries.is_empty());
+        fixture.context = successor.payment().clone();
+        let retry = accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send,
+            &entries,
+        ));
+        assert_eq!(retry.acceptance, first.acceptance);
+        let (send, entries) = fixture.send(1);
+        let next = accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send,
+            &entries,
+        ));
+        assert_eq!(next.epoch, 1);
+        assert_eq!(next.acceptance.ack.body().cumulative_debit(), 1);
+    }
+
+    #[test]
+    fn zero_balance_keeps_epoch_endpoint_for_retry_and_recredit() {
+        let mut fixture = PaymentFixture::new();
+        let payer = fixture.payer.public_key();
+        let receiver = fixture.receiver.public_key();
+        let vector = OutVector::new(
+            0,
+            payer.clone(),
+            vec![OutEntry {
+                recipient: receiver.clone(),
+                cumulative: INITIAL_BALANCE,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let send = SendAuthorization::sign(
+            VectorSendBody::new(
+                &fixture.context,
+                payer.clone(),
+                1,
+                INITIAL_BALANCE,
+                vector.root::<Sha256, Digest>().unwrap(),
+            ),
+            &fixture.payer,
+        );
+        let entries = vec![Entry {
+            recipient: receiver.clone(),
+            amount: INITIAL_BALANCE,
+        }];
+        let first = accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send.clone(),
+            &entries,
+        ));
+        fixture = fixture.reopen();
+        let endpoint = fixture.store.payer_endpoint(&payer).unwrap();
+        assert_eq!(
+            (endpoint.seq, endpoint.cumulative_debit),
+            (1, INITIAL_BALANCE)
+        );
+        let retry = accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send,
+            &entries,
+        ));
+        assert_eq!(retry.acceptance, first.acceptance);
+        let credit = OutVector::new(
+            0,
+            receiver.clone(),
+            vec![OutEntry {
+                recipient: payer.clone(),
+                cumulative: 7,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let send = SendAuthorization::sign(
+            VectorSendBody::new(
+                &fixture.context,
+                receiver,
+                1,
+                7,
+                credit.root::<Sha256, Digest>().unwrap(),
+            ),
+            &fixture.receiver,
+        );
+        accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send,
+            &[Entry {
+                recipient: payer.clone(),
+                amount: 7,
+            }],
+        ));
+        let vector = OutVector::new(
+            0,
+            payer.clone(),
+            vec![OutEntry {
+                recipient: fixture.receiver.public_key(),
+                cumulative: INITIAL_BALANCE + 7,
+                count: 2,
+            }],
+        )
+        .unwrap();
+        let send = SendAuthorization::sign(
+            VectorSendBody::new(
+                &fixture.context,
+                payer.clone(),
+                2,
+                INITIAL_BALANCE + 7,
+                vector.root::<Sha256, Digest>().unwrap(),
+            ),
+            &fixture.payer,
+        );
+        accepted(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            send,
+            &[Entry {
+                recipient: fixture.receiver.public_key(),
+                amount: 7,
+            }],
+        ));
+        assert_eq!(fixture.store.payer_endpoint(&payer).unwrap().seq, 2);
+        assert_eq!(
+            effective_account(&fixture.store.connection, 0, &payer)
+                .unwrap()
+                .unwrap()
+                .current,
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_payer_signature_cannot_change_balances_or_endpoints() {
+        let mut fixture = PaymentFixture::new();
+        let (valid, entries) = fixture.send(1);
+        let invalid = SendAuthorization::sign(valid.body().clone(), &fixture.receiver);
+        let changes = fixture.store.total_changes();
+        assert!(
+            fixture
+                .store
+                .payment_requires_epoch_registration(&fixture.context, &invalid, &entries,)
+                .is_err()
+        );
+        let error = rejected_payment(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            invalid,
+            &entries,
+        ));
+        assert!(format!("{error:#}").contains("verify payer authorization"));
+        assert_eq!(fixture.store.total_changes(), changes);
+        fixture = fixture.reopen();
+        assert_eq!(
+            fixture
+                .store
+                .payer_endpoint(&fixture.payer.public_key())
+                .unwrap()
+                .seq,
+            0
+        );
+        assert!(fixture.store.load_current().unwrap().acks.is_empty());
+        assert_eq!(
+            fixture
+                .store
+                .current_account(&fixture.payer.public_key())
+                .unwrap()
+                .unwrap()
+                .current,
+            INITIAL_BALANCE
+        );
+        let invalid = SendAuthorization::sign(valid.body().clone(), &fixture.receiver);
+        accepted(
+            fixture
+                .store
+                .accept_send(&fixture.context, &fixture.protocol, valid, &entries),
+        );
+        let changes = fixture.store.total_changes();
+        let error = rejected_payment(fixture.store.accept_send(
+            &fixture.context,
+            &fixture.protocol,
+            invalid,
+            &entries,
+        ));
+        assert!(format!("{error:#}").contains("accepted payer signature"));
+        assert_eq!(fixture.store.total_changes(), changes);
+    }
+
+    #[test]
     fn payment_capacity_rejects_new_sends_without_breaking_retries() {
         let mut fixture = PaymentFixture::new();
         let (initial_send, initial_entries) = fixture.send(1);
@@ -3727,8 +3719,8 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO accepted_entries(
-                         epoch, payer, seq, recipient, external, amount, cumulative, count, opening
-                     ) VALUES(0, ?1, ?2, ?3, 0, 1, 1, 1, ?4)",
+                         epoch, payer, seq, recipient, amount, cumulative, count, opening
+                     ) VALUES(0, ?1, ?2, ?3, 1, 1, 1, ?4)",
                     params![payer.as_ref(), seq, receiver.as_ref(), opening.as_ref()],
                 )
                 .unwrap();
@@ -3850,20 +3842,6 @@ mod tests {
     fn payment_validation_rejects_sql_domain_overflow_before_epoch_registration() {
         assert_payment_domain_rejected(
             |fixture| {
-                let payer = fixture.payer.public_key();
-                fixture
-                    .store
-                    .connection
-                    .execute(
-                        "UPDATE account_states SET current_debit = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, payer.as_ref()],
-                    )
-                    .unwrap();
-            },
-            "payer cumulative debit",
-        );
-        assert_payment_domain_rejected(
-            |fixture| {
                 let receiver = fixture.receiver.public_key();
                 fixture
                     .store
@@ -3875,34 +3853,6 @@ mod tests {
                     .unwrap();
             },
             "receiver account balance",
-        );
-        assert_payment_domain_rejected(
-            |fixture| {
-                let receiver = fixture.receiver.public_key();
-                fixture
-                    .store
-                    .connection
-                    .execute(
-                        "UPDATE account_states SET current_credit = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, receiver.as_ref()],
-                    )
-                    .unwrap();
-            },
-            "receiver cumulative credit",
-        );
-        assert_payment_domain_rejected(
-            |fixture| {
-                let receiver = fixture.receiver.public_key();
-                fixture
-                    .store
-                    .connection
-                    .execute(
-                        "UPDATE account_states SET current_receipts = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, receiver.as_ref()],
-                    )
-                    .unwrap();
-            },
-            "receiver receipt count",
         );
         assert_payment_domain_rejected(
             |fixture| {
@@ -3962,8 +3912,7 @@ mod tests {
                 .current_account(&identity.key)
                 .unwrap()
                 .unwrap()
-                .current
-                .balance,
+                .current,
             SQLITE_U64_MAX
         );
     }
@@ -4006,6 +3955,357 @@ mod tests {
     }
 
     #[test]
+    fn offset_boundaries_survive_unknown_cutover() {
+        let mut fixture = PaymentFixture::new();
+        let identity = identities()[0].clone();
+        let liability = fixture.store.current_liability().unwrap();
+        let request = SignedWithdrawal::sign(
+            deployment(),
+            Sha256::hash(&[b"carried-credit-root"]),
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Amount(NonZeroU64::new(INITIAL_BALANCE).unwrap()),
+            100,
+            &fixture.payer,
+        );
+        let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
+        let registered = fixture
+            .protocol
+            .registration(0, DepositBatch::empty(), withdrawals.clone(), liability)
+            .unwrap();
+        fixture
+            .store
+            .stage_withdrawal(
+                &request,
+                &fixture.context,
+                registered.context.payment(),
+                false,
+            )
+            .unwrap();
+        fixture.context = registered.context.payment().clone();
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"carried-credit-event"]),
+            account: identity.key.clone(),
+            amount: INITIAL_BALANCE,
+        };
+        let registered = fixture
+            .protocol
+            .registration(
+                0,
+                DepositBatch::new(vec![
+                    DepositRecord::new(event.account.clone(), event.amount).unwrap(),
+                ])
+                .unwrap(),
+                withdrawals,
+                liability,
+            )
+            .unwrap();
+        fixture
+            .store
+            .stage_deposits(
+                &fixture.context,
+                &[Staging {
+                    identity,
+                    event,
+                    replacement: registered.context.payment().clone(),
+                }],
+            )
+            .unwrap();
+        fixture.context = registered.context.payment().clone();
+        assert_eq!(
+            registered.deposits.amount_for(&fixture.payer.public_key()),
+            INITIAL_BALANCE
+        );
+        let successor = fixture
+            .protocol
+            .registration(
+                1,
+                DepositBatch::empty(),
+                WithdrawalBatch::empty(),
+                liability,
+            )
+            .unwrap();
+        let invalid = fixture
+            .protocol
+            .registration(1, registered.deposits, WithdrawalBatch::empty(), liability)
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .rotate_epoch(0, &fixture.context, &invalid.context)
+                .is_err()
+        );
+        assert_eq!(fixture.store.epoch().unwrap(), 0);
+        assert_eq!(
+            fixture
+                .store
+                .current_account(&fixture.payer.public_key())
+                .unwrap()
+                .unwrap()
+                .current,
+            INITIAL_BALANCE
+        );
+        fixture.store.fail_next_cutover_commit();
+        let error = fixture
+            .store
+            .rotate_epoch(0, &fixture.context, &successor.context)
+            .unwrap_err();
+        assert!(error.downcast_ref::<CommitUnknown>().is_some());
+        fixture = fixture.reopen();
+        assert_eq!(fixture.store.epoch().unwrap(), 1);
+        assert_eq!(fixture.store.current_liability().unwrap(), liability);
+        assert_eq!(
+            fixture
+                .store
+                .current_account(&fixture.payer.public_key())
+                .unwrap()
+                .unwrap()
+                .current,
+            INITIAL_BALANCE
+        );
+        assert!(
+            fixture
+                .store
+                .rotate_epoch(0, &fixture.context, &successor.context)
+                .is_err()
+        );
+        fixture = fixture.reopen();
+        assert_eq!(
+            fixture
+                .store
+                .current_account(&fixture.payer.public_key())
+                .unwrap()
+                .unwrap()
+                .current,
+            INITIAL_BALANCE
+        );
+        let endpoint = fixture
+            .store
+            .payer_endpoint(&fixture.payer.public_key())
+            .unwrap();
+        assert_eq!((endpoint.seq, endpoint.cumulative_debit), (0, 0));
+    }
+
+    #[test]
+    fn queued_amount_resolves_after_credit_without_deducting_reserved_amounts_twice() {
+        for (requested, reserved, output) in [
+            (INITIAL_BALANCE + 1, None, INITIAL_BALANCE + 1),
+            (INITIAL_BALANCE + 2, None, 0),
+            (
+                INITIAL_BALANCE / 2,
+                Some(INITIAL_BALANCE / 2),
+                INITIAL_BALANCE / 2,
+            ),
+        ] {
+            let mut fixture = PaymentFixture::new();
+            let liability = fixture.store.current_liability().unwrap();
+            let account = fixture.receiver.public_key();
+            let request = SignedWithdrawal::sign(
+                deployment(),
+                Sha256::hash(&[b"queued-amount-root"]),
+                Bytes::from_static(b"destination"),
+                WithdrawalAction::Amount(NonZeroU64::new(requested).unwrap()),
+                100,
+                &fixture.receiver,
+            );
+            let registration = fixture
+                .protocol
+                .registration(
+                    0,
+                    DepositBatch::empty(),
+                    WithdrawalBatch::new(vec![request.clone()]).unwrap(),
+                    liability,
+                )
+                .unwrap();
+            fixture
+                .store
+                .stage_withdrawal(
+                    &request,
+                    &fixture.context,
+                    registration.context.payment(),
+                    true,
+                )
+                .unwrap();
+            fixture.context = registration.context.payment().clone();
+            fixture = fixture.reopen();
+            assert_eq!(
+                fixture.store.load_current().unwrap().withdrawals[0].applied_amount,
+                reserved
+            );
+            assert_eq!(
+                fixture.store.current_liability().unwrap(),
+                liability - reserved.unwrap_or(0)
+            );
+
+            let (send, entries) = fixture.send(1);
+            accepted(fixture.store.accept_send(
+                &fixture.context,
+                &fixture.protocol,
+                send,
+                &entries,
+            ));
+            assert_eq!(
+                fixture.store.load_current().unwrap().withdrawals[0].applied_amount,
+                reserved
+            );
+            assert_eq!(
+                fixture.store.successor_liability().unwrap(),
+                liability - output
+            );
+            let successor = epoch_context(
+                1,
+                &DepositBatch::empty(),
+                &WithdrawalBatch::empty(),
+                liability - output,
+            )
+            .unwrap();
+            fixture
+                .store
+                .rotate_epoch(0, &fixture.context, &successor)
+                .unwrap();
+            fixture = fixture.reopen();
+            assert_eq!(
+                fixture.store.current_liability().unwrap(),
+                liability - output
+            );
+            let frozen = fixture.store.epoch_reader().load(0).unwrap();
+            assert_eq!(frozen.withdrawals[0].applied_amount, Some(output));
+            assert_eq!(
+                frozen
+                    .accounts
+                    .iter()
+                    .find(|stored| stored.key == account)
+                    .unwrap()
+                    .current,
+                INITIAL_BALANCE + 1 - output,
+            );
+        }
+    }
+
+    #[test]
+    fn queued_absent_withdrawal_materializes_zero_without_payer_eligibility() {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::MIN),
+            WithdrawalAction::Close,
+        ] {
+            let mut fixture = PaymentFixture::new();
+            let signer = SigningKey::from_seed(999);
+            let account = signer.public_key();
+            let liability = fixture.store.current_liability().unwrap();
+            assert!(fixture.store.current_account(&account).unwrap().is_none());
+            let request = SignedWithdrawal::sign(
+                deployment(),
+                Sha256::hash(&[b"queued-absent-root"]),
+                Bytes::from_static(b"destination"),
+                action,
+                100,
+                &signer,
+            );
+            let registration = fixture
+                .protocol
+                .registration(
+                    0,
+                    DepositBatch::empty(),
+                    WithdrawalBatch::new(vec![request.clone()]).unwrap(),
+                    liability,
+                )
+                .unwrap();
+            fixture
+                .store
+                .stage_withdrawal(
+                    &request,
+                    &fixture.context,
+                    registration.context.payment(),
+                    true,
+                )
+                .unwrap();
+            fixture.context = registration.context.payment().clone();
+            fixture = fixture.reopen();
+            let data = fixture.store.load_current().unwrap();
+            let stored = data
+                .accounts
+                .iter()
+                .find(|stored| stored.key == account)
+                .unwrap();
+            assert_eq!((stored.predecessor, stored.current), (0, 0));
+            assert_eq!(data.withdrawals[0].applied_amount, None);
+            assert!(eligible_account(&fixture.store.connection, 0, &account).is_err());
+            assert_eq!(fixture.store.successor_liability().unwrap(), liability);
+            let successor = epoch_context(
+                1,
+                &DepositBatch::empty(),
+                &WithdrawalBatch::empty(),
+                liability,
+            )
+            .unwrap();
+            fixture
+                .store
+                .rotate_epoch(0, &fixture.context, &successor)
+                .unwrap();
+            assert_eq!(
+                fixture.store.epoch_reader().load(0).unwrap().withdrawals[0].applied_amount,
+                Some(0)
+            );
+            assert!(fixture.store.current_account(&account).unwrap().is_none());
+            assert_eq!(fixture.store.current_liability().unwrap(), liability);
+        }
+    }
+
+    #[test]
+    fn fresh_amount_still_requires_live_affordability() {
+        let mut fixture = PaymentFixture::new();
+        let request = SignedWithdrawal::sign(
+            deployment(),
+            Sha256::hash(&[b"fresh-amount-root"]),
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Amount(NonZeroU64::new(INITIAL_BALANCE + 1).unwrap()),
+            100,
+            &fixture.receiver,
+        );
+        let registration = fixture
+            .protocol
+            .registration(
+                0,
+                DepositBatch::empty(),
+                WithdrawalBatch::new(vec![request.clone()]).unwrap(),
+                fixture.store.current_liability().unwrap(),
+            )
+            .unwrap();
+        let error = fixture
+            .store
+            .stage_withdrawal(
+                &request,
+                &fixture.context,
+                registration.context.payment(),
+                false,
+            )
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("withdrawal exceeds the live balance"));
+    }
+
+    #[test]
+    fn amount_outputs_accept_only_deferred_zero_or_the_requested_amount() {
+        let signer = SigningKey::from_seed(101);
+        let request = SignedWithdrawal::sign(
+            deployment(),
+            Sha256::hash(&[b"amount-output-root"]),
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Amount(NonZeroU64::new(10).unwrap()),
+            100,
+            &signer,
+        );
+        for amount in [None, Some(0), Some(10)] {
+            assert_eq!(
+                validate_applied_withdrawal(&request, amount).unwrap(),
+                amount.map(|amount| amount as u64)
+            );
+        }
+        for amount in [-1, 1, 9, 11] {
+            assert!(validate_applied_withdrawal(&request, Some(amount)).is_err());
+        }
+    }
+
+    #[test]
     fn close_staging_is_deferred_and_cutover_persists_the_derived_tail() {
         let identities = identities();
         let account = identities[0].key.clone();
@@ -4039,17 +4339,12 @@ mod tests {
         store.ensure_current_context(expected.payment()).unwrap();
 
         let staged = store
-            .stage_withdrawal(&request, expected.payment(), replacement.payment())
+            .stage_withdrawal(&request, expected.payment(), replacement.payment(), false)
             .unwrap();
         assert_eq!(staged.action, WithdrawalAction::Close);
         assert_eq!(store.current_liability().unwrap(), predecessor_liability);
         assert_eq!(
-            store
-                .current_account(&account)
-                .unwrap()
-                .unwrap()
-                .current
-                .balance,
+            store.current_account(&account).unwrap().unwrap().current,
             INITIAL_BALANCE
         );
         assert_eq!(
@@ -4098,7 +4393,7 @@ mod tests {
             .iter()
             .find(|stored| stored.key == account)
             .unwrap();
-        assert_eq!(account.current.balance, 0);
+        assert_eq!(account.current, 0);
         assert_eq!(frozen.withdrawals[0].applied_amount, Some(INITIAL_BALANCE));
     }
 }

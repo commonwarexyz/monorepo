@@ -1,6 +1,6 @@
 //! Payer-signed vector endpoints and operator acknowledgment countersignatures.
 //!
-//! A payer authorizes one batch by signing its epoch-local sequence number, lifetime cumulative
+//! A payer authorizes one batch by signing its epoch-local sequence number, epoch cumulative
 //! debit endpoint, and the root of its strictly recipient-sorted, epoch-cumulative per-recipient
 //! vector. The operator accepts by countersigning the identical body. Per-edge evidence is the
 //! dual-signed body plus one membership opening of the vector root at the credited recipient.
@@ -9,15 +9,18 @@ use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
     vector::OutEntry,
 };
-use ahash::RandomState;
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey, Signer};
+#[cfg(feature = "std")]
+use commonware_cryptography::BatchVerifier;
+use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+#[cfg(feature = "std")]
 use commonware_parallel::Strategy;
-use hashbrown::HashSet;
+#[cfg(feature = "std")]
 use rand_core::CryptoRng;
 use thiserror::Error;
 
@@ -167,7 +170,7 @@ impl<P: PublicKey, D: Digest> VectorSendBody<P, D> {
         self.seq
     }
 
-    /// Returns the payer's lifetime cumulative debit endpoint.
+    /// Returns the payer's epoch cumulative debit endpoint.
     pub const fn cumulative_debit(&self) -> Amount {
         self.cumulative_debit
     }
@@ -218,10 +221,10 @@ impl<P: PublicKey, D: Digest> Read for VectorSendBody<P, D> {
 
 /// Payer-signed vector endpoint carried by a close row.
 ///
-/// The operator's acceptance reaches the close as one aggregable countersignature per proof
-/// slice, so rows carry only the payer half. Receipts keep the dual-signed [VectorAck]: the
+/// One aggregate countersignature authenticates the operator's acceptance of every terminal
+/// body in the close, so rows carry only the payer signature. Receipts keep the dual-signed [VectorAck]: the
 /// operator signs each accepted body twice, once for the receipt and once, under
-/// [VECTOR_ACK_AGGREGATE_NAMESPACE], for the slice aggregate.
+/// [VECTOR_ACK_AGGREGATE_NAMESPACE], for the close aggregate.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SendAuthorization<P: PublicKey, D: Digest> {
     body: VectorSendBody<P, D>,
@@ -474,13 +477,13 @@ impl<P: PublicKey, D: Digest> Read for EntryReceipt<P, D> {
     }
 }
 
-/// Verifies every distinct acknowledgment's payer signature in one randomized aggregate batch.
+/// Verifies the payer signatures of a close's unique terminal authorizations in one batch.
 ///
 /// Callers must validate ack structure separately and treat a `false` return as one or more
 /// invalid signatures without attribution.
+#[cfg(feature = "std")]
 pub(crate) fn verify_ack_signatures<'a, P, D, B, R, I>(
     authorizations: I,
-    capacity: usize,
     rng: &mut R,
     strategy: &impl Strategy,
 ) -> bool
@@ -491,35 +494,17 @@ where
     R: CryptoRng,
     I: IntoIterator<Item = &'a SendAuthorization<P, D>>,
 {
-    let mut authorizations = authorizations.into_iter().peekable();
-    if authorizations.peek().is_none() {
+    let authorizations = authorizations.into_iter().collect::<Vec<_>>();
+    if authorizations.is_empty() {
         return true;
     }
 
-    // Randomized hashing bounds collision amplification from adversarial envelopes. The
-    // operator's acceptance verifies separately through one aggregable countersignature per
-    // proof slice.
-    let hasher = RandomState::with_seeds(
-        rng.next_u64(),
-        rng.next_u64(),
-        rng.next_u64(),
-        rng.next_u64(),
-    );
-    let mut unique = HashSet::with_capacity_and_hasher(capacity, hasher);
-    let mut distinct = Vec::<&SendAuthorization<P, D>>::with_capacity(capacity);
-    for authorization in authorizations {
-        if unique.insert(authorization) {
-            distinct.push(authorization);
-        }
-    }
-    drop(unique);
-
-    let mut batch = B::new(distinct.len());
-    let messages = strategy.map_collect_vec(distinct.iter().copied(), |authorization| {
+    let mut batch = B::new(authorizations.len());
+    let messages = strategy.map_collect_vec(authorizations.iter().copied(), |authorization| {
         authorization.body.encode()
     });
     let mut queued = true;
-    for (authorization, message) in distinct.into_iter().zip(messages) {
+    for (authorization, message) in authorizations.into_iter().zip(messages) {
         queued &= B::add(
             &mut batch,
             VECTOR_SEND_SIGNATURE_NAMESPACE,
@@ -631,5 +616,46 @@ mod arbitrary_impls {
                 opening: u.arbitrary()?,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
+    use commonware_cryptography_curve25519::signing::SigningKey;
+
+    #[test]
+    fn signatures_bind_the_epoch_and_signature_purpose() {
+        let payer = SigningKey::from_seed(1);
+        let operator = SigningKey::from_seed(2);
+        let context = PaymentContext::new(ShaDigest::EMPTY, 7, operator.public_key());
+        let root = commitment::empty_root::<Sha256>(VectorKind::OutEntry);
+        let body = VectorSendBody::new(&context, payer.public_key(), 1, 5, root);
+        let encoded = body.encode();
+        let wrong_purpose = payer.sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded);
+        let authorization = SendAuthorization::from_raw_unchecked(body.clone(), wrong_purpose);
+        assert_eq!(
+            authorization.verify(&context),
+            Err(AckError::InvalidPayerSignature)
+        );
+        let wrong_purpose = operator.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded);
+        let acknowledgment = VectorAck::from_raw_unchecked(
+            body.clone(),
+            payer.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &encoded),
+            wrong_purpose,
+        );
+        assert_eq!(
+            acknowledgment.verify(&context),
+            Err(AckError::InvalidOperatorSignature)
+        );
+        let current = VectorAck::sign_by_authorities(body, &payer, &operator);
+        current.verify(&context).unwrap();
+        let next = PaymentContext::new(ShaDigest::EMPTY, 8, operator.public_key());
+        assert_eq!(current.verify(&next), Err(AckError::WrongContext));
+        let reset = VectorSendBody::new(&next, payer.public_key(), 1, 1, root);
+        VectorAck::sign_by_authorities(reset, &payer, &operator)
+            .verify(&next)
+            .unwrap();
     }
 }

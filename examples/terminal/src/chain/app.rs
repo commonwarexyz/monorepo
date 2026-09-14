@@ -3,16 +3,18 @@
 use crate::{
     chain::{
         ingress::Provider,
+        native::NativeGenesis,
         state::execute,
         types::{
             Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, Qmdb, SyncTarget, now,
         },
     },
-    protocol::{Deployment, Timing},
+    protocol::Timing,
 };
 use commonware_codec::EncodeSize as _;
 use commonware_consensus::{Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context};
 use commonware_cryptography::{Digestible as _, certificate::Scheme, ed25519, sha256::Digest};
+use commonware_formatting::Hex;
 use commonware_glue::stateful::{
     Application, Input, Proposed,
     db::{DatabaseSet, ManagedDb, Merkleized as _},
@@ -23,6 +25,7 @@ use commonware_utils::{non_empty_range, sync::Mutex};
 use futures::StreamExt as _;
 use rand_core::Rng;
 use std::{marker::PhantomData, sync::Arc, time::Duration};
+use tracing::info;
 
 /// Maximum milliseconds a block's timestamp may lead the verifier's clock at
 /// vote time.
@@ -82,8 +85,7 @@ pub(crate) struct App<S, P> {
     genesis: Block,
     /// Chain-wide genesis epoch timing policy applied to every deployment.
     timing: Timing,
-    /// The configured deployment set from the shared genesis.
-    deployments: Vec<Deployment>,
+    native: NativeGenesis,
     finalized: Finalized,
     _marker: PhantomData<fn() -> (S, P)>,
 }
@@ -93,7 +95,7 @@ impl<S, P> Clone for App<S, P> {
         Self {
             genesis: self.genesis.clone(),
             timing: self.timing,
-            deployments: self.deployments.clone(),
+            native: self.native.clone(),
             finalized: self.finalized.clone(),
             _marker: PhantomData,
         }
@@ -102,18 +104,18 @@ impl<S, P> Clone for App<S, P> {
 
 impl<S, P> App<S, P> {
     /// Creates the application with its genesis block, the chain-wide timing
-    /// policy, the configured deployment set, and the finalized index it
+    /// policy, native genesis, and the finalized index it
     /// maintains.
     pub(crate) const fn new(
         genesis: Block,
         timing: Timing,
-        deployments: Vec<Deployment>,
+        native: NativeGenesis,
         finalized: Finalized,
     ) -> Self {
         Self {
             genesis,
             timing,
-            deployments,
+            native,
             finalized,
             _marker: PhantomData,
         }
@@ -169,7 +171,7 @@ where
             height,
             timestamp,
             &self.timing,
-            &self.deployments,
+            &self.native,
             &transactions,
         )
         .await
@@ -233,7 +235,7 @@ where
             block.height(),
             block.timestamp,
             &self.timing,
-            &self.deployments,
+            &self.native,
             &block.transactions,
         )
         .await
@@ -258,7 +260,7 @@ where
             block.height(),
             block.timestamp,
             &self.timing,
-            &self.deployments,
+            &self.native,
             &block.transactions,
         )
         .await
@@ -275,11 +277,18 @@ where
         block: &Self::Block,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
+        let digest = block.digest();
         self.finalized.record(
             block.height().get(),
-            block.digest(),
+            digest,
             block.state_root,
             block.timestamp,
+        );
+        info!(
+            height = block.height().get(),
+            digest = %Hex(&digest[..6]),
+            transactions = block.transactions.len(),
+            "finalized block"
         );
     }
 }

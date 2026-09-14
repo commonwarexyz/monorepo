@@ -4,10 +4,7 @@ use super::{
     custody::initial_deposit_nonce,
     evidence::{Holders, unusable_head},
     pay::operator_head,
-    store::{
-        ContextCache, IncomingCredit, IncomingSummary, PendingPayment, PendingPayoutClaim,
-        PendingWithdrawalClaim, State, Store,
-    },
+    store::{ContextCache, IncomingSummary, PendingPayment, PendingWithdrawalClaim, State, Store},
 };
 use crate::{
     chain::{
@@ -15,15 +12,12 @@ use crate::{
         state::StatusRecord,
     },
     operator::rpc as operator_rpc,
-    protocol::{
-        AccountIdentity, DepositEvent, Key, Wallet, deployment_of, external_identity,
-        external_wallet, identities, wallets,
-    },
+    protocol::{AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets},
 };
 use anyhow::{Context, Result, ensure};
-use commonware_clearing::bajillion::{boundary::SignedWithdrawal, challenge::StateOpening};
+use commonware_clearing::bajillion::{boundary::SignedWithdrawal, qmdb::StateOpening};
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::Network;
+use commonware_runtime::{Clock, Network};
 use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 
 /// An agent owns one payer key and retains the receipts returned by the operator.
@@ -37,26 +31,19 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// never an overwritable cache. Everything the counterparty can reproduce is a cache and
 /// never gates progress.
 ///
-/// The cached signing context follows the cache rule and exists precisely so that
-/// ordinary payments need nothing beyond local SQL. The wallet's own durable cumulative
-/// debit is the authoritative signing endpoint, the cached `(epoch, anchor)` is the
-/// claimed context to bind, and the cached verified floor lower-bounds affordability.
-/// When the operator has moved to a new context, the wallet learns it from the typed
-/// corrective rejection its next send earns, never from a routine head read. The cache
-/// steers only what gets signed: settlement's registration confirmation after
-/// acceptance remains the trust anchor before anything is recorded.
+/// Cached contexts and verified balance floors keep successful payments local until submission.
+/// Accepted debit, sequence, and vector state belong to their exact epoch and anchor.
+/// A corrective reply cannot replace an ambiguous authorization; settlement resolves it first.
 ///
 /// Frozen-root recovery requires an opening at the last finalized root, which advances
 /// with every finalization by anyone. Openings refresh on every head read or balance
-/// poll, so only a wallet passive across the final finalization holds none, and it then
-/// opens the frozen root through the slice holders retaining a dealing at it.
+/// poll; a passive wallet fetches the frozen root through the validators' retained state.
 ///
 /// The operator is the fast path for every read and the only path for accepting a send or
 /// applying a withdrawal. Every enforcement flow completes without it: heads, floors, and
-/// endpoints come from the slice holders' openings at the certified state root, committed
-/// entries and claims from their sealed dealings inside a close's challenge window, and
-/// the signing context from the chain's own registration, each verified against a
-/// certified root before use.
+/// balances come from Current proofs at certified state roots, while payment outcomes,
+/// committed entries, and claims come from authenticated epoch activity. The signing
+/// context comes from the chain's own registration. Every proof binds its certified root.
 ///
 /// As a receiver, this wallet may rely on a payment exactly when its verified receipt is
 /// durably held. A balance that moved in the operator's head is an observation, not
@@ -64,8 +51,7 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// reconciliation later proves every finalized credit was backed by one.
 pub(crate) struct Agent {
     pub(super) wallet: Wallet,
-    /// The clearing key of the one operator this agent is bound to. The
-    /// bound deployment digest derives from it.
+    /// The clearing key authenticated by this deployment's registry entry.
     pub(super) operator: Key,
     /// The deployment this agent transacts on: every settlement expectation
     /// (status deployment, payment-context operator, deposit naming) is
@@ -78,12 +64,11 @@ pub(crate) struct Agent {
     /// verified affordability floor. Absent for a fresh wallet and after invalidation.
     pub(super) cache: Option<ContextCache>,
     pub(super) pending_payment: Option<PendingPayment>,
-    pub(super) pending_deposit: Option<DepositEvent>,
+    pub(super) pending_deposit: Option<crate::chain::tx::DepositRequest>,
+    pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
     pub(super) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
-    pub(super) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(super) pending_close_epoch: Option<u64>,
-    pub(super) cumulative_debit: u64,
     pub(super) receipt_count: u64,
     /// Receiver intake ledger summary and durable fetch cursor.
     pub(super) incoming: IncomingSummary,
@@ -92,7 +77,7 @@ pub(crate) struct Agent {
     /// Finalized epochs whose committed evidence the operator is currently withholding, latched
     /// so the alarm is reported once per stretch of withholding.
     pub(super) withheld: BTreeSet<u64>,
-    /// The wallet's route to validator-served evidence: the slice holders each
+    /// The wallet's route to validator-served evidence: the validators each
     /// enforcement flow falls back to when the operator is unreachable or refuses.
     pub(super) holders: Holders,
 }
@@ -101,14 +86,18 @@ impl Agent {
     /// An in-memory agent bound to the compiled default deployment.
     #[cfg(test)]
     pub(crate) fn new(identity: usize) -> Result<Self> {
-        Self::new_for(identity, crate::protocol::operator_key())
+        Self::new_for(
+            identity,
+            crate::protocol::deployment(),
+            crate::protocol::operator_key(),
+        )
     }
 
-    /// An in-memory agent bound to `operator`'s deployment.
-    pub(crate) fn new_for(identity: usize, operator: Key) -> Result<Self> {
+    /// An in-memory agent bound to this deployment and its authenticated operator.
+    #[cfg(test)]
+    pub(crate) fn new_for(identity: usize, deployment: Digest, operator: Key) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let deployment = deployment_of(&operator);
         let (store, state) = Store::in_memory(&account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
@@ -124,15 +113,24 @@ impl Agent {
     /// A durable agent bound to the compiled default deployment.
     #[cfg(test)]
     pub(crate) fn open(path: &Path, identity: usize) -> Result<Self> {
-        Self::open_for(path, identity, crate::protocol::operator_key())
+        Self::open_for(
+            path,
+            identity,
+            crate::protocol::deployment(),
+            crate::protocol::operator_key(),
+        )
     }
 
-    /// A durable agent bound to `operator`'s deployment. The store pins the
-    /// binding, so reopening under another operator fails.
-    pub(crate) fn open_for(path: &Path, identity: usize, operator: Key) -> Result<Self> {
+    /// A durable agent bound to this deployment and its authenticated operator.
+    /// The store rejects reopening under a different binding.
+    pub(crate) fn open_for(
+        path: &Path,
+        identity: usize,
+        deployment: Digest,
+        operator: Key,
+    ) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let deployment = deployment_of(&operator);
         let (store, state) = Store::open(path, &account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
@@ -149,12 +147,12 @@ impl Agent {
         let mut wallets = wallets();
         ensure!(identity <= wallets.len(), "agent identity is out of range");
         let wallet = if identity == wallets.len() {
-            external_wallet()
+            eve_wallet()
         } else {
             wallets.remove(identity)
         };
         let mut receivers = identities();
-        receivers.push(external_identity());
+        receivers.push(eve_identity());
         Ok((wallet, receivers))
     }
 
@@ -177,11 +175,10 @@ impl Agent {
             cache: state.cache,
             pending_payment: state.pending_payment,
             pending_deposit: state.pending_deposit,
-            pending_withdrawal: None,
+            pending_transfer: state.pending_transfer,
+            pending_withdrawal: state.pending_withdrawal,
             pending_withdrawal_claim: state.pending_withdrawal_claim,
-            pending_payout_claim: state.pending_payout_claim,
             pending_close_epoch: None,
-            cumulative_debit: state.cumulative_debit,
             receipt_count: state.receipt_count,
             incoming: state.incoming,
             last_reconciled_epoch: state.last_reconciled_epoch,
@@ -218,7 +215,7 @@ impl Agent {
         self.receivers
             .iter()
             .position(|identity| identity.key != account)
-            .expect("the receiver roster is larger than one wallet")
+            .expect("the demo receiver list is larger than one wallet")
     }
 
     pub(crate) fn receiver_name(&self, index: usize) -> &'static str {
@@ -227,6 +224,11 @@ impl Agent {
 
     pub(crate) const fn receipt_count(&self) -> u64 {
         self.receipt_count
+    }
+
+    /// Rejects further work after a failed wallet storage mutation.
+    pub(crate) fn ensure_store_usable(&self) -> Result<()> {
+        self.store.ensure_usable()
     }
 
     /// Returns the receiver's verified incoming ledger summary.
@@ -239,16 +241,17 @@ impl Agent {
         self.last_reconciled_epoch
     }
 
-    /// Answers the receiver's service-accounting question: has `payer` paid this wallet under
-    /// the batch identified by `id`, and for how much? The id is the digest of the
-    /// payer-signed acknowledgment body, so it is the natural invoice reference. A hit means
-    /// the credit's verified receipt is durably held, which is exactly the condition under
-    /// which a receiver may rely on it.
-    pub(crate) fn paid(&self, payer: &Key, id: &Digest) -> Result<Option<IncomingCredit>> {
-        self.store.paid(payer, id)
+    /// Whether this wallet durably holds the exact verified, anchored receipt.
+    pub(crate) fn has_receipt(&self, payer: &Key, id: &Digest) -> Result<bool> {
+        self.store.has_receipt(payer, id)
     }
 
-    pub(crate) async fn operator_status<E: Network>(
+    /// The exact unresolved send survives restarts and can only be retried or resolved.
+    pub(crate) const fn has_pending_payment(&self) -> bool {
+        self.pending_payment.is_some()
+    }
+
+    pub(crate) async fn operator_status<E: Network + Clock>(
         &self,
         network: &E,
         operator: SocketAddr,
@@ -256,11 +259,11 @@ impl Agent {
         operator_rpc::status(network, operator).await
     }
 
-    /// Reads the account head and verifies it against the certified state root.
+    /// Reads the account head against its finalized or admitted predecessor root.
     ///
     /// The operator's head is the fast path: it carries the live balance and the
     /// signing context to re-cache. When the operator is unreachable or its head fails
-    /// verification, the slice holders open the wallet's leaf at the certified head
+    /// verification, the validators open the wallet's leaf at the certified head
     /// instead and the finalized balance is reported, so the poll never depends on the
     /// operator.
     ///
@@ -268,8 +271,8 @@ impl Agent {
     /// opening is retained through [`Self::verify_head`] or [`Self::retain_head`], so a
     /// wallet that only watches its balance still refreshes its frozen-root recovery
     /// evidence and, from an operator head, re-anchors its optimistic signing state.
-    /// This read is off the payment hot path: payments sign from the cached context and
-    /// learn a moved context from the operator's corrective rejection instead.
+    /// Payments use the cached context. A corrective rejection triggers authenticated
+    /// resolution of the exact pending intent before a new context can be used.
     pub(crate) async fn balance<E: Env>(
         &mut self,
         ctx: &E,
@@ -282,8 +285,8 @@ impl Agent {
                     let status = settlement_status(ctx, chain, self.deployment)
                         .await
                         .context("read settlement balance head")?;
-                    match self.verify_head(&head, &status) {
-                        Ok(()) => return Ok(head.state.balance),
+                    match self.verify_head(ctx, chain, &head, &status).await {
+                        Ok(()) => return Ok(head.balance),
                         Err(error) => error,
                     }
                 }
@@ -293,30 +296,50 @@ impl Agent {
             .validator_head(ctx, chain)
             .await
             .map_err(|error| unusable_head(operator_error, error))?;
-        Ok(opening.leaf.state.balance)
+        Ok(opening.map_or(0, |opening| opening.balance.get()))
     }
 
-    /// This wallet's leaf at the certified head, opened by the slice holders,
+    /// Returns the operator-served account opening verified against the certified
+    /// finalized root, together with the status that authenticates that root.
+    pub(crate) async fn finalized_head<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
+        let head = operator_head(ctx, operator, self.account(), &self.operator).await?;
+        let status = settlement_status(ctx, chain, self.deployment).await?;
+        ensure!(
+            status.state_root == head.root,
+            "payer opening is not the exact finalized head"
+        );
+        self.verify_head(ctx, chain, &head, &status).await?;
+        Ok((status, head.opening))
+    }
+
+    /// This wallet's leaf at the certified head, opened by the validators,
     /// verified against the status root, and retained: the head read that
     /// needs no operator.
     pub(super) async fn validator_head<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
-    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
+    ) -> Result<(StatusRecord, Option<StateOpening<Key, Digest>>)> {
         let status = settlement_status(ctx, chain, self.deployment)
             .await
             .context("read settlement head")?;
         let account = self.account();
         let opening = self
             .holders
-            .validator_opening(ctx, chain, &account, &status)
+            .validator_balance(ctx, chain, &account, &status)
             .await?;
-        self.retain_head(&status.state_root, &opening)?;
+        if let Some(opening) = &opening {
+            self.retain_head(&status.state_root, opening)?;
+        }
         Ok((status, opening))
     }
 
-    pub(crate) async fn start_close<E: Network>(
+    pub(crate) async fn start_close<E: Network + Clock>(
         &mut self,
         network: &E,
         operator: SocketAddr,
@@ -338,7 +361,7 @@ impl Agent {
         Ok(started)
     }
 
-    pub(crate) async fn poll_close<E: Network>(
+    pub(crate) async fn poll_close<E: Network + Clock>(
         &mut self,
         network: &E,
         operator: SocketAddr,

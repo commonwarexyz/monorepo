@@ -1,12 +1,7 @@
-use super::fixtures::{
-    ActiveProfile, CloseFixture, active_close_fixture_with_assignment, selected_active_profiles,
-    strategy,
-};
 use commonware_clearing::bajillion::{
     admission::{Committee, Vote, bls12381},
-    transition::{Assignment, Header, ProofSlice, validate_close},
+    transition::Header,
 };
-use commonware_codec::{Encode as _, EncodeSize};
 use commonware_cryptography::{
     Sha256,
     bls12381::primitives::{
@@ -16,27 +11,13 @@ use commonware_cryptography::{
     },
     sha256::Digest,
 };
-use commonware_cryptography_curve25519::signing::{
-    BatchVerifier as PaymentBatchVerifier, StrictVerifyingKey as VerifyingKey,
-};
-use commonware_utils::{Participant, TestRng};
-use std::ops::Range;
+use commonware_runtime::Runner as _;
+use commonware_utils::Participant;
 
 pub(crate) const VALIDATORS: usize = 100;
 pub(crate) const FAULTS: usize = 33;
 pub(crate) const QUORUM: usize = 67;
-pub(crate) const SLICE_BITS: u8 = 8;
-pub(crate) const SLICES: usize = 1 << SLICE_BITS;
-
 const VALIDATOR_SEED_START: u64 = 1_000_000;
-
-/// One validator, its dealing, and the dealing's encoded size.
-pub(crate) type Largest = (Participant, Vec<ProofSlice<VerifyingKey, Digest>>, usize);
-
-/// Every slice as its own span: the per-slice corpus the size accounting reports.
-pub(crate) fn single_spans() -> Vec<Range<u16>> {
-    (0..SLICES as u16).map(|slice| slice..slice + 1).collect()
-}
 
 pub(crate) struct Validators {
     committee: Committee,
@@ -67,11 +48,6 @@ impl Validators {
         &self.committee
     }
 
-    pub(crate) fn assignment(&self) -> Assignment<Digest> {
-        Assignment::new(self.committee.commitment::<Sha256>(), SLICE_BITS)
-            .expect("benchmark assignment is valid")
-    }
-
     pub(crate) fn signer(&self, validator: Participant) -> bls12381::Scheme {
         bls12381::Scheme::signer(
             self.committee.clone(),
@@ -89,59 +65,7 @@ impl Validators {
             })
             .collect()
     }
-
-    /// Each validator's assigned spans, in committee order.
-    pub(crate) fn spans(&self, assignment: &Assignment<Digest>) -> Vec<Vec<Range<u16>>> {
-        (0..VALIDATORS)
-            .map(|index| {
-                commonware_clearing::bajillion::admission::assigned_slice_spans::<Sha256, _>(
-                    &self.committee,
-                    assignment,
-                    Participant::from_usize(index),
-                )
-                .expect("benchmark assignment matches the committee")
-            })
-            .collect()
-    }
-
-    /// The distinct spans dealt across the committee: what the operator assembles once.
-    pub(crate) fn distinct_spans(&self, assignment: &Assignment<Digest>) -> Vec<Range<u16>> {
-        commonware_clearing::bajillion::admission::committee_spans::<Sha256, _>(
-            &self.committee,
-            assignment,
-        )
-        .expect("benchmark assignment matches the committee")
-    }
-
-    /// Deals every validator's dealt wire and returns, as proof slices, the dealing whose
-    /// wire is largest, with that dealing's full encoded size.
-    pub(crate) fn largest_assignment(&self, close: &CloseFixture) -> Largest {
-        let assignment = close.context.assignment();
-        let dealings = close
-            .prepared
-            .deal(&close.cache, &self.distinct_spans(assignment), strategy())
-            .expect("benchmark dealing is valid");
-        let mut largest: Option<(usize, usize)> = None;
-        for (index, spans) in self.spans(assignment).iter().enumerate() {
-            let bytes = spans
-                .iter()
-                .map(|span| dealings.span_size(span))
-                .sum::<usize>();
-            if largest.is_none_or(|(_, best)| bytes > best) {
-                largest = Some((index, bytes));
-            }
-        }
-        let (index, _) = largest.expect("committee is nonempty");
-        let dealing = close
-            .prepared
-            .assemble_slices(&close.cache, &self.spans(assignment)[index], strategy())
-            .expect("benchmark dealing is valid");
-        let bytes = dealing.encode_size();
-        assert_eq!(dealing.encode().len(), bytes);
-        (Participant::from_usize(index), dealing, bytes)
-    }
 }
-
 pub(crate) struct CertificateFixture {
     pub(crate) header: Header<Digest>,
     pub(crate) assembler: bls12381::Scheme,
@@ -150,70 +74,29 @@ pub(crate) struct CertificateFixture {
     pub(crate) certificate: bls12381::Certificate,
 }
 
-pub(crate) struct ValidatorFixture {
-    pub(crate) validators: Validators,
-    pub(crate) close: CloseFixture,
-    pub(crate) validator: Participant,
-    pub(crate) slices: Vec<ProofSlice<VerifyingKey, Digest>>,
-    pub(crate) public_corpus_bytes: usize,
-    pub(crate) slice_corpus_bytes: usize,
-    pub(crate) assignment_bytes: usize,
-}
-
-pub(crate) fn validator_fixture(profile: ActiveProfile) -> ValidatorFixture {
-    let validators = Validators::new();
-    let assignment = validators.assignment();
-    let close = active_close_fixture_with_assignment(profile, assignment);
-    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &close.context,
-        &close.operator_bls,
-        &close.deposits,
-        &close.withdrawals,
-        close.prepared.close(),
-        &mut TestRng::new(0),
-    )
-    .expect("benchmark close is publicly valid");
-    let all_slices = close
-        .prepared
-        .assemble_slices(&close.cache, &single_spans(), strategy())
-        .expect("benchmark slices are valid");
-    assert_eq!(all_slices.len(), SLICES);
-    let public_corpus_bytes = close.prepared.close().encoded_size();
-    let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
-    drop(all_slices);
-    let (validator, slices, assignment_bytes) = validators.largest_assignment(&close);
-    ValidatorFixture {
-        validators,
-        close,
-        validator,
-        slices,
-        public_corpus_bytes,
-        slice_corpus_bytes,
-        assignment_bytes,
-    }
-}
-
 pub(crate) fn certificate_fixture() -> CertificateFixture {
-    let validators = Validators::new();
-    let assignment = validators.assignment();
-    let profile = selected_active_profiles()
-        .first()
-        .map(|(_, profile)| *profile)
-        .expect("at least one active benchmark profile exists");
-    let fixture = active_close_fixture_with_assignment(profile, assignment);
-    let header = fixture.prepared.close().header;
-    let attestations = validators.attestations(&header);
-    assert_eq!(attestations.len(), QUORUM);
-    let assembler = validators.signer(Participant::new(0));
-    let certificate = assembler
-        .assemble_exact(attestations.clone())
-        .expect("benchmark attestations form an exact certificate");
-    let verifier = bls12381::Scheme::verifier(validators.committee().clone());
-    CertificateFixture {
-        header,
-        assembler,
-        verifier,
-        attestations,
-        certificate,
-    }
+    super::fixtures::runner().start(|runtime| async move {
+        let validators = Validators::new();
+        let profile = super::fixtures::selected_active_profiles()[0].1;
+        let fixture = super::fixtures::active_close_fixture_with_committee(
+            runtime,
+            profile,
+            validators.committee().commitment::<Sha256>(),
+        )
+        .await;
+        let header = fixture.prepared.close().header;
+        let attestations = validators.attestations(&header);
+        let assembler = validators.signer(Participant::new(0));
+        let certificate = assembler
+            .assemble_exact(attestations.clone())
+            .expect("exact certificate");
+        let verifier = bls12381::Scheme::verifier(validators.committee().clone());
+        CertificateFixture {
+            header,
+            assembler,
+            verifier,
+            attestations,
+            certificate,
+        }
+    })
 }

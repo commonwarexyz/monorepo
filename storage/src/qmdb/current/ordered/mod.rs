@@ -11,17 +11,21 @@
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{ValueEncoding, ordered::Update},
+        any::{
+            ValueEncoding,
+            ordered::{Operation, Update},
+        },
         current::proof::OperationProof,
         operation::Key,
     },
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
-use commonware_cryptography::Digest;
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_cryptography::{Digest, Hasher};
 
 pub mod db;
 pub mod fixed;
+pub mod historical;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
 pub mod variable;
@@ -32,7 +36,7 @@ pub mod variable;
 /// between two adjacent active keys. Otherwise exclusion is proven by showing the database contains
 /// no active keys through the most recent commit operation.
 ///
-/// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
+/// Verify using [ExclusionProof::verify].
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
@@ -44,6 +48,35 @@ pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
     Commit(OperationProof<F, D, N>, Option<V::Value>),
+}
+
+impl<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize>
+    ExclusionProof<F, K, V, D, N>
+where
+    Operation<F, K, V>: Codec,
+{
+    /// Verify that `key` has no current value under `root`.
+    pub fn verify<H: Hasher<Digest = D>>(&self, key: &K, root: &D) -> bool {
+        let (proof, op) = match self {
+            Self::KeyValue(proof, data) => {
+                // Ordered spans wrap at the largest key and exclude their endpoints.
+                let inside = if data.key >= data.next_key {
+                    key > &data.key || key < &data.next_key
+                } else {
+                    key > &data.key && key < &data.next_key
+                };
+                if !inside {
+                    return false;
+                }
+                (proof, Operation::<F, K, V>::Update(data.clone()))
+            }
+            Self::Commit(proof, metadata) => {
+                // An active commit whose floor equals its location authenticates emptiness.
+                (proof, Operation::CommitFloor(metadata.clone(), proof.loc))
+            }
+        };
+        proof.verify::<H, _>(op, root)
+    }
 }
 
 const KEY_VALUE_CONTEXT: u8 = 0;

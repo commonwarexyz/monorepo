@@ -1,26 +1,68 @@
-# Verified close kernels
+# Bajillion close arithmetic
 
-Machine-checked proofs (Verus, SMT-backed) for the pure arithmetic the sender-vector close
-leans on hardest, complementing the Stateright model's temporal coverage:
+This directory uses Verus to check the balance and withdrawal equations for a
+close, from individual accounts to the combined settlement liability.
 
-- `derive_successor` **soundness**: the forward derivation satisfies every
-  successor-determining equation row validation checks.
-- `derive_successor` **completeness**: when derivation refuses, no satisfying successor
-  exists.
-- **Uniqueness**: the equations admit exactly one successor and settlement output, so the
-  posted corpus (which omits both) has exactly one reconstruction.
-- **Prefix conservation**: a completed `checked_extend` chain equals the exact
-  componentwise sum of its deltas, for all eight counters.
-- **Liability conservation**: summed over any sequence of valid rows, successor balances
-  plus withdrawals and payouts equal predecessor balances plus deposits once gross debit
-  and credit cancel. This is the equation `checked_successor_liability` and
-  `validate_terminal_prefix` enforce, proven from the per-row balance equations alone.
+From the workspace root, point `VERUS_BIN` at an installed Verus binary:
 
-Out of scope: anything under a hash or signature (lattice-hash collision resistance,
-commitment reconstruction, BLS aggregation) is axiomatized by the surrounding protocol
-argument, not proven here.
+```bash
+VERUS_BIN=/path/to/verus clearing/verus/verify.sh
+```
 
-Run `VERUS_BIN=/path/to/verus ./verify.sh`. The exec bodies mirror
-`bajillion/posted.rs::derive_successor` and `bajillion/state.rs::Prefix::checked_extend`
-and must be kept line-equivalent; single-source integration through `vstd` is the
-production follow-up.
+If `verus` is on `PATH`, run `clearing/verus/verify.sh` directly. The recorded
+validation baseline is Verus `0.2026.08.23.fbbbbcf` with Rust `1.97.1`.
+
+## The account equation
+
+A row describes one account's activity in an epoch. Its predecessor balance,
+deposit, credit, and debit determine the balance available for withdrawal:
+
+```text
+predecessor + deposit + credit - debit
+                   |
+                   v
+                  tail
+                   |
+        +----------+-----------+
+        |          |           |
+       None     Amount(a)     Close
+        |          |           |
+     release 0   a if covered   release tail
+                 0 otherwise
+        |          |           |
+        +----------+-----------+
+                   |
+                   v
+         successor = tail - release
+```
+
+The debit must be covered. Inputs and results fit `u64`, while intermediate
+arithmetic is widened to allow netting. Zero successor balance means absence
+from QMDB. A withdrawal that releases zero still produces `Withdrawal(0)`,
+distinct from having no withdrawal action.
+
+## What is proved
+
+- **Account results:** the equations determine one successor balance and output.
+  `derive_successor` returns them exactly when they fit the supported range.
+- **Absent accounts:** an account without a predecessor balance or deposit
+  cannot debit. Incoming credit can create a balance or fund a selected withdrawal.
+- **Conservation:** summing valid rows preserves balances, deposits, payments,
+  and withdrawals. If total debit equals total credit, the payment terms cancel:
+
+```text
+  successor liability = predecessor liability + deposits - withdrawals
+```
+
+`checked_successor_liability` also verifies this computation's range checks.
+
+## Maintaining the proofs
+
+[close_kernel.rs](close_kernel.rs) models the balance/output block of `derive`
+and `checked_successor_liability` in
+[transition.rs](../src/bajillion/transition.rs). Review them together when either
+changes. Verus checks the model, not its correspondence to production Rust.
+
+The proofs start from selected row inputs and withdrawal actions. Input
+authentication, action eligibility, and persistence belong to the surrounding
+protocol. Equal total debit and credit is an assumption of the liability proof.

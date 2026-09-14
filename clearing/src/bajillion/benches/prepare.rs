@@ -1,56 +1,45 @@
-use super::fixtures::{
-    WORKERS, active_close_fixture, profile_key, selected_active_profiles, strategy,
-};
-use commonware_clearing::bajillion::transition::prepare_close_with_strategy;
+use super::fixtures::{active_close_fixture, profile_key, selected_active_profiles};
+use commonware_clearing::bajillion::transition::prepare_dealing;
 use commonware_cryptography::Sha256;
-use criterion::{BatchSize, Criterion, criterion_group};
-use std::hint::black_box;
+use commonware_runtime::Runner as _;
+use criterion::{Criterion, criterion_group};
+use std::{
+    hint::black_box,
+    time::{Duration, Instant},
+};
 
 fn bench_prepare(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
-        let fixture = active_close_fixture(profile);
         c.bench_function(
             &format!(
-                "{}/{} E={} workers={WORKERS}",
+                "{}/{} E={}",
                 module_path!(),
                 profile_key(profile),
-                profile.edges(),
+                profile.edges()
             ),
             |b| {
-                b.iter_batched(
-                    || {
-                        (
-                            fixture.rows.clone(),
-                            fixture.out_vectors.clone(),
-                            fixture.transpose.clone(),
-                        )
-                    },
-                    |(rows, out_vectors, transpose)| {
-                        black_box(
-                            prepare_close_with_strategy::<Sha256, _, _>(
-                                &fixture.cache,
-                                &fixture.context,
+                b.iter_custom(|iterations| {
+                    super::fixtures::runner().start(|runtime| async move {
+                        let fixture = active_close_fixture(runtime, profile).await;
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let start = Instant::now();
+                            let prepared = prepare_dealing::<Sha256, _, _>(
+                                fixture.context.epoch_context(),
                                 &fixture.deposits,
                                 &fixture.withdrawals,
-                                rows,
-                                out_vectors,
-                                &fixture.out_partials,
-                                &fixture.operator_signatures,
-                                transpose,
-                                strategy(),
+                                fixture.terminals.clone(),
                             )
-                            .expect("benchmark preparation is valid"),
-                        )
-                    },
-                    BatchSize::PerIteration,
-                );
+                            .expect("prepare dealing");
+                            elapsed += start.elapsed();
+                            assert_eq!(prepared.encoded(), fixture.prepared.encoded());
+                            black_box(prepared);
+                        }
+                        elapsed
+                    })
+                });
             },
         );
     }
 }
-
-criterion_group! {
-    name = benches;
-    config = Criterion::default().sample_size(10);
-    targets = bench_prepare,
-}
+criterion_group! {name = benches; config = Criterion::default().sample_size(10); targets = bench_prepare,}

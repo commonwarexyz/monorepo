@@ -6,73 +6,297 @@
 //! the query server ([`crate::chain::query`]), and the wallet and operator
 //! clients ([`crate::chain::client`]).
 //!
-//! # Deployment routing
+//! # Routing, authorization, and replay
 //!
-//! One chain hosts several deployments, and execution applies every
-//! transaction to exactly one deployment's machine. Each variant identifies
-//! its deployment explicitly where it is not already derivable from a signed
-//! field: a queued withdrawal signs the deployment inside
-//! [`SignedWithdrawal`], a registration names it under the operator
-//! signature, a deposit and the terminal account-keyed transitions
-//! (`BeginHardFaultSettlement`, `ClaimHardFault`, `ClaimPendingDeposit`)
-//! name it as a routing field, an admission names it as a routing field
-//! (the certified header is an opaque digest, so the deployment is not
-//! derivable from it, and every authorization check still runs against the
-//! named deployment's own records), and the batch-keyed claims and
-//! challenges route by their batch id, which is deployment-unique by
-//! construction (the close header commits the payment anchor, which folds
-//! the deployment digest). A transaction naming an unconfigured deployment
-//! is rejected with the typed `UnknownDeployment` reason.
+//! Deployment requests name their target explicitly; execution verifies every header, batch,
+//! signature, and opening against that target's state. Native transfers and deployment creation
+//! use the chain domain. Claim-deposit composition names both its source claim and destination
+//! deposit. Routing provides scheduling information, never authorization.
 //!
-//! # Authorization and replay protection
-//!
-//! Ingress is untrusted transport by design: anyone can gossip or submit any
-//! decodable transaction, a transaction carries no submitter identity, and
-//! every authorization check runs at execution against chain state. The only
-//! operator-signed variant is `RegisterEpoch`; `Admit` is authorized by the
-//! validator committee's certificate alone, so a third party relaying a
-//! genuine certificate lands the close identically by design. Replay
-//! protection is likewise domain state: every variant carries a natural
-//! idempotence key, so no account nonces exist and duplicate inclusion lands
-//! on the variant's own guard as a no-op or a typed conflict. Guards are
-//! deployment-scoped: no transaction reads or writes another deployment's
-//! records.
+//! Every native debit binds the complete signed intent to the immutable chain identity.
+//! Deposit IDs, transfer IDs scoped to the signing account, deployment configuration IDs,
+//! epoch sequence, and claim positions own replay protection. There is no shared wallet nonce.
+//! Any peer may relay signed requests or proof-authenticated claims; all authoritative checks
+//! run during block execution. Fees are exact signed operator costs fixed by genesis policy.
 //!
 //! | Variant | Who may land it | Enforced by (at execution) | Replay guard |
 //! |---|---|---|---|
-//! | `Deposit` | anyone (permissionless credit to a configured account; a demo mint) | configured-identity and storage-domain gates, then custody intake | consumed deposit id (`DepositConflict`) |
+//! | `RegisterDeployment` | operator | signed complete configuration, native fee and resource bounds | configuration-derived deployment ID |
+//! | `NativeTransfer` | debit owner | signature and native balance | (sender, transfer ID) |
+//! | `Deposit` | account holder | signature, native debit and clearing custody intake | consumed deposit ID |
+//! | `ClaimDeposit` | native credit recipient | finalized claim and signed destination deposit applied atomically | source claim position and destination deposit ID |
 //! | `QueueWithdrawal` | the account holder | the account signature inside [`SignedWithdrawal`], verified with its deployment and root context | account queue slot and withdrawal replay id (`WithdrawalConflict`) |
-//! | `RegisterEpoch` | the operator | the operator signature over the exact boundary material | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
+//! | `RegisterEpoch` | the operator | the operator signature over exact boundary material and native fee | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
 //! | `Admit` | anyone holding a genuine certificate | the committee certificate over the exact header (exact quorum, verified aggregate) against the chain's own registration | registration admitted mark and admitted record (`AdmissionConflict`) |
 //! | `ClaimWithdrawal` | anyone holding bound evidence | the claim opening against the finalized batch's withdrawal-outputs root; funds go to the certified destination | consumed (batch, position) and its release record |
-//! | `ClaimExternalPayout` | anyone holding bound evidence | the claim opening against the finalized batch's change root; funds go to the certified receiver | consumed (batch, position) and its release record |
 //! | `Challenge` | any holder of contradiction evidence (bearer, by design) | challenge adjudication over the admitted close | one proven challenge per batch (`ChallengeConflict`) |
 //! | `BeginHardFaultSettlement` | anyone, once a real deadline expired or a challenge proved | the chain's own hard-fault flag (block production observes every deadline) | idempotent snapshot, then `HardFaultAlreadySettled` |
 //! | `ClaimHardFault` | anyone holding the account's frozen-root opening; funds go to the opened account and its signed withdrawal | the state opening against the frozen root | consumed opening position and its release record (`PositionConflict`) |
 //! | `ClaimPendingDeposit` | anyone (the refund is fixed to the account) | the chain's own staged-deposit record after a fault | consumed staged deposit and its refund record |
 
-use crate::protocol::{DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, SettlementResult};
+use crate::{
+    chain::native::{NativeGenesis, RegistryEntry},
+    protocol::{
+        Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, SettlementResult,
+    },
+};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
     admission::bls12381::Certificate,
-    boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch},
-    challenge::StateOpening,
+    boundary::{SignedWithdrawal, WithdrawalBatch},
     commitment::VectorRoot,
-    transition::{
-        BatchId, ExternalPayoutClaim, Header, RootBundle, TerminalProof, WithdrawalClaim,
-    },
+    qmdb::StateOpening,
+    transition::{BatchId, Header, OperatorKey, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
     Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
-use commonware_cryptography_curve25519::signing::Signature;
+use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256::Digest};
+use commonware_cryptography_curve25519::signing::{Signature, SigningKey};
 
-/// Maximum entries accepted in one deposit or withdrawal batch.
-const MAX_BATCH_ITEMS: usize = 1_024;
+const NATIVE_TRANSFER_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_NATIVE_TRANSFER";
+const DEPOSIT_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_NATIVE_DEPOSIT";
+const DEPLOYMENT_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_NATIVE_REGISTER";
+const DEPLOYMENT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_NATIVE_DEPLOYMENT";
 
-/// Maximum predecessor-root openings accepted alongside one queued withdrawal.
-const MAX_STATE_OPENINGS: usize = 5;
+/// Signed creation of an immutable operator deployment with zero initial custody.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RegisterDeploymentRequest {
+    pub(crate) chain_id: Digest,
+    pub(crate) registration_id: Digest,
+    pub(crate) operator: Key,
+    pub(crate) operator_ack: OperatorKey,
+    pub(crate) network_key: ed25519::PublicKey,
+    pub(crate) max_dealing_bytes: u32,
+    pub(crate) fee: u64,
+    pub(crate) signature: Signature,
+}
+
+fn registration_message(
+    chain_id: Digest,
+    registration_id: Digest,
+    operator: &Key,
+    operator_ack: OperatorKey,
+    network_key: &ed25519::PublicKey,
+    max_dealing_bytes: u32,
+    fee: u64,
+) -> Bytes {
+    (
+        chain_id,
+        registration_id,
+        operator.clone(),
+        operator_ack,
+        network_key.clone(),
+        max_dealing_bytes,
+        fee,
+    )
+        .encode()
+}
+
+impl RegisterDeploymentRequest {
+    /// Signs the deployment configuration and its exact native registration cost.
+    pub(crate) fn sign(
+        chain_id: Digest,
+        registration_id: Digest,
+        operator_ack: OperatorKey,
+        network_key: ed25519::PublicKey,
+        max_dealing_bytes: u32,
+        fee: u64,
+        signer: &SigningKey,
+    ) -> Self {
+        let operator = signer.public_key();
+        let message = registration_message(
+            chain_id,
+            registration_id,
+            &operator,
+            operator_ack,
+            &network_key,
+            max_dealing_bytes,
+            fee,
+        );
+        Self {
+            chain_id,
+            registration_id,
+            operator,
+            operator_ack,
+            network_key,
+            max_dealing_bytes,
+            fee,
+            signature: signer.sign(DEPLOYMENT_SIGNATURE_NAMESPACE, &message),
+        }
+    }
+
+    fn message(&self) -> Bytes {
+        registration_message(
+            self.chain_id,
+            self.registration_id,
+            &self.operator,
+            self.operator_ack,
+            &self.network_key,
+            self.max_dealing_bytes,
+            self.fee,
+        )
+    }
+
+    /// Replay domain committing to the complete unsigned deployment configuration.
+    pub(crate) fn deployment_id(&self) -> Digest {
+        Sha256::hash(&[DEPLOYMENT_ID_NAMESPACE, &self.message()])
+    }
+
+    /// Derives the canonical zero-custody entry. Admission validates its authorization and bounds.
+    pub(crate) fn entry(&self, native: &NativeGenesis) -> anyhow::Result<RegistryEntry> {
+        Ok(RegistryEntry {
+            deployment: Deployment::configured(
+                self.deployment_id(),
+                self.operator.clone(),
+                self.operator_ack,
+                Vec::new(),
+                native.empty_root,
+                native.empty_operations,
+            )?,
+            network_key: self.network_key.clone(),
+            max_dealing_bytes: self.max_dealing_bytes,
+        })
+    }
+
+    /// Authenticates every mutable registration field under its native chain domain.
+    pub(crate) fn verify(&self, chain_id: &Digest) -> bool {
+        self.chain_id == *chain_id
+            && self.operator.verify(
+                DEPLOYMENT_SIGNATURE_NAMESPACE,
+                &self.message(),
+                &self.signature,
+            )
+    }
+}
+
+impl Write for RegisterDeploymentRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.chain_id.write(buf);
+        self.registration_id.write(buf);
+        self.operator.write(buf);
+        self.operator_ack.write(buf);
+        self.network_key.write(buf);
+        self.max_dealing_bytes.write(buf);
+        self.fee.write(buf);
+        self.signature.write(buf);
+    }
+}
+
+impl EncodeSize for RegisterDeploymentRequest {
+    fn encode_size(&self) -> usize {
+        self.chain_id.encode_size()
+            + self.registration_id.encode_size()
+            + self.operator.encode_size()
+            + self.operator_ack.encode_size()
+            + self.network_key.encode_size()
+            + self.max_dealing_bytes.encode_size()
+            + self.fee.encode_size()
+            + self.signature.encode_size()
+    }
+}
+
+impl Read for RegisterDeploymentRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            chain_id: Digest::read(buf)?,
+            registration_id: Digest::read(buf)?,
+            operator: Key::read(buf)?,
+            operator_ack: OperatorKey::read(buf)?,
+            network_key: ed25519::PublicKey::read(buf)?,
+            max_dealing_bytes: u32::read(buf)?,
+            fee: u64::read(buf)?,
+            signature: Signature::read(buf)?,
+        })
+    }
+}
+
+/// Signed transfer between native accounts, independent of clearing deployments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeTransferRequest {
+    pub(crate) chain_id: Digest,
+    pub(crate) id: Digest,
+    pub(crate) from: Key,
+    pub(crate) to: Key,
+    pub(crate) amount: u64,
+    pub(crate) signature: Signature,
+}
+
+impl NativeTransferRequest {
+    pub(crate) fn sign(
+        chain_id: Digest,
+        id: Digest,
+        to: Key,
+        amount: u64,
+        signer: &SigningKey,
+    ) -> Self {
+        let from = signer.public_key();
+        let signature = signer.sign(
+            NATIVE_TRANSFER_NAMESPACE,
+            &(chain_id, id, from.clone(), to.clone(), amount).encode(),
+        );
+        Self {
+            chain_id,
+            id,
+            from,
+            to,
+            amount,
+            signature,
+        }
+    }
+
+    pub(crate) fn verify(&self, chain_id: &Digest) -> bool {
+        self.chain_id == *chain_id
+            && self.from.verify(
+                NATIVE_TRANSFER_NAMESPACE,
+                &(
+                    self.chain_id,
+                    self.id,
+                    self.from.clone(),
+                    self.to.clone(),
+                    self.amount,
+                )
+                    .encode(),
+                &self.signature,
+            )
+    }
+}
+
+impl Write for NativeTransferRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.chain_id.write(buf);
+        self.id.write(buf);
+        self.from.write(buf);
+        self.to.write(buf);
+        self.amount.write(buf);
+        self.signature.write(buf);
+    }
+}
+impl EncodeSize for NativeTransferRequest {
+    fn encode_size(&self) -> usize {
+        self.chain_id.encode_size()
+            + self.id.encode_size()
+            + self.from.encode_size()
+            + self.to.encode_size()
+            + self.amount.encode_size()
+            + self.signature.encode_size()
+    }
+}
+impl Read for NativeTransferRequest {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            chain_id: Digest::read(buf)?,
+            id: Digest::read(buf)?,
+            from: Key::read(buf)?,
+            to: Key::read(buf)?,
+            amount: u64::read(buf)?,
+            signature: Signature::read(buf)?,
+        })
+    }
+}
 
 /// Certificate participant-bitmap length for the fixed clearing committee.
 const CERTIFICATE_PARTICIPANTS: usize = 4;
@@ -91,12 +315,14 @@ pub(crate) const MAX_CHALLENGE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChallengeRequest {
+    pub(crate) deployment: Digest,
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) evidence: Bytes,
 }
 
 impl Write for ChallengeRequest {
     fn write(&self, buf: &mut impl BufMut) {
+        self.deployment.write(buf);
         self.batch_id.write(buf);
         self.evidence.write(buf);
     }
@@ -104,7 +330,7 @@ impl Write for ChallengeRequest {
 
 impl EncodeSize for ChallengeRequest {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.evidence.encode_size()
+        self.deployment.encode_size() + self.batch_id.encode_size() + self.evidence.encode_size()
     }
 }
 
@@ -113,6 +339,7 @@ impl Read for ChallengeRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
+            deployment: Digest::read(buf)?,
             batch_id: BatchId::read(buf)?,
             evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=MAX_CHALLENGE_BYTES))?,
         })
@@ -175,13 +402,7 @@ impl Read for ClaimHardFaultRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let deployment = Digest::read(buf)?;
-        let opening = StateOpening::read(buf)?;
-        if opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
-            return Err(CodecError::Invalid(
-                "clearing_terminal::ClaimHardFaultRequest",
-                "state opening exceeds the terminal account bound",
-            ));
-        }
+        let opening = StateOpening::read_cfg(buf, &super::query::MAX_PROOF_DIGESTS)?;
         Ok(Self {
             deployment,
             opening,
@@ -196,18 +417,21 @@ impl Read for ClaimHardFaultRequest {
 pub(crate) struct ClaimPendingDepositRequest {
     pub(crate) deployment: Digest,
     pub(crate) account: Key,
+    /// Selects the refund set created when terminal settlement begins.
+    pub(crate) terminal: bool,
 }
 
 impl Write for ClaimPendingDepositRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.account.write(buf);
+        self.terminal.write(buf);
     }
 }
 
 impl EncodeSize for ClaimPendingDepositRequest {
     fn encode_size(&self) -> usize {
-        self.deployment.encode_size() + self.account.encode_size()
+        self.deployment.encode_size() + self.account.encode_size() + self.terminal.encode_size()
     }
 }
 
@@ -218,29 +442,63 @@ impl Read for ClaimPendingDepositRequest {
         Ok(Self {
             deployment: Digest::read(buf)?,
             account: Key::read(buf)?,
+            terminal: bool::read(buf)?,
         })
     }
 }
 
-/// One deposit naming its deployment. The event itself carries no
-/// deployment (it is the shape SQLite and the boundary batches share), so
-/// the transaction names the deployment the custody credits.
+/// A native-account debit funding the same account in one clearing deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DepositRequest {
+    pub(crate) chain_id: Digest,
     pub(crate) deployment: Digest,
     pub(crate) event: DepositEvent,
+    pub(crate) signature: Signature,
+}
+
+impl DepositRequest {
+    /// Signs the complete deposit intent. The event identifier owns replay protection.
+    pub(crate) fn sign(
+        chain_id: Digest,
+        deployment: Digest,
+        event: DepositEvent,
+        signer: &SigningKey,
+    ) -> Self {
+        let message = (chain_id, deployment, event.clone()).encode();
+        Self {
+            chain_id,
+            deployment,
+            event,
+            signature: signer.sign(DEPOSIT_SIGNATURE_NAMESPACE, &message),
+        }
+    }
+
+    /// Authenticates the native debit owner and immutable chain replay domain.
+    pub(crate) fn verify(&self, chain_id: &Digest) -> bool {
+        self.chain_id == *chain_id
+            && self.event.account.verify(
+                DEPOSIT_SIGNATURE_NAMESPACE,
+                &(self.chain_id, self.deployment, self.event.clone()).encode(),
+                &self.signature,
+            )
+    }
 }
 
 impl Write for DepositRequest {
     fn write(&self, buf: &mut impl BufMut) {
+        self.chain_id.write(buf);
         self.deployment.write(buf);
         self.event.write(buf);
+        self.signature.write(buf);
     }
 }
 
 impl EncodeSize for DepositRequest {
     fn encode_size(&self) -> usize {
-        self.deployment.encode_size() + self.event.encode_size()
+        self.chain_id.encode_size()
+            + self.deployment.encode_size()
+            + self.event.encode_size()
+            + self.signature.encode_size()
     }
 }
 
@@ -249,8 +507,10 @@ impl Read for DepositRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
+            chain_id: Digest::read(buf)?,
             deployment: Digest::read(buf)?,
             event: DepositEvent::read(buf)?,
+            signature: Signature::read(buf)?,
         })
     }
 }
@@ -258,19 +518,19 @@ impl Read for DepositRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QueueWithdrawalRequest {
     pub(crate) request: SignedWithdrawal<Key, Digest>,
-    pub(crate) openings: Vec<StateOpening<Key, Digest>>,
+    pub(crate) opening: StateOpening<Key, Digest>,
 }
 
 impl Write for QueueWithdrawalRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request.write(buf);
-        self.openings.write(buf);
+        self.opening.write(buf);
     }
 }
 
 impl EncodeSize for QueueWithdrawalRequest {
     fn encode_size(&self) -> usize {
-        self.request.encode_size() + self.openings.encode_size()
+        self.request.encode_size() + self.opening.encode_size()
     }
 }
 
@@ -280,10 +540,7 @@ impl Read for QueueWithdrawalRequest {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
-            openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=MAX_STATE_OPENINGS), ()),
-            )?,
+            opening: StateOpening::read_cfg(buf, &super::query::MAX_PROOF_DIGESTS)?,
         })
     }
 }
@@ -306,13 +563,12 @@ pub(crate) struct RegisterEpochRequest {
     pub(crate) epoch: u64,
     pub(crate) predecessor_liability: u64,
     pub(crate) deposits_root: VectorRoot<Digest>,
-    /// Root of the operator's full staged deposit set, deferred aggregates included, so a
-    /// deposit view divergence a deferral hides from the boundary is still rejected.
-    pub(crate) staged_root: VectorRoot<Digest>,
+
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
-    /// One predecessor-root opening per withdrawal in batch order. Execution selects the
-    /// ones proving its operator-carried extras certifiable.
+    /// One predecessor-root opening per fresh operator extra in withdrawal order.
+    /// Exact chain-queued requests require no additional opening.
     pub(crate) openings: Vec<StateOpening<Key, Digest>>,
+    pub(crate) fee: u64,
     pub(crate) signature: Signature,
 }
 
@@ -322,9 +578,10 @@ impl Write for RegisterEpochRequest {
         self.epoch.write(buf);
         self.predecessor_liability.write(buf);
         self.deposits_root.write(buf);
-        self.staged_root.write(buf);
+
         self.withdrawals.write(buf);
         self.openings.write(buf);
+        self.fee.write(buf);
         self.signature.write(buf);
     }
 }
@@ -335,9 +592,9 @@ impl EncodeSize for RegisterEpochRequest {
             + self.epoch.encode_size()
             + self.predecessor_liability.encode_size()
             + self.deposits_root.encode_size()
-            + self.staged_root.encode_size()
             + self.withdrawals.encode_size()
             + self.openings.encode_size()
+            + self.fee.encode_size()
             + self.signature.encode_size()
     }
 }
@@ -351,18 +608,22 @@ impl Read for RegisterEpochRequest {
             epoch: u64::read(buf)?,
             predecessor_liability: u64::read(buf)?,
             deposits_root: VectorRoot::read(buf)?,
-            staged_root: VectorRoot::read(buf)?,
+
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
-                    RangeCfg::new(0..=MAX_BATCH_ITEMS),
+                    RangeCfg::new(0..=MAX_WITHDRAWALS),
                     RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 ),
             )?,
             openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
                 buf,
-                &(RangeCfg::new(0..=MAX_BATCH_ITEMS), ()),
+                &(
+                    RangeCfg::new(0..=MAX_WITHDRAWALS),
+                    super::query::MAX_PROOF_DIGESTS,
+                ),
             )?,
+            fee: u64::read(buf)?,
             signature: Signature::read(buf)?,
         })
     }
@@ -377,26 +638,20 @@ pub(crate) struct AdmitRequest {
     /// only earns a typed rejection there.
     pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
-    pub(crate) predecessor_liability: u64,
-    pub(crate) deposits: DepositBatch<Key>,
-    pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) terminal_proof: TerminalProof<Digest>,
+    pub(crate) withdrawal_total: u64,
     pub(crate) certificate: Certificate,
 }
 
 impl From<&SettlementResult> for AdmitRequest {
     fn from(result: &SettlementResult) -> Self {
         Self {
-            deployment: *result.epoch_context.deployment(),
-            epoch: result.epoch,
-            predecessor_liability: result.epoch_context.predecessor_liability(),
-            deposits: result.deposits.clone(),
-            withdrawals: result.withdrawals.clone(),
+            deployment: *result.context.epoch_context().deployment(),
+            epoch: result.context.payment().epoch(),
             header: result.header,
             roots: result.roots,
-            terminal_proof: result.terminal_proof.clone(),
+            withdrawal_total: result.withdrawal_total,
             certificate: result.certificate.clone(),
         }
     }
@@ -406,12 +661,9 @@ impl Write for AdmitRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.epoch.write(buf);
-        self.predecessor_liability.write(buf);
-        self.deposits.write(buf);
-        self.withdrawals.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.terminal_proof.write(buf);
+        self.withdrawal_total.write(buf);
         self.certificate.write(buf);
     }
 }
@@ -420,12 +672,9 @@ impl EncodeSize for AdmitRequest {
     fn encode_size(&self) -> usize {
         self.deployment.encode_size()
             + self.epoch.encode_size()
-            + self.predecessor_liability.encode_size()
-            + self.deposits.encode_size()
-            + self.withdrawals.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.terminal_proof.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.certificate.encode_size()
     }
 }
@@ -437,18 +686,9 @@ impl Read for AdmitRequest {
         let request = Self {
             deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
-            predecessor_liability: u64::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_BATCH_ITEMS))?,
-            withdrawals: WithdrawalBatch::read_cfg(
-                buf,
-                &(
-                    RangeCfg::new(0..=MAX_BATCH_ITEMS),
-                    RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-                ),
-            )?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            terminal_proof: TerminalProof::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
             certificate: Certificate::read_cfg(buf, &CERTIFICATE_PARTICIPANTS)?,
         };
         if request.certificate.signers.len() != CERTIFICATE_PARTICIPANTS {
@@ -463,12 +703,14 @@ impl Read for AdmitRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalClaimRequest {
+    pub(crate) deployment: Digest,
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 impl Write for WithdrawalClaimRequest {
     fn write(&self, buf: &mut impl BufMut) {
+        self.deployment.write(buf);
         self.batch_id.write(buf);
         self.claim.write(buf);
     }
@@ -476,7 +718,7 @@ impl Write for WithdrawalClaimRequest {
 
 impl EncodeSize for WithdrawalClaimRequest {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.claim.encode_size()
+        self.deployment.encode_size() + self.batch_id.encode_size() + self.claim.encode_size()
     }
 }
 
@@ -485,38 +727,36 @@ impl Read for WithdrawalClaimRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
+            deployment: Digest::read(buf)?,
             batch_id: BatchId::read(buf)?,
             claim: WithdrawalClaim::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
         })
     }
 }
 
+/// One atomic finalized claim and signed native deposit into another deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExternalPayoutClaimRequest {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) claim: ExternalPayoutClaim<Key, Digest>,
+pub(crate) struct ClaimDepositRequest {
+    pub(crate) claim: WithdrawalClaimRequest,
+    pub(crate) deposit: DepositRequest,
 }
-
-impl Write for ExternalPayoutClaimRequest {
+impl Write for ClaimDepositRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
         self.claim.write(buf);
+        self.deposit.write(buf);
     }
 }
-
-impl EncodeSize for ExternalPayoutClaimRequest {
+impl EncodeSize for ClaimDepositRequest {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.claim.encode_size()
+        self.claim.encode_size() + self.deposit.encode_size()
     }
 }
-
-impl Read for ExternalPayoutClaimRequest {
+impl Read for ClaimDepositRequest {
     type Cfg = ();
-
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            claim: ExternalPayoutClaim::read(buf)?,
+            claim: WithdrawalClaimRequest::read(buf)?,
+            deposit: DepositRequest::read(buf)?,
         })
     }
 }
@@ -525,12 +765,14 @@ impl Read for ExternalPayoutClaimRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum SettlementTx {
+    RegisterDeployment(RegisterDeploymentRequest),
+    NativeTransfer(NativeTransferRequest),
+    ClaimDeposit(ClaimDepositRequest),
     Deposit(DepositRequest),
     QueueWithdrawal(QueueWithdrawalRequest),
     RegisterEpoch(RegisterEpochRequest),
     Admit(AdmitRequest),
     ClaimWithdrawal(WithdrawalClaimRequest),
-    ClaimExternalPayout(ExternalPayoutClaimRequest),
     Challenge(ChallengeRequest),
     BeginHardFaultSettlement(BeginHardFaultSettlementRequest),
     ClaimHardFault(ClaimHardFaultRequest),
@@ -538,6 +780,23 @@ pub(crate) enum SettlementTx {
 }
 
 impl SettlementTx {
+    /// The claimed deployment route. Execution authenticates the referenced state.
+    pub(crate) const fn deployment(&self) -> Option<Digest> {
+        Some(match self {
+            Self::RegisterDeployment(_) | Self::NativeTransfer(_) => return None,
+            Self::ClaimDeposit(request) => request.deposit.deployment,
+            Self::Deposit(request) => request.deployment,
+            Self::QueueWithdrawal(request) => *request.request.body().deployment(),
+            Self::RegisterEpoch(request) => request.deployment,
+            Self::Admit(request) => request.deployment,
+            Self::ClaimWithdrawal(request) => request.deployment,
+            Self::Challenge(request) => request.deployment,
+            Self::BeginHardFaultSettlement(request) => request.deployment,
+            Self::ClaimHardFault(request) => request.deployment,
+            Self::ClaimPendingDeposit(request) => request.deployment,
+        })
+    }
+
     /// Identity of this transaction: the digest of its encoding.
     ///
     /// The mempool keys dedupe, leasing, and retirement by it. It proves
@@ -552,6 +811,18 @@ impl SettlementTx {
 impl Write for SettlementTx {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::RegisterDeployment(r) => {
+                10u8.write(buf);
+                r.write(buf);
+            }
+            Self::NativeTransfer(r) => {
+                11u8.write(buf);
+                r.write(buf);
+            }
+            Self::ClaimDeposit(r) => {
+                12u8.write(buf);
+                r.write(buf);
+            }
             Self::Deposit(request) => {
                 0_u8.write(buf);
                 request.write(buf);
@@ -570,10 +841,6 @@ impl Write for SettlementTx {
             }
             Self::ClaimWithdrawal(request) => {
                 4_u8.write(buf);
-                request.write(buf);
-            }
-            Self::ClaimExternalPayout(request) => {
-                5_u8.write(buf);
                 request.write(buf);
             }
             Self::Challenge(request) => {
@@ -599,12 +866,14 @@ impl Write for SettlementTx {
 impl EncodeSize for SettlementTx {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::RegisterDeployment(r) => r.encode_size(),
+            Self::NativeTransfer(r) => r.encode_size(),
+            Self::ClaimDeposit(r) => r.encode_size(),
             Self::Deposit(request) => request.encode_size(),
             Self::QueueWithdrawal(request) => request.encode_size(),
             Self::RegisterEpoch(request) => request.encode_size(),
             Self::Admit(request) => request.encode_size(),
             Self::ClaimWithdrawal(request) => request.encode_size(),
-            Self::ClaimExternalPayout(request) => request.encode_size(),
             Self::Challenge(request) => request.encode_size(),
             Self::BeginHardFaultSettlement(request) => request.encode_size(),
             Self::ClaimHardFault(request) => request.encode_size(),
@@ -618,14 +887,16 @@ impl Read for SettlementTx {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
+            10 => Ok(Self::RegisterDeployment(RegisterDeploymentRequest::read(
+                buf,
+            )?)),
+            11 => Ok(Self::NativeTransfer(NativeTransferRequest::read(buf)?)),
+            12 => Ok(Self::ClaimDeposit(ClaimDepositRequest::read(buf)?)),
             0 => Ok(Self::Deposit(DepositRequest::read(buf)?)),
             1 => Ok(Self::QueueWithdrawal(QueueWithdrawalRequest::read(buf)?)),
             2 => Ok(Self::RegisterEpoch(RegisterEpochRequest::read(buf)?)),
             3 => Ok(Self::Admit(AdmitRequest::read(buf)?)),
             4 => Ok(Self::ClaimWithdrawal(WithdrawalClaimRequest::read(buf)?)),
-            5 => Ok(Self::ClaimExternalPayout(ExternalPayoutClaimRequest::read(
-                buf,
-            )?)),
             6 => Ok(Self::Challenge(ChallengeRequest::read(buf)?)),
             7 => Ok(Self::BeginHardFaultSettlement(
                 BeginHardFaultSettlementRequest::read(buf)?,
@@ -643,7 +914,10 @@ impl Read for SettlementTx {
 mod tests {
     use super::*;
     use crate::{
-        protocol::{MAX_ENTRIES, Protocol, Wallet, omitting_close, wallets},
+        protocol::{
+            MAX_ENTRIES, Protocol, Wallet, deployments, genesis_balances, omitting_close,
+            state_config, wallets,
+        },
         rpc,
     };
     use bytes::BytesMut;
@@ -652,14 +926,155 @@ mod tests {
         payment::{VectorAck, VectorSendBody},
         vector::{OutEntry, OutTipLookup, OutVector},
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_utils::TestRng;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn deployment_identity_binds_the_complete_registration() {
+        let signer = crate::protocol::operator_signer(0);
+        let chain = Sha256::hash(&[b"registration-chain"]);
+        let request = RegisterDeploymentRequest::sign(
+            chain,
+            Sha256::hash(&[b"registration-id"]),
+            crate::protocol::operator_ack_key(0),
+            ed25519::PrivateKey::from_seed(50).public_key(),
+            4096,
+            10,
+            &signer,
+        );
+        assert!(request.verify(&chain));
+        assert_eq!(
+            RegisterDeploymentRequest::decode(request.encode()).unwrap(),
+            request
+        );
+        for field in 0..7 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.chain_id = Sha256::hash(&[b"another-chain"]),
+                1 => changed.registration_id = Sha256::hash(&[b"another-id"]),
+                2 => changed.operator = wallets()[0].public_key(),
+                3 => changed.operator_ack = crate::protocol::operator_ack_key(1),
+                4 => changed.network_key = ed25519::PrivateKey::from_seed(51).public_key(),
+                5 => changed.max_dealing_bytes += 1,
+                _ => changed.fee += 1,
+            }
+            assert_ne!(request.deployment_id(), changed.deployment_id());
+            assert!(!changed.verify(&chain));
+        }
+    }
+
+    #[test]
+    fn native_deposit_authenticates_every_debit_field() {
+        let wallet = wallets().remove(0);
+        let chain = Sha256::hash(&[b"native-deposit-chain"]);
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"deposit-id"]),
+            account: wallet.public_key(),
+            amount: 7,
+        };
+        let request =
+            DepositRequest::sign(chain, crate::protocol::deployment(), event, wallet.signer());
+        assert!(request.verify(&chain));
+        assert_eq!(DepositRequest::decode(request.encode()).unwrap(), request);
+        assert!(!request.verify(&Sha256::hash(&[b"another-chain"])));
+        for field in 0..4 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.deployment = Sha256::hash(&[b"another-deployment"]),
+                1 => changed.event.id = Sha256::hash(&[b"another-id"]),
+                2 => changed.event.amount += 1,
+                _ => changed.event.account = wallets()[1].public_key(),
+            }
+            assert!(!changed.verify(&chain));
+        }
+    }
+
+    #[test]
+    fn native_transfer_authenticates_recipient_amount_and_replay_domain() {
+        let wallet = wallets().remove(0);
+        let chain = Sha256::hash(&[b"native-transfer-chain"]);
+        let request = NativeTransferRequest::sign(
+            chain,
+            Sha256::hash(&[b"transfer-id"]),
+            wallets()[1].public_key(),
+            9,
+            wallet.signer(),
+        );
+        assert!(request.verify(&chain));
+        assert_eq!(
+            NativeTransferRequest::decode(request.encode()).unwrap(),
+            request
+        );
+        for field in 0..5 {
+            let mut changed = request.clone();
+            match field {
+                0 => changed.chain_id = Sha256::hash(&[b"other-chain"]),
+                1 => changed.id = Sha256::hash(&[b"other-id"]),
+                2 => changed.to = wallets()[2].public_key(),
+                3 => changed.from = wallets()[2].public_key(),
+                _ => changed.amount += 1,
+            }
+            assert!(!changed.verify(&chain));
+        }
+    }
+
+    #[test]
+    fn queue_withdrawal_request_codec_carries_one_bounded_opening() {
+        let (root, opening) = commonware_runtime::Runner::start(
+            commonware_runtime::deterministic::Runner::default(),
+            |context| async move {
+                let deployment = deployments().remove(0);
+                let config = state_config(
+                    "queue-withdrawal-codec",
+                    &context,
+                    commonware_parallel::Sequential,
+                );
+                let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256>::init(
+                    context,
+                    config,
+                    genesis_balances(&deployment).unwrap(),
+                )
+                .await
+                .unwrap();
+                let opening = state.opening(wallets()[0].public_key()).await.unwrap();
+                (state.root().digest, opening)
+            },
+        );
+        let wallet = wallets().remove(0);
+        let request = QueueWithdrawalRequest {
+            request: SignedWithdrawal::sign(
+                crate::protocol::deployment(),
+                root,
+                Bytes::from_static(b"destination"),
+                commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                    std::num::NonZeroU64::MIN,
+                ),
+                100,
+                wallet.signer(),
+            ),
+            opening: opening.clone(),
+        };
+        let encoded = request.encode();
+        assert_eq!(encoded.len(), request.encode_size());
+        assert_eq!(
+            QueueWithdrawalRequest::decode(encoded.clone()).unwrap(),
+            request
+        );
+        for end in 0..encoded.len() {
+            assert!(QueueWithdrawalRequest::decode(encoded.slice(..end)).is_err());
+        }
+        assert!(
+            StateOpening::<Key, Digest>::decode_cfg(opening.encode(), &0).is_err(),
+            "the opening proof decoder must enforce its digest bound"
+        );
+    }
 
     #[test]
     fn challenge_request_enforces_its_nested_evidence_bound() {
         let batch_id = BatchId::new(Sha256::hash(&[b"bounded-challenge"]));
         let bounded = ChallengeRequest {
+            deployment: crate::protocol::deployment(),
             batch_id,
             evidence: Bytes::from(vec![7; MAX_CHALLENGE_BYTES]),
         };
@@ -667,12 +1082,14 @@ mod tests {
         assert_eq!(ChallengeRequest::decode(bounded.encode()).unwrap(), bounded);
 
         let mut oversized = BytesMut::new();
+        crate::protocol::deployment().write(&mut oversized);
         batch_id.write(&mut oversized);
         (MAX_CHALLENGE_BYTES + 1).write(&mut oversized);
         let error = ChallengeRequest::decode(oversized.freeze()).unwrap_err();
         assert!(matches!(error, CodecError::InvalidLength(_)));
 
         let mut trailing = ChallengeRequest {
+            deployment: crate::protocol::deployment(),
             batch_id,
             evidence: Bytes::from_static(&[0]),
         }
@@ -690,8 +1107,24 @@ mod tests {
         // A genuine higher-entry challenge over a committed close: the
         // retained acknowledgment witness with its entry opening plus the
         // composed sender lookup, the family the bound is sized for.
-        let fraud = omitting_close(&mut TestRng::new(41), 11, 12).unwrap();
-        let context = fraud.result.payment_context.clone();
+        let fraud = commonware_runtime::Runner::start(
+            commonware_runtime::deterministic::Runner::default(),
+            |context| async move {
+                let strategy = commonware_parallel::Rayon::new(NonZeroUsize::MIN).unwrap();
+                let config = crate::protocol::state_config("bound-proof", &context, strategy);
+                let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
+                    context,
+                    config,
+                    crate::protocol::genesis_balances(&crate::protocol::deployments()[0]).unwrap(),
+                )
+                .await
+                .unwrap();
+                Box::pin(omitting_close(state, &mut TestRng::new(41), 11, 12))
+                    .await
+                    .unwrap()
+            },
+        );
+        let context = fraud.result.context.payment().clone();
         let held = &fraud.held_receipt;
         let genuine: Challenge<Key, Digest> = Challenge::HigherAckEntry {
             entry: Box::new(EntryWitness {
@@ -770,6 +1203,7 @@ mod tests {
 
         // The genuine proof clears the request decode bound and the frame budget.
         let request = ChallengeRequest {
+            deployment: crate::protocol::deployment(),
             batch_id: BatchId::new(Sha256::hash(&[b"maximal-challenge-batch"])),
             evidence,
         };
@@ -792,31 +1226,10 @@ mod tests {
             100,
             wallet.signer(),
         );
-        let request = QueueWithdrawalRequest {
-            request: oversized_destination,
-            openings: Vec::new(),
-        };
+        let mut encoded = BytesMut::new();
+        oversized_destination.write(&mut encoded);
         assert!(matches!(
-            QueueWithdrawalRequest::decode(request.encode()),
-            Err(CodecError::InvalidLength(_))
-        ));
-
-        // An openings count beyond the bound is refused before materializing.
-        let bounded = SignedWithdrawal::sign(
-            Sha256::hash(&[b"request-bound-deployment"]),
-            root,
-            Bytes::from_static(b"destination"),
-            commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
-                std::num::NonZeroU64::MIN,
-            ),
-            100,
-            wallet.signer(),
-        );
-        let mut oversized_openings = BytesMut::new();
-        bounded.write(&mut oversized_openings);
-        (MAX_STATE_OPENINGS + 1).write(&mut oversized_openings);
-        assert!(matches!(
-            QueueWithdrawalRequest::decode(oversized_openings.freeze()),
+            QueueWithdrawalRequest::decode(encoded.freeze()),
             Err(CodecError::InvalidLength(_))
         ));
 
@@ -830,7 +1243,7 @@ mod tests {
         };
         oversized_root.write(&mut oversized_batch);
         oversized_root.write(&mut oversized_batch);
-        (MAX_BATCH_ITEMS + 1).write(&mut oversized_batch);
+        (MAX_WITHDRAWALS + 1).write(&mut oversized_batch);
         assert!(matches!(
             RegisterEpochRequest::decode(oversized_batch.freeze()),
             Err(CodecError::InvalidLength(_))

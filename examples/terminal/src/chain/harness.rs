@@ -8,45 +8,32 @@
 //! immediately into their own block, and a background ticker seals empty
 //! blocks so deadlines and finalization progress while clients poll.
 //!
-//! Evidence is served the way validators serve it: from the sealed dealings
-//! the in-process simulation retains ([`crate::protocol::retained_closes`],
-//! the simulation standing in for every committee validator) through the
-//! same [`SpanIndex`] path and the same wire types, with the same release
-//! advice (a close the simulation no longer retains, or whose challenge
-//! deadline the chain height passed, is `Pruned` when the chain finalized
-//! it and `Unsealed` otherwise). The harness genesis lists every clearing
-//! committee key at the harness address, so every slice's quorum resolves to
-//! the harness.
-//!
-//! The scripted walkthrough uses it as the fraud arc's throwaway deployment,
-//! and the wallet and operator tests use it as the settlement side.
+//! Balance evidence comes from canonical QMDB replay of the validated closes retained by
+//! the in-process committee. Activity and claims use the same complete-close index and wire
+//! types as networked validators. Historical proof material is retained without pruning.
 
 use crate::{
     chain::{
-        da::{answer, genesis_cache, genesis_range, live_set, slice_ranges},
+        da::answer,
         ingress::Submission,
+        native::{NativeGenesis, RegistryEntry},
         query::{
             CertifiedRead, Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse,
             METHOD_EVIDENCE, METHOD_READ, METHOD_SUBMIT_TX, ReadProof, ReadRequest, ReadResponse,
-            Submitted,
         },
-        setup::{Genesis, ValidatorEntry},
-        state::{Advice, Record, advise, claim_roots_key, execute},
+        setup::{Genesis, ValidatorEntry, native_genesis},
+        state::{Record, admitted_key, execute, registry_entry_key},
         tx::SettlementTx,
         types::{Block, Database, MAX_TX_BYTES, StateKey, now},
         validator::{NAMESPACE, SHARING_MODE, Scheme, db_config},
     },
     protocol::{
-        Deployment, Key, MAX_SLICES, SLICE_BITS, Timing, committee, deployments, retained_closes,
+        Deployment, Timing, committee, deployments, genesis_balances, retained_closes, state_config,
     },
     rpc::{self, error_response},
 };
-use commonware_clearing::bajillion::{
-    retained::Interval,
-    serve::SpanIndex,
-    transition::{BatchId, StateCache, account_slice},
-};
-use commonware_codec::{Decode as _, Encode as _, EncodeSize as _};
+use commonware_clearing::bajillion::qmdb::{State, StateLookup, StateOpening, account_key};
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     simplex::types::{Context, Finalization, Finalize, Proposal},
     types::{Epoch, Height, Round, View},
@@ -61,7 +48,7 @@ use commonware_glue::stateful::db::{DatabaseSet, Merkleized as _};
 use commonware_macros::select;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Listener as _, Network as _, Spawner as _, Supervisor as _,
+    Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{
@@ -80,11 +67,15 @@ const TICK: Duration = Duration::from_millis(250);
 /// One control message for the chain task.
 #[allow(clippy::large_enum_variant)]
 enum Message {
-    /// Submit one transaction, sealing it into its own block. Answers the
-    /// sealing height and the pre-inclusion dry-run advice.
+    #[cfg(test)]
+    SealBatch {
+        transactions: Vec<SettlementTx>,
+        response: oneshot::Sender<Block>,
+    },
+    /// Submit one transaction and return its sealing height.
     Submit {
         tx: Box<SettlementTx>,
-        response: oneshot::Sender<(u64, Advice)>,
+        response: oneshot::Sender<u64>,
     },
     /// Seal `blocks` empty blocks.
     #[cfg(test)]
@@ -122,14 +113,27 @@ pub(crate) struct Control {
 }
 
 impl Control {
+    /// Executes and certifies a batch, including canonically rejected inputs.
+    #[cfg(test)]
+    pub(crate) async fn seal_batch(&self, transactions: Vec<SettlementTx>) -> Block {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(Message::SealBatch {
+                transactions,
+                response,
+            })
+            .await;
+        receiver.await.expect("chain answers batch sealing")
+    }
+
     /// The genesis threshold identity certified reads verify against.
     pub(crate) const fn identity(&self) -> &Genesis {
         &self.identity
     }
 
-    /// Submits one transaction directly, returning the height that sealed it
-    /// and the pre-inclusion dry-run advice.
-    pub(crate) async fn submit(&self, tx: SettlementTx) -> (u64, Advice) {
+    /// Executes one transaction directly and returns its sealing height.
+    pub(crate) async fn submit(&self, tx: SettlementTx) -> u64 {
         let (response, receiver) = oneshot::channel();
         let message = Message::Submit {
             tx: Box::new(tx),
@@ -198,9 +202,11 @@ struct Node {
     db: Database<deterministic::Context>,
     scheme: Scheme,
     leader: ed25519::PublicKey,
-    deployments: Vec<Deployment>,
-    /// Each configured deployment's genesis state, keyed by digest.
-    genesis: BTreeMap<Digest, StateCache<Key, Digest>>,
+    native: NativeGenesis,
+    timing: Timing,
+    prefix: String,
+    /// Each configured deployment's account owner and next canonical epoch.
+    genesis: BTreeMap<Digest, (State<deterministic::Context, Sha256>, u64)>,
     latest: Option<Latest>,
     reads: u64,
     submissions: u64,
@@ -230,8 +236,8 @@ impl Node {
             batch,
             Height::new(height),
             timestamp,
-            &Timing::DEFAULT,
-            &self.deployments,
+            &self.timing,
+            &self.native,
             &transactions,
         )
         .await
@@ -305,118 +311,223 @@ impl Node {
 
     /// Serves one evidence request from the closes the in-process simulation
     /// retains, exactly as a validator serves from its sealed dealings.
-    async fn evidence(&self, request: &EvidenceRequest) -> EvidenceResponse {
-        let Some(genesis) = self.genesis.get(&request.deployment) else {
-            return EvidenceResponse::Unknown;
+    async fn evidence(
+        &mut self,
+        context: &deterministic::Context,
+        request: &EvidenceRequest,
+    ) -> EvidenceResponse {
+        let entry = {
+            let db = self.db.read().await;
+            match db
+                .get(&registry_entry_key(
+                    &self.native.chain_id(),
+                    &request.deployment,
+                ))
+                .await
+                .unwrap()
+            {
+                Some(Record::RegistryEntry(entry)) => entry,
+                _ => return EvidenceResponse::Unknown,
+            }
         };
-        let height = self.latest.as_ref().map_or(0, |latest| latest.height);
+        let (mut state, mut next) = match self.genesis.remove(&request.deployment) {
+            Some(state) => state,
+            None => {
+                let config = state_config(
+                    &format!("{}-balances-{}", self.prefix, request.deployment),
+                    context,
+                    Sequential,
+                );
+                let state = State::<_, Sha256>::init(
+                    context.child("balances"),
+                    config,
+                    genesis_balances(&entry.deployment).unwrap(),
+                )
+                .await
+                .unwrap();
+                (state, 0)
+            }
+        };
         let retained = retained_closes();
-        let retained = retained
+        let relevant = retained
             .iter()
-            .filter(|close| close.context.deployment() == &request.deployment);
-        let span = 0..MAX_SLICES as u16;
-        match &request.lookup {
-            EvidenceLookup::GenesisState { account } => genesis
-                .opening(account)
-                .map_or(EvidenceResponse::Absent, |opening| {
-                    EvidenceResponse::Served(Evidence::Genesis(opening))
+            .filter(|close| close.context.deployment() == &request.deployment)
+            .collect::<Vec<_>>();
+        loop {
+            let admitted = {
+                let db = self.db.read().await;
+                match db
+                    .get(&admitted_key(&request.deployment, next))
+                    .await
+                    .unwrap()
+                {
+                    Some(Record::Admitted(admitted)) => admitted,
+                    _ => break,
+                }
+            };
+            let Some(close) = relevant.iter().find(|close| {
+                close.context.payment().epoch() == next
+                    && *close.context.predecessor_root() == state.root()
+                    && close.header.batch_id::<Sha256>() == admitted.batch_id
+            }) else {
+                break;
+            };
+            let candidate = state
+                .prepare(state.head(), close.mutations.clone())
+                .await
+                .expect("canonical retained mutations");
+            assert_eq!(candidate.root(), close.roots.successor);
+            state = state
+                .apply(candidate)
+                .await
+                .expect("harness balance application");
+            next += 1;
+        }
+        let genesis_head = entry.deployment.genesis();
+        let response = match &request.lookup {
+            EvidenceLookup::CloseEvidence { batch_id } => relevant
+                .iter()
+                .find(|retained| retained.header.batch_id::<Sha256>() == *batch_id)
+                .map_or(EvidenceResponse::Unsealed, |retained| {
+                    EvidenceResponse::Served(Evidence::Close {
+                        header: retained.header,
+                        roots: retained.roots,
+                        body: super::query::EvidenceBody::Complete {
+                            context: retained.context.clone(),
+                            evidence: retained.close.encode_evidence(),
+                        },
+                    })
                 }),
-            EvidenceLookup::Interval { root, slice } => {
-                if !span.contains(slice) {
-                    return EvidenceResponse::NotHolder { spans: vec![span] };
+            EvidenceLookup::GenesisState { account } => {
+                let root = genesis_head.root();
+                match state
+                    .lookup_at(
+                        root,
+                        genesis_head.operations(),
+                        &account_key(account).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    StateLookup::Present(value) => {
+                        EvidenceResponse::Served(Evidence::Genesis(StateOpening {
+                            account: account.clone(),
+                            balance: value.balance,
+                            proof: value.proof,
+                        }))
+                    }
+                    StateLookup::Absent(proof) => {
+                        EvidenceResponse::Served(Evidence::GenesisAbsent(proof))
+                    }
                 }
-                if *root == genesis.root() {
-                    let ranges =
-                        slice_ranges(&genesis_range(genesis), genesis.leaves(), &span, SLICE_BITS)
-                            .expect("the genesis range narrows to every slice");
-                    return EvidenceResponse::Served(Evidence::Interval(
-                        ranges[usize::from(*slice)].clone(),
-                    ));
-                }
-                for close in retained.filter(|close| close.roots.successor == *root) {
-                    let Some(proof) = close
-                        .dealings
+            }
+            EvidenceLookup::Dealing { epoch } => {
+                if let Some(Record::Admitted(admitted)) = self
+                    .db
+                    .read()
+                    .await
+                    .get(&admitted_key(&request.deployment, *epoch))
+                    .await
+                    .unwrap()
+                {
+                    relevant
                         .iter()
-                        .find_map(|dealing| dealing.serve(*slice))
-                    else {
-                        continue;
-                    };
-                    let members = live_set(&proof.unchanged, &proof.changes.rows, true);
-                    let ranges = slice_ranges(&proof.successor, &members, &proof.span, SLICE_BITS)
-                        .expect("the sealed successor range narrows to every slice");
-                    let offset = slice
-                        .checked_sub(proof.span.start)
-                        .expect("serve(slice) returned a slice inside its span");
-                    return EvidenceResponse::Served(Evidence::Interval(
-                        ranges[usize::from(offset)].clone(),
-                    ));
+                        .find(|retained| {
+                            retained.context.payment().epoch() == *epoch
+                                && retained.header.batch_id::<Sha256>() == admitted.batch_id
+                        })
+                        .map_or_else(
+                            || EvidenceResponse::Unsealed,
+                            |retained| {
+                                let close = &retained.close;
+                                EvidenceResponse::Served(Evidence::Dealing(Box::new(
+                                    super::da::Replay {
+                                        context: retained.context.clone(),
+                                        header: close.header,
+                                        roots: close.roots,
+                                        withdrawal_total: close.withdrawal_total,
+                                        deposits: retained.deposits.clone(),
+                                        withdrawals: retained.withdrawals.clone(),
+                                        dealing: close.encoded().clone(),
+                                    },
+                                )))
+                            },
+                        )
+                } else {
+                    EvidenceResponse::Unsealed
                 }
-                EvidenceResponse::Unsealed
             }
             lookup => {
-                let batch = lookup.batch().expect("close-bound lookups name a batch");
-                let account = lookup
-                    .account()
-                    .expect("close-bound lookups name an account");
-
-                // The validators' retention rule: a dealing the simulation
-                // no longer retains, or whose challenge window closed at the
-                // chain height, is released advice.
-                let Some(close) = retained
-                    .into_iter()
-                    .find(|close| close.header.batch_id::<Sha256>().into_digest() == *batch)
-                    .filter(|close| close.context.challenge_deadline() >= height)
-                else {
-                    return self.released(&request.deployment, batch).await;
-                };
-                let slice = account_slice(account, SLICE_BITS)
-                    .expect("account keys are fixed-size and partition");
-                let Some(proof) = close
-                    .dealings
+                let batch = lookup.batch().unwrap();
+                match relevant
                     .iter()
-                    .find_map(|dealing| dealing.serve(slice))
-                else {
-                    return EvidenceResponse::NotHolder {
-                        spans: close
-                            .dealings
-                            .iter()
-                            .flat_map(|dealing| dealing.slices())
-                            .map(|proof| proof.span.clone())
-                            .collect(),
-                    };
-                };
-                let interval =
-                    Interval::new(live_set(&proof.unchanged, &proof.changes.rows, false))
-                        .expect("sealed slices yield canonical predecessor intervals");
-                let index = SpanIndex::new::<Sha256>(
-                    proof,
-                    &interval,
-                    &close.context,
-                    &close.roots,
-                    &close.withdrawals,
-                )
-                .expect("sealed slices index against their own predecessor interval");
-                answer(&index, close.header, close.roots, lookup)
-                    .expect("sealed slices serve every close-bound lookup")
+                    .find(|close| close.header.batch_id::<Sha256>().into_digest() == *batch)
+                {
+                    None => EvidenceResponse::Unsealed,
+                    Some(retained) => {
+                        let root = match lookup {
+                            EvidenceLookup::PredecessorState { .. } => {
+                                Some(*retained.context.predecessor_root())
+                            }
+                            EvidenceLookup::SuccessorState { .. } => Some(retained.roots.successor),
+                            _ => None,
+                        };
+                        if let Some(root) = root {
+                            {
+                                let account = lookup.account().unwrap().clone();
+                                let operations =
+                                    if matches!(lookup, EvidenceLookup::SuccessorState { .. }) {
+                                        retained.operations
+                                    } else if retained.context.payment().epoch() == 0 {
+                                        genesis_head.operations()
+                                    } else {
+                                        relevant
+                                            .iter()
+                                            .find(|prior| {
+                                                prior.roots.successor == root
+                                                    && prior.context.payment().epoch() + 1
+                                                        == retained.context.payment().epoch()
+                                            })
+                                            .expect("retained predecessor")
+                                            .operations
+                                    };
+                                let body = match state
+                                    .lookup_at(root, operations, &account_key(&account).unwrap())
+                                    .await
+                                    .unwrap()
+                                {
+                                    StateLookup::Present(value) => {
+                                        super::query::EvidenceBody::State(StateOpening {
+                                            account,
+                                            balance: value.balance,
+                                            proof: value.proof,
+                                        })
+                                    }
+                                    StateLookup::Absent(proof) => {
+                                        super::query::EvidenceBody::StateAbsent(proof)
+                                    }
+                                };
+                                EvidenceResponse::Served(Evidence::Close {
+                                    header: retained.header,
+                                    roots: retained.roots,
+                                    body,
+                                })
+                            }
+                        } else {
+                            answer(
+                                &retained.context,
+                                &retained.withdrawals,
+                                &retained.close,
+                                lookup,
+                            )
+                            .expect("retained activity proof")
+                        }
+                    }
+                }
             }
-        }
-    }
-
-    /// Classifies a batch with no served dealing exactly as a validator does:
-    /// `Pruned` when the chain finalized it (its claim roots record exists),
-    /// `Unsealed` otherwise.
-    async fn released(&self, deployment: &Digest, batch: &Digest) -> EvidenceResponse {
-        let guard = self.db.read().await;
-        let finalized = guard
-            .get(&claim_roots_key(deployment, &BatchId::new(*batch)))
-            .await
-            .expect("harness state read succeeds")
-            .is_some();
-        if finalized {
-            EvidenceResponse::Pruned
-        } else {
-            EvidenceResponse::Unsealed
-        }
+        };
+        self.genesis.insert(request.deployment, (state, next));
+        response
     }
 }
 
@@ -435,13 +546,13 @@ pub(crate) fn identity(rng: &mut impl rand_core::CryptoRng) -> Genesis {
         identity,
         0,
         Timing::DEFAULT,
-        deployments(),
+        native(deployments()),
         validators(SocketAddr::from(([127, 0, 0, 1], 0))),
     )
 }
 
 /// The clearing committee with every member served at `address`: the harness
-/// answers evidence for every validator, so every slice's quorum resolves to
+/// answers evidence for every validator, so the complete committee resolves to
 /// it.
 fn validators(address: SocketAddr) -> Vec<ValidatorEntry> {
     committee()
@@ -471,6 +582,65 @@ pub(crate) async fn start_with(
     prefix: &str,
     configured: Vec<Deployment>,
 ) -> Control {
+    start_with_native(
+        context,
+        address,
+        prefix,
+        native(configured),
+        crate::protocol::Timing::DEFAULT,
+    )
+    .await
+}
+
+/// Generates trusted native genesis for deterministic fixtures.
+pub(crate) fn native(mut configured: Vec<Deployment>) -> NativeGenesis {
+    deterministic::Runner::default().start(|context| async move {
+        for deployment in &mut configured {
+            deployment.generate(context.child("genesis")).await.unwrap();
+        }
+        let empty = crate::protocol::empty_genesis(context.child("empty"))
+            .await
+            .unwrap();
+        native_genesis(
+            configured
+                .into_iter()
+                .enumerate()
+                .map(|(index, deployment)| RegistryEntry {
+                    deployment,
+                    network_key: ed25519::PrivateKey::from_seed(50_000 + index as u64).public_key(),
+                    max_dealing_bytes: 4 * 1024 * 1024,
+                })
+                .collect(),
+            &empty,
+        )
+    })
+}
+
+/// Starts a certified chain with explicit native allocations and resource policy.
+pub(crate) async fn start_with_native(
+    context: &deterministic::Context,
+    address: SocketAddr,
+    prefix: &str,
+    native: NativeGenesis,
+    timing: Timing,
+) -> Control {
+    let mut balances = BTreeMap::new();
+    for entry in &native.deployments {
+        let deployment = &entry.deployment;
+        let config = state_config(
+            &format!("{prefix}-balances-{}", deployment.digest()),
+            context,
+            Sequential,
+        );
+        let state = State::<_, Sha256>::init(
+            context.child("balances"),
+            config,
+            genesis_balances(deployment).unwrap(),
+        )
+        .await
+        .unwrap();
+        balances.insert(*deployment.digest(), (state, 0));
+    }
     let mut rng = context.child("harness_rng");
     let signer = ed25519::PrivateKey::from_seed(4_242);
     let players = Set::from_iter_dedup([signer.public_key()]);
@@ -479,8 +649,8 @@ pub(crate) async fn start_with(
     let identity = Genesis::new(
         identity,
         now(context),
-        Timing::DEFAULT,
-        configured.clone(),
+        timing,
+        native.clone(),
         validators(address),
     );
     let share = shares
@@ -505,11 +675,10 @@ pub(crate) async fn start_with(
         db,
         scheme,
         leader: signer.public_key(),
-        genesis: configured
-            .iter()
-            .map(|deployment| (*deployment.digest(), genesis_cache(deployment)))
-            .collect(),
-        deployments: configured,
+        genesis: balances,
+        native,
+        timing,
+        prefix: prefix.into(),
         latest: None,
         reads: 0,
         submissions: 0,
@@ -527,20 +696,30 @@ pub(crate) async fn start_with(
     // The chain task: seals, reads, and the idle ticker in one owner.
     context.child("harness_chain").spawn({
         move |context| async move {
+            let mut tick_at = context.current() + TICK;
             loop {
                 select! {
+                    _ = context.sleep_until(tick_at) => {
+                        node.seal(now(&context), Vec::new()).await;
+                        tick_at = context.current() + TICK;
+                    },
                     message = mailbox.recv() => {
                         let Some(message) = message else {
                             return;
                         };
                         match message {
+                            #[cfg(test)]
+                            Message::SealBatch { transactions, response } => {
+                                node.seal(now(&context), transactions).await;
+                                tick_at = context.current() + TICK;
+                                response.send_lossy(Block::decode_cfg(node.latest.as_ref().unwrap().block.clone(), &()).unwrap());
+                            }
+
                             Message::Submit { tx, response } => {
                                 node.submissions += 1;
-                                let advice = advise(&node.db, &node.deployments, &tx)
-                                    .await
-                                    .expect("harness dry-run succeeds");
                                 let height = node.seal(now(&context), vec![*tx]).await;
-                                response.send_lossy((height, advice));
+                                tick_at = context.current() + TICK;
+                                response.send_lossy(height);
                             }
                             #[cfg(test)]
                             Message::Advance { blocks, response } => {
@@ -550,6 +729,7 @@ pub(crate) async fn start_with(
                                     .map_or(0, |latest| latest.height);
                                 for _ in 0..blocks {
                                     height = node.seal(now(&context), Vec::new()).await;
+                                    tick_at = context.current() + TICK;
                                 }
                                 response.send_lossy(height);
                             }
@@ -558,7 +738,7 @@ pub(crate) async fn start_with(
                                 response.send_lossy(node.read(&request).await);
                             }
                             Message::Evidence { request, response } => {
-                                response.send_lossy(node.evidence(&request).await);
+                                response.send_lossy(node.evidence(&context, &request).await);
                             }
                             Message::Record { key, response } => {
                                 let guard = node.db.read().await;
@@ -573,9 +753,6 @@ pub(crate) async fn start_with(
                                 response.send_lossy((node.reads, node.submissions));
                             }
                         }
-                    },
-                    _ = context.sleep(TICK) => {
-                        node.seal(now(&context), Vec::new()).await;
                     },
                 }
             }
@@ -605,23 +782,13 @@ pub(crate) async fn start_with(
                 let response = match request.method {
                     METHOD_SUBMIT_TX => {
                         if request.body.len() > MAX_TX_BYTES {
-                            respond(&Submitted {
-                                admission: Submission::Oversized,
-                                advice: None,
-                            })
+                            respond(&Submission::Oversized)
                         } else {
                             match SettlementTx::decode_cfg(request.body, &()) {
-                                Ok(tx) if tx.encode_size() <= MAX_TX_BYTES => {
-                                    let (_, advice) = listener_control.submit(tx).await;
-                                    respond(&Submitted {
-                                        admission: Submission::Accepted,
-                                        advice: Some(advice),
-                                    })
+                                Ok(tx) => {
+                                    listener_control.submit(tx).await;
+                                    respond(&Submission::Accepted)
                                 }
-                                Ok(_) => respond(&Submitted {
-                                    admission: Submission::Oversized,
-                                    advice: None,
-                                }),
                                 Err(_) => {
                                     error_response("submitted transaction does not decode".into())
                                 }
@@ -647,5 +814,42 @@ pub(crate) async fn start_with(
 fn respond(body: &impl commonware_codec::Encode) -> rpc::Response {
     rpc::Response::Success {
         body: body.encode(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{chain::query::Lookup, protocol::deployment};
+
+    #[test]
+    fn status_reads_do_not_postpone_empty_blocks() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let control = start(&context, SocketAddr::from(([127, 0, 0, 1], 9991)), "tick").await;
+            let started = context.current();
+            let request = ReadRequest::new(deployment(), Lookup::Status);
+            let mut first = None;
+            let mut last_height = 0;
+            let mut last_read = started;
+            for step in 0..=10 {
+                context
+                    .sleep_until(started + Duration::from_millis(step * 100))
+                    .await;
+                let ReadResponse::Certified(read) = control.read(request.clone()).await else {
+                    panic!("the initialized harness must serve a certified read");
+                };
+                let block = Block::decode_cfg(read.block, &()).unwrap();
+                first.get_or_insert(block.height.get());
+                last_height = block.height.get();
+                let completed = context.current();
+                assert!(completed.duration_since(last_read).unwrap() < TICK);
+                last_read = completed;
+            }
+            assert_eq!(control.counts().await, (11, 0));
+            assert!(
+                last_height >= first.unwrap() + 2,
+                "reads suppressed empty blocks"
+            );
+        });
     }
 }

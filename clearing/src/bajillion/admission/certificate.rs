@@ -150,12 +150,9 @@ pub enum Error {
     /// A certificate does not contain exactly `2f+1` attestations.
     #[error("certificate does not contain the exact quorum")]
     WrongQuorumSize,
-    /// A dealing or slice request does not match the deterministic assignment.
-    #[error("dealing or slice request does not match the assignment")]
-    IncompleteAssignment,
-    /// An assigned proof slice failed semantic authentication.
-    #[error("assigned proof slice is invalid")]
-    InvalidSlice,
+    /// A full dealing failed structural, cryptographic, or state validation.
+    #[error("invalid full dealing")]
+    InvalidDealing,
     /// An attestation could not be assembled into a certificate.
     #[error("certificate contains an invalid attestation")]
     InvalidAttestation,

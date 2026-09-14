@@ -2,15 +2,12 @@
 //!
 //! The server reuses the terminal's one-request/one-response framing (see
 //! [`crate::rpc`]) with concurrent accepts and an async handler. It exposes
-//! two methods:
+//! three methods:
 //!
-//! - [`METHOD_SUBMIT_TX`] feeds the ingress mailbox and returns the advisory
-//!   [`Submitted`] answer: the queue admission result plus a typed dry-run
-//!   verdict against the serving validator's latest applied state
-//!   ([`crate::chain::state::advise`]). Both halves are unauthenticated UX
-//!   advice: acceptance promises gossip and proposal attempts, never
-//!   inclusion, and the authoritative answer is the submitter's certified
-//!   read of the transaction's effect record (rejections are effect-free).
+//! - [`METHOD_SUBMIT_TX`] submits owned bytes for ingress qualification and
+//!   returns an advisory [`crate::chain::ingress::Submission`]. Clients resolve
+//!   execution through
+//!   certified effect records; accepted requests can become stale before inclusion.
 //! - [`METHOD_READ`] answers one [`ReadRequest`] with a [`CertifiedRead`]:
 //!   the finalization certificate, the finalized block bytes, and a presence
 //!   or absence proof against the block's canonical state root. The snapshot
@@ -23,7 +20,7 @@
 //!   [`EvidenceResponse`] from the validator's retained sealed dealings (see
 //!   [`crate::chain::da`]): per-account openings a challenge, a chain
 //!   withdrawal, or a claim needs, the deployment's genesis state, and the
-//!   slice intervals another validator catches up from. Every served opening
+//!   complete closes another validator replays for catch-up. Every served opening
 //!   verifies against certified roots the client already holds, so nothing
 //!   here is trusted unverified.
 //!
@@ -33,25 +30,23 @@
 use crate::{
     chain::{
         app::Finalized,
-        da::{Mailbox as SealerMailbox, SliceRange},
-        ingress::{Mailbox as IngressMailbox, Submission},
+        da::{Mailbox as SealerMailbox, Replay},
+        ingress::Mailbox as IngressMailbox,
         state::{
-            Advice, Record, admitted_key, advise, anchor_key, claim_roots_key, deposit_key,
-            fault_key, hard_fault_key, payout_release_key, refund_key, registration_key,
-            status_key, withdrawal_key, withdrawal_release_key,
+            Record, admitted_key, anchor_key, claim_roots_key, deposit_key, fault_key,
+            hard_fault_key, native_balance_key, native_transfer_key, refund_key, registration_key,
+            registry_entry_key, registry_key, status_key, withdrawal_key, withdrawal_release_key,
         },
-        tx::SettlementTx,
-        types::{Block, Database, Exclusion, MAX_TX_BYTES, Proof, StateKey},
+        types::{Block, Database, Exclusion, Proof, StateKey},
     },
-    protocol::{Deployment, Key, MAX_DESTINATION_BYTES, MAX_SLICES, limits},
+    protocol::{Key, WithdrawalWitness},
     rpc::{self, ACCEPT_RETRY_DELAY, error_response},
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
-    challenge::{AccountLookup, ChangeOpening, HigherEntryLookup, StateOpening},
-    commitment::{RangeOpening, VectorRoot},
-    transition::{BatchId, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
-    vector::TransposeEntry,
+    challenge::{AccountLookup, ChangeOpening, HigherEntryLookup},
+    qmdb::{Absence, StateOpening},
+    transition::{BatchId, CloseContext, Header, RootBundle},
 };
 use commonware_codec::{
     Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -61,10 +56,12 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{certificate::Scheme, sha256::Digest};
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::Acknowledgement;
-use std::{net::SocketAddr, ops::Range};
+use futures::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
+use std::net::SocketAddr;
 use tracing::debug;
 
 /// Submits one settlement transaction into the ingress queue.
@@ -85,10 +82,25 @@ pub(crate) const MAX_READ_BYTES: usize = rpc::MAX_BODY_SIZE / 2;
 
 /// One certified-read lookup, covering one deployment's settlement read
 /// surface: status, epoch roots (anchor plus admitted), claim roots, deposit
-/// custody, the registration singleton, queued withdrawals, released claims,
+/// custody, the registration singleton, withdrawal intake receipts, released claims,
 /// the fault singleton, and terminal releases.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Lookup {
+    /// Shared native funds under the immutable chain domain.
+    NativeBalance { chain_id: Digest, account: Key },
+    /// The bounded directory of registered deployment IDs.
+    Registry { chain_id: Digest },
+    /// One immutable deployment configuration and its authenticated genesis allocations.
+    RegistryEntry {
+        chain_id: Digest,
+        deployment: Digest,
+    },
+    /// The successful native transfer with this replay identity.
+    NativeTransfer {
+        chain_id: Digest,
+        from: Key,
+        id: Digest,
+    },
     /// The status singleton.
     Status,
     /// The registered payment anchor for one epoch.
@@ -101,24 +113,20 @@ pub(crate) enum Lookup {
     Deposit { id: Digest },
     /// The registration singleton.
     Registration,
-    /// The queued withdrawal for one account.
+    /// The latest accepted withdrawal receipt, retained after carriage.
     Withdrawal { account: Key },
     /// One released withdrawal by (batch, position).
     WithdrawalRelease { batch: Digest, position: u32 },
-    /// One released external payout by (batch, position).
-    PayoutRelease { batch: Digest, position: u32 },
     /// One hard-fault release by account.
     HardFault { account: Key },
-    /// One deposit refund by account.
-    Refund { account: Key },
+    /// One deposit refund by account and settlement phase.
+    Refund { account: Key, terminal: bool },
     /// The fault singleton.
     Fault,
 }
 
-/// One certified-read key request: the deployment whose records it reads
-/// plus the lookup within that deployment's domains. Every read is
-/// deployment-scoped: the requested key derives from the named deployment,
-/// so a proof never answers for another deployment's records.
+/// One certified read. Clearing keys bind the named deployment; shared native
+/// keys bind the lookup's immutable chain identity and account or replay identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReadRequest {
     pub(crate) deployment: Digest,
@@ -134,6 +142,15 @@ impl ReadRequest {
     pub(crate) fn key(&self) -> StateKey {
         let deployment = &self.deployment;
         match &self.lookup {
+            Lookup::NativeBalance { chain_id, account } => native_balance_key(chain_id, account),
+            Lookup::Registry { chain_id } => registry_key(chain_id),
+            Lookup::RegistryEntry {
+                chain_id,
+                deployment,
+            } => registry_entry_key(chain_id, deployment),
+            Lookup::NativeTransfer { chain_id, from, id } => {
+                native_transfer_key(chain_id, from, id)
+            }
             Lookup::Status => status_key(deployment),
             Lookup::Anchor { epoch } => anchor_key(deployment, *epoch),
             Lookup::Admitted { epoch } => admitted_key(deployment, *epoch),
@@ -144,11 +161,8 @@ impl ReadRequest {
             Lookup::WithdrawalRelease { batch, position } => {
                 withdrawal_release_key(deployment, &BatchId::new(*batch), *position)
             }
-            Lookup::PayoutRelease { batch, position } => {
-                payout_release_key(deployment, &BatchId::new(*batch), *position)
-            }
             Lookup::HardFault { account } => hard_fault_key(deployment, account),
-            Lookup::Refund { account } => refund_key(deployment, account),
+            Lookup::Refund { account, terminal } => refund_key(deployment, account, *terminal),
             Lookup::Fault => fault_key(deployment),
         }
     }
@@ -208,20 +222,39 @@ impl Write for Lookup {
                 batch.write(buf);
                 position.write(buf);
             }
-            Self::PayoutRelease { batch, position } => {
-                8_u8.write(buf);
-                batch.write(buf);
-                position.write(buf);
-            }
             Self::HardFault { account } => {
                 9_u8.write(buf);
                 account.write(buf);
             }
-            Self::Refund { account } => {
+            Self::Refund { account, terminal } => {
                 10_u8.write(buf);
                 account.write(buf);
+                terminal.write(buf);
             }
             Self::Fault => 11_u8.write(buf),
+            Self::NativeBalance { chain_id, account } => {
+                12_u8.write(buf);
+                chain_id.write(buf);
+                account.write(buf);
+            }
+            Self::Registry { chain_id } => {
+                13_u8.write(buf);
+                chain_id.write(buf);
+            }
+            Self::RegistryEntry {
+                chain_id,
+                deployment,
+            } => {
+                15_u8.write(buf);
+                chain_id.write(buf);
+                deployment.write(buf);
+            }
+            Self::NativeTransfer { chain_id, from, id } => {
+                14_u8.write(buf);
+                chain_id.write(buf);
+                from.write(buf);
+                id.write(buf);
+            }
         }
     }
 }
@@ -229,17 +262,26 @@ impl Write for Lookup {
 impl EncodeSize for Lookup {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::NativeBalance { chain_id, account } => {
+                chain_id.encode_size() + account.encode_size()
+            }
+            Self::Registry { chain_id } => chain_id.encode_size(),
+            Self::RegistryEntry {
+                chain_id,
+                deployment,
+            } => chain_id.encode_size() + deployment.encode_size(),
+            Self::NativeTransfer { chain_id, from, id } => {
+                chain_id.encode_size() + from.encode_size() + id.encode_size()
+            }
             Self::Status | Self::Registration | Self::Fault => 0,
             Self::Anchor { epoch } | Self::Admitted { epoch } => epoch.encode_size(),
             Self::ClaimRoots { batch } => batch.encode_size(),
             Self::Deposit { id } => id.encode_size(),
-            Self::WithdrawalRelease { batch, position }
-            | Self::PayoutRelease { batch, position } => {
+            Self::WithdrawalRelease { batch, position } => {
                 batch.encode_size() + position.encode_size()
             }
-            Self::Withdrawal { account }
-            | Self::HardFault { account }
-            | Self::Refund { account } => account.encode_size(),
+            Self::Withdrawal { account } | Self::HardFault { account } => account.encode_size(),
+            Self::Refund { account, terminal } => account.encode_size() + terminal.encode_size(),
         }
     }
 }
@@ -270,17 +312,30 @@ impl Read for Lookup {
                 batch: Digest::read(buf)?,
                 position: u32::read(buf)?,
             }),
-            8 => Ok(Self::PayoutRelease {
-                batch: Digest::read(buf)?,
-                position: u32::read(buf)?,
-            }),
             9 => Ok(Self::HardFault {
                 account: Key::read(buf)?,
             }),
             10 => Ok(Self::Refund {
                 account: Key::read(buf)?,
+                terminal: bool::read(buf)?,
             }),
             11 => Ok(Self::Fault),
+            12 => Ok(Self::NativeBalance {
+                chain_id: Digest::read(buf)?,
+                account: Key::read(buf)?,
+            }),
+            13 => Ok(Self::Registry {
+                chain_id: Digest::read(buf)?,
+            }),
+            14 => Ok(Self::NativeTransfer {
+                chain_id: Digest::read(buf)?,
+                from: Key::read(buf)?,
+                id: Digest::read(buf)?,
+            }),
+            15 => Ok(Self::RegistryEntry {
+                chain_id: Digest::read(buf)?,
+                deployment: Digest::read(buf)?,
+            }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -420,51 +475,11 @@ impl Read for ReadResponse {
     }
 }
 
-/// The advisory answer to one submission: the queue admission result plus a
-/// dry-run verdict when the answering path holds applied state to peek at.
-///
-/// Both halves are unauthenticated UX advice, never authorization or
-/// evidence: the authoritative answer is a certified read of the
-/// transaction's effect record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Submitted {
-    pub(crate) admission: Submission,
-    /// Dry-run verdict against the answering validator's latest applied
-    /// state, or `None` for paths that assess nothing (p2p submission).
-    pub(crate) advice: Option<Advice>,
-}
-
-impl Write for Submitted {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.admission.write(buf);
-        self.advice.write(buf);
-    }
-}
-
-impl EncodeSize for Submitted {
-    fn encode_size(&self) -> usize {
-        self.admission.encode_size() + self.advice.encode_size()
-    }
-}
-
-impl Read for Submitted {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            admission: Submission::read(buf)?,
-            advice: Option::<Advice>::read(buf)?,
-        })
-    }
-}
-
 /// One evidence lookup within one deployment's retained sealed dealings.
 ///
 /// Close-bound lookups name the batch id of the sealed close and the account
-/// whose slice the serving validator must hold. [`Self::GenesisState`] opens
-/// the deployment's genesis state, which every validator holds whole, and
-/// [`Self::Interval`] returns one slice's retained live leaves at a certified
-/// state root for another holder's catch-up.
+/// whose evidence is requested. [`Self::GenesisState`] opens the deployment's
+/// genesis state, and [`Self::Dealing`] returns a complete close for canonical replay.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EvidenceLookup {
     /// The account's leaf under the close's predecessor state root.
@@ -485,23 +500,18 @@ pub(crate) enum EvidenceLookup {
     Account { batch: Digest, account: Key },
     /// The account's validator-derived withdrawal output for claiming.
     WithdrawalOutput { batch: Digest, account: Key },
-    /// The recipient's credited transpose range under the transpose root.
-    Credits { batch: Digest, recipient: Key },
     /// The account's leaf under the deployment's genesis state root.
     GenesisState { account: Key },
-    /// One slice's retained live leaves at `root`, with the guards that
-    /// prove the slice complete.
-    Interval {
-        root: VectorRoot<Digest>,
-        slice: u16,
-    },
-    /// The account's external payout claim under the change root.
-    ExternalPayout { batch: Digest, account: Key },
+    /// Complete durable close material for replay by a lagging validator.
+    Dealing { epoch: u64 },
+    /// Complete derived close evidence retained by a validator that voted for
+    /// the batch.
+    CloseEvidence { batch_id: BatchId<Digest> },
 }
 
 impl EvidenceLookup {
     /// The sealed close this lookup addresses, or `None` for a lookup outside
-    /// any close (genesis state and interval catch-up).
+    /// any close (genesis state and close catch-up).
     pub(crate) const fn batch(&self) -> Option<&Digest> {
         match self {
             Self::PredecessorState { batch, .. }
@@ -509,15 +519,13 @@ impl EvidenceLookup {
             | Self::Change { batch, .. }
             | Self::CommittedEntry { batch, .. }
             | Self::Account { batch, .. }
-            | Self::WithdrawalOutput { batch, .. }
-            | Self::Credits { batch, .. }
-            | Self::ExternalPayout { batch, .. } => Some(batch),
-            Self::GenesisState { .. } | Self::Interval { .. } => None,
+            | Self::WithdrawalOutput { batch, .. } => Some(batch),
+            Self::CloseEvidence { batch_id } => Some(batch_id.digest()),
+            Self::GenesisState { .. } | Self::Dealing { .. } => None,
         }
     }
 
-    /// The account whose slice the serving validator must hold, or `None`
-    /// for an interval lookup, which names its slice directly.
+    /// The requested account, or `None` for a complete close lookup.
     pub(crate) const fn account(&self) -> Option<&Key> {
         match self {
             Self::PredecessorState { account, .. }
@@ -525,11 +533,9 @@ impl EvidenceLookup {
             | Self::Change { account, .. }
             | Self::Account { account, .. }
             | Self::WithdrawalOutput { account, .. }
-            | Self::GenesisState { account }
-            | Self::ExternalPayout { account, .. } => Some(account),
+            | Self::GenesisState { account } => Some(account),
             Self::CommittedEntry { payer, .. } => Some(payer),
-            Self::Credits { recipient, .. } => Some(recipient),
-            Self::Interval { .. } => None,
+            Self::Dealing { .. } | Self::CloseEvidence { .. } => None,
         }
     }
 }
@@ -572,24 +578,17 @@ impl Write for EvidenceLookup {
                 batch.write(buf);
                 account.write(buf);
             }
-            Self::Credits { batch, recipient } => {
-                6_u8.write(buf);
-                batch.write(buf);
-                recipient.write(buf);
-            }
             Self::GenesisState { account } => {
                 7_u8.write(buf);
                 account.write(buf);
             }
-            Self::Interval { root, slice } => {
+            Self::Dealing { epoch } => {
                 8_u8.write(buf);
-                root.write(buf);
-                slice.write(buf);
+                epoch.write(buf);
             }
-            Self::ExternalPayout { batch, account } => {
+            Self::CloseEvidence { batch_id } => {
                 9_u8.write(buf);
-                batch.write(buf);
-                account.write(buf);
+                batch_id.write(buf);
             }
         }
     }
@@ -602,8 +601,7 @@ impl EncodeSize for EvidenceLookup {
             | Self::SuccessorState { batch, account }
             | Self::Change { batch, account }
             | Self::Account { batch, account }
-            | Self::WithdrawalOutput { batch, account }
-            | Self::ExternalPayout { batch, account } => {
+            | Self::WithdrawalOutput { batch, account } => {
                 batch.encode_size() + account.encode_size()
             }
             Self::CommittedEntry {
@@ -611,9 +609,9 @@ impl EncodeSize for EvidenceLookup {
                 payer,
                 recipient,
             } => batch.encode_size() + payer.encode_size() + recipient.encode_size(),
-            Self::Credits { batch, recipient } => batch.encode_size() + recipient.encode_size(),
             Self::GenesisState { account } => account.encode_size(),
-            Self::Interval { root, slice } => root.encode_size() + slice.encode_size(),
+            Self::Dealing { epoch } => epoch.encode_size(),
+            Self::CloseEvidence { batch_id } => batch_id.encode_size(),
         }
     }
 }
@@ -648,20 +646,14 @@ impl Read for EvidenceLookup {
                 batch: Digest::read(buf)?,
                 account: Key::read(buf)?,
             }),
-            6 => Ok(Self::Credits {
-                batch: Digest::read(buf)?,
-                recipient: Key::read(buf)?,
-            }),
             7 => Ok(Self::GenesisState {
                 account: Key::read(buf)?,
             }),
-            8 => Ok(Self::Interval {
-                root: VectorRoot::read(buf)?,
-                slice: u16::read(buf)?,
+            8 => Ok(Self::Dealing {
+                epoch: u64::read(buf)?,
             }),
-            9 => Ok(Self::ExternalPayout {
-                batch: Digest::read(buf)?,
-                account: Key::read(buf)?,
+            9 => Ok(Self::CloseEvidence {
+                batch_id: BatchId::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -708,34 +700,36 @@ impl Read for EvidenceRequest {
     }
 }
 
-/// One close-bound opening served from a sealed proof slice, byte-equal to
-/// what the whole-close constructors produce and verifiable against the
-/// served roots.
+/// One close-bound opening verifiable against the certified roots.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceBody {
     /// A state leaf opening (predecessor or successor state).
     State(StateOpening<Key, Digest>),
+    /// Authenticated zero balance at the requested account key.
+    StateAbsent(Absence<Digest>),
     /// The higher-debit payer lookup.
     Account(AccountLookup<Key, Digest>),
     /// A compact change opening.
     Change(ChangeOpening<Digest>),
     /// The composed higher-entry lookup.
     CommittedEntry(HigherEntryLookup<Key, Digest>),
-    /// A withdrawal output claim.
-    WithdrawalOutput(WithdrawalClaim<Digest>),
-    /// An external payout claim.
-    ExternalPayout(ExternalPayoutClaim<Key, Digest>),
-    /// The recipient's contiguous credited transpose entries with their
-    /// opening under the transpose root.
-    Credits {
-        entries: Vec<TransposeEntry<Key>>,
-        opening: RangeOpening<Digest>,
+    /// A withdrawal request and its corresponding output claim.
+    WithdrawalOutput(WithdrawalWitness),
+    /// The registered context and complete derived evidence for one voted close.
+    Complete {
+        context: CloseContext<Key, Digest>,
+        evidence: Bytes,
     },
 }
 
 impl Write for EvidenceBody {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::StateAbsent(proof) => {
+                6_u8.write(buf);
+                proof.write(buf);
+            }
             Self::State(opening) => {
                 0_u8.write(buf);
                 opening.write(buf);
@@ -756,14 +750,10 @@ impl Write for EvidenceBody {
                 4_u8.write(buf);
                 claim.write(buf);
             }
-            Self::ExternalPayout(claim) => {
-                5_u8.write(buf);
-                claim.write(buf);
-            }
-            Self::Credits { entries, opening } => {
-                6_u8.write(buf);
-                entries.write(buf);
-                opening.write(buf);
+            Self::Complete { context, evidence } => {
+                7_u8.write(buf);
+                context.write(buf);
+                evidence.write(buf);
             }
         }
     }
@@ -772,13 +762,13 @@ impl Write for EvidenceBody {
 impl EncodeSize for EvidenceBody {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::StateAbsent(proof) => proof.encode_size(),
             Self::State(opening) => opening.encode_size(),
             Self::Account(lookup) => lookup.encode_size(),
             Self::Change(opening) => opening.encode_size(),
             Self::CommittedEntry(lookup) => lookup.encode_size(),
             Self::WithdrawalOutput(claim) => claim.encode_size(),
-            Self::ExternalPayout(claim) => claim.encode_size(),
-            Self::Credits { entries, opening } => entries.encode_size() + opening.encode_size(),
+            Self::Complete { context, evidence } => context.encode_size() + evidence.encode_size(),
         }
     }
 }
@@ -788,29 +778,22 @@ impl Read for EvidenceBody {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(Self::State(StateOpening::read(buf)?)),
+            0 => Ok(Self::State(StateOpening::read_cfg(
+                buf,
+                &MAX_PROOF_DIGESTS,
+            )?)),
             1 => Ok(Self::Account(AccountLookup::read(buf)?)),
             2 => Ok(Self::Change(ChangeOpening::read(buf)?)),
             3 => Ok(Self::CommittedEntry(HigherEntryLookup::read(buf)?)),
-            4 => Ok(Self::WithdrawalOutput(WithdrawalClaim::read_cfg(
+            4 => Ok(Self::WithdrawalOutput(WithdrawalWitness::read(buf)?)),
+            6 => Ok(Self::StateAbsent(Absence::read_cfg(
                 buf,
-                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+                &(MAX_PROOF_DIGESTS, (), ()),
             )?)),
-            5 => Ok(Self::ExternalPayout(ExternalPayoutClaim::read(buf)?)),
-            6 => {
-                // A recipient's credits are one contiguous run of the
-                // anchor-bound transpose, so its total entry limit bounds
-                // both the entries and the opening they are proven under.
-                let max_entries = usize::try_from(limits().max_total_entries())
-                    .map_err(|_| CodecError::Invalid("EvidenceBody", "entry limit"))?;
-                Ok(Self::Credits {
-                    entries: Vec::<TransposeEntry<Key>>::read_cfg(
-                        buf,
-                        &(RangeCfg::new(1..=max_entries), ()),
-                    )?,
-                    opening: RangeOpening::read_cfg(buf, &max_entries)?,
-                })
-            }
+            7 => Ok(Self::Complete {
+                context: CloseContext::read(buf)?,
+                evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
+            }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -821,8 +804,8 @@ impl Read for EvidenceBody {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Evidence {
     /// Close-bound evidence: the sealed header, the roots it commits, and the
-    /// opening. The client checks the header against the chain's admitted
-    /// record before trusting the roots the body verifies under.
+    /// requested body. The client authenticates the header through admission
+    /// or quorum votes before trusting the roots and body.
     Close {
         header: Header<Digest>,
         roots: RootBundle<Digest>,
@@ -830,9 +813,10 @@ pub(crate) enum Evidence {
     },
     /// One account opened under the deployment's genesis state root.
     Genesis(StateOpening<Key, Digest>),
-    /// One slice's live leaves at the requested root, with the adjacent
-    /// guards outside the slice (or the vector ends) proving it complete.
-    Interval(SliceRange),
+    /// Authenticated absence from genesis.
+    GenesisAbsent(Absence<Digest>),
+    /// Canonical close retained by a validator before its vote.
+    Dealing(Box<Replay>),
 }
 
 impl Write for Evidence {
@@ -848,13 +832,17 @@ impl Write for Evidence {
                 roots.write(buf);
                 body.write(buf);
             }
+            Self::GenesisAbsent(proof) => {
+                3_u8.write(buf);
+                proof.write(buf);
+            }
             Self::Genesis(opening) => {
                 1_u8.write(buf);
                 opening.write(buf);
             }
-            Self::Interval(range) => {
+            Self::Dealing(dealing) => {
                 2_u8.write(buf);
-                range.write(buf);
+                dealing.write(buf);
             }
         }
     }
@@ -868,8 +856,9 @@ impl EncodeSize for Evidence {
                 roots,
                 body,
             } => header.encode_size() + roots.encode_size() + body.encode_size(),
+            Self::GenesisAbsent(proof) => proof.encode_size(),
             Self::Genesis(opening) => opening.encode_size(),
-            Self::Interval(range) => range.encode_size(),
+            Self::Dealing(dealing) => dealing.encode_size(),
         }
     }
 }
@@ -884,8 +873,15 @@ impl Read for Evidence {
                 roots: RootBundle::read(buf)?,
                 body: EvidenceBody::read(buf)?,
             }),
-            1 => Ok(Self::Genesis(StateOpening::read(buf)?)),
-            2 => Ok(Self::Interval(SliceRange::read(buf)?)),
+            1 => Ok(Self::Genesis(StateOpening::read_cfg(
+                buf,
+                &MAX_PROOF_DIGESTS,
+            )?)),
+            2 => Ok(Self::Dealing(Box::new(Replay::read(buf)?))),
+            3 => Ok(Self::GenesisAbsent(Absence::read_cfg(
+                buf,
+                &(MAX_PROOF_DIGESTS, (), ()),
+            )?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -895,26 +891,18 @@ impl Read for Evidence {
 ///
 /// Only [`Self::Served`] carries anything verifiable. The other answers are
 /// unauthenticated routing advice: a client that cannot get an answer from
-/// one holder asks the next in the slice's quorum.
+/// one holder asks the next committee member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceResponse {
     /// The requested evidence.
     Served(Evidence),
-    /// The account's slice is outside this validator's assigned spans, which
-    /// are returned so the client can pick a holder.
-    NotHolder { spans: Vec<Range<u16>> },
-    /// This validator holds no sealed dealing for the batch (or no interval
-    /// at the root).
+    /// This validator has not retained the requested close.
     Unsealed,
-    /// The batch finalized and its dealing was released after its challenge
-    /// window closed.
-    Pruned,
     /// The deployment is not served by this validator.
     Unknown,
-    /// The held slice has nothing to open for the lookup: the account is not
-    /// live in the requested state, has no changed row, no withdrawal, no
-    /// payout, or no credit in this close.
+    /// The requested activity or claim is unavailable. This is routing advice,
+    /// not authenticated absence; state absence has a verifiable proof.
     Absent,
 }
 
@@ -925,16 +913,7 @@ impl Write for EvidenceResponse {
                 0_u8.write(buf);
                 evidence.write(buf);
             }
-            Self::NotHolder { spans } => {
-                1_u8.write(buf);
-                spans.len().write(buf);
-                for span in spans {
-                    span.start.write(buf);
-                    span.end.write(buf);
-                }
-            }
             Self::Unsealed => 2_u8.write(buf),
-            Self::Pruned => 3_u8.write(buf),
             Self::Unknown => 4_u8.write(buf),
             Self::Absent => 5_u8.write(buf),
         }
@@ -945,14 +924,7 @@ impl EncodeSize for EvidenceResponse {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Served(evidence) => evidence.encode_size(),
-            Self::NotHolder { spans } => {
-                spans.len().encode_size()
-                    + spans
-                        .iter()
-                        .map(|span| span.start.encode_size() + span.end.encode_size())
-                        .sum::<usize>()
-            }
-            Self::Unsealed | Self::Pruned | Self::Unknown | Self::Absent => 0,
+            Self::Unsealed | Self::Unknown | Self::Absent => 0,
         }
     }
 }
@@ -963,29 +935,19 @@ impl Read for EvidenceResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => Ok(Self::Served(Evidence::read(buf)?)),
-            1 => {
-                let count = usize::read_cfg(buf, &RangeCfg::new(..=MAX_SLICES))?;
-                let mut spans = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let span = u16::read(buf)?..u16::read(buf)?;
-                    if span.start >= span.end || usize::from(span.end) > MAX_SLICES {
-                        return Err(CodecError::Invalid(
-                            "EvidenceResponse",
-                            "span is not canonical",
-                        ));
-                    }
-                    spans.push(span);
-                }
-                Ok(Self::NotHolder { spans })
-            }
             2 => Ok(Self::Unsealed),
-            3 => Ok(Self::Pruned),
             4 => Ok(Self::Unknown),
             5 => Ok(Self::Absent),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
 }
+
+/// The frontend buffers at most 16 request frames (4 MiB each). Ingress owns
+/// separately bounded work after handoff. Shared limits do not guarantee public
+/// availability under an unlimited unauthenticated connection flood.
+pub(super) const MAX_CONNECTIONS: usize = 16;
+pub(super) const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Query server configuration.
 pub(crate) struct Config<E, S, A>
@@ -996,8 +958,6 @@ where
 {
     /// Listen address.
     pub(crate) address: SocketAddr,
-    /// The configured deployment set the dry-run advises against.
-    pub(crate) deployments: Vec<Deployment>,
     /// The applied settlement database.
     pub(crate) db: Database<E>,
     /// The finalized (height, digest, root) index maintained by the app.
@@ -1037,8 +997,23 @@ where
             return;
         }
     };
+    // Slots include request buffering, state/evidence work, and response writes.
+    // Finished handles are reaped before accepting another connection.
+    let mut connections = FuturesUnordered::<Handle<()>>::new();
     loop {
-        let (_, mut sink, mut stream) = match listener.accept().await {
+        while let Some(Some(result)) = connections.next().now_or_never() {
+            result.expect("query connection task failed");
+        }
+        let accepted = select! {
+            result = async {
+                if connections.is_empty() { std::future::pending().await } else { connections.next().await }
+            } => {
+                result.expect("connection exists").expect("query connection task failed");
+                continue;
+            },
+            accepted = listener.accept() => accepted,
+        };
+        let (_, mut sink, mut stream) = match accepted {
             Ok(connection) => connection,
             Err(error) => {
                 debug!(?error, "query accept failed; retrying");
@@ -1046,34 +1021,43 @@ where
                 continue;
             }
         };
-        let deployments = config.deployments.clone();
+        if connections.len() >= MAX_CONNECTIONS {
+            continue;
+        }
         let db = config.db.clone();
         let finalized = config.finalized.clone();
         let marshal = config.marshal.clone();
         let ingress = config.ingress.clone();
         let sealer = config.sealer.clone();
-        context.child("connection").spawn(move |_| async move {
-            let Ok(request) = rpc::recv_request(&mut stream).await else {
-                return;
-            };
-            let response = handle(
-                &deployments,
-                &db,
-                &finalized,
-                &marshal,
-                &ingress,
-                sealer.as_ref(),
-                request,
-            )
-            .await;
-            let _ = rpc::send_response(&mut sink, &response).await;
-        });
+        connections.push(
+            context
+                .child("connection")
+                .spawn(move |context| async move {
+                    let request = select! {
+                        request = rpc::recv_request(&mut stream) => request,
+                        _ = context.sleep(REQUEST_READ_TIMEOUT) => return,
+                    };
+                    let Ok(request) = request else { return };
+                    let response = handle(
+                        &db,
+                        &finalized,
+                        &marshal,
+                        &ingress,
+                        sealer.as_ref(),
+                        request,
+                    )
+                    .await;
+                    select! {
+                        _ = rpc::send_response(&mut sink, &response) => {},
+                        _ = context.sleep(REQUEST_READ_TIMEOUT) => {},
+                    }
+                }),
+        );
     }
 }
 
 /// Handles one decoded request.
 async fn handle<E, S, A>(
-    deployments: &[Deployment],
     db: &Database<E>,
     finalized: &Finalized,
     marshal: &MarshalMailbox<S, Standard<Block>>,
@@ -1087,25 +1071,10 @@ where
     A: Acknowledgement,
 {
     match request.method {
-        METHOD_SUBMIT_TX => {
-            if request.body.len() > MAX_TX_BYTES {
-                return respond(&Submitted {
-                    admission: Submission::Oversized,
-                    advice: None,
-                });
-            }
-            let Ok(tx) = SettlementTx::decode_cfg(request.body, &()) else {
-                return error_response("submitted transaction does not decode".into());
-            };
-            let advice = match advise(db, deployments, &tx).await {
-                Ok(advice) => advice,
-                Err(error) => return error_response(format!("dry-run failed: {error}")),
-            };
-            respond(&Submitted {
-                admission: ingress.submit(tx).await,
-                advice: Some(advice),
-            })
-        }
+        METHOD_SUBMIT_TX => match ingress.submit_raw(request.body.into()).await {
+            Ok(submission) => respond(&submission),
+            Err(error) => error_response(format!("submission failed: {error:#}")),
+        },
         METHOD_READ => {
             let Ok(request) = ReadRequest::decode_cfg(request.body, &()) else {
                 return error_response("read request does not decode".into());
@@ -1193,31 +1162,126 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        chain::da::{genesis_cache, genesis_range, slice_ranges},
-        protocol::{MAX_ACCOUNTS, SLICE_BITS, deployments, identities},
+    use crate::protocol::{Protocol, deployments, genesis_balances, identities, state_config};
+    use commonware_clearing::bajillion::{
+        boundary::{DepositBatch, WithdrawalBatch},
+        qmdb::{State, StateLookup, account_key},
     };
-    use bytes::BytesMut;
-    use commonware_clearing::bajillion::state::StateLeaf;
     use commonware_codec::{DecodeExt as _, FixedSize as _};
     use commonware_cryptography::{Hasher as _, Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    fn digest(name: &[u8]) -> Digest {
-        Sha256::hash(&[name])
+    #[test]
+    fn native_read_keys_bind_chain_and_transfer_owner() {
+        let accounts = identities();
+        let chain_id = Sha256::hash(&[b"chain"]);
+        let id = Sha256::hash(&[b"transfer"]);
+        let lookups = [
+            Lookup::NativeBalance {
+                chain_id,
+                account: accounts[0].key.clone(),
+            },
+            Lookup::Registry { chain_id },
+            Lookup::RegistryEntry {
+                chain_id,
+                deployment: id,
+            },
+            Lookup::NativeTransfer {
+                chain_id,
+                from: accounts[0].key.clone(),
+                id,
+            },
+        ];
+        for lookup in lookups {
+            let request = ReadRequest::new(Sha256::hash(&[b"deployment"]), lookup);
+            assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
+            assert_eq!(
+                request.key(),
+                ReadRequest::new(
+                    Sha256::hash(&[b"another deployment"]),
+                    request.lookup.clone()
+                )
+                .key()
+            );
+        }
+        let request = |chain_id, from| {
+            ReadRequest::new(
+                Sha256::hash(&[b"deployment"]),
+                Lookup::NativeTransfer { chain_id, from, id },
+            )
+        };
+        assert_ne!(
+            request(chain_id, accounts[0].key.clone()).key(),
+            request(chain_id, accounts[1].key.clone()).key()
+        );
+        assert_ne!(
+            request(chain_id, accounts[0].key.clone()).key(),
+            request(Sha256::hash(&[b"other chain"]), accounts[0].key.clone()).key()
+        );
     }
 
-    fn root(name: &[u8]) -> VectorRoot<Digest> {
-        VectorRoot {
-            digest: digest(name),
-        }
+    #[test]
+    fn registry_entry_lookup_binds_chain_and_deployment() {
+        let lookup = |chain_id, deployment| {
+            ReadRequest::new(
+                Sha256::hash(&[b"outer deployment"]),
+                Lookup::RegistryEntry {
+                    chain_id,
+                    deployment,
+                },
+            )
+        };
+        let chain = Sha256::hash(&[b"chain"]);
+        let deployment = Sha256::hash(&[b"registered deployment"]);
+        let request = lookup(chain, deployment);
+        assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
+        assert_ne!(
+            request.key(),
+            lookup(Sha256::hash(&[b"other chain"]), deployment).key()
+        );
+        assert_ne!(
+            request.key(),
+            lookup(chain, Sha256::hash(&[b"other deployment"])).key()
+        );
+        assert_ne!(
+            request.key(),
+            ReadRequest::new(deployment, Lookup::Registry { chain_id: chain }).key()
+        );
+    }
+
+    #[test]
+    fn registry_entry_record_rejects_non_prime_order_genesis_key() {
+        let deployment = crate::chain::harness::native(deployments())
+            .deployments
+            .remove(0)
+            .deployment;
+        let account_offset = 1
+            + Digest::SIZE
+            + Key::SIZE
+            + deployment.operator_ack.encode_size()
+            + deployment.accounts.len().encode_size();
+        let entry = crate::chain::native::RegistryEntry {
+            network_key: commonware_cryptography::ed25519::PublicKey::decode(
+                deployment.operator.encode(),
+            )
+            .unwrap(),
+            deployment,
+            max_dealing_bytes: 1,
+        };
+        let record = Record::RegistryEntry(entry);
+        assert_eq!(Record::decode(record.encode()).unwrap(), record);
+        let mut invalid = record.encode().to_vec();
+        invalid[account_offset..account_offset + Key::SIZE].fill(0);
+        invalid[account_offset] = 1;
+        assert!(Record::decode(Bytes::from(invalid)).is_err());
     }
 
     #[test]
     fn evidence_request_codecs_round_trip() {
         let account = identities()[0].key.clone();
-        let other = identities()[1].key.clone();
-        let batch = digest(b"batch");
-        let lookups = [
+        let batch = Sha256::hash(&[b"batch"]);
+        let lookups = vec![
             EvidenceLookup::PredecessorState {
                 batch,
                 account: account.clone(),
@@ -1230,136 +1294,124 @@ mod tests {
                 batch,
                 account: account.clone(),
             },
-            EvidenceLookup::CommittedEntry {
-                batch,
-                payer: account.clone(),
-                recipient: other.clone(),
-            },
             EvidenceLookup::Account {
                 batch,
                 account: account.clone(),
+            },
+            EvidenceLookup::CommittedEntry {
+                batch,
+                payer: account.clone(),
+                recipient: identities()[1].key.clone(),
             },
             EvidenceLookup::WithdrawalOutput {
                 batch,
                 account: account.clone(),
             },
-            EvidenceLookup::Credits {
-                batch,
-                recipient: other,
+            EvidenceLookup::GenesisState { account },
+            EvidenceLookup::Dealing { epoch: 7 },
+            EvidenceLookup::CloseEvidence {
+                batch_id: BatchId::new(batch),
             },
-            EvidenceLookup::GenesisState {
-                account: account.clone(),
-            },
-            EvidenceLookup::Interval {
-                root: root(b"interval"),
-                slice: 3,
-            },
-            EvidenceLookup::ExternalPayout { batch, account },
         ];
-        for (tag, lookup) in lookups.into_iter().enumerate() {
-            let request = EvidenceRequest::new(digest(b"deployment"), lookup);
-            let encoded = request.encode();
-            assert_eq!(encoded.len(), request.encode_size());
-            assert_eq!(encoded[Digest::SIZE], tag as u8);
-            assert_eq!(EvidenceRequest::decode(encoded).unwrap(), request);
+        for lookup in lookups {
+            let request = EvidenceRequest::new(batch, lookup);
+            let bytes = request.encode();
+            assert_eq!(bytes.len(), request.encode_size());
+            assert_eq!(EvidenceRequest::decode(bytes).unwrap(), request);
         }
-        assert!(matches!(
-            EvidenceLookup::decode(Bytes::from_static(&[10])),
-            Err(CodecError::InvalidEnum(10))
-        ));
+        for tag in [6, 10, 255] {
+            assert!(EvidenceLookup::decode(Bytes::from(vec![tag])).is_err());
+        }
     }
 
     #[test]
-    fn evidence_response_codecs_round_trip() {
-        let genesis = genesis_cache(&deployments()[0]);
-        let account = identities()[0].key.clone();
-        let opening = genesis.opening(&account).unwrap();
-        let ranges = slice_ranges(
-            &genesis_range(&genesis),
-            genesis.leaves(),
-            &(0..MAX_SLICES as u16),
-            SLICE_BITS,
-        )
-        .unwrap();
-        let header = Header::decode(digest(b"header").encode()).unwrap();
-        let roots = RootBundle {
-            change: root(b"change"),
-            withdrawal_outputs: root(b"outputs"),
-            successor: root(b"successor"),
-            coverage: root(b"coverage"),
-            transpose: root(b"transpose"),
-            transpose_len: 7,
-        };
-        let responses = [
-            EvidenceResponse::Served(Evidence::Genesis(opening.clone())),
-            EvidenceResponse::Served(Evidence::Interval(ranges[0].clone())),
-            EvidenceResponse::Served(Evidence::Close {
-                header,
-                roots,
-                body: EvidenceBody::State(opening),
-            }),
-            EvidenceResponse::NotHolder {
-                spans: vec![0..2, 3..4],
-            },
-            EvidenceResponse::Unsealed,
-            EvidenceResponse::Pruned,
-            EvidenceResponse::Unknown,
-            EvidenceResponse::Absent,
-        ];
-        for response in responses {
-            let encoded = response.encode();
-            assert_eq!(encoded.len(), response.encode_size());
-            assert_eq!(EvidenceResponse::decode(encoded).unwrap(), response);
-        }
-        assert!(matches!(
-            EvidenceResponse::decode(Bytes::from_static(&[6])),
-            Err(CodecError::InvalidEnum(6))
-        ));
-        assert!(matches!(
-            Evidence::decode(Bytes::from_static(&[3])),
-            Err(CodecError::InvalidEnum(3))
-        ));
-        assert!(matches!(
-            EvidenceBody::decode(Bytes::from_static(&[7])),
-            Err(CodecError::InvalidEnum(7))
-        ));
+    fn complete_evidence_codec_round_trips_and_bounds_bytes() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let deployment = deployments().remove(0);
+            let state = State::<_, Sha256>::init(
+                runtime.child("complete_evidence_state"),
+                state_config("complete-evidence", &runtime, Sequential),
+                genesis_balances(&deployment).unwrap(),
+            )
+            .await
+            .unwrap();
+            let deposits = DepositBatch::empty();
+            let withdrawals = WithdrawalBatch::empty();
+            let epoch = Protocol::new(commonware_utils::NZUsize!(1))
+                .unwrap()
+                .registration_at(0, deposits.clone(), withdrawals.clone(), 400, 11, 12)
+                .unwrap()
+                .context;
+            let context = epoch
+                .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+                .unwrap();
+            let body = EvidenceBody::Complete {
+                context: context.clone(),
+                evidence: Bytes::from_static(b"complete evidence"),
+            };
+            let encoded = body.encode();
+            assert_eq!(encoded.len(), body.encode_size());
+            assert_eq!(EvidenceBody::decode(encoded.clone()).unwrap(), body);
+            for end in 0..encoded.len() {
+                assert!(EvidenceBody::decode(encoded.slice(..end)).is_err());
+            }
+
+            let mut oversized = bytes::BytesMut::new();
+            7_u8.write(&mut oversized);
+            context.write(&mut oversized);
+            (rpc::MAX_BODY_SIZE + 1).write(&mut oversized);
+            assert!(EvidenceBody::decode(oversized.freeze()).is_err());
+        });
     }
 
     #[test]
-    fn evidence_codecs_reject_out_of_bound_shapes() {
-        // More spans than slices, and a span that is empty or past the
-        // partition, are refused.
-        let mut encoded = BytesMut::new();
-        1_u8.write(&mut encoded);
-        (MAX_SLICES + 1).write(&mut encoded);
-        assert!(EvidenceResponse::decode(encoded.freeze()).is_err());
-        for span in [(2_u16, 1_u16), (0, MAX_SLICES as u16 + 1)] {
-            let mut encoded = BytesMut::new();
-            1_u8.write(&mut encoded);
-            1_usize.write(&mut encoded);
-            span.0.write(&mut encoded);
-            span.1.write(&mut encoded);
-            assert!(EvidenceResponse::decode(encoded.freeze()).is_err());
-        }
-
-        // A credit range with no entries is refused.
-        let mut encoded = BytesMut::new();
-        6_u8.write(&mut encoded);
-        0_usize.write(&mut encoded);
-        assert!(EvidenceBody::decode(encoded.freeze()).is_err());
-
-        // A slice range with more members than accounts is refused.
-        let genesis = genesis_cache(&deployments()[0]);
-        let leaf: StateLeaf<crate::protocol::Key> = genesis.leaves()[0].clone();
-        let ranges = slice_ranges(
-            &genesis_range(&genesis),
-            genesis.leaves(),
-            &(0..MAX_SLICES as u16),
-            SLICE_BITS,
-        )
-        .unwrap();
-        let mut oversized = ranges[0].clone();
-        oversized.members = vec![leaf; MAX_ACCOUNTS + 1];
-        assert!(SliceRange::decode(oversized.encode()).is_err());
+    fn balance_evidence_codec_preserves_membership_absence_and_bounds() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = state_config("query-proofs", &context, Sequential);
+            let state = State::<_, Sha256>::init(
+                context,
+                config,
+                genesis_balances(&deployments()[0]).unwrap(),
+            )
+            .await
+            .unwrap();
+            let account = identities()[0].key.clone();
+            let present = state.opening(account).await.unwrap();
+            let absent = crate::protocol::eve_identity().key;
+            let StateLookup::Absent(proof) =
+                state.lookup(&account_key(&absent).unwrap()).await.unwrap()
+            else {
+                panic!("zero-balance account is absent")
+            };
+            let responses = vec![
+                EvidenceResponse::Served(Evidence::Genesis(present)),
+                EvidenceResponse::Served(Evidence::GenesisAbsent(proof.clone())),
+                EvidenceResponse::Unsealed,
+                EvidenceResponse::Unknown,
+                EvidenceResponse::Absent,
+            ];
+            for response in responses {
+                let bytes = response.encode();
+                assert_eq!(bytes.len(), response.encode_size());
+                assert_eq!(EvidenceResponse::decode(bytes.clone()).unwrap(), response);
+                if matches!(response, EvidenceResponse::Served(_)) {
+                    for end in 0..bytes.len() {
+                        assert!(EvidenceResponse::decode(bytes.slice(..end)).is_err());
+                    }
+                }
+            }
+            assert_eq!(
+                StateLookup::Absent(proof.clone())
+                    .resolve::<Sha256>(&state.root(), &account_key(&absent).unwrap())
+                    .unwrap(),
+                None
+            );
+            assert!(
+                StateLookup::<Digest>::decode_cfg(StateLookup::Absent(proof).encode(), &0).is_err()
+            );
+            for tag in [5, 8, 255] {
+                assert!(EvidenceBody::decode(Bytes::from(vec![tag])).is_err());
+            }
+        });
     }
 }

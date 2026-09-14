@@ -144,7 +144,7 @@ struct ChallengeModel;
 
 const BATCHES: [Batch; 5] = [Batch::B0, Batch::B1, Batch::B2, Batch::B3, Batch::Offset];
 
-// Committed terminal endpoint for the payer with public activity.
+// Epoch-local terminal endpoint for the payer with authenticated public activity.
 const PUBLIC_TERMINAL: Endpoint = Endpoint {
     payer: Account::Alice,
     seq: 1,
@@ -224,6 +224,7 @@ const fn other_batch(target: Batch) -> Batch {
     }
 }
 
+// Activity absence authenticates zero debit in this epoch, regardless of predecessor balance.
 fn public_debit(_target: Batch, payer: Account) -> u8 {
     if payer == Account::Alice { 3 } else { 0 }
 }

@@ -211,6 +211,11 @@ where
         self.any.is_empty()
     }
 
+    /// Return the number of active keys in the database.
+    pub const fn active_keys(&self) -> usize {
+        self.any.active_keys()
+    }
+
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error<F>> {
         self.any.get_metadata().await

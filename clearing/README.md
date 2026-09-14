@@ -5,106 +5,96 @@
 
 Settle actions at scale.
 
+**Bajillion** nets payments across accounts and settles their combined effects.
+This crate provides signed payment vectors, operator receipts, close validation,
+committee certificates, challenges, and the settlement state machine.
+
+To run it, start with the [terminal example](../examples/terminal/README.md).
+For the records and protocol rules, see the [module documentation](src/bajillion/mod.rs).
+
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
+Bajillion is **ALPHA**: its API, wire format, and storage may change without a
+migration path. See the workspace's [stability levels](../README.md#stability).
 
-Bajillion is **ALPHA**. Its API and wire format may change without a migration path.
+## From payments to settlement
 
-The `bajillion` module provides the runtime-agnostic objects and verification rules for Bajillion:
-payer-signed sender-vector endpoints and operator acknowledgment countersignatures, per-payer
-outgoing vectors and the recipient-major transpose, fresh live-state transitions, deterministic
-proof slices for authenticated dissemination, exact-quorum commitment certificates and retained
-dealings, bounded acknowledgment challenges, and a bounded in-memory settlement state machine
-for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and
-incremental hard-fault claims. Deposits can create accounts, zero balances leave the committed
-state, and sends to absent recipients become certified external payouts. Compact change leaves
-expose the validator-authenticated settlement and challenge projection, allowing independent payout
-claims without opening a neighboring row. `CloseContext` owns the predecessor state root;
-`RootBundle` carries the change, withdrawal-output, successor-state, coverage, and transpose roots
-plus the exact transpose leaf count; and the 32-byte Header binds every contextual role. The
-164-byte RootBundle is public witness data. It is retained by validators and the
-data-availability layer and must be supplied or cached by external settlement operations.
+Every validator keeps the operator's full balance state and receives the same
+**dealing**, containing the signed inputs needed to check one epoch's close.
+It derives incoming credits from payer vectors, applies the registered deposits
+and withdrawals, and reconstructs three commitments:
 
-The posted corpus ships movers and edges only: readers hold the previous certified state as a
-`Replica`, live accounts ride as one-or-two-byte rank gaps, and the transpose, predecessor
-states, successor states, and prefixes are all derived rather than shipped. Dealt slices travel
-without their unchanged state: every slice assignee retains its key interval across closes,
-hydrates each dealing against it, and validates the result against the certified roots. The
-operator encodes each slice's dealt content once, as a chunk whose bytes do not depend on the
-span carrying it, and ships every span as one witness followed by clones of the covered
-chunks, so dealing the whole committee costs one pass over the corpus.
-
-Successful epoch registration activates one immutable payment anchor and a bounded obligation to
-admit its certified close. Operator receipts must not be released before that exact registration
-succeeds. The open registration slot has no periodic heartbeat, but the first authenticated-time
-observation after a registered admission deadline permanently faults the deployment; the expired
-anchor cannot be rolled into another epoch. Each cleanly finalized withdrawal is independently
-claimable as its certified destination and amount plus one opening in the withdrawal-output tree.
-
-`seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
-dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator:
-each slice is held by one quorum window of the validator ring, the window slides with the slice
-index, so a validator's slices form one contiguous span (two when the window wraps) and its
-dealing is one `ProofSlice` per span. `seal` checks the local row equations and the exact
-state-update, prefix, accumulator, and conservation relations represented by the dealing and
-shared Header, at every covered slice boundary. It verifies each slice's combined operator
-countersignature and every distinct payer authorization in one randomized aggregate batch. The
-embedding must verify each validator's proof of possession when it registers, and the crate
-assumes it. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
-`ceil(n / 8)`-byte signer bitmap on the external chain. For every slice, its `q = 2f + 1`
-holders and an exact certificate quorum of `q` signers intersect in more than `f` validators, so at
-least one honest certificate signer has authenticated and retains that slice. Across all slices,
-the certificate therefore attests to exhaustive honest authentication of the represented
-predicates without requiring any validator to authenticate the complete public corpus. That claim
-does not extend to a relation absent from both an authenticated slice and the shared Header.
-
-The settlement state machine is a transition primitive, not a durable chain or asset adapter. An
-embedding application must provide an authenticated monotonic clock and atomically persist each
-state mutation with its custody effects. A chain operated by the same validators may persist the
-32-byte Header as its admitted commitment because consensus admission occurs only after those
-validators have seen the RootBundle and authenticated their dealings. This does not remove the
-chain's context, status, custody, or deadline state, and it does not replace RootBundle or
-data-availability retention. The crate does not provide an operator, network service, persistence
-layer, or asset-adapter implementation.
-
-## Benchmarks
-
-The benchmark matrix uses one adaptive pool with 16 workers and selects one live-account
-profile per fresh process. The default profile set is a smaller developer matrix with six
-profiles, `0` through `5`. The blog's measured matrix needs `RUSTFLAGS="--cfg full_bench"` and
-has seven profiles: `0` through `3` sweep the live-account count from 1,024 to one million with
-every account sending, and `3` through `6` hold one million live accounts while the sender count
-falls from one million to 1,024. Run one profile per process:
-
-```bash
-RUSTFLAGS="--cfg full_bench" \
-COMMONWARE_CLEARING_PROFILE=0 \
-COMMONWARE_CLEARING_BENCH=blog-chain \
-cargo bench -p commonware-clearing --bench bajillion
+```text
+             signed payments + registered epoch boundary
+                                  |
+                         one shared dealing
+                                  |
+                    each validator checks it
+                       against its prior state
+                                  |
+           +----------------------+----------------------+
+           |                      |                      |
+      Activity BMT          Withdrawal BMT          Successor QMDB
+       challenges               claims                balances
+           |                      |                      |
+           +----------------------+----------------------+
+                                  |
+                        Header + certificate
+                                  |
+                    admit --> wait --> finalize
 ```
 
-The `sizes` group prints exact encoded sizes for the same profiles, including the posted corpus
-against a reader-held replica and the dealt-slice corpus without unchanged state.
+The header binds the three roots to the registered epoch and its predecessor.
+Each signer validates and stores the evidence before voting. A committee of
+`n = 3f + 1` validators certifies a close with exactly `2f + 1` votes.
 
-The harness reports raw encoded sizes and separately times preparing roots, dealing slices, the
-complete validator `seal` path for the byte-largest dealing, repeatable certified-commitment
-validation, bounded challenge decode plus adjudication, and fixed-amount and Close withdrawal
-claims. The protocol accounting distinguishes the 32-byte validator-chain commitment, the external
-MinSig certificate's 48-byte signature plus `ceil(n / 8)`-byte signer bitmap, and the 164-byte
-RootBundle witness. The generic codec adds an eight-byte bitmap-length prefix, so the raw encoded
-Header-plus-certificate package is `88 + ceil(n / 8)` bytes. The harness also preflights the
-corresponding mutating `SettlementChain` admission and challenge paths outside Criterion's timed
-loops.
+Admission adds the close to an ordered queue and permits the next epoch to
+register. Finalization waits for the challenge deadline and all earlier closes,
+then makes withdrawals claimable. A successful receipt challenge blocks the
+contested close and its descendants. Earlier clean closes can still finalize
+before recovery freezes the surviving state.
 
-Ordinary withdrawals authorize an exact positive amount. A close carries no amount and releases
-the account's authenticated epoch-tail balance after that epoch's deposits, credits, and debits.
-A zero tail is valid and removes the account without creating a payout claim.
+## Balances and evidence
 
-## Formal model
+QMDB Current Ordered with MMB maps a canonical 32-byte account key to a positive
+eight-byte balance. Absence means zero. Payments can create a recipient's balance
+without an onchain account. Balances can accumulate across closes until their
+owners choose to withdraw.
 
-The [executable Stateright model](stateright/README.md) exhausts its finite certification,
-challenge, claim-ledger, and settlement state spaces to completion and pairs them with deterministic
-end-to-end fund-recovery traces. Its documentation records the exact state counts, composition
-boundaries, reachability matrix, and the refinement obligations that remain with the Rust
-implementation and embedding.
+A close writes only changed balances. Activity that nets to zero still appears
+in the activity BMT, and payer-vector BMTs authenticate individual payment entries.
+Payment counters belong to epoch evidence. Withdrawal claims use the output
+BMT, and balance recovery uses historical QMDB proofs.
+
+Receipts let their holders challenge omitted or contradictory payments. Wallets
+save verified receipts and keep them available through the challenge deadline.
+
+## Embedding the protocol
+
+Applications supply networking, authenticated time, durable storage, and custody.
+The main responsibilities are:
+
+- Store evidence before voting and advance canonical state from admitted closes.
+- Serve proofs for pending closes and the finalized recovery state.
+- Retain receipts and get any challenge included before its deadline.
+- Persist protocol decisions and their asset transfers atomically.
+
+The [module documentation](src/bajillion/mod.rs) defines the full contract,
+including committee assumptions, retention, retries, and recovery. The terminal
+example implements these responsibilities in a running application.
+
+Payment, boundary, vector, and BMT types support `no_std`. QMDB, complete-close
+validation, challenges, and settlement require `std` and use Commonware runtime
+traits.
+
+## Tests, models, and benchmarks
+
+Run crate tests from the repository root:
+
+```bash
+just test -p commonware-clearing
+```
+
+- [Lifecycle models](stateright/README.md)
+- [Arithmetic proofs](verus/README.md)
+- [Benchmarks](src/bajillion/benches/README.md)

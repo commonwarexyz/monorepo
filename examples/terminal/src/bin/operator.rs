@@ -19,7 +19,7 @@ struct Args {
     #[arg(long, default_value = "terminal-operator.sqlite")]
     database: PathBuf,
 
-    /// Workers shared by BMT construction, proof dealing, and validator sealing.
+    /// Workers for maintaining the local balance proof replica.
     #[arg(long, default_value_t = default_workers())]
     workers: NonZeroUsize,
 }

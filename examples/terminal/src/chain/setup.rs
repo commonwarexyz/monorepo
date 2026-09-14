@@ -1,24 +1,15 @@
-//! `setup` subcommand: generate validator directories for the settlement
-//! chain.
+//! Chain bootstrap and live operator registration commands.
 //!
-//! Setup writes one directory per validator holding `node.json` (signing key,
-//! addresses, the validator's consensus threshold share, and its dealt
-//! clearing committee key), the shared `network.json` (participants, dial
-//! addresses, and the operators' network identities), and the shared
-//! `genesis.json` (the trusted-dealer threshold output plus the deployment
-//! list). The committee is fixed for the life of the chain: this is the
-//! reshare example's trusted-bootstrap path without continuous resharing,
-//! which remains a drop-in replacement (swap the fixed scheme provider for
-//! the reshare orchestrator and dkg actors).
+//! Setup writes validator keys, fixed committee shares, query addresses, and
+//! the shared native genesis. It also creates initial operator directories.
+//! Genesis commits the native supply, resource and timing policy, and initial
+//! deployment configurations under the fresh consensus identity.
 //!
-//! Setup also writes one node directory per operator (`operator-0/`,
-//! `operator-1/`, ...): its own `node.json` with a fresh ed25519 NETWORK key
-//! and its curve25519 CLEARING key, plus the shared network and genesis
-//! files. The network key authenticates the operator as a p2p secondary,
-//! while the clearing key is the payment-signing identity whose digest names
-//! the deployment the operator runs. Genesis carries one deployment per
-//! operator, in operator order, each opening with the compiled demo account
-//! set, and one chain-wide epoch timing policy applied to every deployment.
+//! An operator prepared for an existing chain receives fresh network,
+//! clearing and acknowledgment keys plus an exact signed registration. After
+//! its native account is funded, registration joins the certified registry.
+//! Validators authorize its network key from that registry; network.json
+//! supplies bootstrap addresses only.
 //!
 //! The clearing committee is the same machines as the consensus committee
 //! under separate key material: each validator's consensus identity is its
@@ -26,24 +17,30 @@
 //! BLS key setup distributes as `clearing` (key `i` to directory `i`).
 //! Genesis lists every validator's clearing public key with its query
 //! address, so a wallet can route an evidence request to the exact quorum
-//! retaining an account's slice ([`Genesis::holders_for`]).
+//! retaining the deployment's complete close ([`Genesis::holders`]).
 
 use crate::{
-    chain::validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
+    chain::{
+        client::{Chain, Client, Env},
+        native::{NativeGenesis, RegistryEntry},
+        query::{Lookup, ReadRequest},
+        state::Record,
+        tx::{RegisterDeploymentRequest, SettlementTx},
+        validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
+    },
     protocol::{
-        Account, Deployment, Key, SLICE_BITS, Timing, accounts, clearing_private, committee,
-        operator_ack_key, operator_ack_signer, operator_signer,
+        Account, Deployment, Key, MIN_DEALING_BYTES, Timing, accounts, clearing_private, committee,
+        deployment_of, empty_genesis, operator_ack_key, operator_ack_signer, operator_signer,
+        wallets,
     },
 };
 use anyhow::Context as _;
+use bytes::BytesMut;
 use clap::Args;
-use commonware_clearing::bajillion::{
-    admission::slice_holders,
-    transition::{Assignment, OperatorKey, account_slice},
-};
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_clearing::bajillion::{qmdb::StateRoot, transition::OperatorKey};
+use commonware_codec::{Decode as _, Encode as _, Write as _};
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    Hasher as _, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Output, deal},
         primitives::{
@@ -54,17 +51,21 @@ use commonware_cryptography::{
         },
     },
     ed25519::{PrivateKey, PublicKey},
+    sha256::Digest,
 };
 use commonware_cryptography_curve25519::signing::SigningKey as ClearingSigner;
 use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random as _;
+use commonware_runtime::{Runner as _, Supervisor as _, tokio};
 use commonware_utils::{N3f1, Participant, ordered::Set};
 use rand::rngs::StdRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
+    collections::BTreeMap,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// The trusted-dealer threshold output shared by every validator.
@@ -104,10 +105,8 @@ pub(crate) struct Genesis {
     /// Exact blocks between a registration's admission deadline and its
     /// challenge deadline (the same genesis-fixed rule).
     pub(crate) challenge_duration: u64,
-    /// The configured deployments sharing this chain: each an operator
-    /// clearing identity plus the accounts and initial balances its genesis
-    /// machine opens with.
-    pub(crate) deployments: Vec<Deployment>,
+    /// Initial registry, native asset allocations, and resource policy.
+    pub(crate) native: NativeGenesis,
     /// Every committee validator's clearing key with the query address
     /// serving its retained evidence, in validator directory order.
     pub(crate) validators: Vec<ValidatorEntry>,
@@ -118,7 +117,7 @@ impl Genesis {
         identity: Identity,
         timestamp: u64,
         timing: Timing,
-        deployments: Vec<Deployment>,
+        native: NativeGenesis,
         validators: Vec<ValidatorEntry>,
     ) -> Self {
         Self {
@@ -126,7 +125,7 @@ impl Genesis {
             timestamp,
             admission_offset: timing.admission_offset,
             challenge_duration: timing.challenge_duration,
-            deployments,
+            native,
             validators,
         }
     }
@@ -145,28 +144,14 @@ impl Genesis {
             .map(|validator| validator.query))
     }
 
-    /// The query addresses of the exact quorum retaining `slice`, in
-    /// ascending committee participant order.
-    pub(crate) fn holders_for(&self, slice: u16) -> anyhow::Result<Vec<SocketAddr>> {
-        let committee = committee()?;
-        let assignment = Assignment::new(committee.commitment::<Sha256>(), SLICE_BITS)
-            .context("construct the slice assignment")?;
-        slice_holders::<Sha256, _>(&committee, &assignment, slice)
-            .context("derive the slice holders")?
-            .into_iter()
-            .map(|participant| {
-                self.query_of(participant)?.with_context(|| {
-                    format!("genesis lists no validator for participant {participant}")
-                })
+    /// Every committee validator retains the complete close, in participant order.
+    pub(crate) fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        (0..committee()?.members().len())
+            .map(|i| {
+                self.query_of(Participant::from_usize(i))?
+                    .context("genesis omits validator query address")
             })
             .collect()
-    }
-
-    /// The query addresses of the exact quorum retaining `account`'s slice,
-    /// in ascending committee participant order.
-    pub(crate) fn holders_for_account(&self, account: &Key) -> anyhow::Result<Vec<SocketAddr>> {
-        let slice = account_slice(account, SLICE_BITS).context("derive the account slice")?;
-        self.holders_for(slice)
     }
 
     /// The committee players holding dealt shares.
@@ -216,22 +201,21 @@ impl NodeConfig {
     }
 }
 
-/// One operator node's config stored in `operator-<index>/node.json`: its
-/// ed25519 network identity and addresses plus its curve25519 clearing key.
-/// The network key authenticates the operator as a p2p secondary, while the
-/// clearing key signs payments and registrations and names the deployment
-/// the operator runs (the deployment digest derives from it).
+/// One operator's keys, network addresses, and explicit registry identity.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct OperatorConfig {
+    /// The registry identity this operator serves.
+    #[serde(with = "hex_digest")]
+    pub(crate) deployment: Digest,
     #[serde(with = "hex_private_key")]
     pub(crate) signing_key: PrivateKey,
     pub(crate) listen: SocketAddr,
     pub(crate) dial: SocketAddr,
-    /// The operator's clearing signing key (a demo protocol constant).
+    /// The operator's clearing signing key.
     #[serde(with = "hex_clearing_signer")]
     pub(crate) clearing: ClearingSigner,
     /// The operator's aggregable-acknowledgment BLS signing key (a demo protocol
-    /// constant): the close carries one combined countersignature per proof slice
+    /// constant): the close carries the countersignature for each sender
     /// under this key.
     #[serde(with = "hex_clearing")]
     pub(crate) ack: ClearingKey,
@@ -253,9 +237,7 @@ pub(crate) struct NetworkConfig {
     #[serde(with = "hex_public_keys")]
     pub(crate) participants: Vec<PublicKey>,
     pub(crate) peers: Vec<PeerConfig>,
-    /// The operators' network identities, in the same order as the genesis
-    /// deployment list (operator `i` runs deployment `i`): every validator's
-    /// extra bootstrappers and tracked secondaries.
+    /// Initial operator dial hints. The certified registry authorizes peers.
     pub(crate) operators: Vec<PeerConfig>,
 }
 
@@ -324,8 +306,7 @@ struct EncodedGenesis {
     /// Genesis-fixed exact challenge window duration in blocks, applied to
     /// every deployment.
     challenge_duration: u64,
-    /// The configured deployments sharing this chain, in operator order.
-    deployments: Vec<EncodedDeployment>,
+    native: EncodedNative,
     /// Every validator's clearing key and query address, in directory order.
     validators: Vec<EncodedValidator>,
 }
@@ -343,6 +324,11 @@ struct EncodedValidator {
 /// One configured deployment in `genesis.json`.
 #[derive(Serialize, Deserialize)]
 struct EncodedDeployment {
+    #[serde(with = "hex_state_root")]
+    root: StateRoot<Digest>,
+    operations: u64,
+    #[serde(with = "hex_digest")]
+    digest: Digest,
     /// Hex curve25519 operator clearing public key.
     #[serde(with = "hex_clearing_public")]
     operator: Key,
@@ -366,6 +352,9 @@ struct EncodedAccount {
 impl From<&Deployment> for EncodedDeployment {
     fn from(deployment: &Deployment) -> Self {
         Self {
+            root: deployment.genesis().root(),
+            operations: deployment.genesis().operations(),
+            digest: *deployment.digest(),
             operator: deployment.operator.clone(),
             operator_ack: deployment.operator_ack,
             accounts: deployment
@@ -380,9 +369,12 @@ impl From<&Deployment> for EncodedDeployment {
     }
 }
 
-impl From<EncodedDeployment> for Deployment {
-    fn from(encoded: EncodedDeployment) -> Self {
-        Self::new(
+impl TryFrom<EncodedDeployment> for Deployment {
+    type Error = anyhow::Error;
+
+    fn try_from(encoded: EncodedDeployment) -> Result<Self, Self::Error> {
+        Self::configured(
+            encoded.digest,
             encoded.operator,
             encoded.operator_ack,
             encoded
@@ -393,7 +385,154 @@ impl From<EncodedDeployment> for Deployment {
                     balance: account.balance,
                 })
                 .collect(),
+            encoded.root,
+            encoded.operations,
         )
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncodedRegistryEntry {
+    deployment: EncodedDeployment,
+    #[serde(with = "hex_public_key")]
+    network_key: PublicKey,
+    max_dealing_bytes: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncodedNative {
+    #[serde(with = "hex_state_root")]
+    empty_root: StateRoot<Digest>,
+    empty_operations: u64,
+    balances: Vec<EncodedAccount>,
+    deployments: Vec<EncodedRegistryEntry>,
+    #[serde(with = "hex_clearing_public")]
+    fee_recipient: Key,
+    registration_fee: u64,
+    epoch_fee: u64,
+    max_deployments: u32,
+    max_dealing_bytes: u32,
+}
+
+impl From<&NativeGenesis> for EncodedNative {
+    fn from(native: &NativeGenesis) -> Self {
+        Self {
+            empty_root: native.empty_root,
+            empty_operations: native.empty_operations,
+            balances: native
+                .balances
+                .iter()
+                .map(|account| EncodedAccount {
+                    key: account.key.clone(),
+                    balance: account.balance,
+                })
+                .collect(),
+            deployments: native
+                .deployments
+                .iter()
+                .map(|entry| EncodedRegistryEntry {
+                    deployment: EncodedDeployment::from(&entry.deployment),
+                    network_key: entry.network_key.clone(),
+                    max_dealing_bytes: entry.max_dealing_bytes,
+                })
+                .collect(),
+            fee_recipient: native.fee_recipient.clone(),
+            registration_fee: native.registration_fee,
+            epoch_fee: native.epoch_fee,
+            max_deployments: native.max_deployments,
+            max_dealing_bytes: native.max_dealing_bytes,
+        }
+    }
+}
+
+impl TryFrom<EncodedNative> for NativeGenesis {
+    type Error = anyhow::Error;
+    fn try_from(encoded: EncodedNative) -> anyhow::Result<Self> {
+        Ok(Self {
+            empty_root: encoded.empty_root,
+            empty_operations: encoded.empty_operations,
+            balances: encoded
+                .balances
+                .into_iter()
+                .map(|account| Account {
+                    key: account.key,
+                    balance: account.balance,
+                })
+                .collect(),
+            deployments: encoded
+                .deployments
+                .into_iter()
+                .map(|entry| {
+                    Ok(RegistryEntry {
+                        deployment: Deployment::try_from(entry.deployment)?,
+                        network_key: entry.network_key,
+                        max_dealing_bytes: entry.max_dealing_bytes,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            fee_recipient: encoded.fee_recipient,
+            registration_fee: encoded.registration_fee,
+            epoch_fee: encoded.epoch_fee,
+            max_deployments: encoded.max_deployments,
+            max_dealing_bytes: encoded.max_dealing_bytes,
+        })
+    }
+}
+
+/// Allocates a finite native supply alongside the initial clearing custody.
+pub(crate) fn native_genesis(
+    deployments: Vec<RegistryEntry>,
+    empty: &commonware_clearing::bajillion::settlement::Genesis<Digest>,
+) -> NativeGenesis {
+    let mut balances = BTreeMap::new();
+    for wallet in wallets() {
+        balances.insert(wallet.public_key(), 1_000_000_000);
+    }
+    for entry in &deployments {
+        balances.insert(entry.deployment.operator.clone(), 1_000_000_000);
+    }
+    NativeGenesis {
+        empty_root: empty.root(),
+        empty_operations: empty.operations(),
+        balances: balances
+            .into_iter()
+            .map(|(key, balance)| Account { key, balance })
+            .collect(),
+        deployments,
+        fee_recipient: ClearingSigner::from_seed(30_000).public_key(),
+        registration_fee: 10,
+        epoch_fee: 1,
+        max_deployments: 64,
+        max_dealing_bytes: 4 * 1024 * 1024,
+    }
+}
+
+/// Commits initial deployment domains to the committee and complete native policy.
+fn bind_genesis_deployments(
+    identity: &Identity,
+    timestamp: u64,
+    timing: Timing,
+    native: &mut NativeGenesis,
+) {
+    const NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_GENESIS_DEPLOYMENT";
+    let mut config = BytesMut::new();
+    identity.write(&mut config);
+    timestamp.write(&mut config);
+    timing.admission_offset.write(&mut config);
+    timing.challenge_duration.write(&mut config);
+    native.empty_root.write(&mut config);
+    native.empty_operations.write(&mut config);
+    native.balances.write(&mut config);
+    native.deployments.write(&mut config);
+    native.fee_recipient.write(&mut config);
+    native.registration_fee.write(&mut config);
+    native.epoch_fee.write(&mut config);
+    native.max_deployments.write(&mut config);
+    native.max_dealing_bytes.write(&mut config);
+    let domain = Sha256::hash(&[NAMESPACE, &config]);
+    for (index, entry) in native.deployments.iter_mut().enumerate() {
+        let digest = Sha256::hash(&[NAMESPACE, domain.as_ref(), &(index as u64).to_be_bytes()]);
+        entry.deployment.rebind(digest);
     }
 }
 
@@ -414,37 +553,26 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
         encoded.challenge_duration >= 1,
         "the genesis challenge duration must be at least one block"
     );
+    crate::protocol::settlement_config(&Timing {
+        admission_offset: encoded.admission_offset,
+        challenge_duration: encoded.challenge_duration,
+    })?;
+    let native = NativeGenesis::try_from(encoded.native)?;
     anyhow::ensure!(
-        !encoded.deployments.is_empty(),
-        "the genesis must configure at least one deployment"
+        native.validate(),
+        "invalid native genesis supply or registry policy"
     );
-    let deployments = encoded
-        .deployments
-        .into_iter()
-        .map(Deployment::from)
-        .collect::<Vec<_>>();
-    let mut digests = std::collections::BTreeSet::new();
-    for deployment in &deployments {
-        anyhow::ensure!(
-            !deployment.accounts.is_empty(),
-            "every genesis deployment must configure at least one account"
-        );
-        let mut keys = std::collections::BTreeSet::new();
-        anyhow::ensure!(
-            deployment
-                .accounts
-                .iter()
-                .all(|account| keys.insert(account.key.clone())),
-            "a genesis deployment configures a duplicate account"
-        );
-        anyhow::ensure!(
-            digests.insert(*deployment.digest()),
-            "genesis deployment operators must be distinct"
-        );
-    }
+    anyhow::ensure!(
+        native.deployments.iter().all(|entry| !encoded
+            .output
+            .players()
+            .iter()
+            .any(|key| key == &entry.network_key)),
+        "operator network identities must be separate from consensus participants"
+    );
 
     // The validators are exactly the clearing committee, each key once, each
-    // at its own query address, so every slice's quorum resolves to distinct
+    // at its own query address, so the committee resolves to distinct
     // holders.
     let clearing = committee().context("clearing committee is unavailable")?;
     anyhow::ensure!(
@@ -481,7 +609,7 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
             admission_offset: encoded.admission_offset,
             challenge_duration: encoded.challenge_duration,
         },
-        deployments,
+        native,
         validators,
     ))
 }
@@ -497,10 +625,10 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate every validator directory with node, network, and genesis config.
+/// Generate validator and operator directories plus the local demo launcher.
 #[derive(Args)]
 pub struct Setup {
-    /// Directory where validator subdirectories will be generated.
+    /// Directory for node configs, demo databases, and mprocs launchers.
     #[arg(long, default_value = "./data")]
     pub node_dir: PathBuf,
 
@@ -524,14 +652,189 @@ pub struct Setup {
     #[arg(long, default_value_t = 3400)]
     pub(crate) operator_port: u16,
 
+    /// First local RPC port assigned to operator-0 in the demo launcher.
+    #[arg(long, default_value_t = 7001)]
+    pub(crate) operator_rpc_port: u16,
+
     /// IP address used for generated listen and dial addresses.
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     pub(crate) host: IpAddr,
 }
 
-/// Generate the validator directories and print the commands to run next.
+/// Generate the demo and print its launch instructions.
 pub fn run(args: Setup) {
     run_inner(args).expect("setup failed");
+}
+
+/// Prepare an operator that can register on an existing chain.
+#[derive(Args)]
+#[commonware_macros::stability(ALPHA)]
+pub struct OperatorSetup {
+    /// Empty directory for the operator's keys and registration request.
+    #[arg(long)]
+    pub node_dir: PathBuf,
+    /// Existing chain genesis file.
+    #[arg(long)]
+    genesis: PathBuf,
+    /// Existing validator network file used for bootstrap addresses.
+    #[arg(long)]
+    network: PathBuf,
+    /// Operator P2P listen and advertised address.
+    #[arg(long, default_value = "127.0.0.1:3500")]
+    listen: SocketAddr,
+    /// Reserved maximum bytes per epoch's validator dealing (at least 256 KiB).
+    #[arg(long, default_value_t = 4 * 1024 * 1024)]
+    max_dealing_bytes: u32,
+}
+
+/// Save fresh operator keys and the exact signed registration to submit after funding.
+#[commonware_macros::stability(ALPHA)]
+pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
+    let genesis = read_genesis_file(&args.genesis)?;
+    let network: NetworkConfig = read_json(&args.network)?;
+    network.validate()?;
+    anyhow::ensure!(
+        args.max_dealing_bytes >= MIN_DEALING_BYTES,
+        "the stock operator requires a dealing reservation of at least {MIN_DEALING_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        args.max_dealing_bytes <= genesis.native.max_dealing_bytes,
+        "dealing reservation exceeds the chain resource policy"
+    );
+    anyhow::ensure!(
+        !args.node_dir.exists() || args.node_dir.read_dir()?.next().is_none(),
+        "operator directory must be empty"
+    );
+    let mut rng = rand::make_rng::<StdRng>();
+    let signing_key = PrivateKey::random(&mut rng);
+    let clearing = ClearingSigner::random(&mut rng);
+    let ack = ClearingKey::random(&mut rng);
+    let request = RegisterDeploymentRequest::sign(
+        genesis.native.chain_id(),
+        Digest::random(&mut rng),
+        compute_public::<MinSig>(&ack),
+        signing_key.public_key(),
+        args.max_dealing_bytes,
+        genesis.native.registration_fee,
+        &clearing,
+    );
+    let node = OperatorConfig {
+        deployment: request.deployment_id(),
+        signing_key,
+        listen: args.listen,
+        dial: args.listen,
+        clearing,
+        ack,
+    };
+    fs::create_dir_all(&args.node_dir)?;
+    write_json(&args.node_dir.join("node.json"), &node)?;
+    write_json(&args.node_dir.join("network.json"), &network)?;
+    fs::copy(&args.genesis, args.node_dir.join("genesis.json"))?;
+    write_json(
+        &args.node_dir.join("registration.json"),
+        &hex(&request.encode()),
+    )?;
+    println!("Deployment: {}", hex(request.deployment_id().as_ref()));
+    println!("Fund native account: {}", hex(&request.operator.encode()));
+    println!(
+        "Registration fee: {}; reserved epoch fee: {}",
+        request.fee,
+        genesis.native.epoch_fee * u64::from(request.max_dealing_bytes).div_ceil(1024)
+    );
+    println!(
+        "Register with: terminal-chain register --node-dir {}",
+        args.node_dir.display()
+    );
+    Ok(())
+}
+
+/// Submit a saved operator registration to an existing chain.
+#[derive(Args)]
+#[commonware_macros::stability(ALPHA)]
+pub struct RegisterOperator {
+    /// Prepared operator directory containing its signed registration.
+    #[arg(long)]
+    pub node_dir: PathBuf,
+    /// Validator query address; repeat for failover. Defaults to genesis addresses.
+    #[arg(long = "query")]
+    queries: Vec<SocketAddr>,
+}
+
+/// Complete registration only after a certified registry read contains the exact entry.
+#[commonware_macros::stability(ALPHA)]
+pub async fn register_operator(
+    context: tokio::Context,
+    args: RegisterOperator,
+) -> anyhow::Result<()> {
+    let genesis = read_genesis(&args.node_dir)?;
+    let node = OperatorConfig::load(&args.node_dir)?;
+    let raw: String = read_json(&args.node_dir.join("registration.json"))?;
+    let bytes = from_hex(&raw).context("invalid registration encoding")?;
+    let request = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &())?;
+    let chain_id = genesis.native.chain_id();
+    anyhow::ensure!(
+        request.verify(&chain_id)
+            && request.deployment_id() == node.deployment
+            && request.operator == node.clearing.public_key()
+            && request.operator_ack == compute_public::<MinSig>(&node.ack)
+            && request.network_key == node.public_key(),
+        "registration does not match this operator and chain"
+    );
+    let queries = if args.queries.is_empty() {
+        genesis
+            .validators
+            .iter()
+            .map(|validator| validator.query)
+            .collect()
+    } else {
+        args.queries
+    };
+    let mut client = Client::new(
+        &genesis,
+        node.deployment,
+        queries,
+        context.child("registration_rng"),
+    )?;
+    complete_registration(&context, &mut client, &genesis.native, request).await?;
+    println!("Registered deployment: {}", hex(node.deployment.as_ref()));
+    Ok(())
+}
+
+/// Completes a signed registration only after its exact entry is certified.
+pub(crate) async fn complete_registration<E: Env, C: Chain>(
+    context: &E,
+    client: &mut C,
+    native: &NativeGenesis,
+    request: RegisterDeploymentRequest,
+) -> anyhow::Result<()> {
+    let chain_id = request.chain_id;
+    let deployment = request.deployment_id();
+    let expected = request.entry(native)?;
+    let tx = SettlementTx::RegisterDeployment(request);
+    for _ in 0..100 {
+        let read = client
+            .read(
+                context,
+                &ReadRequest::new(
+                    deployment,
+                    Lookup::RegistryEntry {
+                        chain_id,
+                        deployment,
+                    },
+                ),
+            )
+            .await?;
+        if let Some(Record::RegistryEntry(entry)) = read.record {
+            anyhow::ensure!(
+                entry == expected,
+                "certified registration differs from the prepared configuration"
+            );
+            return Ok(());
+        }
+        client.deliver(context, &tx).await?;
+        context.sleep(Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("registration was not certified; retry with the same saved request")
 }
 
 fn run_inner(args: Setup) -> anyhow::Result<()> {
@@ -549,25 +852,38 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
 
-    // One fresh network identity, one clearing identity, and therefore one
-    // deployment per operator. Operator `index` runs deployment `index` in
-    // both the network config and the genesis deployment list.
+    // Network keys authenticate secondary peers; clearing keys authorize
+    // deployment transactions and private acknowledgments.
     let operator_signers = (0..args.operators)
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
     let operator_addresses = (0..args.operators)
         .map(|index| Ok(SocketAddr::new(args.host, port(args.operator_port, index)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let deployments = (0..args.operators)
+    let mut deployments = (0..args.operators)
         .map(|index| {
             let index = u64::try_from(index).expect("the operator count fits u64");
             Deployment::new(
+                deployment_of(&operator_signer(index).public_key()),
                 operator_signer(index).public_key(),
                 operator_ack_key(index),
                 accounts(),
             )
         })
         .collect::<Vec<_>>();
+    let scratch = args.node_dir.join(".genesis");
+    let generated = tokio::Runner::new(
+        tokio::Config::new().with_storage_directory(scratch.clone()),
+    )
+    .start(move |context| async move {
+        for deployment in &mut deployments {
+            deployment.generate(context.child("genesis")).await?;
+        }
+        let empty = empty_genesis(context.child("empty_genesis")).await?;
+        Ok::<_, anyhow::Error>((deployments, empty))
+    });
+    fs::remove_dir_all(&scratch).context("remove temporary genesis preparation")?;
+    let (deployments, empty) = generated?;
     let peers = signers
         .iter()
         .enumerate()
@@ -606,6 +922,19 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
             .as_millis(),
     )
     .context("the system clock exceeds u64 milliseconds")?;
+    let mut native = native_genesis(
+        deployments
+            .into_iter()
+            .zip(&operator_signers)
+            .map(|(deployment, signer)| RegistryEntry {
+                deployment,
+                network_key: signer.public_key(),
+                max_dealing_bytes: 4 * 1024 * 1024,
+            })
+            .collect(),
+        &empty,
+    );
+    bind_genesis_deployments(&output, timestamp, Timing::GENESIS, &mut native);
     let validators = (0..args.peers)
         .map(|index| {
             Ok(EncodedValidator {
@@ -619,7 +948,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         timestamp,
         admission_offset: Timing::GENESIS.admission_offset,
         challenge_duration: Timing::GENESIS.challenge_duration,
-        deployments: deployments.iter().map(EncodedDeployment::from).collect(),
+        native: EncodedNative::from(&native),
         validators: validators
             .iter()
             .map(|validator| EncodedValidator {
@@ -663,6 +992,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         write_json(
             &operator_dir.join("node.json"),
             &OperatorConfig {
+                deployment: *native.deployments[index].deployment.digest(),
                 signing_key: signer,
                 listen: operator_addresses[index],
                 dial: operator_addresses[index],
@@ -674,42 +1004,120 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         write_json(&operator_dir.join("genesis.json"), &encoded(output.clone()))?;
     }
 
-    println!("Run the cluster with:");
+    let node_dir = fs::canonicalize(&args.node_dir)?;
+    let executable = std::env::current_exe()?;
+    let deployments = native
+        .deployments
+        .iter()
+        .map(|entry| *entry.deployment.digest())
+        .collect::<Vec<_>>();
+    for (name, scripted) in [("mprocs.yaml", true), ("mprocs-wallets.yaml", false)] {
+        write_json(
+            &node_dir.join(name),
+            &demo_launcher(&args, &node_dir, &executable, &deployments, scripted)?,
+        )?;
+    }
     println!(
-        "mprocs {}",
-        (0..args.peers)
-            .map(|index| {
-                format!(
-                    "\"cargo run --bin terminal-chain -- validator --node-dir {}\"",
-                    args.node_dir.join(format!("validator-{index}")).display()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        "Bajillion demo ready / validators: {} / operators: {}",
+        args.peers, args.operators
     );
-    for index in 0..args.operators {
-        println!(
-            "Run operator {index} with: --node-dir {}",
-            args.node_dir.join(format!("operator-{index}")).display()
+    println!("From {} (mprocs 0.9.6 or newer):", node_dir.display());
+    println!("  Walkthrough: mprocs");
+    println!("  Interactive wallets: mprocs --config mprocs-wallets.yaml");
+    println!("Validators and operators start automatically. Wait for Operator ready, then");
+    println!("select a wallet or Walkthrough pane and press s. Ctrl-a switches focus.");
+    println!("Run one launcher at a time; both use the same services and wallet databases.");
+
+    Ok(())
+}
+
+/// JSON is valid YAML; argv arrays keep generated paths out of a shell.
+fn demo_launcher(
+    args: &Setup,
+    node_dir: &Path,
+    executable: &Path,
+    deployments: &[Digest],
+    scripted: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let node_dir = node_dir.to_str().context("demo directory must be UTF-8")?;
+    let binary_dir = executable
+        .parent()
+        .context("setup executable has no parent directory")?
+        .to_str()
+        .context("binary directory must be UTF-8")?;
+    let binary = |name: &str| {
+        Path::new(binary_dir)
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+            .display()
+            .to_string()
+    };
+    let mut procs = serde_json::Map::new();
+    for index in 0..args.peers {
+        procs.insert(
+            format!("Validator {index}"),
+            serde_json::json!({
+                "cmd": [binary("terminal-chain"), "validator", "--node-dir",
+                    Path::new(node_dir).join(format!("validator-{index}"))],
+                "cwd": node_dir,
+                "autostart": true,
+            }),
         );
     }
-
-    // The wallet agents verify certified reads against the shared genesis
-    // identity and query the validators' certified query servers, each bound
-    // to one operator's deployment.
-    let queries = (0..args.peers)
-        .map(|index| {
-            port(args.base_query_port, index)
-                .map(|port| format!("--query {}", SocketAddr::new(args.host, port)))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .join(" ");
-    let genesis = args.node_dir.join("validator-0").join("genesis.json");
-    println!(
-        "Point the agents at the chain with: --genesis {} {queries} --deployment <operator index>",
-        genesis.display()
-    );
-    Ok(())
+    for (index, deployment) in deployments.iter().enumerate() {
+        let operator_dir = Path::new(node_dir).join(format!("operator-{index}"));
+        let address = SocketAddr::new(args.host, port(args.operator_rpc_port, index)?);
+        procs.insert(
+            format!("Operator {index}"),
+            serde_json::json!({
+                "cmd": [binary("terminal-operator"), "--node-dir", operator_dir,
+                    "--bind", address.to_string(), "--database", operator_dir.join("operator.sqlite")],
+                "cwd": node_dir,
+                "autostart": true,
+            }),
+        );
+        let wallets: &[(usize, &str)] = if scripted {
+            &[(0, "Walkthrough")]
+        } else {
+            &[(0, "Alice"), (1, "Bob"), (4, "Eve")]
+        };
+        for &(identity, name) in wallets {
+            let database = match identity {
+                0 => "alice.sqlite".to_owned(),
+                1 => "bob.sqlite".to_owned(),
+                _ => format!("terminal-agent-{deployment}-{identity}.sqlite"),
+            };
+            let mut command = vec![binary("terminal-agent")];
+            if scripted {
+                command.push("--scripted".to_owned());
+            }
+            command.extend([
+                "--identity".to_owned(),
+                identity.to_string(),
+                "--deployment".to_owned(),
+                index.to_string(),
+                "--operator".to_owned(),
+                address.to_string(),
+                "--genesis".to_owned(),
+                Path::new(node_dir)
+                    .join("validator-0/genesis.json")
+                    .display()
+                    .to_string(),
+                "--database".to_owned(),
+                operator_dir.join(database).display().to_string(),
+            ]);
+            for peer in 0..args.peers {
+                command.extend([
+                    "--query".to_owned(),
+                    SocketAddr::new(args.host, port(args.base_query_port, peer)?).to_string(),
+                ]);
+            }
+            procs.insert(
+                format!("{name} {index}"),
+                serde_json::json!({"cmd": command, "cwd": node_dir, "autostart": false}),
+            );
+        }
+    }
+    Ok(serde_json::json!({"procs": procs}))
 }
 
 fn validate(args: &Setup) -> anyhow::Result<()> {
@@ -725,12 +1133,16 @@ fn validate(args: &Setup) -> anyhow::Result<()> {
     if args.peers > MAX_PARTICIPANTS.get() as usize {
         anyhow::bail!("peers exceeds max supported participants");
     }
-    if args.operators == 0 {
-        anyhow::bail!("at least one operator is required");
+    if args.operators == 0 || args.operators > super::native::MAX_DEPLOYMENTS {
+        anyhow::bail!(
+            "operator count must be between 1 and {}",
+            super::native::MAX_DEPLOYMENTS
+        );
     }
     port(args.base_port, args.peers - 1)?;
     port(args.base_query_port, args.peers - 1)?;
     port(args.operator_port, args.operators - 1)?;
+    port(args.operator_rpc_port, args.operators - 1)?;
     Ok(())
 }
 
@@ -738,6 +1150,26 @@ fn port(base: u16, index: usize) -> anyhow::Result<u16> {
     let offset = u16::try_from(index)?;
     base.checked_add(offset)
         .ok_or_else(|| anyhow::anyhow!("base port plus peer index overflows u16"))
+}
+
+/// Serde codec for a hex-encoded deployment identifier.
+mod hex_digest {
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &Digest,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex(&value.encode()))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Digest, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
+        Digest::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+    }
 }
 
 /// Serde codec for a hex-encoded [`PrivateKey`].
@@ -825,6 +1257,27 @@ mod hex_share {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
         Share::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+    }
+}
+
+/// Serde codec for the trusted genesis account commitment.
+mod hex_state_root {
+    use super::*;
+    use commonware_codec::DecodeExt;
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &StateRoot<Digest>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex(&value.encode()))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<StateRoot<Digest>, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
+        StateRoot::decode(bytes.as_slice()).map_err(D::Error::custom)
     }
 }
 
@@ -947,7 +1400,147 @@ mod hex_genesis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::deployments;
+    use crate::protocol::deployments as unconfigured_deployments;
+    use commonware_runtime::deterministic;
+
+    fn deployments() -> Vec<Deployment> {
+        deterministic::Runner::default().start(|context| async move {
+            let mut deployments = unconfigured_deployments();
+            for deployment in &mut deployments {
+                deployment.generate(context.child("genesis")).await.unwrap();
+            }
+            deployments
+        })
+    }
+
+    #[test]
+    fn demo_launcher_keeps_argv_ports_and_databases_isolated() {
+        let root = std::env::temp_dir().join("demo space ' $value ; `command`");
+        let executable = root.join("redirected target/release/terminal-chain");
+        let args = Setup {
+            node_dir: root.clone(),
+            peers: 4,
+            base_port: 4300,
+            base_query_port: 4400,
+            operators: 2,
+            operator_port: 4500,
+            operator_rpc_port: 7100,
+            host: IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        let deployments = [Sha256::hash(&[b"first"]), Sha256::hash(&[b"second"])];
+        let launcher = demo_launcher(&args, &root, &executable, &deployments, true).unwrap();
+        let procs = launcher["procs"].as_object().unwrap();
+        assert_eq!(procs.len(), 8);
+        let mut databases = std::collections::BTreeSet::new();
+        for (name, process) in procs {
+            assert_eq!(
+                process
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["autostart", "cmd", "cwd"]
+            );
+            assert_eq!(process["cwd"], root.to_str().unwrap());
+            assert_eq!(process["autostart"], !name.starts_with("Walkthrough"));
+            let argv = process["cmd"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>();
+            let binary = Path::new(argv[0]);
+            assert_eq!(binary.parent(), executable.parent());
+            assert!(binary.is_absolute());
+            if let Some(index) = argv.iter().position(|arg| *arg == "--database") {
+                let database = Path::new(argv[index + 1]);
+                assert!(database.is_absolute());
+                assert!(database.starts_with(&root));
+                assert!(databases.insert(database.to_path_buf()));
+            }
+        }
+        assert_eq!(databases.len(), 4);
+        let interactive = demo_launcher(&args, &root, &executable, &deployments, false).unwrap();
+        assert_eq!(interactive["procs"].as_object().unwrap().len(), 12);
+        for index in 0..2 {
+            let operator = &procs[&format!("Operator {index}")]["cmd"];
+            assert_eq!(
+                operator[0],
+                executable
+                    .with_file_name(format!("terminal-operator{}", std::env::consts::EXE_SUFFIX))
+                    .to_str()
+                    .unwrap()
+            );
+            assert_eq!(
+                operator[2],
+                root.join(format!("operator-{index}")).to_str().unwrap()
+            );
+            assert_eq!(operator[4], format!("[::1]:{}", 7100 + index));
+            let walkthrough = procs[&format!("Walkthrough {index}")]["cmd"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                walkthrough[0],
+                executable
+                    .with_file_name(format!("terminal-agent{}", std::env::consts::EXE_SUFFIX))
+                    .to_str()
+                    .unwrap()
+            );
+            assert_eq!(walkthrough[1], "--scripted");
+            assert_eq!(walkthrough[5], index.to_string());
+            assert_eq!(walkthrough[7], operator[4]);
+            assert_eq!(
+                walkthrough[9],
+                root.join("validator-0/genesis.json").to_str().unwrap()
+            );
+            assert_eq!(
+                walkthrough[11],
+                root.join(format!("operator-{index}/alice.sqlite"))
+                    .to_str()
+                    .unwrap()
+            );
+            for peer in 0..4 {
+                assert_eq!(walkthrough[12 + peer * 2], "--query");
+                assert_eq!(walkthrough[13 + peer * 2], format!("[::1]:{}", 4400 + peer));
+            }
+            for (name, identity, database) in [
+                ("Alice", 0, "alice.sqlite".to_owned()),
+                ("Bob", 1, "bob.sqlite".to_owned()),
+                (
+                    "Eve",
+                    4,
+                    format!("terminal-agent-{}-4.sqlite", deployments[index]),
+                ),
+            ] {
+                let process = &interactive["procs"][format!("{name} {index}")];
+                assert_eq!(process["autostart"], false);
+                assert_eq!(process["cwd"], root.to_str().unwrap());
+                let mut expected = walkthrough.clone();
+                expected.remove(1);
+                expected[2] = identity.to_string().into();
+                expected[10] = root
+                    .join(format!("operator-{index}"))
+                    .join(database)
+                    .to_str()
+                    .unwrap()
+                    .into();
+                assert_eq!(process["cmd"], serde_json::Value::Array(expected));
+            }
+        }
+        let other = root.with_file_name("second demo");
+        let other_launcher = demo_launcher(&args, &other, &executable, &deployments, true).unwrap();
+        for process in other_launcher["procs"].as_object().unwrap().values() {
+            let argv = process["cmd"].as_array().unwrap();
+            if let Some(index) = argv.iter().position(|arg| arg == "--database") {
+                assert!(!databases.contains(Path::new(argv[index + 1].as_str().unwrap())));
+            }
+        }
+        let mut overflow = args;
+        overflow.operator_rpc_port = u16::MAX;
+        assert!(validate(&overflow).is_err());
+        assert!(demo_launcher(&overflow, &root, &executable, &deployments, true).is_err());
+    }
 
     #[test]
     fn setup_writes_node_network_operator_and_genesis() {
@@ -961,9 +1554,24 @@ mod tests {
             base_query_port: 4400,
             operators: 2,
             operator_port: 4500,
+            operator_rpc_port: 7001,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         })
         .unwrap();
+
+        let launcher: serde_json::Value = read_json(&node_dir.join("mprocs.yaml")).unwrap();
+        let interactive: serde_json::Value =
+            read_json(&node_dir.join("mprocs-wallets.yaml")).unwrap();
+        assert_eq!(launcher["procs"].as_object().unwrap().len(), 8);
+        assert_eq!(interactive["procs"].as_object().unwrap().len(), 12);
+        assert_eq!(
+            launcher["procs"]["Validator 0"]["cmd"][3],
+            fs::canonicalize(&node_dir)
+                .unwrap()
+                .join("validator-0")
+                .to_str()
+                .unwrap()
+        );
 
         let first = node_dir.join("validator-0");
         let node = NodeConfig::load(&first).unwrap();
@@ -981,6 +1589,14 @@ mod tests {
         for index in 0..2u16 {
             let operator_dir = node_dir.join(format!("operator-{index}"));
             let operator = OperatorConfig::load(&operator_dir).unwrap();
+            assert_eq!(
+                interactive["procs"][format!("Eve {index}")]["cmd"][10],
+                fs::canonicalize(&operator_dir)
+                    .unwrap()
+                    .join(format!("terminal-agent-{}-4.sqlite", operator.deployment))
+                    .to_str()
+                    .unwrap()
+            );
             assert_eq!(operator.listen.port(), 4500 + index);
             let listed = &network.operators[usize::from(index)];
             assert_eq!(listed.public_key, operator.public_key());
@@ -992,11 +1608,25 @@ mod tests {
             let genesis = read_genesis(&operator_dir).unwrap();
             assert_eq!(genesis.players().len(), 4);
             assert_eq!(
-                genesis.deployments[usize::from(index)].operator,
+                operator.deployment,
+                *genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .digest()
+            );
+            assert_eq!(
+                operator.public_key(),
+                genesis.native.deployments[usize::from(index)].network_key
+            );
+            assert_eq!(
+                genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .operator,
                 operator.clearing.public_key()
             );
             assert_eq!(
-                genesis.deployments[usize::from(index)].operator_ack,
+                genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .operator_ack,
                 operator_ack_key(u64::from(index))
             );
         }
@@ -1014,14 +1644,42 @@ mod tests {
         // demo accounts under a distinct operator.
         assert_eq!(genesis.timing(), Timing::GENESIS);
         assert!(genesis.timestamp > 0);
-        assert_eq!(genesis.deployments.len(), 2);
+        assert_eq!(genesis.native.deployments.len(), 2);
         assert_ne!(
-            genesis.deployments[0].digest(),
-            genesis.deployments[1].digest()
+            genesis.native.deployments[0].deployment.digest(),
+            genesis.native.deployments[1].deployment.digest()
         );
-        for deployment in &genesis.deployments {
-            assert_eq!(deployment.accounts.len(), accounts().len());
+        for entry in &genesis.native.deployments {
+            assert_eq!(entry.deployment.accounts.len(), accounts().len());
         }
+        assert!(!node_dir.join(".genesis").exists());
+        let configured = genesis
+            .native
+            .deployments
+            .iter()
+            .map(|entry| entry.deployment.clone())
+            .collect::<Vec<_>>();
+        deterministic::Runner::default().start(|context| async move {
+            for deployment in configured {
+                let state = commonware_clearing::bajillion::qmdb::State::<
+                    _,
+                    commonware_cryptography::Sha256,
+                >::init(
+                    context.child("generated_genesis"),
+                    crate::protocol::state_config(
+                        &format!("verify-{}", deployment.digest()),
+                        &context,
+                        commonware_parallel::Sequential,
+                    ),
+                    crate::protocol::genesis_balances(&deployment).unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(state.root(), deployment.genesis().root());
+                assert_eq!(state.head().operations(), deployment.genesis().operations());
+                assert_eq!(state.liability(), deployment.genesis().liability());
+            }
+        });
         let mut dealt = Vec::new();
         for index in 0..4 {
             let dir = node_dir.join(format!("validator-{index}"));
@@ -1052,34 +1710,108 @@ mod tests {
             assert_eq!(genesis.query_of(participant).unwrap(), Some(node.query));
         }
 
-        // Every slice resolves to its exact quorum of distinct holders in
-        // ascending participant order, and every account routes to its
-        // slice's holders.
-        let assignment = Assignment::new(clearing.commitment::<Sha256>(), SLICE_BITS).unwrap();
-        for slice in 0..assignment.slice_count() {
-            let holders = genesis.holders_for(slice).unwrap();
-            let participants = slice_holders::<Sha256, _>(&clearing, &assignment, slice).unwrap();
-            assert_eq!(holders.len(), clearing.quorum());
-            assert!(participants.windows(2).all(|pair| pair[0] < pair[1]));
-            let expected = participants
+        let holders = genesis.holders().unwrap();
+        assert_eq!(holders.len(), clearing.members().len());
+        let expected = (0..clearing.members().len())
+            .map(|i| {
+                genesis
+                    .query_of(Participant::from_usize(i))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(holders, expected);
+        let mut distinct = holders.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), holders.len());
+
+        let undersized = node_dir.join("undersized");
+        assert!(
+            prepare_operator(OperatorSetup {
+                node_dir: undersized.clone(),
+                genesis: first.join("genesis.json"),
+                network: first.join("network.json"),
+                listen: SocketAddr::from(([127, 0, 0, 1], 4_901)),
+                max_dealing_bytes: 1,
+            })
+            .is_err()
+        );
+        assert!(!undersized.exists());
+
+        let joining = node_dir.join("joining");
+        prepare_operator(OperatorSetup {
+            node_dir: joining.clone(),
+            genesis: first.join("genesis.json"),
+            network: first.join("network.json"),
+            listen: SocketAddr::from(([127, 0, 0, 1], 4_900)),
+            max_dealing_bytes: MIN_DEALING_BYTES,
+        })
+        .unwrap();
+        let encoded: String = read_json(&joining.join("registration.json")).unwrap();
+        let bytes = from_hex(&encoded).unwrap();
+        let registration = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &()).unwrap();
+        let operator = OperatorConfig::load(&joining).unwrap();
+        assert!(registration.verify(&genesis.native.chain_id()));
+        assert_eq!(registration.deployment_id(), operator.deployment);
+        assert_eq!(registration.operator, operator.clearing.public_key());
+        assert_eq!(registration.network_key, operator.public_key());
+        assert_eq!(read_genesis(&joining).unwrap(), genesis);
+        assert!(
+            !genesis
+                .native
+                .deployments
                 .iter()
-                .map(|participant| genesis.query_of(*participant).unwrap().unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(holders, expected);
-            let mut distinct = holders.clone();
-            distinct.sort_unstable();
-            distinct.dedup();
-            assert_eq!(distinct.len(), holders.len());
-        }
-        for account in accounts() {
-            let slice = account_slice(&account.key, SLICE_BITS).unwrap();
-            assert_eq!(
-                genesis.holders_for_account(&account.key).unwrap(),
-                genesis.holders_for(slice).unwrap()
-            );
-        }
-        assert!(genesis.holders_for(assignment.slice_count()).is_err());
+                .any(|entry| entry.deployment.digest() == &operator.deployment)
+        );
         let _ = fs::remove_dir_all(node_dir);
+    }
+
+    #[test]
+    fn genesis_domains_bind_committee_timing_and_native_policy() {
+        let mut rng = commonware_utils::test_rng();
+        let genesis = crate::chain::harness::identity(&mut rng);
+        let other = crate::chain::harness::identity(&mut rng);
+        let mut native = genesis.native.clone();
+        bind_genesis_deployments(&genesis.identity, 1, Timing::DEFAULT, &mut native);
+        let domain = native.chain_id();
+        let mut replay = genesis.native.clone();
+        bind_genesis_deployments(&genesis.identity, 1, Timing::DEFAULT, &mut replay);
+        assert_eq!(domain, replay.chain_id());
+        for (identity, timestamp, timing, epoch_fee) in [
+            (
+                &other.identity,
+                1,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                2,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                1,
+                Timing {
+                    admission_offset: Timing::DEFAULT.admission_offset + 1,
+                    ..Timing::DEFAULT
+                },
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                1,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee + 1,
+            ),
+        ] {
+            let mut changed = genesis.native.clone();
+            changed.epoch_fee = epoch_fee;
+            bind_genesis_deployments(identity, timestamp, timing, &mut changed);
+            assert_ne!(domain, changed.chain_id());
+        }
     }
 
     /// The genesis validator list must be exactly the clearing committee,
@@ -1108,7 +1840,7 @@ mod tests {
             timestamp: 1,
             admission_offset: Timing::GENESIS.admission_offset,
             challenge_duration: Timing::GENESIS.challenge_duration,
-            deployments: deployments().iter().map(EncodedDeployment::from).collect(),
+            native: EncodedNative::from(&crate::chain::harness::native(deployments())),
             validators,
         };
         let path = node_dir.join("genesis.json");
@@ -1156,6 +1888,7 @@ mod tests {
                 base_query_port: 4600,
                 operators: 2,
                 operator_port: 4700,
+                operator_rpc_port: 7001,
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             })
             .is_err()
@@ -1177,6 +1910,7 @@ mod tests {
             base_query_port: 4900,
             operators: 2,
             operator_port: 5000,
+            operator_rpc_port: 7001,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         })
         .unwrap_err();
