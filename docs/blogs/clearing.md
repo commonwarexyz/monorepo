@@ -290,9 +290,7 @@ Accounts with deposits or withdrawals must resolve their full admitted outcome b
 
 ## The Close Follows Accounts and Edges
 
-An [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) is available in the Commonware Library.
-
-In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4664), every account sends one unit payment to one of 512 recipients. Each of 100 validators receives the same update.
+We benchmarked the Commonware Library's [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with each account sending one unit payment to one of 512 recipients. All 100 validators receive the same update.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -366,7 +364,9 @@ Figure 6: Encoded sizes and processing times, measured on an AWS c8a.4xlarge wit
 
 With a million live accounts and only 1,024 senders paying the same 512 recipients, each validator receives 105 KB. Decoding, verification, and application take 8.69 ms with in-memory storage. On an EBS gp3 SSD, the same work takes 20.5 ms including QMDB commit.
 
-The SSD benchmark uses a 100 GiB volume at its default 3,000 IOPS and 125 MiB/s, with a 4 MiB QMDB cache. The full dataset fits in the host's 32 GiB of RAM, and the OS page cache was not cleared between runs. The timing excludes networking and the accepted-close journal.
+::: {.image-caption}
+SSD measurement: 100 GiB EBS gp3 volume at its default 3,000 IOPS and 125 MiB/s, with a 4 MiB QMDB cache. The full dataset fits in the host's 32 GiB of RAM, and the OS page cache was not cleared between runs. The timing excludes networking and the accepted-close journal.
+:::
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
