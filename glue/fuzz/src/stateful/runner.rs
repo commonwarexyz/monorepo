@@ -14,9 +14,13 @@ use super::{
     app::{Block, CorrectApp},
     backend::Backend,
     invariants::{self, Counts, EngineObservations},
+    marshal::Marshal,
     stack::{ElectorConfig, EngineConfig, register_channels, spawn_engine},
 };
-use commonware_consensus::types::View;
+use commonware_consensus::{
+    marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
+    types::View,
+};
 use commonware_cryptography::Digestible;
 use commonware_p2p::simulated::{
     Config as NetworkConfig, Link, Network as SimulatedNetwork, Oracle,
@@ -69,6 +73,8 @@ pub struct RunReport {
     pub target: &'static str,
     /// The database backend every node ran.
     pub database: &'static str,
+    /// The marshal variant every node ran.
+    pub marshal: &'static str,
     /// Why the run stopped.
     pub outcome: Outcome,
     /// How much each check compared.
@@ -79,11 +85,13 @@ impl RunReport {
     pub(super) const fn skipped(
         target: &'static str,
         database: &'static str,
+        marshal: &'static str,
         outcome: Outcome,
     ) -> Self {
         Self {
             target,
             database,
+            marshal,
             outcome,
             counts: Counts {
                 correct_nodes: 0,
@@ -105,10 +113,11 @@ impl fmt::Display for RunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] database={} outcome={} correct_nodes={} chain_heights={} state_comparisons={} \
-             verdict_comparisons={} restarts={}{}",
+            "[{}] database={} marshal={} outcome={} correct_nodes={} chain_heights={} \
+             state_comparisons={} verdict_comparisons={} restarts={}{}",
             self.target,
             self.database,
+            self.marshal,
             self.outcome,
             self.counts.correct_nodes,
             self.counts.chain_heights,
@@ -179,16 +188,18 @@ pub(super) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
 }
 
 /// The identities, network, and genesis block every driver starts from.
-pub(super) struct Cluster<B: Backend> {
+pub(super) struct Cluster<M: Marshal> {
     pub(super) participants: Arc<[PublicKey]>,
     pub(super) schemes: Vec<Scheme>,
     pub(super) oracle: Oracle<PublicKey, deterministic::Context>,
-    pub(super) genesis: Block<B::Commitment>,
+    pub(super) genesis: Block<M>,
 }
 
 /// Derive the identities and their mock schemes, start the simulated network
 /// with every directed link up, and build the shared genesis block.
-pub(super) async fn setup<B: Backend>(context: &mut deterministic::Context) -> Cluster<B> {
+pub(super) async fn setup<B: Backend, M: Marshal>(
+    context: &mut deterministic::Context,
+) -> Cluster<M> {
     let fixture = commonware_consensus::simplex::mocks::scheme::fixture_with::<false, true, true, _>(
         context,
         NAMESPACE,
@@ -232,7 +243,7 @@ pub(super) async fn setup<B: Backend>(context: &mut deterministic::Context) -> C
 
 /// One correct identity's engine, retained so a restart can rebuild it on the
 /// same storage partitions under the same key.
-pub(super) struct CorrectEngine<B: Backend, EC> {
+pub(super) struct CorrectEngine<B: Backend, M: Marshal, EC> {
     pub(super) engine: usize,
     identity: PublicKey,
     scheme: Scheme,
@@ -240,14 +251,20 @@ pub(super) struct CorrectEngine<B: Backend, EC> {
     partition: String,
     pub(super) observations: EngineObservations,
     handle: Handle<()>,
-    backend: PhantomData<B>,
+    backend: PhantomData<(B, M)>,
 }
 
-impl<B: Backend, EC: ElectorConfig> CorrectEngine<B, EC> {
+impl<B, M, EC> CorrectEngine<B, M, EC>
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+    EC: ElectorConfig,
+{
     /// Start one correct identity's engine.
     pub(super) async fn start(
         context: &deterministic::Context,
-        cluster: &Cluster<B>,
+        cluster: &Cluster<M>,
         engine: usize,
         elector: EC,
         observations: EngineObservations,
@@ -255,7 +272,7 @@ impl<B: Backend, EC: ElectorConfig> CorrectEngine<B, EC> {
         let identity = cluster.participants[engine].clone();
         let scheme = cluster.schemes[engine].clone();
         let partition = format!("engine-{engine}");
-        let handle = spawn(
+        let handle = spawn::<B, M, EC>(
             context,
             cluster,
             engine,
@@ -287,12 +304,12 @@ impl<B: Backend, EC: ElectorConfig> CorrectEngine<B, EC> {
     pub(super) async fn restart(
         &mut self,
         context: &deterministic::Context,
-        cluster: &Cluster<B>,
+        cluster: &Cluster<M>,
         downtime: Duration,
     ) {
         self.handle.abort();
         commonware_runtime::Clock::sleep(context, downtime).await;
-        self.handle = spawn(
+        self.handle = spawn::<B, M, EC>(
             context,
             cluster,
             self.engine,
@@ -308,18 +325,24 @@ impl<B: Backend, EC: ElectorConfig> CorrectEngine<B, EC> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spawn<B: Backend, EC: ElectorConfig>(
+async fn spawn<B, M, EC>(
     context: &deterministic::Context,
-    cluster: &Cluster<B>,
+    cluster: &Cluster<M>,
     engine: usize,
     identity: &PublicKey,
     scheme: &Scheme,
     elector: &EC,
     partition: &str,
     observations: &EngineObservations,
-) -> Handle<()> {
+) -> Handle<()>
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+    EC: ElectorConfig,
+{
     let channels = register_channels(&cluster.oracle, identity).await.whole();
-    spawn_engine::<B, _, _, _, _, _, _, _>(
+    spawn_engine::<B, M, _, _, _, _, _, _, _>(
         context.child("correct").with_attribute("index", engine),
         cluster.oracle.clone(),
         EngineConfig {
@@ -328,7 +351,7 @@ async fn spawn<B: Backend, EC: ElectorConfig>(
             elector: elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: partition.to_string(),
-            application: CorrectApp::<B>::new(cluster.genesis.clone(), observations.clone()),
+            application: CorrectApp::<B, M>::new(cluster.genesis.clone(), observations.clone()),
             observations: observations.clone(),
         },
         channels,
@@ -365,9 +388,9 @@ pub(super) fn restart_schedule(
 /// would otherwise be free to satisfy a one-height requirement in the first
 /// view and never reach the second or third. A driver that scripts nothing
 /// passes `View::zero()`, and then every applied height counts.
-pub(super) fn waiters<B: Backend, EC>(
+pub(super) fn waiters<B: Backend, M: Marshal, EC>(
     context: &deterministic::Context,
-    nodes: &[CorrectEngine<B, EC>],
+    nodes: &[CorrectEngine<B, M, EC>],
     required: usize,
     scripted_through: View,
 ) -> Vec<Handle<()>> {
@@ -396,12 +419,12 @@ pub(super) fn waiters<B: Backend, EC>(
 }
 
 /// Check the invariants over the correct nodes and report what was compared.
-pub(super) fn measure<B: Backend, EC>(
+pub(super) fn measure<B: Backend, M: Marshal, EC>(
     target: &'static str,
     outcome: Outcome,
-    nodes: &[CorrectEngine<B, EC>],
+    nodes: &[CorrectEngine<B, M, EC>],
     observations: &[EngineObservations],
-    genesis: &Block<B::Commitment>,
+    genesis: &Block<M>,
 ) -> RunReport {
     let correct: Vec<(usize, &EngineObservations)> = nodes
         .iter()
@@ -417,6 +440,7 @@ pub(super) fn measure<B: Backend, EC>(
     RunReport {
         target,
         database: B::NAME,
+        marshal: M::NAME,
         outcome,
         counts,
     }

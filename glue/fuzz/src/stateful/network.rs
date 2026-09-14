@@ -21,13 +21,15 @@
 //!
 //! The database-sync channel is not split: every message on it is viewless, so
 //! sharing the identity's sender and delivering to both halves already is the
-//! rule.
+//! rule. The dissemination channel is classified by the marshal variant: a
+//! broadcast block names its round, while a shard names only a commitment,
+//! so under the coding marshal every shard is viewless and reaches both halves.
 
 // The mock certificate scheme's codec configuration is a unit value; the
 // bindings below stay so the shape survives a scheme whose configuration is not.
 #![allow(clippy::let_unit_value)]
 
-use super::{Digest, PublicKey, Scheme, app::Block, backend::Commitment};
+use super::{Digest, PublicKey, Scheme, marshal::Marshal};
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     Viewable,
@@ -62,15 +64,16 @@ enum Routing {
     Undecodable,
 }
 
-/// Classify a message on the vote channel.
-fn vote_routing(message: &IoBuf) -> Routing {
-    Vote::<Scheme, Digest>::decode(message.clone())
+/// Classify a message on the vote channel. Votes name the marshal variant's
+/// payload.
+fn vote_routing<M: Marshal>(message: &IoBuf) -> Routing {
+    Vote::<Scheme, M::Payload>::decode(message.clone())
         .map_or(Routing::Undecodable, |vote| Routing::Partition(vote.view()))
 }
 
 /// Classify a message on the certificate channel.
-fn certificate_routing(message: &IoBuf, codec: &CertificateCfg) -> Routing {
-    Certificate::<Scheme, Digest>::decode_cfg(message.clone(), codec)
+fn certificate_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg) -> Routing {
+    Certificate::<Scheme, M::Payload>::decode_cfg(message.clone(), codec)
         .map_or(Routing::Undecodable, |certificate| {
             Routing::Partition(certificate.view())
         })
@@ -80,16 +83,18 @@ fn certificate_routing(message: &IoBuf, codec: &CertificateCfg) -> Routing {
 ///
 /// A request names its view directly. A response carries a certificate, whose
 /// view is the one it answers for. An error names nothing.
-fn simplex_resolver_routing(message: &IoBuf, codec: &CertificateCfg) -> Routing {
+fn simplex_resolver_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg) -> Routing {
     let Ok(message) = ResolverMessage::<U64>::decode(message.clone()) else {
         return Routing::Undecodable;
     };
     match message.payload {
         ResolverPayload::Request(key) => Routing::Partition(View::new(u64::from(key))),
-        ResolverPayload::Response(bytes) => Certificate::<Scheme, Digest>::decode_cfg(bytes, codec)
-            .map_or(Routing::Undecodable, |certificate| {
-                Routing::Partition(certificate.view())
-            }),
+        ResolverPayload::Response(bytes) => {
+            Certificate::<Scheme, M::Payload>::decode_cfg(bytes, codec)
+                .map_or(Routing::Undecodable, |certificate| {
+                    Routing::Partition(certificate.view())
+                })
+        }
         ResolverPayload::Error => Routing::Viewless,
     }
 }
@@ -110,12 +115,11 @@ fn backfill_routing(message: &IoBuf) -> Routing {
     }
 }
 
-/// Classify a message on the block broadcast channel. A broadcast payload is a
-/// bare block, whose embedded consensus context names its round; the block
-/// carries the commitment of the backend the cluster runs.
-fn broadcast_routing<C: Commitment>(message: &IoBuf) -> Routing {
-    Block::<C>::decode(message.clone()).map_or(Routing::Undecodable, |block| {
-        Routing::Partition(block.context.round.view())
+/// Classify a message on the dissemination channel. The marshal variant says
+/// what travels on it and whether that names a view.
+fn broadcast_routing<M: Marshal>(message: &IoBuf) -> Routing {
+    M::Wire::decode_cfg(message.clone(), &M::wire_cfg()).map_or(Routing::Undecodable, |wire| {
+        M::wire_view(&wire).map_or(Routing::Viewless, Routing::Partition)
     })
 }
 
@@ -161,8 +165,8 @@ fn router(
 }
 
 macro_rules! channel {
-    ($forward:ident, $route:ident, $classify:expr) => {
-        pub(super) fn $forward(
+    ($forward:ident, $route:ident, $classify:ident) => {
+        pub(super) fn $forward<M: Marshal>(
             participants: Arc<[PublicKey]>,
             scenario: Scenario,
             term_length: TermLength,
@@ -171,23 +175,23 @@ macro_rules! channel {
         + Sync
         + Clone
         + 'static {
-            forwarder(participants, scenario, term_length, $classify)
+            forwarder(participants, scenario, term_length, $classify::<M>)
         }
 
-        pub(super) fn $route(
+        pub(super) fn $route<M: Marshal>(
             participants: Arc<[PublicKey]>,
             scenario: Scenario,
             term_length: TermLength,
         ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
-            router(participants, scenario, term_length, $classify)
+            router(participants, scenario, term_length, $classify::<M>)
         }
     };
 }
 
 channel!(vote_forwarder, vote_router, vote_routing);
-channel!(backfill_forwarder, backfill_router, backfill_routing);
+channel!(broadcast_forwarder, broadcast_router, broadcast_routing);
 
-pub(super) fn broadcast_forwarder<C: Commitment>(
+pub(super) fn backfill_forwarder(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -196,46 +200,18 @@ pub(super) fn broadcast_forwarder<C: Commitment>(
 + Sync
 + Clone
 + 'static {
-    forwarder(participants, scenario, term_length, broadcast_routing::<C>)
+    forwarder(participants, scenario, term_length, backfill_routing)
 }
 
-pub(super) fn broadcast_router<C: Commitment>(
+pub(super) fn backfill_router(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
 ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
-    router(participants, scenario, term_length, broadcast_routing::<C>)
+    router(participants, scenario, term_length, backfill_routing)
 }
 
-pub(super) fn certificate_forwarder(
-    participants: Arc<[PublicKey]>,
-    scenario: Scenario,
-    term_length: TermLength,
-    scheme: Scheme,
-) -> impl Fn(SplitOrigin, &Recipients<PublicKey>, &IoBuf) -> Option<Recipients<PublicKey>>
-+ Send
-+ Sync
-+ Clone
-+ 'static {
-    let codec = scheme.certificate_codec_config();
-    forwarder(participants, scenario, term_length, move |message| {
-        certificate_routing(message, &codec)
-    })
-}
-
-pub(super) fn certificate_router(
-    participants: Arc<[PublicKey]>,
-    scenario: Scenario,
-    term_length: TermLength,
-    scheme: Scheme,
-) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
-    let codec = scheme.certificate_codec_config();
-    router(participants, scenario, term_length, move |message| {
-        certificate_routing(message, &codec)
-    })
-}
-
-pub(super) fn resolver_forwarder(
+pub(super) fn certificate_forwarder<M: Marshal>(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -247,11 +223,11 @@ pub(super) fn resolver_forwarder(
 + 'static {
     let codec = scheme.certificate_codec_config();
     forwarder(participants, scenario, term_length, move |message| {
-        simplex_resolver_routing(message, &codec)
+        certificate_routing::<M>(message, &codec)
     })
 }
 
-pub(super) fn resolver_router(
+pub(super) fn certificate_router<M: Marshal>(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -259,7 +235,35 @@ pub(super) fn resolver_router(
 ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     let codec = scheme.certificate_codec_config();
     router(participants, scenario, term_length, move |message| {
-        simplex_resolver_routing(message, &codec)
+        certificate_routing::<M>(message, &codec)
+    })
+}
+
+pub(super) fn resolver_forwarder<M: Marshal>(
+    participants: Arc<[PublicKey]>,
+    scenario: Scenario,
+    term_length: TermLength,
+    scheme: Scheme,
+) -> impl Fn(SplitOrigin, &Recipients<PublicKey>, &IoBuf) -> Option<Recipients<PublicKey>>
++ Send
++ Sync
++ Clone
++ 'static {
+    let codec = scheme.certificate_codec_config();
+    forwarder(participants, scenario, term_length, move |message| {
+        simplex_resolver_routing::<M>(message, &codec)
+    })
+}
+
+pub(super) fn resolver_router<M: Marshal>(
+    participants: Arc<[PublicKey]>,
+    scenario: Scenario,
+    term_length: TermLength,
+    scheme: Scheme,
+) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
+    let codec = scheme.certificate_codec_config();
+    router(participants, scenario, term_length, move |message| {
+        simplex_resolver_routing::<M>(message, &codec)
     })
 }
 

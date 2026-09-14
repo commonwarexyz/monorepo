@@ -30,10 +30,16 @@
 //! - `app` holds the correct and faulty applications.
 //! - `backend` holds the statically dispatched database backends: what differs
 //!   between the QMDB adapter classes and nothing else.
+//! - `marshal` holds the two marshal variants an engine may run, the standard
+//!   `Deferred` wrapper over buffered block broadcast and the coding
+//!   `Marshaled` wrapper over shard dissemination, and the type-erased
+//!   application and reporter that keep consensus monomorphized once per
+//!   variant rather than once per backend and application.
 //! - `stack` builds one engine and is the unit a restart rebuilds.
 //! - `runner` holds what the cluster drivers share: cluster setup, correct-node
 //!   startup and restart, the height waiters, and the measurement point.
-//! - `twins` is the byzantine driver: five engines, no crashes.
+//! - `twins` is the byzantine driver: five engines, no crashes. It runs over
+//!   the standard marshal and, as its own target, over the coding marshal.
 //! - `restarts` is the environment driver: four correct engines, crashed and
 //!   restarted on a schedule.
 //! - `db_restarts` runs the restart driver over every database backend.
@@ -51,7 +57,11 @@ mod backend;
 mod db_restarts;
 mod input;
 mod invariants;
-#[cfg(feature = "stateful-cert-mock-twins")]
+mod marshal;
+#[cfg(any(
+    feature = "stateful-cert-mock-twins",
+    feature = "stateful-cert-mock-twins-coding"
+))]
 mod network;
 #[cfg(feature = "stateful-probe")]
 mod probe;
@@ -62,7 +72,10 @@ mod probe;
 mod restarts;
 mod runner;
 mod stack;
-#[cfg(feature = "stateful-cert-mock-twins")]
+#[cfg(any(
+    feature = "stateful-cert-mock-twins",
+    feature = "stateful-cert-mock-twins-coding"
+))]
 mod twins;
 
 use commonware_consensus::simplex::{mocks::scheme::Scheme as MockScheme, types::Context};
@@ -75,6 +88,7 @@ pub use input::{
     StatefulRestartsFuzzInput, StatefulTwinsFuzzInput,
 };
 pub use invariants::Counts;
+use marshal::Marshal;
 #[cfg(feature = "stateful-probe")]
 pub use probe::{ProbeReport, fuzz_stateful_probe, run_stateful_probe};
 #[cfg(any(
@@ -89,6 +103,8 @@ use std::{
 };
 #[cfg(feature = "stateful-cert-mock-twins")]
 pub use twins::{fuzz_stateful_cert_mock_twins, run_stateful_twins};
+#[cfg(feature = "stateful-cert-mock-twins-coding")]
+pub use twins::{fuzz_stateful_cert_mock_twins_coding, run_stateful_twins_coding};
 
 /// Identity key type.
 pub(crate) type PublicKey = ed25519::PublicKey;
@@ -103,8 +119,9 @@ pub(crate) type Digest = sha256::Digest;
 /// harness has no use for the fault evidence attribution would produce.
 pub(crate) type Scheme = MockScheme<PublicKey, false>;
 
-/// The consensus context embedded in every block.
-pub(crate) type Ctx = Context<Digest, PublicKey>;
+/// The consensus context embedded in every block: the payload votes and
+/// certificates name is the marshal variant's.
+type Ctx<M> = Context<<M as Marshal>::Payload, PublicKey>;
 
 /// Namespace for the mock certificate scheme fixture.
 pub(crate) const NAMESPACE: &[u8] = b"glue_fuzz_stateful";

@@ -11,6 +11,7 @@ stateful-all = [
 	"stateful-cert-mock-restarts",
 	"stateful-cert-mock-restarts-db",
 	"stateful-cert-mock-twins",
+	"stateful-cert-mock-twins-coding",
 	"stateful-probe",
 ]
 mocks = [
@@ -22,6 +23,7 @@ mocks = [
 stateful-cert-mock-restarts = [ "mocks" ]
 stateful-cert-mock-restarts-db = [ "mocks" ]
 stateful-cert-mock-twins = [ "mocks" ]
+stateful-cert-mock-twins-coding = [ "mocks", "dep:commonware-coding" ]
 stateful-probe = [ "mocks" ]
 
 [package.metadata]
@@ -36,6 +38,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-actor.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
+commonware-coding = { workspace = true, optional = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-glue.workspace = true
@@ -56,6 +59,14 @@ tracing.workspace = true
 name = "stateful_cert_mock_twins"
 path = "fuzz_targets/stateful_cert_mock_twins.rs"
 required-features = [ "stateful-cert-mock-twins" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_twins_coding"
+path = "fuzz_targets/stateful_cert_mock_twins_coding.rs"
+required-features = [ "stateful-cert-mock-twins-coding" ]
 test = false
 doc = false
 bench = false

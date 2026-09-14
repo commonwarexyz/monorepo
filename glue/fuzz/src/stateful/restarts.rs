@@ -8,12 +8,14 @@
 //! pending map, forcing lazy recovery on its next proposal or verification.
 //!
 //! Because every node here is correct, the invariants are checked over all four.
+//! Every node runs the standard marshal.
 
 use super::{
     NUM_IDENTITIES, RUN_TIMEOUT,
     backend::{Any, Backend},
     input::StatefulRestartsFuzzInput,
     invariants::EngineObservations,
+    marshal::Standard,
     runner::{self, CorrectEngine, Outcome, RunReport},
     stack::round_robin,
 };
@@ -60,7 +62,7 @@ async fn run<B: Backend>(
     input: StatefulRestartsFuzzInput,
     entropy: Vec<u8>,
 ) -> RunReport {
-    let cluster = runner::setup::<B>(&mut context).await;
+    let cluster = runner::setup::<B, Standard>(&mut context).await;
     let elector = round_robin(input.term_length);
 
     let observations: Vec<EngineObservations> = (0..NUM_IDENTITIES as usize)
@@ -69,7 +71,14 @@ async fn run<B: Backend>(
     let mut correct = Vec::with_capacity(observations.len());
     for (index, node) in observations.iter().enumerate() {
         correct.push(
-            CorrectEngine::start(&context, &cluster, index, elector.clone(), node.clone()).await,
+            CorrectEngine::<B, Standard, _>::start(
+                &context,
+                &cluster,
+                index,
+                elector.clone(),
+                node.clone(),
+            )
+            .await,
         );
     }
 

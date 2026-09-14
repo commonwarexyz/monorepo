@@ -95,8 +95,8 @@ produces, and on whether a block verifies.
 ## 3. Technical requirements
 
 - **R1 — Focused fuzz targets.** The feature MUST expose independently runnable libFuzzer targets
-  for Twins safety, restart recovery, database-adapter coverage under restart recovery, and the
-  Stateful probe protocol.
+  for Twins safety over the standard marshal, Twins safety over the coding marshal, restart
+  recovery, database-adapter coverage under restart recovery, and the Stateful probe protocol.
   Targets MAY share library machinery, but each distinct search space MUST retain its own corpus so
   progress in one does not displace inputs for another.
 - **R2 — Thin targets.** Every fuzz-target file MUST only instantiate libFuzzer and invoke a
@@ -128,13 +128,17 @@ produces, and on whether a block verifies.
   in the signing or certificate path, because it is too slow for fuzzing.
 - **R10 — Fuzz-only implementation.** Every file changed by this feature MUST be under
   `glue/fuzz/`. No file outside that directory—including crate sources, workspace metadata, or CI
-  configuration—may be modified. All exercised behavior MUST be reached through public APIs
+  configuration—may be modified, with one exception: adding a dependency to `glue/fuzz/Cargo.toml`
+  necessarily records it in the workspace `Cargo.lock`, and that lockfile entry is the only change
+  permitted outside `glue/fuzz/`. All exercised behavior MUST be reached through public APIs
   exposed by the existing crates.
 - **R11 — Cluster node stack.** In the Twins, restart, and database-adapter targets, every engine
-  MUST run the real stack: a Simplex engine, a marshal actor in the Standard `Deferred`
-  configuration, the real Stateful actor, and a real QMDB-backed database selected for that target.
-  Stateful is incompatible with `Inline`, which does not verify the embedded context, so `Inline`
-  is excluded. Each node MUST use a single database and start with no finalized floor attached, so
+  MUST run the real stack: a Simplex engine, a marshal actor, the real Stateful actor, and a real
+  QMDB-backed database selected for that target. The restart, database-adapter, and standard Twins
+  targets run marshal in the Standard `Deferred` configuration; the coding Twins target runs it in
+  the Coding `Marshaled` configuration, with blocks disseminated as erasure-coded shards. Stateful
+  is incompatible with `Inline`, which does not verify the embedded context, so `Inline` is
+  excluded. Each node MUST use a single database and start with no finalized floor attached, so
   startup uses marshal reconciliation and does not enter peer state sync. The probe target is
   governed separately by R20 and R21.
 - **R12 — Restart scope.** The restart targets, plain and database-adapter, MUST accept a
@@ -199,7 +203,15 @@ produces, and on whether a block verifies.
   statically dispatched, harness-local backend abstraction. Adapter-specific
   code MUST be limited to database types and configuration, valid batch operations, sync-target
   construction, and canonical-commitment extraction. The feature MUST NOT duplicate the complete
-  runner or node stack for each adapter or add dynamic dispatch to the exercised path.
+  runner or node stack for each adapter or add dynamic dispatch to the path through the Stateful
+  actor and its adapter; the only erasure is the one R23 places at the consensus boundary.
+- **R23 — Consensus monomorphized per marshal variant.** The block type consensus carries MUST be
+  generic over the marshal variant and over nothing else: every database backend commits through
+  one commitment type, and the stateful actor's mailbox is type-erased before it reaches the
+  marshal wrapper and the marshal actor. Simplex, marshal, and the wrapper are then compiled once
+  per variant in a binary, and only the Stateful actor and the adapter it manages vary with the
+  backend. The erasure sits on the consensus side of the boundary; the Stateful actor is driven
+  through its real mailbox without indirection.
 
 ## 4. Properties
 
@@ -243,11 +255,13 @@ and is not itself a requirement. The target names in §5.2 are normative (R1, R2
 - `mod.rs` — module wiring; re-exports the input type and the entry function.
 - `input.rs` — the fuzz input type and its hand-written `Arbitrary`.
 - `network.rs` — the per-channel split forwarders and routers that realise the twins partition.
-- `stack.rs` — construction of one engine: channels, broadcast, archives, marshal, Stateful, QMDB,
-  and the Simplex engine, plus the restart path.
+- `stack.rs` — construction of one engine: channels, dissemination, archives, marshal, Stateful,
+  QMDB, and the Simplex engine, plus the restart path.
+- `marshal.rs` — the standard and coding marshal variants (payload, dissemination, wrapper, and
+  dissemination-channel routing) and the type-erased application and reporter of R23.
 - `app.rs` — the correct application and the faulty application.
 - `backend.rs` — statically dispatched database types, configurations, valid workload operations,
-  and commitment conversion for the database-adapter matrix.
+  and the shared commitment with its conversion to each adapter's sync target.
 - `probe.rs` — deterministic Probe topology, adversarial event driver, global source-state model,
   and Probe-specific oracles.
 - `runner.rs` — deterministic cluster execution and measurement shared by the Twins, restart, and
@@ -257,6 +271,7 @@ and is not itself a requirement. The target names in §5.2 are normative (R1, R2
 ### 5.2 Fuzz targets
 
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_twins.rs`
+- `glue/fuzz/fuzz_targets/stateful_cert_mock_twins_coding.rs`
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts.rs`
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts_db.rs`
 - `glue/fuzz/fuzz_targets/stateful_probe.rs`
@@ -328,7 +343,10 @@ Every target MUST use its bounded, deterministic structure below.
 ### 7.1 Twins
 
 1. **Setup.** Four identities and five engines are constructed per R4 and R11 using the
-   representative `any` adapter. The compromised identity's channels are split per A1.
+   representative `any` adapter. The compromised identity's channels are split per A1. The
+   standard and coding targets differ only in the marshal variant every engine runs; under the
+   coding marshal the dissemination channel carries shards, which name no view and so reach both
+   halves.
 2. **Prefix.** The engines execute the selected bounded Twins scenario while the secondary half's
    faulty application is active.
 3. **Suffix.** After the scripted prefix, the network is whole and both compromised halves address
@@ -425,8 +443,8 @@ no exclusion may be introduced in code.
 - **Restarting the compromised identity.** Excluded by R12.
 - **Peer state sync.** No node attaches a finalized floor, so the state-sync startup path and the
   sync engines are not exercised.
-- **Marshal variants other than Standard `Deferred`.** `Inline` is unsupported by Stateful; the
-  coding variant is a later target.
+- **Marshal variants other than Standard `Deferred` and Coding `Marshaled`.** `Inline` is
+  unsupported by Stateful. The restart and database-adapter targets run the standard marshal only.
 - **Multi-database sets.** Each node manages a single database.
 - **Pruning.** Periodic database and marshal pruning is disabled, so the deferred prune path is not
   exercised.
@@ -459,15 +477,19 @@ should confirm. `cargo fuzz` requires a nightly toolchain; set it as a directory
    `cargo nextest run -p commonware-glue-fuzz stateful::` runs every fixed-input scenario and
    reports all tests passing, exercising I1-I4 and I6 (R15; acceptance criterion 2).
 
-6. **The fuzz target builds.**
-   `cargo +nightly fuzz build --fuzz-dir glue/fuzz stateful_cert_mock_twins` completes with no
-   warnings and no errors (acceptance criterion 1).
+6. **The fuzz targets build.**
+   `cargo +nightly fuzz build --fuzz-dir glue/fuzz stateful_cert_mock_twins` and
+   `cargo +nightly fuzz build --fuzz-dir glue/fuzz stateful_cert_mock_twins_coding` each complete
+   with no warnings and no errors (acceptance criterion 1). The coding target is built with only
+   its own feature enabled, so the standard targets are confirmed not to pull in the erasure
+   coding stack.
 
 7. **Throughput clears the floor.**
-   A short smoke run, `cargo +nightly fuzz run --fuzz-dir glue/fuzz stateful_cert_mock_twins --
-   -max_total_time=8`, completes with no crash, hang, or out-of-memory, and libFuzzer's reported
-   `exec/s` is above 10 (acceptance criterion 3, R13). If it is not, the run bounds in R13 are what
-   move; the invariants are not.
+   A short smoke run of each Twins target, `cargo +nightly fuzz run --fuzz-dir glue/fuzz
+   stateful_cert_mock_twins -- -max_total_time=8` and the same for
+   `stateful_cert_mock_twins_coding` over its own corpus, completes with no crash, hang, or
+   out-of-memory, and libFuzzer's reported `exec/s` is above 10 (acceptance criterion 3, R13). If
+   it is not, the run bounds in R13 are what move; the invariants are not.
 
 8. **The checks are not vacuous.** A test can pass because nothing was wrong, or because nothing
    was checked. This step rules out the second case.

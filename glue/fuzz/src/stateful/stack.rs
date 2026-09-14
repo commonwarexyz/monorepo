@@ -1,23 +1,28 @@
-//! Construction of one engine: channels, broadcast, archives, marshal, the
+//! Construction of one engine: channels, dissemination, archives, marshal, the
 //! stateful actor, QMDB, and the Simplex engine.
 //!
 //! An engine is spawned as a single supervised task. Every actor it starts is a
 //! descendant of that task, so aborting the task crashes the whole node at
 //! once, and rebuilding it on the same storage partitions is a restart.
+//!
+//! The marshal variant selects dissemination, the marshal actor's block type,
+//! and the wrapper Simplex drives; the stateful actor's mailbox is erased
+//! before it reaches that wrapper, so everything above the stateful actor is
+//! monomorphized once per variant rather than once per backend.
 
 use super::{
     Ctx, EPOCH_LENGTH, IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, PublicKey, Scheme,
     app::Block,
     backend::{Backend, Databases},
     invariants::{EngineObservations, ObservingReporter},
+    marshal::{ErasedApplication, ErasedReporter, Marshal},
 };
-use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
         self,
-        core::Actor as MarshalActor,
+        ancestry::BlockProvider,
+        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
     },
     simplex::{
         self,
@@ -27,7 +32,7 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, TermLength, ViewDelta},
 };
-use commonware_cryptography::{Digestible, Sha256, certificate::ConstantProvider};
+use commonware_cryptography::{Sha256, certificate::ConstantProvider};
 use commonware_glue::stateful::{
     Application, Config as StatefulConfig, Stateful as StatefulActor, SyncPlan,
     db::{SyncEngineConfig, p2p as qmdb_resolver},
@@ -151,11 +156,11 @@ pub(super) struct EngineChannels<VS, CS, RS, BS, FS> {
 }
 
 /// Everything one engine needs, so a restart can rebuild it unchanged.
-pub(super) struct EngineConfig<B: Backend, A, EC> {
+pub(super) struct EngineConfig<M: Marshal, A, EC> {
     pub(super) identity: PublicKey,
     pub(super) scheme: Scheme,
     pub(super) elector: EC,
-    pub(super) genesis: Block<B::Commitment>,
+    pub(super) genesis: Block<M>,
     pub(super) partition_prefix: String,
     pub(super) application: A,
     pub(super) observations: EngineObservations,
@@ -165,19 +170,21 @@ pub(super) struct EngineConfig<B: Backend, A, EC> {
 ///
 /// The task never returns, so the whole node stays alive until the handle is
 /// aborted; aborting it takes every descendant actor down with it.
-pub(super) fn spawn_engine<B, A, EC, VS, CS, RS, BS, FS>(
+pub(super) fn spawn_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<B, A, EC>,
+    config: EngineConfig<M, A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) -> Handle<()>
 where
     B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
     A: Application<
             deterministic::Context,
             SigningScheme = Scheme,
-            Context = Ctx,
-            Block = Block<B::Commitment>,
+            Context = Ctx<M>,
+            Block = Block<M>,
             Databases = Databases<B>,
             Provider = (),
             Input = (),
@@ -190,22 +197,24 @@ where
     EC: ElectorConfig,
 {
     context.spawn(move |context| async move {
-        run_engine::<B, _, _, _, _, _, _, _>(context, oracle, config, channels).await;
+        run_engine::<B, M, _, _, _, _, _, _, _>(context, oracle, config, channels).await;
     })
 }
 
-async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
+async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<B, A, EC>,
+    config: EngineConfig<M, A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) where
     B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
     A: Application<
             deterministic::Context,
             SigningScheme = Scheme,
-            Context = Ctx,
-            Block = Block<B::Commitment>,
+            Context = Ctx<M>,
+            Block = Block<M>,
             Databases = Databases<B>,
             Provider = (),
             Input = (),
@@ -246,19 +255,14 @@ async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
         channels.backfill,
     );
 
-    // Block broadcast.
-    let (broadcast_engine, buffer) = buffered::Engine::new(
+    // Block dissemination: buffered broadcast or shards, per the variant.
+    let buffer = M::start_dissemination(
         context.child("broadcast"),
-        buffered::Config {
-            public_key: identity.clone(),
-            mailbox_size: MAILBOX_SIZE,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
-            peer_provider: oracle.manager(),
-        },
+        &oracle,
+        identity.clone(),
+        provider.clone(),
+        channels.broadcast,
     );
-    broadcast_engine.start(channels.broadcast);
 
     // Marshal archives.
     let finalizations_by_height = prunable::Archive::init(
@@ -280,14 +284,14 @@ async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
     let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
 
     let (marshal_actor, marshal_mailbox, floor) =
-        MarshalActor::<_, Standard<Block<B::Commitment>>, _, _, _, _, _>::init(
+        MarshalActor::<_, M::Variant, _, _, _, _, _>::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider,
+                provider: provider.clone(),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone().into()),
+                start: plan.marshal_start(M::stored_genesis(&genesis)),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention: VIEW_RETENTION,
@@ -339,15 +343,18 @@ async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
         },
     );
 
-    let deferred = Deferred::new(
-        context.child("deferred"),
-        stateful_mailbox.clone(),
+    // Consensus sees the stateful mailbox only through the erased application
+    // and reporter, so nothing above this point varies with the backend.
+    let automaton = M::automaton(
+        context.child("automaton"),
+        ErasedApplication::new(stateful_mailbox.clone()),
         marshal_mailbox.clone(),
-        FixedEpocher::new(EPOCH_LENGTH),
+        buffer.clone(),
+        provider,
     );
 
     marshal_actor.start(
-        ObservingReporter::new(observations, stateful_mailbox),
+        ObservingReporter::new(observations, ErasedReporter::<M>::new(stateful_mailbox)),
         buffer,
         resolver,
     );
@@ -359,14 +366,14 @@ async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
             scheme,
             elector,
             blocker: oracle.control(identity),
-            automaton: deferred.clone(),
-            relay: deferred,
+            automaton: automaton.clone(),
+            relay: automaton,
             reporter: marshal_mailbox,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: MAILBOX_SIZE,
             epoch: Epoch::zero(),
-            floor: simplex::config::Floor::Genesis(genesis.digest()),
+            floor: simplex::config::Floor::Genesis(M::genesis_payload(&genesis)),
             replay_buffer: IO_BUFFER_SIZE,
             write_buffer: IO_BUFFER_SIZE,
             page_cache,

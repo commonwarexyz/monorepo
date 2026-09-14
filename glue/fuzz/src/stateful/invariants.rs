@@ -6,13 +6,14 @@
 //! keyed by engine rather than by identity because the compromised identity's
 //! two halves share a key.
 
-use super::{Ctx, Digest};
+use super::{Digest, app::Block, marshal::Marshal};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    CertifiableBlock, Reporter,
+    Block as _, Heightable as _, Reporter,
     marshal::Update,
     types::{Height, View},
 };
+use commonware_cryptography::Digestible as _;
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,12 +36,6 @@ struct Linkage {
     /// The parent named by the block's embedded consensus context.
     context_parent: Digest,
 }
-
-/// A block the observations can record: any block the cluster's marshal
-/// delivers, whatever database backend it commits to.
-pub(super) trait Observable: CertifiableBlock<Digest = Digest, Context = Ctx> {}
-
-impl<B: CertifiableBlock<Digest = Digest, Context = Ctx>> Observable for B {}
 
 #[derive(Default)]
 struct Records {
@@ -77,7 +72,7 @@ impl EngineObservations {
         Self::default()
     }
 
-    fn record_delivery(&self, block: &impl Observable) {
+    fn record_delivery<M: Marshal>(&self, block: &Block<M>) {
         let mut records = self.0.lock();
         records.delivered.push((block.height(), block.digest()));
         records.blocks.insert(
@@ -85,7 +80,7 @@ impl EngineObservations {
             Linkage {
                 digest: block.digest(),
                 parent: block.parent(),
-                context_parent: block.context().parent.1,
+                context_parent: block.context_parent(),
             },
         );
     }
@@ -179,12 +174,12 @@ impl<R> ObservingReporter<R> {
     }
 }
 
-impl<R, B> Reporter for ObservingReporter<R>
+impl<R, M> Reporter for ObservingReporter<R>
 where
-    R: Reporter<Activity = Update<B>>,
-    B: Observable,
+    R: Reporter<Activity = Update<Block<M>>>,
+    M: Marshal,
 {
-    type Activity = Update<B>;
+    type Activity = Update<Block<M>>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
@@ -446,13 +441,13 @@ pub(super) fn check_verdict_agreement(nodes: &[CorrectNode<'_>]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::{app::Block, backend::AnyCommitment};
+    use crate::stateful::{app::Block, backend::StateCommitment, marshal::Standard};
     use commonware_consensus::{
         simplex::types::Context,
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{Hasher, Sha256, Signer as _, ed25519, sha256};
-    use commonware_storage::{mmr::Location, qmdb::sync::Target};
+    use commonware_storage::mmr::Location;
     use commonware_utils::non_empty_range;
 
     fn digest(label: &[u8]) -> Digest {
@@ -463,7 +458,7 @@ mod tests {
         (Height::new(height), digest(label))
     }
 
-    fn block(height: u64, label: &[u8]) -> Block<AnyCommitment> {
+    fn block(height: u64, label: &[u8]) -> Block<Standard> {
         Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height)),
@@ -472,10 +467,11 @@ mod tests {
             },
             parent: digest(b"parent"),
             height: Height::new(height),
-            commitment: Target::new(
-                digest(label),
-                non_empty_range!(Location::new(0), Location::new(1)),
-            ),
+            commitment: StateCommitment {
+                root: digest(label),
+                sync_root: digest(label),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            },
         }
     }
 

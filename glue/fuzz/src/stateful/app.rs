@@ -14,12 +14,19 @@
 //! because `Stateful` panics deliberately on both.
 //!
 //! Both applications are generic over the database backend, which owns the
-//! workload one block applies and the commitment a block carries.
+//! workload one block applies and the extraction of the commitment a block
+//! carries, and over the marshal variant, which owns the payload the block's
+//! embedded consensus context names. The block itself is generic over the
+//! variant only: every backend commits through the same [`StateCommitment`],
+//! so consensus sees one block type per variant.
 
 use super::{
     Ctx, Digest, PublicKey, Scheme,
-    backend::{Backend, Batches, Commitment, Databases, MerkleizedBatches, Readers, Transition},
+    backend::{
+        Backend, Batches, Databases, MerkleizedBatches, Readers, StateCommitment, Transition,
+    },
     invariants::EngineObservations,
+    marshal::Marshal,
 };
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -34,7 +41,7 @@ use commonware_runtime::{BufMut, deterministic};
 use commonware_utils::FuzzRng;
 use futures::StreamExt;
 use rand::RngExt as _;
-use std::{marker::PhantomData, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 /// The state transition the correct application applies.
 const CORRECT_BUMP: u64 = 1;
@@ -46,15 +53,47 @@ const DIVERGENT_BUMP: u64 = 2;
 const FAULT_VIEWS: usize = 64;
 
 /// A block committing to the database state its execution produced.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Block<C> {
-    pub(super) context: Ctx,
+pub(super) struct Block<M: Marshal> {
+    pub(super) context: Ctx<M>,
     pub(super) parent: Digest,
     pub(super) height: Height,
-    pub(super) commitment: C,
+    pub(super) commitment: StateCommitment,
 }
 
-impl<C: Commitment> Write for Block<C> {
+impl<M: Marshal> Clone for Block<M> {
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            parent: self.parent,
+            height: self.height,
+            commitment: self.commitment.clone(),
+        }
+    }
+}
+
+impl<M: Marshal> fmt::Debug for Block<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("context", &self.context)
+            .field("parent", &self.parent)
+            .field("height", &self.height)
+            .field("commitment", &self.commitment)
+            .finish()
+    }
+}
+
+impl<M: Marshal> PartialEq for Block<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.parent == other.parent
+            && self.height == other.height
+            && self.commitment == other.commitment
+    }
+}
+
+impl<M: Marshal> Eq for Block<M> {}
+
+impl<M: Marshal> Write for Block<M> {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
         self.parent.write(buf);
@@ -63,7 +102,7 @@ impl<C: Commitment> Write for Block<C> {
     }
 }
 
-impl<C: Commitment> EncodeSize for Block<C> {
+impl<M: Marshal> EncodeSize for Block<M> {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.parent.encode_size()
@@ -72,7 +111,7 @@ impl<C: Commitment> EncodeSize for Block<C> {
     }
 }
 
-impl<C: Commitment> Read for Block<C> {
+impl<M: Marshal> Read for Block<M> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -80,12 +119,12 @@ impl<C: Commitment> Read for Block<C> {
             context: Context::read(buf)?,
             parent: Digest::read(buf)?,
             height: Height::read(buf)?,
-            commitment: C::read(buf)?,
+            commitment: StateCommitment::read(buf)?,
         })
     }
 }
 
-impl<C: Commitment> Digestible for Block<C> {
+impl<M: Marshal> Digestible for Block<M> {
     type Digest = Digest;
 
     fn digest(&self) -> Digest {
@@ -93,34 +132,34 @@ impl<C: Commitment> Digestible for Block<C> {
     }
 }
 
-impl<C: Commitment> Heightable for Block<C> {
+impl<M: Marshal> Heightable for Block<M> {
     fn height(&self) -> Height {
         self.height
     }
 }
 
-impl<C: Commitment> ConsensusBlock for Block<C> {
+impl<M: Marshal> ConsensusBlock for Block<M> {
     fn parent(&self) -> Digest {
         self.parent
     }
 }
 
-impl<C: Commitment> CertifiableBlock for Block<C> {
-    type Context = Ctx;
+impl<M: Marshal> CertifiableBlock for Block<M> {
+    type Context = Ctx<M>;
 
     fn context(&self) -> Self::Context {
         self.context.clone()
     }
 }
 
-impl<C: Commitment> Block<C> {
+impl<M: Marshal> Block<M> {
     /// The genesis block every engine starts from.
-    pub(super) fn genesis(leader: PublicKey, commitment: C) -> Self {
+    pub(super) fn genesis(leader: PublicKey, commitment: StateCommitment) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
                 leader,
-                parent: (View::zero(), Digest::EMPTY),
+                parent: (View::zero(), M::genesis_parent()),
             },
             parent: Digest::EMPTY,
             height: Height::zero(),
@@ -129,7 +168,12 @@ impl<C: Commitment> Block<C> {
     }
 
     /// Commit to an execution result.
-    const fn committing(context: Ctx, parent: Digest, height: Height, commitment: C) -> Self {
+    const fn committing(
+        context: Ctx<M>,
+        parent: Digest,
+        height: Height,
+        commitment: StateCommitment,
+    ) -> Self {
         Self {
             context,
             parent,
@@ -137,17 +181,22 @@ impl<C: Commitment> Block<C> {
             commitment,
         }
     }
+
+    /// The block digest the embedded consensus context names as its parent.
+    pub(super) fn context_parent(&self) -> Digest {
+        M::payload_block(&self.context.parent.1)
+    }
 }
 
 /// The application every correct node and the compromised identity's primary
 /// half runs, identically configured.
-pub(super) struct CorrectApp<B: Backend> {
-    genesis: Block<B::Commitment>,
+pub(super) struct CorrectApp<B: Backend, M: Marshal> {
+    genesis: Block<M>,
     observations: EngineObservations,
     backend: PhantomData<B>,
 }
 
-impl<B: Backend> Clone for CorrectApp<B> {
+impl<B: Backend, M: Marshal> Clone for CorrectApp<B, M> {
     fn clone(&self) -> Self {
         Self {
             genesis: self.genesis.clone(),
@@ -157,11 +206,8 @@ impl<B: Backend> Clone for CorrectApp<B> {
     }
 }
 
-impl<B: Backend> CorrectApp<B> {
-    pub(super) const fn new(
-        genesis: Block<B::Commitment>,
-        observations: EngineObservations,
-    ) -> Self {
+impl<B: Backend, M: Marshal> CorrectApp<B, M> {
+    pub(super) const fn new(genesis: Block<M>, observations: EngineObservations) -> Self {
         Self {
             genesis,
             observations,
@@ -170,10 +216,10 @@ impl<B: Backend> CorrectApp<B> {
     }
 }
 
-impl<B: Backend> Application<deterministic::Context> for CorrectApp<B> {
+impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<B, M> {
     type SigningScheme = Scheme;
-    type Context = Ctx;
-    type Block = Block<B::Commitment>;
+    type Context = Ctx<M>;
+    type Block = Block<M>;
     type Databases = Databases<B>;
     type Captured = ();
     type Provider = ();
@@ -199,7 +245,7 @@ impl<B: Backend> Application<deterministic::Context> for CorrectApp<B> {
         let height = Height::new(parent.height().get() + 1);
         let merkleized = B::execute(
             Transition {
-                context: &context.1,
+                view: context.1.round.view(),
                 parent: parent.digest(),
                 height,
                 bump: CORRECT_BUMP,
@@ -222,7 +268,7 @@ impl<B: Backend> Application<deterministic::Context> for CorrectApp<B> {
         let tip = ancestry.next().await?;
         let merkleized = B::execute(
             Transition {
-                context: &tip.context,
+                view: tip.context.round.view(),
                 parent: tip.parent,
                 height: tip.height(),
                 bump: CORRECT_BUMP,
@@ -244,7 +290,7 @@ impl<B: Backend> Application<deterministic::Context> for CorrectApp<B> {
         Some(
             B::execute(
                 Transition {
-                    context: &block.context,
+                    view: block.context.round.view(),
                     parent: block.parent,
                     height: block.height(),
                     bump: CORRECT_BUMP,
@@ -364,12 +410,12 @@ impl FaultSchedule {
 }
 
 /// The application the compromised identity's secondary half runs.
-pub(super) struct FaultyApp<B: Backend> {
-    inner: CorrectApp<B>,
+pub(super) struct FaultyApp<B: Backend, M: Marshal> {
+    inner: CorrectApp<B, M>,
     schedule: FaultSchedule,
 }
 
-impl<B: Backend> Clone for FaultyApp<B> {
+impl<B: Backend, M: Marshal> Clone for FaultyApp<B, M> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -378,23 +424,23 @@ impl<B: Backend> Clone for FaultyApp<B> {
     }
 }
 
-impl<B: Backend> FaultyApp<B> {
-    pub(super) const fn new(inner: CorrectApp<B>, schedule: FaultSchedule) -> Self {
+impl<B: Backend, M: Marshal> FaultyApp<B, M> {
+    pub(super) const fn new(inner: CorrectApp<B, M>, schedule: FaultSchedule) -> Self {
         Self { inner, schedule }
     }
 }
 
-impl<B: Backend> Application<deterministic::Context> for FaultyApp<B> {
+impl<B: Backend, M: Marshal> Application<deterministic::Context> for FaultyApp<B, M> {
     type SigningScheme = Scheme;
-    type Context = Ctx;
-    type Block = Block<B::Commitment>;
+    type Context = Ctx<M>;
+    type Block = Block<M>;
     type Databases = Databases<B>;
-    type Captured = <CorrectApp<B> as Application<deterministic::Context>>::Captured;
+    type Captured = <CorrectApp<B, M> as Application<deterministic::Context>>::Captured;
     type Provider = ();
     type Input = ();
 
     fn sync_targets(block: &Self::Block) -> super::backend::SyncTarget<B> {
-        <CorrectApp<B> as Application<deterministic::Context>>::sync_targets(block)
+        <CorrectApp<B, M> as Application<deterministic::Context>>::sync_targets(block)
     }
 
     async fn genesis(&mut self) -> Self::Block {
@@ -416,7 +462,7 @@ impl<B: Backend> Application<deterministic::Context> for FaultyApp<B> {
                 let height = Height::new(parent.height().get() + 1);
                 let merkleized = B::execute(
                     Transition {
-                        context: &context.1,
+                        view: context.1.round.view(),
                         parent: parent.digest(),
                         height,
                         bump: DIVERGENT_BUMP,

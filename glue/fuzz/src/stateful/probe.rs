@@ -39,8 +39,9 @@ use super::{
     PAGE_CACHE_SIZE, PAGE_SIZE, PROBE_EPOCH_LENGTH, PROBE_KNOWN_EPOCHS, PROBE_RETRY_TIMEOUT,
     PROBE_RUN_TIMEOUT, PROBE_STEP, PublicKey, Scheme,
     app::Block,
-    backend::{Any, AnyCommitment, Backend as _},
+    backend::{Any, Backend as _},
     input::{ProbeEvent, StatefulProbeFuzzInput},
+    marshal::Standard as StandardMarshal,
     runner::{self, Reportable},
     stack::{TEST_QUOTA, archive_config},
 };
@@ -121,8 +122,8 @@ const VIEW_RETENTION: ViewDelta = ViewDelta::new(10);
 const SECTION_ITEMS: NonZeroU64 = NZU64!(10);
 
 /// The block the sources' marshals store. The probe never looks inside a
-/// block, so the cluster's block over the `any` commitment serves.
-type ProbeBlock = Block<AnyCommitment>;
+/// block, so the cluster's block over the standard marshal serves.
+type ProbeBlock = Block<StandardMarshal>;
 type Variant = Standard<ProbeBlock>;
 type Floor = Finalization<Scheme, Digest>;
 type Mailbox = ProbeMailbox<Scheme, Variant>;

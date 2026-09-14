@@ -6,7 +6,8 @@
 //! bounded crash/restart schedule with storage retained, and the same chain,
 //! database-state, verdict, panic, and reproducibility predicates. The
 //! selection is dispatched statically here, so each backend runs its own
-//! monomorphized cluster and no trait object sits on the exercised path.
+//! monomorphized stateful actor and adapter; consensus above them is shared,
+//! since the block type does not vary with the backend.
 
 use super::{
     backend::{Any, Current, ImmutableCompact, ImmutableStandard, KeylessCompact, KeylessStandard},
