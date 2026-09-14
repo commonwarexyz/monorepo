@@ -111,7 +111,7 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 
 enum ProposalResponse<D> {
     Proposed(D),
-    WaitForParentCertification,
+    AwaitCertification,
 }
 
 enum ProposalReceiver<D> {
@@ -139,9 +139,7 @@ impl<D> Future for ProposalReceiver<D> {
             Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
                 result.map(|proposal| match proposal {
                     HandoffProposal::Proposed(payload) => ProposalResponse::Proposed(payload),
-                    HandoffProposal::WaitForParentCertification => {
-                        ProposalResponse::WaitForParentCertification
-                    }
+                    HandoffProposal::AwaitCertification => ProposalResponse::AwaitCertification,
                 })
             }),
         }
@@ -724,7 +722,7 @@ impl<
         // Try to use result
         let proposed = match proposed {
             Ok(ProposalResponse::Proposed(proposed)) => proposed,
-            Ok(ProposalResponse::WaitForParentCertification) => {
+            Ok(ProposalResponse::AwaitCertification) => {
                 self.state.defer_handoff(&context);
                 return None;
             }

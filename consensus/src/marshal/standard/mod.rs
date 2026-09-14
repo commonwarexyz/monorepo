@@ -3467,7 +3467,7 @@ mod tests {
                 let optimistic_rx = wrapper.propose_handoff(reproposal_context.clone()).await;
                 assert_eq!(
                     optimistic_rx.await.expect("optimistic decision missing"),
-                    HandoffProposal::WaitForParentCertification,
+                    HandoffProposal::AwaitCertification,
                     "{kind:?}: application deferral must precede automatic boundary reproposal"
                 );
 
