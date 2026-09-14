@@ -1,29 +1,27 @@
 //! Storage for a single partition of a partitioned index.
 //!
 //! A partition holds the values for all translated keys that share a key prefix, stored as sorted
-//! struct-of-arrays: parallel `keys`/`vals` vectors ordered by translated key. Storing keys and
-//! values contiguously (rather than in a per-entry map node) is what makes the partitioned index
-//! memory-efficient at scale.
+//! struct-of-arrays: parallel key/value arrays ordered by translated key, sharing one slab slot.
+//! Storing keys and values contiguously (rather than in a per-entry map node) is what makes the
+//! partitioned index memory-efficient at scale.
 //!
 //! Multiple values for the same translated key (collisions, or repeated inserts) form a contiguous
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
 //! length one. The index's insertion path appends new values to the end of an existing run.
 
-use std::ops::Range;
+use super::{array::Entries, pool::Pool};
+use std::{ops::Range, sync::Arc};
 
 /// A single partition's values as sorted parallel arrays keyed by translated key.
-pub(super) struct Partition<K, V> {
-    /// Translated keys in ascending order. Equal keys are adjacent (a value run).
-    keys: Vec<K>,
-    /// Values, aligned with `keys`: `vals[i]` belongs to `keys[i]`.
-    vals: Vec<V>,
+pub(super) struct Partition<K: Copy, V> {
+    /// Keys in ascending order, aligned with their values. Equal keys form a value run.
+    entries: Entries<K, V>,
 }
 
-impl<K, V> Default for Partition<K, V> {
+impl<K: Copy, V> Default for Partition<K, V> {
     fn default() -> Self {
         Self {
-            keys: Vec::new(),
-            vals: Vec::new(),
+            entries: Entries::default(),
         }
     }
 }
@@ -31,19 +29,18 @@ impl<K, V> Default for Partition<K, V> {
 impl<K: Ord + Copy, V> Partition<K, V> {
     /// Whether the partition holds no entries.
     pub(super) const fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.entries.len() == 0
     }
 
     /// The number of stored entries (values, counting collisions).
     pub(super) const fn len(&self) -> usize {
-        self.keys.len()
+        self.entries.len()
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
     /// per distinct key with its values in their current run order.
     pub(super) fn drain_runs(&mut self) -> Vec<(K, Vec<V>)> {
-        let keys = std::mem::take(&mut self.keys);
-        let vals = std::mem::take(&mut self.vals);
+        let (keys, vals) = std::mem::take(&mut self.entries).into_vecs();
         let mut vals = vals.into_iter();
         let mut runs = Vec::new();
         let mut i = 0;
@@ -62,15 +59,15 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// Index of the first entry whose key is `>= key` (the start of `key`'s run, or its insertion
     /// point if absent).
     fn lower_bound(&self, key: &K) -> usize {
-        self.keys.partition_point(|k| k < key)
+        self.entries.keys().partition_point(|k| k < key)
     }
 
     /// The half-open `[idx, end)` index range of the run of entries equal to `keys[idx]`, given
     /// that `idx` is known to be the run's start (scans forward only).
     fn run_starting_at(&self, idx: usize) -> Range<usize> {
-        let key = self.keys[idx];
+        let key = self.entries.keys()[idx];
         let mut end = idx + 1;
-        while end < self.keys.len() && self.keys[end] == key {
+        while end < self.entries.len() && self.entries.keys()[end] == key {
             end += 1;
         }
         idx..end
@@ -79,9 +76,9 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The half-open `[start, idx + 1)` index range of the run of entries equal to `keys[idx]`,
     /// given that `idx` is known to be the run's end (scans backward only).
     fn run_ending_at(&self, idx: usize) -> Range<usize> {
-        let key = self.keys[idx];
+        let key = self.entries.keys()[idx];
         let mut start = idx;
-        while start > 0 && self.keys[start - 1] == key {
+        while start > 0 && self.entries.keys()[start - 1] == key {
             start -= 1;
         }
         start..idx + 1
@@ -91,11 +88,11 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// key is absent).
     pub(super) fn run_range(&self, key: &K) -> Range<usize> {
         let start = self.lower_bound(key);
-        if self.keys.get(start) != Some(key) {
+        if self.entries.keys().get(start) != Some(key) {
             return start..start;
         }
         let mut end = start + 1;
-        while end < self.keys.len() && self.keys[end] == *key {
+        while end < self.entries.len() && self.entries.keys()[end] == *key {
             end += 1;
         }
         start..end
@@ -103,75 +100,72 @@ impl<K: Ord + Copy, V> Partition<K, V> {
 
     /// The values associated with `key` in their current run order (empty if absent).
     pub(super) fn values(&self, key: &K) -> &[V] {
-        &self.vals[self.run_range(key)]
+        &self.entries.values()[self.run_range(key)]
     }
 
     /// The value at array index `idx`.
-    pub(super) fn value_at(&self, idx: usize) -> &V {
-        &self.vals[idx]
+    pub(super) const fn value_at(&self, idx: usize) -> &V {
+        &self.entries.values()[idx]
     }
 
     /// Iterate every value held by the partition (in array order, all runs).
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn values_iter(&self) -> std::slice::Iter<'_, V> {
-        self.vals.iter()
+        self.entries.values().iter()
     }
 
     /// Insert `(key, value)` at array index `idx`. The caller must pass an `idx` that keeps `keys`
     /// sorted (i.e. within or adjacent to `key`'s run).
-    pub(super) fn insert_at(&mut self, idx: usize, key: K, value: V) {
-        self.keys.insert(idx, key);
-        self.vals.insert(idx, value);
+    pub(super) fn insert_at(&mut self, idx: usize, key: K, value: V, pool: &Arc<Pool>) {
+        self.entries.insert(idx, key, value, pool);
     }
 
     /// Remove the entry at array index `idx`, returning its value.
     pub(super) fn remove(&mut self, idx: usize) -> V {
-        self.keys.remove(idx);
-        self.vals.remove(idx)
+        self.entries.remove(idx)
     }
 
     /// Remove every entry in the array range `range` (a whole key's run).
     pub(super) fn remove_run(&mut self, range: Range<usize>) {
-        self.keys.drain(range.clone());
-        self.vals.drain(range);
+        self.entries.remove_range(range);
     }
 
     /// Overwrite the value at array index `idx`.
     pub(super) fn set(&mut self, idx: usize, value: V) {
-        self.vals[idx] = value;
+        self.entries.values_mut()[idx] = value;
     }
 
     /// The values of the lexicographically smallest key in their current run order (None if the
     /// partition is empty).
     pub(super) fn first_values(&self) -> Option<&[V]> {
-        if self.keys.is_empty() {
+        if self.entries.len() == 0 {
             return None;
         }
-        Some(&self.vals[self.run_starting_at(0)])
+        Some(&self.entries.values()[self.run_starting_at(0)])
     }
 
     /// The values of the lexicographically largest key in their current run order (None if the
     /// partition is empty).
     pub(super) fn last_values(&self) -> Option<&[V]> {
-        let last = self.keys.len().checked_sub(1)?;
-        Some(&self.vals[self.run_ending_at(last)])
+        let last = self.entries.len().checked_sub(1)?;
+        Some(&self.entries.values()[self.run_ending_at(last)])
     }
 
     /// The values of the smallest key strictly greater than `key` in their current run order (None
     /// if no such key exists).
     pub(super) fn next_values_after(&self, key: &K) -> Option<&[V]> {
-        let idx = self.keys.partition_point(|k| *k <= *key);
-        if idx >= self.keys.len() {
+        let idx = self.entries.keys().partition_point(|k| *k <= *key);
+        if idx >= self.entries.len() {
             return None;
         }
-        Some(&self.vals[self.run_starting_at(idx)])
+        Some(&self.entries.values()[self.run_starting_at(idx)])
     }
 
     /// The values of the largest key strictly less than `key` in their current run order (None if
     /// no such key exists).
     pub(super) fn prev_values_before(&self, key: &K) -> Option<&[V]> {
         let prev = self.lower_bound(key).checked_sub(1)?;
-        Some(&self.vals[self.run_ending_at(prev)])
+        Some(&self.entries.values()[self.run_ending_at(prev)])
     }
 }
 
@@ -179,12 +173,18 @@ impl<K: Ord + Copy, V> Partition<K, V> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_partition_header_size() {
+        // P=3 allocates 16.8M headers, including those for empty partitions.
+        assert!(size_of::<Partition<[u8; 5], u64>>() <= 4 * size_of::<usize>());
+    }
+
     /// Append `value` to `key`'s run, keeping the arrays sorted. The production hot path instead
     /// reuses the run it already computed (`insert_at(run.end, ..)`) to avoid a second lookup; this
     /// helper keeps the tests concise.
     fn insert<K: Ord + Copy, V>(p: &mut Partition<K, V>, key: K, value: V) {
         let end = p.run_range(&key).end;
-        p.insert_at(end, key, value);
+        p.insert_at(end, key, value, &Arc::default());
     }
 
     #[test]
@@ -205,8 +205,8 @@ mod tests {
         for (k, v) in [(30u16, 300u64), (10, 100), (20, 200)] {
             insert(&mut p, k, v);
         }
-        assert_eq!(p.keys, vec![10, 20, 30]);
-        assert_eq!(p.vals, vec![100, 200, 300]);
+        assert_eq!(p.entries.keys(), vec![10, 20, 30]);
+        assert_eq!(p.entries.values(), vec![100, 200, 300]);
         assert_eq!(p.first_values(), Some(&[100u64] as &[u64]));
         assert_eq!(p.last_values(), Some(&[300u64] as &[u64]));
         assert_eq!(p.values(&20), &[200]);
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(p.values(&10), &[1, 11, 111]);
         assert_eq!(p.values(&20), &[2]);
         // Keys remain sorted with the run adjacent.
-        assert_eq!(p.keys, vec![10, 10, 10, 20]);
+        assert_eq!(p.entries.keys(), vec![10, 10, 10, 20]);
         assert_eq!(p.run_range(&10), 0..3);
         assert_eq!(p.run_range(&20), 3..4);
     }
@@ -256,8 +256,8 @@ mod tests {
         // keys=[10,10,20] vals=[1,11,2]; remove the newer value of key 10 (index 1).
         let removed = p.remove(1);
         assert_eq!(removed, 11);
-        assert_eq!(p.keys, vec![10, 20]);
-        assert_eq!(p.vals, vec![1, 2]);
+        assert_eq!(p.entries.keys(), vec![10, 20]);
+        assert_eq!(p.entries.values(), vec![1, 2]);
         assert_eq!(p.values(&10), &[1]);
     }
 

@@ -12,6 +12,10 @@
 //! (including CI's full-suite run) does nothing. Non-numeric args restrict which variants run by
 //! name, e.g. `-- 1000000000 partitioned_ordered_3` runs only the SoA index at 1B (the heavy flat
 //! baselines would need ~40+ GB at that size).
+//!
+//! For a smaller memory experiment with the same mean partition occupancy as 1B keys at P=3,
+//! use `-- 3906250 partitioned_ordered_2`. Run each variant in a fresh process under a memory
+//! profiler to include allocator fragmentation as well as live allocations.
 
 use commonware_runtime::{
     Metrics, Name, Supervisor,
@@ -140,6 +144,12 @@ fn main() {
             "partitioned_ordered_3",
             partitioned::ordered::Index::<_, _, 3>::new(DummyMetrics, Cap::<5>::new())
         );
+        if only.iter().any(|v| v == "partitioned_ordered_2") {
+            run!(
+                "partitioned_ordered_2",
+                partitioned::ordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<5>::new())
+            );
+        }
         run!("unordered", unordered::Index::new(DummyMetrics, EightCap));
         run!(
             "partitioned_unordered_1",
