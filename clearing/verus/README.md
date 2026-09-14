@@ -1,79 +1,95 @@
-# Verified close arithmetic
+# Bajillion close arithmetic
 
-`close_kernel.rs` models the full-replica close's balance-only account arithmetic.
-A predecessor or successor is a `u64`; zero denotes absence, and positive balances
-are the values stored in QMDB. Debit and credit are totals for one immutable epoch.
-Every recipient credit remains virtual, and the only settlement output is an
-authorized withdrawal. No lifetime counters, active flag, or running prefix are
-modeled.
-
-The Verus proofs establish:
-
-- **Soundness and completeness:** `derive_successor` returns exactly when the
-  balance and output equations have a representable solution. Underfunding and
-  final-balance overflow reject; widened intermediates permit valid netting.
-- **Uniqueness:** those equations determine one successor balance and one
-  settlement output. An uncovered Amount request still produces `Withdrawal(0)`.
-- **Receive-only creation:** credit to an absent account creates that account's
-  successor balance and no settlement output, whether the prior zero represents
-  a never-funded or deleted account. Such an account cannot originate a debit or
-  withdrawal until it is present at an eligible epoch boundary.
-- **Liability conservation:** for any sequence of arithmetic-valid rows whose
-  absent accounts are receive-only, successor balances plus gross debit and
-  withdrawals equal predecessor balances plus gross credit and deposits. The
-  withdrawal amount is extracted from the authenticated output.
-- **Settlement liability:** assuming the epoch's gross debit equals gross credit,
-  withdrawals determine successor liability. The executable
-  `checked_successor_liability` mirror proves the exact widened computation and
-  rejects precisely when its integer result is outside `u64`.
-
-Run from any directory:
+From the workspace root, point `VERUS_BIN` at an installed Verus binary:
 
 ```bash
-VERUS_BIN=/path/to/verus /path/to/clearing/verus/verify.sh
+VERUS_BIN=/path/to/verus clearing/verus/verify.sh
 ```
 
-Validated with official Verus release `0.2026.08.23.fbbbbcf` and Rust `1.97.1`:
-`11 verified, 0 errors`.
+If `verus` is on `PATH`, run `clearing/verus/verify.sh` directly. The script resolves
+[close_kernel.rs](close_kernel.rs) relative to itself, so an absolute script path
+also works from another directory. The recorded validation baseline is Verus
+`0.2026.08.23.fbbbbcf` with Rust `1.97.1`: `11 verified, 0 errors`.
 
-## Production correspondence
+The script verifies an arithmetic model. **It does not machine-check the model's
+correspondence to production Rust.** Review both together when either changes.
 
-Both executable mirrors correspond to `clearing/src/bajillion/transition.rs`:
+## The account equation
 
-| Model | Production |
-| --- | --- |
-| `derive_successor` | The balance/output block in `derive` |
-| `checked_successor_liability` | `checked_successor_liability` |
-| `row_valid` origination eligibility | `derive` rejects an absent predecessor without a sealed deposit when it has a debit or withdrawal |
-| Gross debit equals gross credit | `derive` sums each outgoing vector and routes those same entries to incoming credit |
-| Output sum | Checked additions to `withdrawal_total` |
+A row describes one account in one immutable epoch. Balances, deposit, debit, and
+credit inputs are `u64`. Zero balance denotes absence; positive balances are the
+values stored in QMDB. Credits remain virtual. Only an authorized withdrawal
+produces a settlement output.
 
-`derive_successor` receives the already selected balance, epoch vector totals,
-deposit amount, and withdrawal action. Production uses `Option<WithdrawalAction>`
-and positive Amount values; the model uses `Action::None` and also proves the
-arithmetic for Amount zero. Production `Result` errors become `None`, `u128::from`
-becomes a widening cast, and checked combinators and narrowing conversions become
-explicit matches and range checks. These are arithmetic mirrors, not identical
-source text or a machine-checked refinement of production Rust. Review these two
-production blocks alongside the model whenever either changes; `verify.sh` only
-checks the model.
+```text
+predecessor + deposit + credit - debit
+                   |
+                   v
+                  tail
+                   |
+        +----------+-----------+
+        |          |           |
+       None     Amount(a)     Close
+        |          |           |
+     release 0   a if covered   release tail
+                 0 otherwise
+        |          |           |
+        +----------+-----------+
+                   |
+                   v
+         successor = tail - release
+```
 
-## Proof boundary
+Underfunding rejects. Both successor and withdrawal must fit `u64`; widened
+intermediates allow valid netting even when an intermediate sum exceeds `u64`.
+`None` produces `Output::None`. A withdrawal action that releases zero still
+produces `Output::Withdrawal(0)`.
 
-Arithmetic completeness applies after input selection; it does not claim every
-arithmetic solution passes full-close validation. In particular, activity
-eligibility, exact boundary coverage, per-edge amount/count rules, limits,
+## What is proved
+
+- **Soundness, completeness, and uniqueness:** `derive_successor` returns exactly
+  when the balance/output equations have a representable solution, and those
+  equations determine one successor and output.
+- **Receive-only creation:** an account with no predecessor balance or sealed
+  deposit can receive virtual credit, but cannot debit or withdraw in that epoch.
+  Its successor is the credit and its output is `None`, whether it was never
+  funded or previously deleted.
+- **Row conservation:** for any sequence satisfying `row_valid`, the sum of
+  successor balances, gross debits, and withdrawals equals the sum of predecessor
+  balances, gross credits, and deposits. Withdrawal values come from the outputs.
+- **Settlement liability:** assuming gross debit equals gross credit, summing the
+  rows gives `successor liability = predecessor liability + deposits - withdrawals`.
+  `checked_successor_liability` proves the widened executable computation and
+  rejects exactly when the integer result is outside `u64`.
+
+These arithmetic proofs are independent of the finite lifecycle exploration in
+[Stateright](../stateright/README.md).
+
+## Production correspondence and limits
+
+The two executable mirrors correspond to
+[transition.rs](../src/bajillion/transition.rs): `derive_successor` mirrors the
+balance/output block in `derive`, and `checked_successor_liability` mirrors the
+function of the same name. Production derives debit and credit from the same
+vector entries and accumulates releases into `withdrawal_total`.
+
+The mirror receives already-selected inputs. Production's
+`Option<WithdrawalAction>` becomes `Action::None/Amount/Close`; the model also
+covers Amount zero, which the production boundary type excludes. Production
+`Result` errors become `None`, and checked conversions become explicit range
+checks.
+
+Arithmetic completeness applies after input selection. It does not establish
+that every arithmetic-valid row is a valid protocol row. `row_valid` requires
+receive-only behavior when predecessor and deposit are zero, but allows more
+than production accepts, including an absent row with no activity. Exact boundary
+coverage, account activity, per-edge amount/count rules, resource limits,
 signatures, and canonical account/vector order remain production obligations.
-The summed liability theorem needs only the receive-only eligibility implication,
-so `row_valid` deliberately covers more than accepted protocol rows; for example,
-it does not require a positive credit merely because predecessor and deposit are
-both zero.
 
-Gross payment conservation is a hypothesis of the liability theorem. The model
-does not verify vector traversal, checked aggregation into `withdrawal_total`, or
-the QMDB mutation application. Unchanged accounts contribute equal balances on
-both sides, but connecting these sums to authenticated full-state liability and
-roots remains outside the proof. Withdrawal custody and reserves, FIFO
-finalization, faults, finalized-only recovery, QMDB history, hashing, signatures,
-private receipt challenges, and certification retention are also outside this
-model and remain production obligations.
+Gross payment conservation is a hypothesis, not a verified vector traversal.
+Checked aggregation of `withdrawal_total`, QMDB mutation, and the connection from
+row sums to authenticated full-state liability and roots are outside the proof.
+Unchanged accounts contribute equal balances to both sides. Withdrawal custody
+and reserves, FIFO finalization, faults and finalized-only recovery, QMDB history,
+hashing, receipt challenges, and certification retention also remain outside
+this arithmetic model.

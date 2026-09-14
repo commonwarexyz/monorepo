@@ -1,45 +1,116 @@
 # Bajillion benchmarks
 
-The [September 11 measurements](results/2026-09-11/README.md) compare QMDB and the sliced reference on the same c8a.4xlarge, with phase timings, filesystem commit measurements, proof sizes, raw samples, and reproduction inputs.
+Measure close construction, validator processing, and proof verification. Each
+run uses 100 validators and an adaptive 16-worker Rayon pool.
 
-Each process uses 100 validators and one adaptive strategy with 16 workers. Default profiles are dense N=1024/K=1, sparse N=1024 with 128 senders/K=8, and zero-net N=512/K=1. `RUSTFLAGS='--cfg full_bench'` selects 14 profiles: dense N=1024/10k/100k/1M and sparse N=1M with 1024/10k/100k senders, each K1/K8. The recipient pool is 512 accounts; a small sender set may touch fewer recipients. `COMMONWARE_CLEARING_PROFILE` accepts a profile index or the printed `N=... A=... B=... K=...` label.
+## Run a small profile
 
-Build and run a local correctness smoke:
+From the repository root:
 
 ```sh
-cargo bench -p commonware-clearing --features bench --bench bajillion --no-run
 COMMONWARE_CLEARING_PROFILE=0 COMMONWARE_CLEARING_BENCH=receive-apply \
   cargo bench -p commonware-clearing --features bench --bench bajillion -- --test
 COMMONWARE_CLEARING_PROFILE=0 COMMONWARE_CLEARING_BENCH=sizes \
   cargo bench -p commonware-clearing --features bench --bench bajillion
 ```
 
-Select `verify-ack`, `assemble-certificate`, `verify-certificate`, `verify-claim`, `adjudicate`, or `settlement` for receipt/authorization, certificate and acceptance checks. Add `-- --test` to exercise a Criterion group without a measurement run. `sizes` is untimed encoded-artifact verification. Sizes come from actual Rust encodings; the compiled activity/output BMT wrappers determine their wire lengths.
+`-- --test` runs a Criterion group in test mode without collecting timings. Omit it
+for a measurement run. `sizes` verifies actual encoded artifacts and is untimed.
+Select one profile and one group per process.
 
-`challenge-sizes` runs the same real close preparation and validation, packet/receipt checks, and complete challenge artifacts. It skips withdrawal-output trees, Current application/historical queries, and calculator cases. This explicit selector is not included again in the default suite.
+## Choose a workload
 
-`state-sizes` checks complete Current exclusion encodings across native bootstrap, empty genesis, funding, deletion of all accounts, native reopen, and an earlier empty root. It verifies zero liability uses absent CommitFloor metadata and binds historical requests to the retained root and operation count. This selector is untimed.
+Profile labels use `N` for live accounts, `A` for senders, `B` for the recipient
+pool, and `K` for recipients per sender. There are `A * K` directed payment pairs.
+A small sender set may touch fewer than `B` recipients.
 
-| Group | Measured work |
-|---|---|
-| initialize | Canonical genesis construction in one Current database; key generation excluded |
-| prepare | Clone frozen terminal inputs, derive activity/balances/output trees, merkleize a real batch and encode the shared dealing; no application |
-| fanout | Clone already encoded Bytes for 100 recipient packet references; no encoding or transport |
-| decode | Bounded dealing decode, including strict key decoding |
-| validate-close | Predecoded dealing through full relation/signature validation and PreparedClose; no signing/application |
-| seal | Owned encoded dealing through decode, validation and vote; no application |
-| sign-vote | Sign an already prepared header; no decode, relation validation or application |
-| prepare-apply | Preparation, encoding, 100 packet references and actual Current database advancement |
-| receive-apply | Owned encoded dealing through decode, validation, vote and actual Current database advancement |
-| verify-ack | Existing receipt/authorization verification plus encoded receipt decode-and-verify |
-| verify-claim | Amount/close output claims at W=1/W=N and Current account-opening verification |
-| adjudicate | Bounded encoded challenge decode and adjudication |
-| settlement | Actual queue, admission, finalization and hard-fault operations with QMDB state proofs |
+| Default profile | N | A | B | K |
+| --- | ---: | ---: | ---: | ---: |
+| `0`: dense | 1,024 | 1,024 | 512 | 1 |
+| `1`: sparse | 1,024 | 128 | 512 | 8 |
+| `2`: zero-net balances | 512 | 512 | 512 | 1 |
 
-Fixtures open native state, prepare canonical genesis from the configured accounts, and apply it once. `State::open` recovers the head from native root, operation count, liability metadata and active-key count; the application wrapper does not rescan already-applied history. The advancement groups process consecutive epochs against that database per Criterion batch. They regenerate only terminal signatures/context between closes, and retain the live database. `receive-apply` prepares the operator's encoded packet outside its timer. Each sequence retains the first accepted root and native operation count, then checks historical proof availability after later advancement, outside elapsed capture. Setup never rebuilds all live accounts between closes. A zero-net close has no logical balance writes but still applies a canonical batch; QMDB maintenance may append additional operations. Sample sequences retain unpruned history, so these timings are not repeated measurements of one identical predecessor state.
+`COMMONWARE_CLEARING_PROFILE` accepts an index or an exact printed label such as
+`N=1024 A=1024 B=512 K=1`. With `RUSTFLAGS='--cfg full_bench'`, the 14 profiles are:
 
-The deterministic runtime supplies in-memory storage. The `bench` feature enables `commonware-runtime/external` for the real 16-worker Rayon pool. The benchmark target requires this opt-in; ordinary crate tests keep their existing runtime features. The benchmark runner uses the minimum supported cycle (`SYSTEM_TIME_PRECISION`, 1 ns). The external executor sleeps between polls; observed scheduling overhead remains part of elapsed time and must match the reference runtime when comparing paths. Journal commit/sync, application evidence persistence, transport and transaction framing are excluded. Historical view reconstruction and proof generation are separate from head advancement. Historical queries build an ephemeral native view from retained operations and can scale with the target active operation window; that work belongs entirely in the query measurement. `seal` includes decode in this implementation and cannot be compared as though it were the older predecoded slice-seal benchmark. Do not infer isolated costs by subtracting these different paths.
+- Dense: 1,024, 10,000, 100,000, or 1,000,000 live accounts, all sending.
+- Sparse: 1,000,000 live accounts with 1,024, 10,000, or 100,000 senders.
 
-The 101-byte encoded header-plus-certificate remains a certified commitment, not complete settlement admission. Output-claim fixtures at W1/WN are proof verification/size cases, not measured WN withdrawal transitions. Complete Current account openings, known-key lookups and proof components are labeled separately. Calculator parity samples use actual production dealing encoding for the declared graph/key-placement scenario.
+Each runs with `K=1` and `K=8`, over a 512-account recipient pool. See
+[the fixtures](fixtures.rs) for the full index order.
 
-Published latency requires a designated quiet external machine after builds/tests stop, with the same compiler and configuration for both variants. Local runs provide correctness and encoded-size evidence only.
+## What the timers include
+
+```text
+  OPERATOR
+  frozen inputs --> prepare --> fanout --> apply
+  [--------------- prepare-apply --------------]
+
+  VALIDATOR
+  dealing --> decode --> validate-close --> sign-vote --> apply
+  [---------------------- seal --------------------]
+  [---------------------- receive-apply ---------------------]
+```
+
+`prepare` includes encoding the dealing. `fanout` creates 100 references to the
+same encoded `Bytes`; it performs no network transfer. `validate-close` starts
+from decoded inputs and includes balance reads, signature checks, and root
+preparation. `seal` adds decoding and a vote. `apply` advances QMDB and is included
+in the two enclosing `*-apply` groups, not exposed as a separate selector.
+
+The phase groups are independent measurements. Do not subtract one from another
+to infer an isolated cost, or compare this encoded-input `seal` directly with the
+older reference's predecoded slice-seal timer.
+
+Additional selectors for `COMMONWARE_CLEARING_BENCH`:
+
+| Group | Work |
+| --- | --- |
+| `initialize` | Build canonical genesis; exclude key generation. |
+| `sign-vote` | Sign an already prepared header. |
+| `assemble-certificate` / `verify-certificate` | Assemble or check an exact-quorum certificate. |
+| `verify-ack` | Verify authorizations and receipts, including receipt decode-and-verify. |
+| `verify-claim` | Verify withdrawal claims and Current account openings. |
+| `adjudicate` | Decode and adjudicate a bounded challenge. |
+| `settlement` | Admission, queue, finalization, and hard-fault operations. |
+| `sizes` | Check encoded dealings, receipts, certificates, claims, state proofs, and calculator parity. |
+| `challenge-sizes` | Check close and challenge artifacts, skipping withdrawal trees, state history, and calculator cases. |
+| `state-sizes` | Check Current exclusion encodings across bootstrap, funding, deletion, reopen, and historical roots. |
+
+The last three are untimed. `challenge-sizes` and `state-sizes` run only when
+selected explicitly.
+
+## State and measurement scope
+
+Fixtures initialize one native Current database. The `*-apply` groups advance
+consecutive epochs against it, regenerating terminal signatures outside the
+timer. They do not rebuild all live accounts between closes. Zero-net activity
+still applies a canonical batch; QMDB maintenance can append operations even
+when no balance changes. History remains unpruned, so each epoch has a different
+predecessor state.
+
+After advancement, the harness checks a historical proof without including that
+query in the timer. Historical view reconstruction can scale with the retained
+operation window and should be measured separately.
+
+Storage is in memory under the deterministic runtime. The `bench` feature enables
+real Rayon workers, and executor polling uses the minimum supported 1 ns cycle.
+Elapsed time includes scheduling overhead. Journal commit/sync, application
+evidence persistence, SQL, transport, and transaction framing are excluded.
+Publication runs need a quiet external machine and matched compiler, runtime,
+and workload settings for both variants; local runs check correctness and sizes.
+
+Report complete artifacts: in the 100-validator SHA-256 fixture, Header plus
+certificate is 101 bytes. The three roots and withdrawal total add 104 bytes;
+chain transaction framing is additional. `W=1` and `W=N` claim fixtures measure
+proofs, not full `W=N` withdrawal transitions. Complete Current openings and
+known-key lookups have separate encodings.
+
+## Archived measurements
+
+The [September 11 archive](results/2026-09-11/README.md) compares the pinned QMDB
+and sliced-reference revisions on one c8a.4xlarge. It includes phase medians,
+filesystem commit runs, proof sizes, samples, and reproduction inputs. Its
+[manifest](results/2026-09-11/manifest.json) identifies the measured sources and
+hashes the archived files, including that README. Use the current harness above
+to measure later revisions.
