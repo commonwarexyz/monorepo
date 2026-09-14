@@ -60,6 +60,10 @@ impl<T: Blocks> Blocks for Recording<T> {
         Ok((self, handle))
     }
 
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        self.inner.has(digest).await
+    }
+
     async fn get(
         &self,
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
@@ -75,10 +79,6 @@ impl<T: Blocks> Blocks for Recording<T> {
     async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
         self.inner = self.inner.prune(min).await?;
         Ok(self)
-    }
-
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        self.inner.missing_items(start, max)
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {

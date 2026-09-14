@@ -140,12 +140,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
+        /// `ancestry` contains commitments on the selected parent branch in
+        /// forward order, ending at the parent and excluding the new payload.
+        /// For parent-linked consensus it begins at a finalized or genesis
+        /// anchor; applications may resolve older canonical history as needed.
+        /// Consecutive re-proposals of one payload contribute one commitment.
+        ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
         /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
+            ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
         /// Verify the payload is valid.
@@ -167,10 +174,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
+        /// `ancestry` has the same ordering and availability contract as
+        /// [`Self::propose`] and excludes `payload`.
         fn verify(
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
+            ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
@@ -180,12 +190,17 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Determine whether a verified payload is safe to commit.
+        /// Determine whether a payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
         /// applications to associate certification with the correct verification context. The
         /// same payload may appear in multiple rounds, so implementations must key any state
         /// on `(round, payload)` rather than `payload` alone.
+        ///
+        /// Certification may be requested without prior local verification.
+        /// `ancestry` supplies the selected parent branch independently of
+        /// verification, with the same ordering and availability contract as
+        /// [`Automaton::propose`], and excludes `payload`.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -211,6 +226,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _round: Round,
             _payload: Self::Digest,
+            _ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
             #[allow(clippy::async_yields_async)]
             async move {
@@ -278,7 +294,7 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::marshal::blocks::Blocks;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
@@ -304,9 +320,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// that need no input set this to `()`.
         type Input: Send;
 
-        /// Build a new block on top of the provided parent ancestry. If the build job fails,
+        /// Build a new block on top of `parent`. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
+        /// `blocks` supplies forward ranges of the selected parent branch, including
+        /// finalized history. Select only the history needed to build the block.
         /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
@@ -314,11 +332,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            parent: Arc<Self::Block>,
+            blocks: Blocks<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
-        /// Verify a block produced by the application's proposer, relative to its ancestry.
+        /// Verify `block` produced by the application's proposer against `parent`.
+        ///
+        /// `blocks` supplies forward ranges of the selected parent branch, including
+        /// finalized history. It excludes the candidate block.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
@@ -335,7 +357,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            block: Arc<Self::Block>,
+            parent: Arc<Self::Block>,
+            blocks: Blocks<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

@@ -13,10 +13,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Epochable, Heightable, Viewable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
@@ -110,7 +107,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
         select_loop! {
@@ -152,7 +148,9 @@ where
                 Message::Verify {
                     span,
                     context,
-                    ancestry,
+                    block,
+                    parent,
+                    blocks,
                     verification,
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.verify.defer");
@@ -161,7 +159,9 @@ where
                     self.deferred_verifications.push(VerificationRequest {
                         span,
                         context,
-                        ancestry,
+                        block,
+                        parent,
+                        blocks,
                         verification,
                     });
                     process.in_scope(|| {
@@ -420,7 +420,7 @@ mod tests {
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
-        marshal::{self, Update, ancestry, core::Mailbox as MarshalMailbox},
+        marshal::{self, Update, core::Mailbox as MarshalMailbox},
         simplex::mocks::scheme as scheme_mocks,
         types::Height,
     };
@@ -969,12 +969,14 @@ mod tests {
                     )),
                     Feedback::Ok
                 ));
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            parent.clone(),
+                            fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
                             (),
                         )
                         .await
@@ -1062,12 +1064,14 @@ mod tests {
                     )),
                     Feedback::Ok
                 ));
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (queue_context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            parent.clone(),
+                            fixtures::blocks(parent.height(), std::slice::from_ref(&parent)),
                             (),
                         )
                         .await
