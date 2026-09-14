@@ -586,10 +586,8 @@ where
     /// Runs one cryptographic operation on `strategy` and returns its originating span with the
     /// result.
     ///
-    /// The pool is the caller's choice rather than the class's: view-critical assembly and signing
-    /// run on the critical pool, while data-availability recovery runs with the bulk verification
-    /// it is paced by. A job's closure takes the pool it was submitted to, so a job cannot use one
-    /// pool's threads while occupying the other's queue.
+    /// Signing, certificate assembly, and nullification recovery use the critical pool. Each
+    /// closure receives its submission strategy so nested parallel work uses that same pool.
     fn spawn_crypto<S: Strategy>(
         &mut self,
         strategy: S,
@@ -617,7 +615,18 @@ where
             ?class,
             "reserved crypto task and completion"
         );
-        let operation = run_crypto_operation(strategy, span, operation);
+        let wait = match class {
+            TaskClass::LocalSigning => &self.metrics.crypto_submit_wait_signing,
+            TaskClass::CriticalAggregation => &self.metrics.crypto_submit_wait_aggregation,
+            _ => unreachable!("local crypto requires a signing or aggregation permit"),
+        }
+        .clone();
+        let context = self.crypto_clock.clone();
+        let submitted_at = context.current();
+        let operation = run_crypto_operation(strategy, span, move |strategy| {
+            wait.observe_between(submitted_at, context.current());
+            operation(strategy)
+        });
         let root = root.clone();
         self.crypto.push(async move {
             let (span, outcome) = operation.await;

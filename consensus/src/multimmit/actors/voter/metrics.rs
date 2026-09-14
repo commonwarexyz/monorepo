@@ -211,6 +211,10 @@ pub(super) struct Metrics {
     pub verification_wait_fast: Histogram,
     /// Queue wait of bulk verification jobs.
     pub verification_wait_bulk: Histogram,
+    /// Critical-pool submission to worker entry for local signing, once per batch or singleton.
+    pub crypto_submit_wait_signing: Histogram,
+    /// Critical-pool submission to worker entry for certificate assembly and nullification recovery.
+    pub crypto_submit_wait_aggregation: Histogram,
 }
 
 /// Block-count buckets for per-vote coverage histograms.
@@ -483,6 +487,16 @@ impl Metrics {
                 "encoded size of one locally aggregated quorum certificate",
                 ENCODED_BYTES,
             ),
+            crypto_submit_wait_signing: context.histogram(
+                "crypto_submit_wait_signing",
+                "seconds from critical-pool submission to worker entry for local signing",
+                histogram::Buckets::LOCAL,
+            ),
+            crypto_submit_wait_aggregation: context.histogram(
+                "crypto_submit_wait_aggregation",
+                "seconds from critical-pool submission to worker entry for certificate assembly and nullification recovery",
+                histogram::Buckets::LOCAL,
+            ),
             verification_wait_fast: context.histogram(
                 "verification_wait_fast",
                 "queue wait of view-critical verification jobs before workers are reserved",
@@ -574,8 +588,8 @@ mod tests {
     #[test]
     fn voter_series_footprint_stays_within_budget() {
         const CHAINS: usize = 50;
-        // This includes five 213-bucket WAN histograms and one aggregate extension histogram.
-        const BUDGET: usize = 1_508;
+        // Includes five 213-bucket WAN histograms and two 12-bucket crypto submission histograms.
+        const BUDGET: usize = 1_538;
 
         deterministic::Runner::default().start(|context| async move {
             let voter = context.child("engine").child("voter");
@@ -597,6 +611,20 @@ mod tests {
                 assert_eq!(samples.len(), WAN_LATENCY.len() + 3, "{name}");
                 assert!(samples.iter().any(|line| line.contains("le=\"0.485\"")));
                 assert!(samples.iter().all(|line| !line.contains("chain=\"")));
+            }
+            for name in [
+                "crypto_submit_wait_signing",
+                "crypto_submit_wait_aggregation",
+            ] {
+                let prefix = format!("engine_voter_{name}_");
+                let samples: Vec<_> = encoded
+                    .lines()
+                    .filter(|line| line.starts_with(&prefix))
+                    .collect();
+                assert_eq!(samples.len(), histogram::Buckets::LOCAL.len() + 3, "{name}");
+                assert!(samples.iter().all(|line| {
+                    !line.contains("chain=") && !line.contains("view=") && !line.contains("job=")
+                }));
             }
             let series = encoded
                 .lines()

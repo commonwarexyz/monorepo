@@ -9,6 +9,35 @@ use commonware_runtime::{
 /// The zero bucket separates current-view votes, which is the healthy case, from any lag at all.
 const VIEW_LAG: [f64; 10] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerificationKind {
+    ViewMessage,
+    Vqc,
+    Lqc,
+    Bulk,
+    Mixed,
+}
+
+impl VerificationKind {
+    const ALL: [Self; 5] = [
+        Self::ViewMessage,
+        Self::Vqc,
+        Self::Lqc,
+        Self::Bulk,
+        Self::Mixed,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ViewMessage => "view_message",
+            Self::Vqc => "vqc",
+            Self::Lqc => "lqc",
+            Self::Bulk => "bulk",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
 pub(super) struct Metrics {
     pub decoded: CounterFamily<Traffic>,
     /// Views a verified vote trails the job that carried it.
@@ -25,7 +54,8 @@ pub(super) struct Metrics {
     /// Network receipt to voter hand-off of one artifact. The ingress queue on the round's
     /// critical path.
     pub ingress_dwell: Histogram,
-    pub verify_latency: histogram::Timed,
+    pub verify_latency: [histogram::Timed; 5],
+    pub verify_queue: [Histogram; 5],
     /// Transcript messages of one verified certificate.
     pub certificate_transcript_messages: Histogram,
     /// Cached verified votes supplied to one certificate verification, before transcript matching.
@@ -83,11 +113,29 @@ impl Metrics {
             "network receipt to voter hand-off of one artifact",
             LATENCY,
         );
-        let verify_latency = context.histogram(
-            "verify_latency",
-            "latency of one verification job",
-            histogram::Buckets::CRYPTOGRAPHY,
-        );
+        let kinds = VerificationKind::ALL;
+        let verify_latency = kinds.map(|kind| {
+            histogram::Timed::new(
+                context
+                    .child("verify")
+                    .with_attribute("kind", kind.label())
+                    .histogram(
+                        "latency",
+                        "worker execution time of one verification job",
+                        histogram::Buckets::CRYPTOGRAPHY,
+                    ),
+            )
+        });
+        let verify_queue = kinds.map(|kind| {
+            context
+                .child("verify")
+                .with_attribute("kind", kind.label())
+                .histogram(
+                    "queue",
+                    "time from executor submission to verification worker entry",
+                    histogram::Buckets::CRYPTOGRAPHY,
+                )
+        });
 
         Self {
             decoded,
@@ -101,7 +149,8 @@ impl Metrics {
             ingress_dwell,
             certificate_transcript_messages,
             certificate_known_messages,
-            verify_latency: histogram::Timed::new(verify_latency),
+            verify_latency,
+            verify_queue,
         }
     }
 }

@@ -942,6 +942,7 @@ where
             validator_receivers.push(Some(receiver));
         }
         let mut driver = Driver {
+            crypto_clock: Arc::new(driver_context.child("crypto")),
             context: driver_context,
             protocol_epoch: epoch,
             leaders,
@@ -1303,6 +1304,7 @@ where
     S3: Sender<PublicKey = P>,
 {
     context: E,
+    crypto_clock: Arc<E>,
     protocol_epoch: Epoch,
     leaders: LeaderSchedule,
     participant: Option<Participant>,
@@ -3591,6 +3593,7 @@ mod tests {
             let critical_strategy = CountingStrategy::default();
             let initial_view = machine.inspection().view();
             let mut driver = Driver {
+                crypto_clock: Arc::new(context.child("crypto")),
                 context: context.child("driver"),
                 protocol_epoch: committee.config.epoch(),
                 leaders: machine.profile().protocol().leaders().clone(),
@@ -3730,6 +3733,7 @@ mod tests {
             }
             if matches!(scenario, RuntimeSourceScenario::Signing) {
                 let job = held_signing.expect("startup must release a real signing request");
+                let submitted_at = context.current();
                 driver.execute_capabilities(
                     Capability::Durability(DurabilityCapability::Released(job)).into(),
                     &Span::none(),
@@ -3745,7 +3749,19 @@ mod tests {
                 assert_eq!(driver.egress.len(), 0);
                 assert_eq!(critical_strategy.spawns(), driver.crypto.len(),
                     "released crypto must be submitted before polling its completion collection");
+                assert!(context.encode().lines().any(|line|
+                    line == "metrics_crypto_submit_wait_signing_count 0"));
+                context.sleep(Duration::from_millis(125)).await;
                 let (_, _, outcome) = driver.crypto.next_completed().await;
+                let encoded = context.encode();
+                assert!(encoded.lines().any(|line|
+                    line == "metrics_crypto_submit_wait_signing_count 1"), "{encoded}");
+                let elapsed = context.current().duration_since(submitted_at).unwrap();
+                assert!(elapsed >= Duration::from_millis(125));
+                let expected_sum = format!("metrics_crypto_submit_wait_signing_sum {}", elapsed.as_secs_f64());
+                assert!(encoded.lines().any(|line| line == expected_sum), "{encoded}");
+                assert!(encoded.lines().any(|line|
+                    line == "metrics_crypto_submit_wait_aggregation_count 0"), "{encoded}");
                 let (id, generation) = match outcome.unwrap().unwrap() {
                     CryptoOutcome::Signed { id, generation, .. }
                     | CryptoOutcome::SignedBatch { id, generation, .. } => (id, generation),

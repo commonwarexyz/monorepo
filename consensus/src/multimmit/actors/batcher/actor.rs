@@ -1,7 +1,7 @@
 use super::{
     Completed, Config, Drop, IngressLimits, Message, Observed,
     lanes::{Group, LaneId, Lanes},
-    metrics::Metrics as ActorMetrics,
+    metrics::{Metrics as ActorMetrics, VerificationKind},
 };
 use crate::{
     Epochable as _,
@@ -195,19 +195,22 @@ async fn run_verification_operation<E, P, O, T>(
     strategy: P,
     completion_span: Span,
     worker_span: Span,
+    queue: Histogram,
     operation: O,
 ) -> (Span, Result<T, VerificationTaskPanicked>)
 where
-    E: Send + 'static,
+    E: Clock,
     P: Strategy,
     O: FnOnce(E, P) -> T + Send + 'static,
     T: Send + 'static,
 {
     let instrument = worker_span.clone();
     let operation = async move {
+        let submitted = context.current();
         strategy
             .manual()
             .spawn(1, move |_| {
+                queue.observe_between(submitted, context.current());
                 worker_span.in_scope(|| operation(context, strategy))
             })
             .await
@@ -393,7 +396,25 @@ where
         job: VerifyJob<V, H::Digest>,
     ) -> impl Future<Output = VerifyResult<V, H::Digest>> + Send + 'static {
         let scheme = Arc::clone(&self.scheme);
-        let latency = self.metrics.verify_latency.clone();
+        let kind = job
+            .items()
+            .iter()
+            .map(|item| match item.artifact() {
+                Artifact::Vqc(_) => VerificationKind::Vqc,
+                Artifact::Lqc(_) => VerificationKind::Lqc,
+                artifact if artifact.view_critical() => VerificationKind::ViewMessage,
+                _ => VerificationKind::Bulk,
+            })
+            .reduce(|left, right| {
+                if left == right {
+                    left
+                } else {
+                    VerificationKind::Mixed
+                }
+            })
+            .unwrap_or(VerificationKind::Mixed);
+        let latency = self.metrics.verify_latency[kind as usize].clone();
+        let queue = self.metrics.verify_queue[kind as usize].clone();
         let verified_vote_lag = self.metrics.verified_vote_lag.clone();
         let verified_votes = Arc::clone(&self.verified_votes);
         let transcript_messages = self.metrics.certificate_transcript_messages.clone();
@@ -439,7 +460,7 @@ where
             timer.observe(&context);
             completion
         };
-        run_verification_operation(context, strategy, span, worker, operation)
+        run_verification_operation(context, strategy, span, worker, queue, operation)
     }
 
     async fn run(
@@ -822,7 +843,10 @@ mod tests {
         Rayon, Sequential,
         mocks::{self, CountingStrategy},
     };
-    use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic, tokio};
+    use commonware_runtime::{
+        IoBuf, Runner as _, Supervisor as _, deterministic, telemetry::metrics::MetricsExt as _,
+        tokio,
+    };
     use commonware_utils::sync::{Condvar, Mutex};
     use std::{collections::VecDeque, future::pending, num::NonZeroUsize, sync::Arc, thread};
 
@@ -1439,6 +1463,30 @@ mod tests {
     }
 
     #[test]
+    fn verification_queue_starts_at_submission_for_inline_execution() {
+        deterministic::Runner::default().start(|context| async move {
+            let queue = context.histogram("queue", "worker queue", [0.0, 1.0]);
+            let operation = run_verification_operation(
+                context.child("inline"),
+                Sequential,
+                Span::none(),
+                Span::none(),
+                queue.clone(),
+                |context, _| {
+                    assert!(context.encode().contains("queue_count 1\n"));
+                    7
+                },
+            );
+            context.sleep(std::time::Duration::from_millis(125)).await;
+            assert!(context.encode().contains("queue_count 0\n"));
+            assert_eq!(operation.await.1.unwrap(), 7);
+            let encoded = context.encode();
+            assert!(encoded.contains("queue_count 1\n"), "{encoded}");
+            assert!(encoded.contains("queue_sum 0.0\n"), "{encoded}");
+        });
+    }
+
+    #[test]
     fn verification_operation_runs_on_strategy_pool() {
         tokio::Runner::default().start(|context| async move {
             let (_, on_strategy) = run_verification_operation(
@@ -1446,6 +1494,7 @@ mod tests {
                 rayon(),
                 Span::none(),
                 Span::none(),
+                context.histogram("queue", "worker queue", [0.0, 1.0]),
                 |_, _| rayon::current_thread_index().is_some(),
             )
             .await;
@@ -1468,10 +1517,11 @@ mod tests {
                 let probe = Arc::clone(&probe);
                 context.child("verification").spawn(move |context| {
                     run_verification_operation(
-                        context,
+                        context.child("worker"),
                         rayon(),
                         Span::none(),
                         Span::none(),
+                        context.histogram("queue", "worker queue", [0.0, 1.0]),
                         move |_, _| {
                             probe.block_cpu();
                         },
@@ -1500,6 +1550,7 @@ mod tests {
                 rayon(),
                 Span::none(),
                 Span::none(),
+                context.histogram("queue", "worker queue", [0.0, 1.0]),
                 |_, _| -> () { panic!("worker panic") },
             )
             .await;
