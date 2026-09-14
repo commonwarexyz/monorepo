@@ -1203,6 +1203,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 }
 
+/// Remove a closed journal's blob and checkpoint partitions without opening it. `partition` is
+/// the base name from [Config::partition]. Missing partitions are ignored.
+#[commonware_macros::stability(ALPHA)]
+pub(super) async fn destroy_partition<E: Context>(
+    context: &E,
+    partition: &str,
+) -> Result<(), Error> {
+    Partition::<E>::remove_prefix(context, partition).await?;
+    Checkpoint::<E>::destroy_partition(context, partition).await
+}
+
 /// Implementation of [super::Mutable] for fixed-size value journals.
 ///
 /// # Repair

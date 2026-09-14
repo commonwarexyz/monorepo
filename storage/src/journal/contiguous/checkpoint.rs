@@ -47,6 +47,9 @@ const RECOVERY_WATERMARK_KEY: u64 = 3;
 /// The journal's durable recovery checkpoint.
 pub(super) struct Checkpoint<E: Context> {
     metadata: Metadata<E, u64, VecU64>,
+    /// Whether an entry was changed since the last sync. A freshly opened store rewrites itself
+    /// on its first sync, so an unchanged checkpoint is never synced.
+    staged: bool,
 }
 
 impl<E: Context> Checkpoint<E> {
@@ -60,7 +63,10 @@ impl<E: Context> Checkpoint<E> {
             },
         )
         .await?;
-        Ok(Self { metadata })
+        Ok(Self {
+            metadata,
+            staged: false,
+        })
     }
 
     /// Read a `u64`-valued entry, if present.
@@ -95,16 +101,22 @@ impl<E: Context> Checkpoint<E> {
         if boundary.is_multiple_of(items_per_blob) {
             if self.boundary_hint().is_some() {
                 self.metadata.remove(&PRUNING_BOUNDARY_KEY);
+                self.staged = true;
             }
         } else if self.boundary_hint() != Some(boundary) {
             self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
+            self.staged = true;
         }
         if self.watermark() != Some(watermark) {
             self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+            self.staged = true;
         }
-        // Always sync, even if this call staged nothing: `lower_watermark` stages without syncing,
-        // so skipping the sync when our own entries are unchanged could drop that pending change.
-        self.sync().await
+        // Sync whenever anything is staged, including a `lower_watermark` that stages without
+        // syncing; an unchanged checkpoint needs no write.
+        if self.staged {
+            return self.sync().await;
+        }
+        Ok(self)
     }
 
     /// Begin raising the watermark to `watermark`, returning a completion handle. A `watermark`
@@ -122,6 +134,9 @@ impl<E: Context> Checkpoint<E> {
         self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         let (metadata, handle) = self.metadata.start_sync().await?;
         self.metadata = metadata;
+        // The write is in flight, not observed: the next blocking sync must wait for it so a
+        // failure surfaces there.
+        self.staged = true;
         Ok((self, handle))
     }
 
@@ -132,6 +147,7 @@ impl<E: Context> Checkpoint<E> {
         match self.watermark() {
             Some(current) if current > limit => {
                 self.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
+                self.staged = true;
                 true
             }
             _ => false,
@@ -142,6 +158,7 @@ impl<E: Context> Checkpoint<E> {
     pub(super) async fn stage_clear(mut self, target: u64) -> Result<Self, Error> {
         self.lower_watermark(target);
         self.metadata.put(CLEAR_TARGET_KEY, target.into());
+        self.staged = true;
         self.sync().await
     }
 
@@ -153,12 +170,14 @@ impl<E: Context> Checkpoint<E> {
         target: u64,
     ) -> Result<Self, Error> {
         self.metadata.remove(&CLEAR_TARGET_KEY);
+        self.staged = true;
         self.persist(items_per_blob, target, target).await
     }
 
     /// Make staged entries durable.
     pub(super) async fn sync(mut self) -> Result<Self, Error> {
         self.metadata = self.metadata.sync().await?;
+        self.staged = false;
         Ok(self)
     }
 
@@ -166,6 +185,16 @@ impl<E: Context> Checkpoint<E> {
     pub(super) async fn destroy(self) -> Result<(), Error> {
         self.metadata.destroy().await?;
         Ok(())
+    }
+
+    /// Remove the checkpoint stored for `partition_prefix` without opening it.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn destroy_partition(
+        context: &E,
+        partition_prefix: &str,
+    ) -> Result<(), Error> {
+        super::blobs::Partition::<E>::remove_all(context, &format!("{partition_prefix}-metadata"))
+            .await
     }
 }
 
@@ -189,21 +218,25 @@ mod tests {
                     self.metadata.remove(&RECOVERY_WATERMARK_KEY);
                 }
             }
+            self.staged = true;
         }
 
         /// Set the mid-blob pruning boundary directly.
         pub(crate) fn set_boundary_hint(&mut self, boundary: u64) {
             self.metadata.put(PRUNING_BOUNDARY_KEY, boundary.into());
+            self.staged = true;
         }
 
         /// Stage a clear intent directly.
         pub(crate) fn set_clear_target(&mut self, target: u64) {
             self.metadata.put(CLEAR_TARGET_KEY, target.into());
+            self.staged = true;
         }
 
         /// Remove every entry, simulating metadata corruption.
         pub(crate) fn clear(&mut self) {
             self.metadata.clear();
+            self.staged = true;
         }
     }
 
