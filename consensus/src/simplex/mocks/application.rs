@@ -497,7 +497,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             observer(context.clone());
                         }
                         if !self.accept_handoffs {
-                            response.send_lossy(HandoffProposal::WaitForParentCertification);
+                            response.send_lossy(HandoffProposal::AwaitCertification);
                             continue;
                         }
                         if self.stall_proposals {

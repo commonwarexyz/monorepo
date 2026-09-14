@@ -34,7 +34,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
-            handoff_policy: HandoffPolicy::WaitForParentCertification,
+            handoff_policy: HandoffPolicy::AwaitCertification,
             _phantom: PhantomData,
         }
     }
@@ -44,7 +44,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result,
-            handoff_policy: HandoffPolicy::WaitForParentCertification,
+            handoff_policy: HandoffPolicy::AwaitCertification,
             _phantom: PhantomData,
         }
     }
@@ -67,7 +67,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
-            handoff_policy: HandoffPolicy::WaitForParentCertification,
+            handoff_policy: HandoffPolicy::AwaitCertification,
             _phantom: PhantomData,
         }
     }
@@ -130,7 +130,7 @@ impl<B, S> GatedVerifyingApp<B, S> {
             Self {
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
-                handoff_policy: HandoffPolicy::WaitForParentCertification,
+                handoff_policy: HandoffPolicy::AwaitCertification,
                 _phantom: PhantomData,
             },
             started_rx,

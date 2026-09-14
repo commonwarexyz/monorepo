@@ -885,8 +885,8 @@ where
                 _ = tx.closed() => return,
                 decision = decision => decision,
             };
-            if decision == HandoffPolicy::WaitForParentCertification {
-                tx.send_lossy(HandoffProposal::WaitForParentCertification);
+            if decision == HandoffPolicy::AwaitCertification {
+                tx.send_lossy(HandoffProposal::AwaitCertification);
                 return;
             }
             let proposal = Automaton::propose(&mut handoff, consensus_context).await;
