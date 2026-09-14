@@ -7,10 +7,11 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
 };
 
 const ACCENT: Color = Color::Cyan;
+const DRAFT_ACCENT: Color = Color::Green;
 
 pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     let area = frame.area();
@@ -55,9 +56,9 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     let sections = Layout::vertical([
         Constraint::Length(4),
         Constraint::Length(5),
-        Constraint::Length(4),
         Constraint::Min(3),
-        Constraint::Length(5),
+        Constraint::Length(7),
+        Constraint::Length(3),
     ])
     .split(area);
 
@@ -149,12 +150,36 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         roles[1],
     );
 
+    frame.render_widget(
+        Paragraph::new(
+            state
+                .activity
+                .iter()
+                .rev()
+                .map(|message| {
+                    let alert = message.contains("ALARM")
+                        || message.contains("HARD FAULT")
+                        || message.contains("rejected")
+                        || message.contains("failed")
+                        || message.contains("unconfirmed")
+                        || message.contains("not sent");
+                    Line::styled(
+                        format!("> {message}"),
+                        Style::default().fg(if alert { Color::Yellow } else { Color::White }),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: true })
+        .block(panel(" Activity / newest first ")),
+        sections[2],
+    );
+
     let staged = if state.staged.is_empty() {
-        "Batch empty - a stages this draft; b sends the batch".to_string()
+        "Batch empty - add payments with a".to_string()
     } else {
         format!(
-            "Batch {}: {}",
-            state.staged.len(),
+            "Batch: {}",
             state
                 .staged
                 .iter()
@@ -163,6 +188,22 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
                 .join(", ")
         )
     };
+    let total: u128 = state
+        .staged
+        .iter()
+        .map(|(_, amount)| u128::from(*amount))
+        .sum();
+    let mut draft = panel(" Payment draft ")
+        .border_type(BorderType::Rounded)
+        .border_style(emphasis(DRAFT_ACCENT))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().fg(Color::White).bg(Color::Rgb(17, 35, 30)));
+    if agent.has_pending_payment() {
+        draft = draft.title_bottom(Line::styled(
+            " Saved payment awaiting confirmation - R retries that request ",
+            emphasis(Color::Yellow),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
@@ -174,52 +215,36 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
                 ),
                 emphasis(Color::White),
             ),
+            Line::styled(
+                "Left/Right recipient  +/- or = amount  PgUp/PgDn +/-10",
+                Style::default().fg(Color::Gray),
+            ),
+            Line::from(vec![
+                Span::styled("p", emphasis(DRAFT_ACCENT)),
+                Span::raw(" send this payment    "),
+                Span::styled("a", emphasis(DRAFT_ACCENT)),
+                Span::raw(" add to batch"),
+            ]),
             Line::raw(staged),
+            Line::from(vec![
+                Span::styled("b", emphasis(DRAFT_ACCENT)),
+                Span::raw(format!(" send batch ({total} total)    ")),
+                Span::styled("R", emphasis(DRAFT_ACCENT)),
+                Span::raw(" retry saved payment"),
+            ]),
         ])
-        .block(panel(if agent.has_pending_payment() {
-            " Payment draft / saved payment awaiting confirmation - R retry "
-        } else {
-            " Payment draft "
-        })),
-        sections[2],
-    );
-
-    frame.render_widget(
-        Paragraph::new(
-            state
-                .activity
-                .iter()
-                .rev()
-                .map(|message| {
-                    let alert = message.contains("ALARM")
-                        || message.contains("HARD FAULT")
-                        || message.contains("rejected")
-                        || message.contains("failed");
-                    Line::styled(
-                        format!("> {message}"),
-                        Style::default().fg(if alert { Color::Yellow } else { Color::White }),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .wrap(Wrap { trim: true })
-        .block(panel(" Activity / newest first ")),
+        .block(draft),
         sections[3],
     );
 
     frame.render_widget(
         Paragraph::new(vec![
-            help("Pay     ", "p pay  R retry saved  a stage  b pay batch"),
             help("Funds   ", "d deposit  t fund operator  r refund deposit"),
             help(
                 "Withdraw",
                 "w withdraw  f Close account  x escalate  c claim withdrawal",
             ),
             help("Network ", "s cut epoch  h recover state  q / Esc quit"),
-            help(
-                "Draft   ",
-                "Left/Right recipient  +/- or = amount  PgUp/PgDn +/-10",
-            ),
         ]),
         sections[4],
     );
@@ -285,6 +310,7 @@ mod tests {
         state.native_balance = Some(654);
         state.amount = 17;
         state.staged.push((1, 17));
+        state.staged.push((2, 3));
         state.log("Payment confirmed: 17 to Bob");
         for (width, height) in [(80, 24), (120, 35)] {
             let output = draw(width, height, &state);
@@ -295,12 +321,12 @@ mod tests {
                 "Verified incoming 0",
                 "Alice -> Bob",
                 "Amount 17",
-                "Batch 1: Bob 17",
+                "Batch: Bob 17, Carol 3",
                 "Payment confirmed: 17 to Bob",
-                "p pay",
-                "R retry saved",
-                "a stage",
-                "b pay batch",
+                "p send this payment",
+                "R retry saved payment",
+                "a add to batch",
+                "b send batch (20 total)",
                 "d deposit",
                 "t fund operator",
                 "r refund deposit",
@@ -320,6 +346,7 @@ mod tests {
                     "missing {expected:?} at {width}x{height}:\n{output}"
                 );
             }
+            assert!(output.find("Activity /").unwrap() < output.find("Payment draft").unwrap());
         }
     }
 

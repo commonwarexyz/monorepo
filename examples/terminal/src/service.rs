@@ -3,14 +3,14 @@
 use crate::{
     agent::Agent,
     chain::{
-        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL, SUBMIT_ATTEMPTS},
         native::RegistryEntry,
         node,
         query::Lookup,
         state::{FaultRecord, HardFaultReasonResponse, Record},
         tx::SettlementTx,
     },
-    operator::{CloseEvent, Operator, StagedDeposit, rpc as operator_rpc},
+    operator::{Operator, StagedDeposit, rpc as operator_rpc},
     protocol::{MIN_DEALING_BYTES, Timing, short_digest},
     rpc, ui,
 };
@@ -304,13 +304,7 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
                 break;
             }
             Some(record) => {
-                let mut operator = operator.lock();
-                operator.observe_admitted(epoch, &record)?;
-                if record.finalized
-                    && let Some(CloseEvent::Finished(close)) = operator.poll_close(epoch)?
-                {
-                    println!("epoch {} close finalized", close.epoch);
-                }
+                operator.lock().observe_admitted(epoch, &record)?;
             }
             None if fault.is_some() => {
                 invalid_from = Some(epoch);
@@ -520,49 +514,78 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
 ) -> Result<Option<rpc::Response>> {
     match request {
         operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
-            if operator
-                .lock()
-                .staged_withdrawal(&request.request)?
-                .is_some()
-            {
-                return Ok(None);
-            }
-            let status = chain.recent_status(ctx).await?;
-            ensure!(
-                !status.hard_faulted,
-                "withdrawal deployment is hard-faulted"
-            );
-            let inclusion = status
-                .height
-                .checked_add(1)
-                .context("withdrawal inclusion height overflow")?;
-            let config = crate::protocol::settlement_config(&timing)?;
-            let minimum = inclusion
-                .checked_add(config.minimum_withdrawal_notice.get())
-                .context("withdrawal notice overflow")?;
-            let deadline = request.request.body().deadline();
-            if deadline < minimum
-                || deadline > inclusion.saturating_add(config.maximum_withdrawal_notice.get())
-            {
-                let lookup = chain.request(Lookup::Withdrawal {
-                    account: request.request.account().clone(),
-                });
-                let queued = chain.recent(ctx, &lookup).await?;
+            for attempt in 0..SUBMIT_ATTEMPTS {
+                if attempt > 0 {
+                    ctx.sleep(POLL).await;
+                }
+                if operator
+                    .lock()
+                    .staged_withdrawal(&request.request)?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let status = chain.recent_status(ctx).await?;
                 ensure!(
-                    queued.height >= status.height && deadline > queued.height,
-                    "withdrawal has expired"
+                    !status.hard_faulted,
+                    "withdrawal deployment is hard-faulted"
                 );
-                ensure!(
-                    matches!(queued.record, Some(Record::Withdrawal(ref accepted)) if accepted == &request.request),
-                    "withdrawal deadline {deadline} is outside [{minimum}, {}] at height {}",
-                    inclusion.saturating_add(config.maximum_withdrawal_notice.get()),
-                    status.height
-                );
+                request
+                    .request
+                    .verify_deployment(&status.deployment)
+                    .context("verify withdrawal authorization")?;
+                let inclusion = status
+                    .height
+                    .checked_add(1)
+                    .context("withdrawal inclusion height overflow")?;
+                let config = crate::protocol::settlement_config(&timing)?;
+                let minimum = inclusion
+                    .checked_add(config.minimum_withdrawal_notice.get())
+                    .context("withdrawal notice overflow")?;
+                let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
+                let deadline = request.request.body().deadline();
+                let current_root = request.request.body().state_root() == &status.state_root.digest;
+                let valid_notice = (minimum..=maximum).contains(&deadline);
+
+                // A queued authorization keeps its exact root and deadline as finality advances.
+                // A fresh request must satisfy the current certified intake conditions.
+                if !current_root || !valid_notice {
+                    let lookup = chain.request(Lookup::Withdrawal {
+                        account: request.request.account().clone(),
+                    });
+                    let queued = chain.recent(ctx, &lookup).await?;
+                    ensure!(
+                        queued.height >= status.height && deadline > queued.height,
+                        "withdrawal has expired"
+                    );
+                    if !matches!(queued.record, Some(Record::Withdrawal(ref accepted)) if accepted == &request.request)
+                    {
+                        ensure!(
+                            current_root,
+                            "withdrawal reference root differs from the current finalized state"
+                        );
+                        ensure!(
+                            valid_notice,
+                            "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
+                            status.height
+                        );
+                    }
+                }
+
+                // Publication fixes the current boundary. Keep this authorization intact
+                // until the close driver opens a successor boundary for it.
+                {
+                    let mut operator = operator.lock();
+                    if !operator.withdrawals_frozen()? {
+                        return Ok(Some(operator_rpc::handle_decoded(
+                            &mut operator,
+                            operator_rpc::OperatorRequest::ApplyWithdrawal(request.clone()),
+                        )));
+                    }
+                }
+                drive_closes(ctx, chain, operator, timing).await?;
             }
-            return Ok(Some(operator_rpc::handle_decoded(
-                &mut operator.lock(),
-                operator_rpc::OperatorRequest::ApplyWithdrawal(request.clone()),
-            )));
+            bail!("the next withdrawal boundary did not open in time; retry the saved request");
         }
         operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
             // The reserve retires only against the certified release record
@@ -1004,6 +1027,166 @@ mod tests {
             );
             release
         })
+    }
+
+    #[test]
+    fn withdrawal_from_first_deposit_requires_a_predecessor_account() {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::new(5).unwrap()),
+            WithdrawalAction::Close,
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let control = harness::start(&context, CHAIN, "chain").await;
+                let mut chain = client(&context, &control);
+                let operator =
+                    Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+                let wallet = crate::protocol::eve_wallet();
+                Agent::new(0)
+                    .unwrap()
+                    .transfer_native(&context, &mut chain, wallet.public_key(), 7)
+                    .await
+                    .unwrap();
+                let deposit = DepositEvent {
+                    id: Sha256::hash(&[b"first-deposit-withdrawal"]),
+                    account: wallet.public_key(),
+                    amount: 7,
+                };
+                chain
+                    .deliver(
+                        &context,
+                        &SettlementTx::Deposit(crate::chain::tx::DepositRequest::sign(
+                            chain.genesis().native.chain_id(),
+                            deployment(),
+                            deposit.clone(),
+                            wallet.signer(),
+                        )),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    chain.deposit(&context, deposit.id).await.unwrap(),
+                    Some(deposit.clone())
+                );
+                operator.lock().observe(&[deposit]).unwrap();
+                assert!(
+                    operator
+                        .lock()
+                        .withdrawal_opening(&wallet.public_key())
+                        .is_err()
+                );
+
+                // The authorization is valid, but the new deposit has no predecessor leaf.
+                let status = chain.recent_status(&context).await.unwrap();
+                let deadline = status.height
+                    + crate::protocol::settlement_config(&Timing::DEFAULT)
+                        .unwrap()
+                        .maximum_withdrawal_notice
+                        .get();
+                let withdrawal = SignedWithdrawal::sign(
+                    deployment(),
+                    status.state_root.digest,
+                    wallet.public_key().encode(),
+                    action,
+                    deadline,
+                    wallet.signer(),
+                );
+                let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                    operator_rpc::ApplyWithdrawalRequest {
+                        request: withdrawal.clone(),
+                    },
+                );
+                let response =
+                    prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(
+                    matches!(response, rpc::Response::Error { .. }),
+                    "withdrawal without a predecessor opening was carried: {response:?}"
+                );
+                assert!(
+                    operator
+                        .lock()
+                        .staged_withdrawal(&withdrawal)
+                        .unwrap()
+                        .is_none()
+                );
+
+                // Rejecting the withdrawal leaves its deposit boundary publishable.
+                register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                    .await
+                    .unwrap();
+                let registered = chain.registration(&context).await.unwrap().unwrap();
+                assert_eq!(registered.epoch, 0);
+                assert!(
+                    operator
+                        .lock()
+                        .signed_registration()
+                        .unwrap()
+                        .withdrawals
+                        .requests()
+                        .is_empty()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn withdrawal_after_payment_waits_for_next_boundary() {
+        deterministic::Runner::timed(Duration::from_secs(15)).start(|context| async move {
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let mut chain = client(&context, &control);
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            operator.lock().pay(0, 1, 5).unwrap();
+
+            let head = chain.recent_status(&context).await.unwrap();
+            let wallet = wallets().remove(0);
+            let deadline = head.height
+                + crate::protocol::settlement_config(&Timing::DEFAULT)
+                    .unwrap()
+                    .maximum_withdrawal_notice
+                    .get();
+            let withdrawal = SignedWithdrawal::sign(
+                deployment(),
+                head.state_root.digest,
+                wallet.public_key().encode(),
+                WithdrawalAction::Close,
+                deadline,
+                wallet.signer(),
+            );
+            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                operator_rpc::ApplyWithdrawalRequest {
+                    request: withdrawal.clone(),
+                },
+            );
+            let response =
+                prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                matches!(response, rpc::Response::Success { .. }),
+                "{response:?}"
+            );
+            let staged = operator
+                .lock()
+                .staged_withdrawal(&withdrawal)
+                .unwrap()
+                .unwrap();
+            assert_eq!(staged.epoch, 1);
+            assert!(
+                chain
+                    .status(&context)
+                    .await
+                    .unwrap()
+                    .last_finalized
+                    .is_none()
+            );
+        });
     }
 
     #[test]
@@ -1458,6 +1641,21 @@ mod tests {
                 .payment_head(&agent.account())
                 .unwrap()
                 .context;
+            let action = WithdrawalAction::Amount(NonZeroU64::new(3).unwrap());
+            let rejected = operator
+                .lock()
+                .withdraw(0, action)
+                .err()
+                .expect("direct intake must preserve the published withdrawal boundary");
+            assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
+            assert_eq!(
+                operator
+                    .lock()
+                    .payment_head(&agent.account())
+                    .unwrap()
+                    .context,
+                before
+            );
             let mut listener = context
                 .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
                 .await
@@ -1481,40 +1679,31 @@ mod tests {
                 }
             });
             let outcome = agent
-                .withdraw(
-                    &context,
-                    &mut chain,
-                    address,
-                    WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
-                )
+                .withdraw(&context, &mut chain, address, action)
                 .await
                 .unwrap();
             server.await.unwrap();
-            assert!(
-                matches!(outcome, WithdrawalOutcome::Signed { .. }),
-                "a published registration accepted a new withdrawal without a receipt"
-            );
+            let WithdrawalOutcome::Applied { epoch, request } = outcome else {
+                panic!("the service did not carry the withdrawal in the successor: {outcome:?}");
+            };
+            assert_eq!(epoch, 1);
             assert_eq!(
                 operator
                     .lock()
-                    .payment_head(&agent.account())
+                    .staged_withdrawal(&request)
                     .unwrap()
-                    .context,
-                before
+                    .unwrap()
+                    .epoch,
+                1
             );
-            for _ in 0..8 {
-                drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
-                    .await
-                    .unwrap();
-                if operator.lock().status().unwrap().epoch == 1 {
-                    break;
-                }
-                control.advance(1).await;
-            }
             assert_eq!(operator.lock().status().unwrap().epoch, 1);
             assert_eq!(
                 chain.registration(&context).await.unwrap().unwrap(),
                 registered
+            );
+            assert_eq!(
+                chain.anchor(&context, 0).await.unwrap(),
+                Some(registered.anchor)
             );
             assert!(!status(&control).await.hard_faulted);
             operator.lock().wait_for_closes().unwrap();
@@ -1625,12 +1814,13 @@ mod tests {
             );
             let replacement = operator.lock().signed_registration().unwrap();
             assert_ne!(old.deposits_root, replacement.deposits_root);
-            assert!(
-                operator
-                    .lock()
-                    .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()))
-                    .is_err()
-            );
+            let rejected = operator
+                .lock()
+                .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()))
+                .err()
+                .expect("the replacement publication must keep withdrawals frozen");
+            assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
+            assert_eq!(operator.lock().signed_registration().unwrap(), replacement);
             drop(operator);
 
             let operator =

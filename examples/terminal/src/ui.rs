@@ -277,7 +277,14 @@ pub(crate) async fn run_with_io<E: Env>(
                     Ok(PaymentOutcome::CommittedUnheld { epoch, total }) => state.log(format!(
                         "epoch {epoch} payment for {total} committed in a finalized close; receipts unheld"
                     )),
-                    Err(error) => state.log(format!("payment rejected: {error:#}")),
+                    Err(error) => {
+                        let action = if agent.has_pending_payment() {
+                            "saved payment unconfirmed; press R to retry it"
+                        } else {
+                            "payment not sent"
+                        };
+                        state.log(format!("{action}: {error:#}"));
+                    }
                 }
             }
             KeyCode::Char('R') => {
@@ -340,9 +347,14 @@ pub(crate) async fn run_with_io<E: Env>(
                             ));
                             state.staged.clear();
                         }
-                        Err(error) => state.log(format!(
-                            "batch rejected; press b to retry the same batch: {error:#}"
-                        )),
+                        Err(error) => {
+                            let action = if agent.has_pending_payment() {
+                                "saved payment unconfirmed; press R to retry it"
+                            } else {
+                                "batch not sent"
+                            };
+                            state.log(format!("{action}: {error:#}"));
+                        }
                     }
                 }
             }
@@ -384,7 +396,7 @@ pub(crate) async fn run_with_io<E: Env>(
                             "epoch {epoch} withdrawal carried by operator: {amount}"
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {epoch} Close carried by operator; withdrawal is finalized at epoch close"
+                            "epoch {epoch} Close carried by operator; press c to claim after finalization"
                         )),
                     },
                     Ok(WithdrawalOutcome::Signed {
@@ -1308,7 +1320,7 @@ mod tests {
             });
             let mut agent = Agent::new(0).unwrap();
             let phase = Cell::new(0);
-            let displayed = RefCell::new((1, Vec::new(), false));
+            let displayed = RefCell::new((1, Vec::new(), false, String::new()));
             let started = context.current();
             super::run_with_io(
                 &context,
@@ -1320,6 +1332,7 @@ mod tests {
                         state.receiver,
                         state.staged.clone(),
                         agent.has_pending_payment(),
+                        state.activity.back().cloned().unwrap_or_default(),
                     );
                     Ok(())
                 },
@@ -1334,8 +1347,13 @@ mod tests {
                         1 if shown.1.len() == 1 => Some(KeyCode::Char('b')),
                         2 if shown.2 => Some(KeyCode::Right),
                         3 if shown.0 == 2 => Some(KeyCode::Char('a')),
-                        4 if shown.1.len() == 2 => Some(KeyCode::Char('R')),
-                        5 if !shown.2 => Some(KeyCode::Char('q')),
+                        4 if shown.1.len() == 2 => Some(KeyCode::Char('b')),
+                        5 => {
+                            assert!(shown.2);
+                            assert!(shown.3.contains("press R"), "{}", shown.3);
+                            Some(KeyCode::Char('R'))
+                        }
+                        6 if !shown.2 => Some(KeyCode::Char('q')),
                         _ => None,
                     };
                     if key.is_some() {

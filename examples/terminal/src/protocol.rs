@@ -1181,8 +1181,8 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
     );
     let challenge = NonZeroU64::new(timing.challenge_duration)
         .context("challenge duration must be positive")?;
-    // Fixed native windows overlap. A full four-slot pipeline needs one slot to turn
-    // over, followed by the carrying close's window and one block before expiry.
+    // Native deadlines overlap. Notice covers admission of the current epoch and
+    // finalization of the successor carrying the withdrawal, with inclusion slack.
     let minimum_notice = delay
         .checked_add(2)
         .and_then(|notice| notice.checked_add(delay.saturating_sub(3)))
@@ -1191,7 +1191,6 @@ pub(crate) fn settlement_config(timing: &Timing) -> Result<SettlementConfig> {
         .checked_add(100)
         .context("withdrawal horizon exceeds the epoch clock")?;
     Ok(SettlementConfig::new(
-        NonZeroUsize::new(4).expect("pipeline bound is nonzero"),
         EpochDeadlinePolicy::new(
             NonZeroU64::new(delay).expect("admission delay is nonzero"),
             challenge,

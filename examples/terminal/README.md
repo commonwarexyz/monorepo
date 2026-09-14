@@ -106,6 +106,9 @@ Wallets verify receipts against that registered context and retain them in
 SQLite. A batch uses one payer signature for several recipients and is accepted
 or rejected as a whole. If the response is lost, the wallet retries the saved request.
 
+Once a close is admitted, the next epoch can accept payments while earlier closes
+await finality. There is no fixed limit on how many admitted closes can be pending.
+
 Recipients fetch their receipts from the operator and verify them locally. A
 balance report alone is not proof of a payment. The wallet checks its retained
 receipts against admitted closes and submits a challenge if a close omits a

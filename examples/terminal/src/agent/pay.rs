@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     chain::{
-        client::{Chain, Client, Env},
+        client::{Chain, Client, Env, POLL, SUBMIT_ATTEMPTS},
         state::StatusRecord,
     },
     operator::rpc as operator_rpc,
@@ -26,9 +26,6 @@ use commonware_clearing::bajillion::{
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use std::{net::SocketAddr, time::Duration};
-
-/// Settlement resolutions allowed during one submission.
-const MAX_RESOLUTIONS: usize = 2;
 
 /// Certified anchor polls before an acceptance is reported unconfirmed. The
 /// operator registers on the chain before it releases a receipt, so absence
@@ -61,7 +58,7 @@ pub(crate) enum PaymentOutcome {
 
 /// How the wallet resolved an already-staged pending send before submission.
 enum PendingOutcome {
-    /// The staged context is still live, so resubmit the exact bytes.
+    /// No admitted outcome resolves the intent, so resubmit the exact bytes.
     Live(Box<StagedSend>),
     /// The send's commitment was concluded from a finalized settlement root.
     Resolved(PaymentOutcome),
@@ -143,7 +140,7 @@ impl Agent {
             None => self.stage(ctx, chain, operator, &requested, total).await?,
         };
 
-        let mut resolutions = 0;
+        let mut attempts = 1;
         loop {
             let response = match operator_rpc::accept_send(
                 ctx,
@@ -183,12 +180,15 @@ impl Agent {
                 "corrective context has an unexpected operator"
             );
             ensure!(
-                resolutions < MAX_RESOLUTIONS,
+                attempts < SUBMIT_ATTEMPTS,
                 "the operator repeatedly rejected the unresolved payment"
             );
-            resolutions += 1;
+            attempts += 1;
             staged = match self.resolve_pending(ctx, chain, operator, staged).await? {
-                PendingOutcome::Live(staged) => *staged,
+                PendingOutcome::Live(staged) => {
+                    ctx.sleep(POLL).await;
+                    *staged
+                }
                 PendingOutcome::Resolved(outcome) => return Ok(outcome),
                 PendingOutcome::Abandoned => {
                     self.stage(ctx, chain, operator, &requested, total).await?
@@ -326,7 +326,9 @@ impl Agent {
         Ok((requested, total))
     }
 
-    /// Resolves only the staged context's immutable registration and finalized activity.
+    /// Resolves the staged authorization against its registration and admitted activity.
+    /// Admission fixes the close, so exclusion is permanent. Inclusion without a receipt
+    /// requires finality before the wallet records a completed payment.
     async fn resolve_pending<E: Env>(
         &mut self,
         ctx: &E,
@@ -355,17 +357,12 @@ impl Agent {
         if invalidated {
             return self.abandon_staged(&staged);
         }
-        ensure!(
-            anchor.is_some(),
-            "the staged context has no irrevocable settlement outcome"
-        );
+        if anchor.is_none() {
+            return Ok(PendingOutcome::Live(Box::new(staged)));
+        }
         let Some(admitted) = chain.admitted(ctx, context.epoch()).await? else {
             return Ok(PendingOutcome::Live(Box::new(staged)));
         };
-        ensure!(
-            admitted.finalized,
-            "the staged epoch has not finalized, so its commitment is not yet decidable"
-        );
         let account = self.account();
         let lookup = self
             .holders
@@ -373,7 +370,7 @@ impl Agent {
             .await?;
         let (_, activity) = lookup
             .resolve::<Sha256>(&admitted.roots.change, &account)
-            .context("verify finalized payer activity")?;
+            .context("verify admitted payer activity")?;
         let Some(activity) = activity.filter(|activity| activity.has_outgoing()) else {
             return self.abandon_staged(&staged);
         };
@@ -381,7 +378,7 @@ impl Agent {
             let prior = self
                 .store
                 .vector_state(context)?
-                .context("finalized activity names an unknown authorization")?;
+                .context("committed activity names an unknown authorization")?;
             let vector = OutVector::new(context.epoch(), account.clone(), prior.entries)?;
             let body = VectorSendBody::new(
                 context,
@@ -392,10 +389,15 @@ impl Agent {
             );
             ensure!(
                 activity.matches_outgoing(context, &body),
-                "finalized activity names an unknown authorization"
+                "committed activity names an unknown authorization"
             );
             return self.abandon_staged(&staged);
         }
+
+        ensure!(
+            admitted.finalized,
+            "the staged epoch has not finalized, so its commitment is not yet decidable"
+        );
 
         let total = entry_total(&staged.entries)?;
         let previous_debit = staged

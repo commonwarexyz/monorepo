@@ -1,4 +1,4 @@
-//! Bounded admission, challenge timing, custody, and terminal settlement.
+//! Close admission, challenge timing, custody, and terminal settlement.
 //!
 //! # Integration contract
 //!
@@ -14,7 +14,7 @@
 //! Queued deposits can be returned directly to their fixed accounts after a permanent fault,
 //! without a surviving-state witness. Terminal settlement freezes the last finalized state root.
 //! Each surviving account then consumes one authenticated opening independently. Starting
-//! terminal settlement only traverses the bounded admitted pipeline to recover unfinalized
+//! terminal settlement only traverses the admitted pipeline to recover unfinalized
 //! deposits and withdrawals. Deposit replay state is retained for the deployment lifetime.
 //! Reaching its limit safely rejects new deposits.
 //! Withdrawal replay identifiers are retained only through the configured maximum deadline.
@@ -204,37 +204,23 @@ impl EpochDeadlinePolicy {
 /// tightest one. The deployment must leave the honest operator room to discharge
 /// it, or that user can force an unnecessary permanent hard fault:
 ///
-/// - `minimum_withdrawal_notice` must exceed the worst-case latency from queueing
-///   a withdrawal to finalizing the close that carries it. A chain-queued
-///   withdrawal is not discharged until its close finalizes, and that close is
-///   appended at the pipeline tail: every close already pending when it is queued
-///   must finalize first under FIFO, and only then does its own challenge window
-///   elapse. The safe notice therefore covers a full pipeline drain plus one more
-///   challenge window, on the order of
-///   `(max_pending_epochs + 1) * (max_admission_delay + maximum_challenge_duration)`,
-///   not merely one challenge window. Sizing it at `minimum_challenge_duration`
-///   plus a small constant is only safe when the pipeline is empty at queue time,
-///   so it is unsafe under ordinary load: a deeper pipeline makes the required
-///   notice larger, not smaller. The operator-carried path is exempt because it
-///   is declined at registration when the deadline cannot clear the earliest
-///   tick at which that close can finalize (see `register_close`), but a
-///   chain-queued request cannot be declined, so the notice window is the only
-///   lever.
-/// - `deposit_inclusion_timeout` must exceed the pipeline turnover time: the
-///   longest an accepted deposit can wait for a free pipeline slot given
-///   `max_pending_epochs` and the challenge cadence. A deposit is discharged at
-///   the admission of its close, so this matters only when every slot is
-///   occupied and the operator must finalize one first.
+/// - `minimum_withdrawal_notice` must cover registration, admission, and FIFO
+///   finalization of the close carrying a queued withdrawal. Challenge windows
+///   overlap and their absolute deadlines are immutable at registration. The
+///   carrying close waits for the latest challenge deadline in its prefix and
+///   for the deployment to process the preceding finalizations. The withdrawal
+///   deadline must be strictly later than its finalization time because expiry
+///   is observed before finalization. Operator-carried requests are checked
+///   against the prefix's latest challenge deadline at registration.
+/// - `deposit_inclusion_timeout` must cover registration and admission of the
+///   deposit-carrying close. Admission discharges the deposit's inclusion
+///   obligation while earlier closes may still be challengeable.
 ///
-/// These are operator responsibilities, not enforced invariants, because they
-/// couple parameters whose safe margins depend on the deployment's throughput
-/// goals. [`SettlementChain::new`] does reject `max_pending_epochs` below two,
-/// which cannot leave a free slot for deposits under any timeout.
+/// The deployment must size these windows for its scheduling and finalization
+/// cadence. The primitive enforces deadlines and ancestry without limiting the
+/// number of admitted closes awaiting finality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SettlementConfig {
-    /// Maximum number of admitted, unfinalized closes. Must be at least two so
-    /// the operator can always reserve a slot to admit a deposit-carrying close.
-    pub max_pending_epochs: NonZeroUsize,
     /// Admission and challenge timing fixed before the deployment accepts funds.
     pub epoch_deadlines: EpochDeadlinePolicy,
     /// Maximum time an accepted deposit may remain outside an admitted close.
@@ -255,7 +241,6 @@ impl SettlementConfig {
     /// Creates an explicit settlement policy.
     #[must_use]
     pub const fn new(
-        max_pending_epochs: NonZeroUsize,
         epoch_deadlines: EpochDeadlinePolicy,
         deposit_inclusion_timeout: NonZeroU64,
         minimum_withdrawal_notice: NonZeroU64,
@@ -264,7 +249,6 @@ impl SettlementConfig {
         max_deposit_ids: NonZeroUsize,
     ) -> Self {
         Self {
-            max_pending_epochs,
             epoch_deadlines,
             deposit_inclusion_timeout,
             minimum_withdrawal_notice,
@@ -542,7 +526,7 @@ impl<D: Digest> From<&StateHead<D>> for Genesis<D> {
 
 /// Runtime-agnostic chain state for one immutable operator deployment.
 ///
-/// The admitted pipeline is a bounded linear extension of the finalized root. A hard fault
+/// The admitted pipeline is a linear extension of the finalized root. A hard fault
 /// permanently rejects new work, while preserving the earlier pending prefix for ordinary
 /// challenge and FIFO finalization before independent terminal claims.
 ///
@@ -608,14 +592,6 @@ where
             < config.epoch_deadlines.minimum_challenge_duration
         {
             return Err(SettlementError::ChallengeDurationOrder);
-        }
-        // A single-slot pipeline has no free slot to admit a deposit-carrying
-        // close while its one close is in the challenge window, so a deposit
-        // recorded then can be stranded past its inclusion deadline. A depth of
-        // two or more always leaves the operator a slot to reserve for
-        // deposits.
-        if config.max_pending_epochs.get() < 2 {
-            return Err(SettlementError::PipelineDepthTooShallow);
         }
         let current_liability = current_state.liability();
         Ok(Self {
@@ -1124,9 +1100,6 @@ where
         if self.registered.is_some() {
             return Err(SettlementError::EpochAlreadyActive);
         }
-        if self.pipeline.len() >= self.config.max_pending_epochs.get() {
-            return Err(SettlementError::PipelineFull);
-        }
         if now > context.admission_deadline() {
             return Err(SettlementError::AdmissionAfterDeadline);
         }
@@ -1593,7 +1566,7 @@ where
 
     /// Freezes the last finalized root for independent terminal claims.
     ///
-    /// Starting terminal settlement only recovers the bounded unfinalized pipeline. Each live
+    /// Starting terminal settlement only recovers the unfinalized pipeline. Each live
     /// account is later released with [`Self::claim_hard_fault`], while deposits remain directly
     /// refundable with [`Self::claim_pending_deposit`].
     pub fn begin_hard_fault_settlement(
@@ -1901,7 +1874,6 @@ where
     // Nested configuration and fault values are encoded only as part of a chain checkpoint.
 
     fn write_config(config: &SettlementConfig, buf: &mut impl BufMut) {
-        (config.max_pending_epochs.get() as u64).write(buf);
         config.epoch_deadlines.max_admission_delay.write(buf);
         config.epoch_deadlines.minimum_challenge_duration.write(buf);
         config.epoch_deadlines.maximum_challenge_duration.write(buf);
@@ -1913,21 +1885,11 @@ where
     }
 
     const fn size_config(_: &SettlementConfig) -> usize {
-        9 * u64::SIZE
+        8 * u64::SIZE
     }
 
     fn read_config(buf: &mut impl Buf) -> Result<SettlementConfig, CodecError> {
         const CONTEXT: &str = "clearing::SettlementConfig";
-        let bounded = |value: u64| -> Result<NonZeroUsize, CodecError> {
-            usize::try_from(value)
-                .ok()
-                .and_then(NonZeroUsize::new)
-                .ok_or(CodecError::Invalid(
-                    CONTEXT,
-                    "bound is zero or unrepresentable",
-                ))
-        };
-        let max_pending_epochs = bounded(u64::read(buf)?)?;
         let epoch_deadlines = EpochDeadlinePolicy::new(
             NonZeroU64::read(buf)?,
             NonZeroU64::read(buf)?,
@@ -1938,9 +1900,14 @@ where
         let maximum_withdrawal_notice = NonZeroU64::read(buf)?;
         let max_destination_bytes = usize::try_from(u64::read(buf)?)
             .map_err(|_| CodecError::Invalid(CONTEXT, "destination bound is unrepresentable"))?;
-        let max_deposit_ids = bounded(u64::read(buf)?)?;
+        let max_deposit_ids = usize::try_from(u64::read(buf)?)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .ok_or(CodecError::Invalid(
+                CONTEXT,
+                "deposit bound is zero or unrepresentable",
+            ))?;
         Ok(SettlementConfig::new(
-            max_pending_epochs,
             epoch_deadlines,
             deposit_inclusion_timeout,
             minimum_withdrawal_notice,
@@ -2275,9 +2242,9 @@ where
 ///
 /// Every bound must dominate the deployment maxima its collections can
 /// reach, or state the chain honestly persisted fails to decode at restart.
-/// `items` must cover [`SettlementConfig::max_deposit_ids`],
-/// [`SettlementConfig::max_pending_epochs`], the deployment's account cardinality,
-/// and all withdrawal identifiers retained within the maximum notice window.
+/// `items` must cover [`SettlementConfig::max_deposit_ids`], the admitted closes
+/// awaiting finality, the deployment's account cardinality, and all withdrawal
+/// identifiers retained within the maximum notice window.
 /// Finalized claim records have independent per-batch bounds. `destination` must be at least
 /// [`SettlementConfig::max_destination_bytes`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2660,7 +2627,6 @@ where
             Ok(NonZeroU64::new(u.arbitrary::<u64>()?.max(1)).expect("value is at least one"))
         };
         let config = SettlementConfig::new(
-            NonZeroUsize::new(u.int_in_range(2..=1_024)?).expect("range starts above zero"),
             EpochDeadlinePolicy::new(nonzero_u64(u)?, nonzero_u64(u)?, nonzero_u64(u)?),
             nonzero_u64(u)?,
             nonzero_u64(u)?,
@@ -2811,9 +2777,6 @@ pub enum SettlementError {
     /// An epoch registration is already active.
     #[error("an epoch registration is already active")]
     EpochAlreadyActive,
-    /// The admitted pipeline reached its configured capacity.
-    #[error("the configured admitted pipeline is full")]
-    PipelineFull,
     /// The context names another deployment.
     #[error("close context does not equal the settlement deployment")]
     Deployment,
@@ -2893,9 +2856,6 @@ pub enum SettlementError {
     /// The configured maximum challenge duration is shorter than the minimum.
     #[error("maximum challenge duration must not be shorter than the minimum")]
     ChallengeDurationOrder,
-    /// The configured pipeline depth cannot guarantee deposit inclusion.
-    #[error("max pending epochs must be at least two")]
-    PipelineDepthTooShallow,
     /// No outstanding liveness obligation has expired.
     #[error("no outstanding liveness obligation has expired")]
     DeadlineNotReached,
@@ -3163,7 +3123,7 @@ mod tests {
             committee(101),
             &configured,
             0,
-            config(2, 1),
+            config(1),
         )
         .unwrap();
         assert_eq!(chain.current_state_root, configured.root());
@@ -3293,9 +3253,8 @@ mod tests {
         accounts: Vec<SigningKey>,
     }
 
-    fn config(max_pending_epochs: usize, minimum_withdrawal_notice: u64) -> SettlementConfig {
+    fn config(minimum_withdrawal_notice: u64) -> SettlementConfig {
         SettlementConfig::new(
-            NonZeroUsize::new(max_pending_epochs).unwrap(),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(1_000).unwrap(),
                 NonZeroU64::new(1).unwrap(),
@@ -3355,7 +3314,7 @@ mod tests {
     }
 
     fn harness(balances: &[u64]) -> Harness {
-        harness_with_config(balances, config(3, 2))
+        harness_with_config(balances, config(2))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4326,7 +4285,6 @@ mod tests {
     fn registration_enforces_the_deployment_deadline_policy() {
         fn policy() -> SettlementConfig {
             SettlementConfig::new(
-                NonZeroUsize::new(3).unwrap(),
                 EpochDeadlinePolicy::new(
                     NonZeroU64::new(3).unwrap(),
                     NonZeroU64::new(2).unwrap(),
@@ -5140,6 +5098,74 @@ mod tests {
     }
 
     #[test]
+    fn admitted_closes_extend_before_finality_across_checkpoint() {
+        let mut fixture = harness(&[10]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let mut batches = Vec::new();
+        for epoch in 0..8 {
+            let close_context = context(
+                fixture.deployment,
+                &fixture.operator,
+                fixture.committee,
+                epoch,
+                &fixture.cache,
+                &deposits,
+                &withdrawals,
+                epoch + 1,
+                epoch + 20,
+            );
+            let close = empty_close(&fixture.cache, &close_context);
+            batches.push(register_and_admit(
+                &mut fixture.chain,
+                &fixture.signer,
+                &fixture.operator_bls,
+                epoch + 1,
+                close_context,
+                deposits.clone(),
+                withdrawals.clone(),
+                &[],
+                &close,
+            ));
+            fixture.cache = fixture.cache.next(vec![]);
+            assert_eq!(fixture.chain.pending_epoch_count(), epoch as usize + 1);
+            assert_eq!(fixture.chain.expected_epoch(), 0);
+            assert!(matches!(
+                fixture.chain.finalize(epoch + 1),
+                Err(SettlementError::ChallengeWindowOpen)
+            ));
+            if epoch == 4 {
+                assert!(matches!(
+                    TestChain::decode_cfg(
+                        fixture.chain.encode(),
+                        &Bounds {
+                            committee: 16,
+                            items: 4,
+                            destination: 1024,
+                        },
+                    ),
+                    Err(CodecError::InvalidLength(_))
+                ));
+                fixture.chain = round_trip(&fixture.chain);
+            }
+        }
+        fixture.chain = round_trip(&fixture.chain);
+        for (epoch, batch_id) in batches.into_iter().enumerate() {
+            let deadline = epoch as u64 + 20;
+            assert!(matches!(
+                fixture.chain.finalize(deadline),
+                Err(SettlementError::ChallengeWindowOpen)
+            ));
+            let finalized = fixture.chain.finalize(deadline + 1).unwrap();
+            assert_eq!(finalized.epoch, epoch as u64);
+            assert_eq!(finalized.batch_id, batch_id);
+        }
+        assert_eq!(fixture.chain.pending_epoch_count(), 0);
+        assert_eq!(fixture.chain.expected_epoch(), 8);
+        assert!(fixture.chain.hard_fault().is_none());
+    }
+
+    #[test]
     fn happy_two_slot_pipeline_and_inclusive_deadlines() {
         let mut fixture = harness(&[10]);
         let deposits = DepositBatch::empty();
@@ -5405,7 +5431,7 @@ mod tests {
 
     #[test]
     fn registered_anchor_wins_a_same_instant_deposit_expiry() {
-        let mut settlement_config = config(3, 2);
+        let mut settlement_config = config(2);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(2).unwrap();
         let mut fixture = harness_with_config(&[10], settlement_config);
         let account = fixture.accounts[0].public_key();
@@ -6213,7 +6239,6 @@ mod tests {
         // Challenge durations vary within [10, 100], so an earlier pending
         // close can hold the FIFO front past a later close's own window.
         let policy = SettlementConfig::new(
-            NonZeroUsize::new(3).unwrap(),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(1_000).unwrap(),
                 NonZeroU64::new(10).unwrap(),
@@ -6508,31 +6533,6 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_a_single_slot_pipeline() {
-        let fixture = harness(&[10]);
-        assert!(matches!(
-            SettlementChain::<Sha256, VerifyingKey>::new(
-                fixture.deployment,
-                fixture.operator.public_key(),
-                committee(206),
-                &fixture.cache.head().into(),
-                0,
-                config(1, 1),
-            ),
-            Err(SettlementError::PipelineDepthTooShallow)
-        ));
-        SettlementChain::<Sha256, VerifyingKey>::new(
-            fixture.deployment,
-            fixture.operator.public_key(),
-            committee(206),
-            &fixture.cache.head().into(),
-            0,
-            config(2, 1),
-        )
-        .expect("a two-slot pipeline is accepted");
-    }
-
-    #[test]
     fn carried_amount_must_be_coverable_at_registration() {
         let mut fixture = harness(&[10, 10]);
         let signer = fixture.accounts[0].clone();
@@ -6580,7 +6580,7 @@ mod tests {
     fn offset_boundaries_settle_together_across_intake_orders_and_restart() {
         for queued in [false, true] {
             for order in 0..3 {
-                let mut policy = config(3, 2);
+                let mut policy = config(2);
                 policy.deposit_inclusion_timeout = NonZeroU64::new(5).unwrap();
                 let mut fixture = harness_with_config(&[10], policy);
                 let signer = fixture.accounts[0].clone();
@@ -6693,7 +6693,6 @@ mod tests {
     #[test]
     fn intake_limits_notice_and_clean_release_replay_are_exact() {
         let invalid_notice = SettlementConfig::new(
-            NonZeroUsize::new(3).unwrap(),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(1_000).unwrap(),
                 NonZeroU64::new(1).unwrap(),
@@ -6719,7 +6718,6 @@ mod tests {
         ));
 
         let settlement_config = SettlementConfig::new(
-            NonZeroUsize::new(3).unwrap(),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(1_000).unwrap(),
                 NonZeroU64::new(1).unwrap(),
@@ -6973,7 +6971,7 @@ mod tests {
 
     #[test]
     fn expired_deposit_is_claimable_without_a_survivor() {
-        let mut settlement_config = config(3, 2);
+        let mut settlement_config = config(2);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(5).unwrap();
         let mut fixture = harness_with_config(&[], settlement_config);
         let account = SigningKey::from_seed(999).public_key();
@@ -7046,7 +7044,7 @@ mod tests {
 
     #[test]
     fn admitted_deposit_discharges_its_inclusion_deadline() {
-        let mut settlement_config = config(3, 2);
+        let mut settlement_config = config(2);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(3).unwrap();
         let mut fixture = harness_with_config(&[], settlement_config);
         let account = SigningKey::from_seed(999).public_key();
@@ -7091,7 +7089,7 @@ mod tests {
 
     #[test]
     fn same_account_deposits_keep_the_earliest_deadline() {
-        let mut settlement_config = config(3, 2);
+        let mut settlement_config = config(2);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(5).unwrap();
         let mut fixture = harness_with_config(&[], settlement_config);
         let account = SigningKey::from_seed(999).public_key();
@@ -7586,7 +7584,7 @@ mod tests {
 
     #[test]
     fn finalized_claim_batches_do_not_block_later_finalization() {
-        let mut fixture = harness_with_config(&[100, 100], config(2, 1));
+        let mut fixture = harness_with_config(&[100, 100], config(1));
         let mut settled_size = None;
 
         for epoch in 0..6 {
@@ -9032,7 +9030,7 @@ mod tests {
 
     #[test]
     fn settlement_adds_no_account_limit_below_the_protocol_limit() {
-        let mut fixture = harness_with_config(&[10], config(3, 2));
+        let mut fixture = harness_with_config(&[10], config(2));
         let created = SigningKey::from_seed(999).public_key();
         fixture
             .chain
@@ -9348,7 +9346,7 @@ mod tests {
 
     #[test]
     fn withdrawal_wins_an_equal_deposit_expiry_tie() {
-        let mut settlement_config = config(3, 2);
+        let mut settlement_config = config(2);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(5).unwrap();
         let mut fixture = harness_with_config(&[10, 10], settlement_config);
         let withdrawing = &fixture.accounts[0];
@@ -9559,7 +9557,7 @@ mod tests {
             committee(205),
             &fixture.cache.head().into(),
             u64::MAX - 2,
-            config(2, 1),
+            config(1),
         )
         .unwrap();
         let deposit_id = Sha256::hash(&[b"post-inclusion-exit-horizon"]);
@@ -9585,7 +9583,7 @@ mod tests {
                 committee(206),
                 &fixture.cache.head().into(),
                 u64::MAX - 3,
-                config(2, 1),
+                config(1),
             )
             .unwrap();
             let id = Sha256::hash(&[b"offset-epoch-horizon"]);
@@ -9626,7 +9624,7 @@ mod tests {
             committee(202),
             &deposit_fixture.cache.head().into(),
             u64::MAX - 1,
-            config(2, 1),
+            config(1),
         )
         .unwrap();
         assert!(matches!(
@@ -9648,7 +9646,7 @@ mod tests {
             committee(203),
             &withdrawal_fixture.cache.head().into(),
             u64::MAX - 1,
-            config(2, 1),
+            config(1),
         )
         .unwrap();
         let request = withdrawal(
@@ -9869,7 +9867,7 @@ mod tests {
             Err(SettlementError::CustodyArithmetic)
         ));
 
-        let mut settlement_config = config(2, 1);
+        let mut settlement_config = config(1);
         settlement_config.deposit_inclusion_timeout = NonZeroU64::new(5).unwrap();
         let deadline_harness = harness(&[1]);
         let mut deposit_deadline_chain = SettlementChain::<Sha256, VerifyingKey>::new(
@@ -9925,7 +9923,7 @@ mod tests {
                 committee(202),
                 &epoch_harness.cache.head().into(),
                 u64::MAX,
-                config(2, 1),
+                config(1),
             ),
             Err(SettlementError::EpochOverflow)
         ));

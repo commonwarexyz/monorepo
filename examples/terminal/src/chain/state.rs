@@ -1653,7 +1653,7 @@ impl Machine {
         // acceptable as soon as its predecessor's close is admitted, while
         // that close's challenge window is still open.
         let pending = u64::try_from(self.chain.pending_epoch_count())
-            .expect("the admission pipeline is bounded");
+            .expect("pending epochs fit the epoch counter");
         if Some(request.epoch) != self.chain.expected_epoch().checked_add(pending) {
             return Ok(Step::rejected(Reject::EpochSequence));
         }

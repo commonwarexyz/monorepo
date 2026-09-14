@@ -124,7 +124,7 @@ hash = "ef3613f7b7522acf580c5540e215bd825962a3378f11f708386c4ab4e08533a9"
 
 ["conformance::CodecConformance<SettlementChain<Sha256,VerifyingKey>>"]
 n_cases = 256
-hash = "33e381f0cd86cf717991221997332b7e69e030d56c9c1238fe4548dca7506272"
+hash = "87f82e288255a7fcb54b52288c75698de20fde11159ba78435dad2af6c7cc1b1"
 
 ["conformance::CodecConformance<SettlementOutput>"]
 n_cases = 65536

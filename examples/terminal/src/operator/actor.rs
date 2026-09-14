@@ -63,7 +63,6 @@ use std::{
 };
 
 pub(crate) const DEFAULT_AMOUNT: u64 = 5;
-const MAX_PENDING_CLOSES: usize = 4;
 #[cfg(test)]
 const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPOSIT";
 
@@ -279,12 +278,7 @@ impl Operator {
             "stored deposit event count differs from the current epoch log"
         );
         let close_fault = store.failed_close()?;
-        let pending_close_count = store.pending_close_count()?;
-        ensure!(
-            pending_close_count <= MAX_PENDING_CLOSES,
-            "stored close backlog exceeds its {MAX_PENDING_CLOSES}-epoch bound"
-        );
-        let pending_close = pending_close_count != 0;
+        let pending_close = store.closing_epoch_from(0)?.is_some();
         let recovering = close_fault.is_none() && pending_close;
         if close_fault.is_none() && !pending_close {
             let (expected_epoch, expected_root) = match store.latest_finalized_root()? {
@@ -508,12 +502,19 @@ impl Operator {
             return Ok(SendOutcome::Accepted(accepted));
         }
 
-        // A send bound to a context this operator moved past can never be accepted, so
-        // it earns the corrective rejection instead of an opaque error: the live context
-        // and the payer's endpoint let an optimistic payer merge, re-sign, and retry
-        // from its local state instead of re-reading the head.
+        // The corrective response reports the live context. The wallet must resolve
+        // its saved authorization before using that context for another send.
         let context = self.registration.context.payment().clone();
         let body = authorization.body();
+        let account_name = |identities: &[AccountIdentity], key: &Key| {
+            identities
+                .iter()
+                .find(|identity| identity.key == *key && identity.name != "Account")
+                .map_or_else(|| key.to_string(), |identity| identity.name.to_string())
+        };
+        let payer = account_name(&self.identities, body.payer());
+        let seq = body.seq();
+        let cumulative_debit = body.cumulative_debit();
         let rebound = VectorSendBody::new(
             &context,
             body.payer().clone(),
@@ -523,6 +524,13 @@ impl Operator {
         );
         if rebound != *body {
             let endpoint = self.store.payer_endpoint(body.payer())?;
+            println!(
+                "payment rejected stale context: payer={payer} sent_epoch={} sent_anchor={} seq={seq} live_epoch={} live_anchor={}",
+                body.epoch(),
+                short_digest(body.anchor()),
+                context.epoch(),
+                short_digest(context.anchor()),
+            );
             return Ok(SendOutcome::Stale {
                 context,
                 cumulative_debit: endpoint.cumulative_debit,
@@ -539,13 +547,35 @@ impl Operator {
             &entries,
         );
         match self.guard_store(result)? {
-            SendVerdict::Accepted(accepted) => Ok(SendOutcome::Accepted(*accepted)),
-            SendVerdict::Stale(endpoint) => Ok(SendOutcome::Stale {
-                context,
-                cumulative_debit: endpoint.cumulative_debit,
-                seq: endpoint.seq,
-                entries: endpoint.entries,
-            }),
+            SendVerdict::Accepted(accepted) => {
+                let recipients = entries
+                    .iter()
+                    .map(|entry| {
+                        let recipient = account_name(&self.identities, &entry.recipient);
+                        format!("{recipient}:{}", entry.amount)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "payment accepted: epoch={} seq={} payer={payer} recipients=[{recipients}] total={}",
+                    accepted.epoch, accepted.sequence, accepted.total,
+                );
+                Ok(SendOutcome::Accepted(*accepted))
+            }
+            SendVerdict::Stale(endpoint) => {
+                println!(
+                    "payment rejected stale endpoint: epoch={} payer={payer} sent_seq={seq} sent_debit={cumulative_debit} accepted_seq={} accepted_debit={}",
+                    context.epoch(),
+                    endpoint.seq,
+                    endpoint.cumulative_debit,
+                );
+                Ok(SendOutcome::Stale {
+                    context,
+                    cumulative_debit: endpoint.cumulative_debit,
+                    seq: endpoint.seq,
+                    entries: endpoint.entries,
+                })
+            }
         }
     }
 
@@ -699,8 +729,9 @@ impl Operator {
         );
         let request = SignedWithdrawal::sign(
             self.protocol.deployment(),
-            self.balances
-                .root(self.registration.context.payment().epoch())?
+            self.store
+                .latest_finalized_root()?
+                .map_or(self.genesis_root, |(_, root)| root)
                 .digest,
             destination,
             action,
@@ -714,17 +745,27 @@ impl Operator {
         self.ensure_operating()?;
         self.ensure_close_horizon()?;
         self.ensure_payer_eligible(account)?;
+        let epoch = self
+            .store
+            .latest_finalized_root()?
+            .map_or(Some(0), |(epoch, _)| epoch.checked_add(1))
+            .context("finalized withdrawal checkpoint overflow")?;
         Ok(WithdrawalOpening {
-            root: self
-                .balances
-                .root(self.registration.context.payment().epoch())?,
+            root: self.balances.root(epoch)?,
             opening: self
                 .balances
-                .opening(self.registration.context.payment().epoch(), account)
+                .opening(epoch, account)
                 .context("open withdrawing account")?,
         })
     }
 
+    /// Whether registration has fixed the live epoch's withdrawal boundary.
+    pub(crate) fn withdrawals_frozen(&self) -> Result<bool> {
+        self.ensure_operating()?;
+        self.store.withdrawals_frozen()
+    }
+
+    /// Stages a withdrawal after the service authenticates its root and deadline with settlement.
     pub(crate) fn apply_withdrawal(
         &mut self,
         request: SignedWithdrawal<Key, Digest>,
@@ -736,10 +777,10 @@ impl Operator {
             return Ok(staged);
         }
         self.ensure_withdrawal_intake_horizon(request.body().action())?;
-        let head = self.withdrawal_opening(request.account())?;
+        self.ensure_payer_eligible(request.account())?;
         request
-            .verify_context(&self.protocol.deployment(), &head.root.digest)
-            .context("verify withdrawal context")?;
+            .verify_deployment(&self.protocol.deployment())
+            .context("verify withdrawal authorization")?;
 
         let replacement =
             registration_with_withdrawal(&self.protocol, &self.registration, request.clone())
@@ -863,6 +904,7 @@ impl Operator {
             self.close_fault = Some(message.clone());
             return Err(error.context(format!("operator fenced: {message}")));
         }
+        println!("epoch {epoch} cut; successor={next_epoch}");
 
         // SQLite owns the cut and the root-independent successor context. The RPC service registers
         // that exact context with settlement before it releases the successor's first receipt.
@@ -905,10 +947,6 @@ impl Operator {
         );
         self.next_openable_epoch()?;
         ensure!(self.store.has_current_work()?, "there is nothing to close");
-        ensure!(
-            self.store.pending_close_count()? < MAX_PENDING_CLOSES,
-            "close backlog reached its {MAX_PENDING_CLOSES}-epoch bound"
-        );
         Ok(())
     }
 
@@ -1064,12 +1102,6 @@ impl Operator {
         self.ensure_operating()?;
         self.next_openable_epoch()?;
 
-        // Registration starts an immutable admission deadline, so reserve a close slot
-        // before issuing the live epoch's first receipt.
-        ensure!(
-            self.store.pending_close_count()? < MAX_PENDING_CLOSES,
-            "close backlog reached its {MAX_PENDING_CLOSES}-epoch bound"
-        );
         let epoch = self.registration.context.payment().epoch();
         let predecessor_liability = self.registration.context.predecessor_liability();
         let withdrawals = self.registration.withdrawals.clone();
@@ -1161,6 +1193,10 @@ impl Operator {
         );
         self.guard_store(adopted)?;
         self.registration = replacement;
+        println!(
+            "epoch {epoch} registered: admission deadline block {}; challenge deadline block {}",
+            record.admission_deadline, record.challenge_deadline,
+        );
         Ok(())
     }
 
@@ -1406,6 +1442,11 @@ impl Operator {
                 && *result.context.predecessor_root() == predecessor,
             "admitted close does not extend the authenticated local tip"
         );
+        println!(
+            "epoch {} close admitted: challenge deadline block {}",
+            result.context.payment().epoch(),
+            result.context.challenge_deadline(),
+        );
         self.admitted.push_back(result);
         Ok(())
     }
@@ -1436,6 +1477,7 @@ impl Operator {
             let finalized = self.store.finish_close(result, self.genesis_root);
             self.guard_store(finalized)?;
             self.admitted.pop_front();
+            println!("epoch {epoch} close finalized");
             self.verify_recovered_predecessor()?;
         }
         Ok(())
@@ -1459,10 +1501,7 @@ impl Operator {
 
     pub(crate) fn automatic_epoch(&self) -> Result<Option<u64>> {
         self.ensure_store_usable()?;
-        if self.ensure_operating().is_err()
-            || !self.store.has_current_work()?
-            || self.store.pending_close_count()? >= MAX_PENDING_CLOSES
-        {
+        if self.ensure_operating().is_err() || !self.store.has_current_work()? {
             return Ok(None);
         }
         Ok(Some(self.registration.context.payment().epoch()))

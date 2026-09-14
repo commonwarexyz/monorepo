@@ -55,7 +55,6 @@ use support::TestState;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_ACCOUNTS: usize = 4;
 const MAX_ACTIONS: usize = 24;
-const MAX_PENDING_EPOCHS: usize = 3;
 const MAX_DESTINATION_BYTES: usize = 16;
 const MAX_EPOCH_ADMISSION_DELAY: u64 = 6;
 const CHALLENGE_DURATION: u64 = 2;
@@ -397,7 +396,6 @@ impl Harness {
         let validator = bls12381::Scheme::signer(committee.clone(), validator_bls)
             .expect("deterministic validator belongs to its committee");
         let config = SettlementConfig::new(
-            NonZeroUsize::new(MAX_PENDING_EPOCHS).unwrap(),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(MAX_EPOCH_ADMISSION_DELAY).unwrap(),
                 NonZeroU64::new(CHALLENGE_DURATION).unwrap(),
@@ -668,7 +666,6 @@ impl Harness {
     }
 
     fn assert_invariants(&self) {
-        assert!(self.slots.len() <= MAX_PENDING_EPOCHS);
         assert_eq!(self.chain.pending_epoch_count(), self.slots.len());
         let expected_state_root = self.finalized.root();
         assert_eq!(self.chain.current_state_root(), expected_state_root);
@@ -1769,7 +1766,6 @@ impl Harness {
                 == Some(CHALLENGE_DURATION);
         let expected = if self.operates_after(&observation)
             && self.registered.is_none()
-            && self.slots.len() < MAX_PENDING_EPOCHS
             && now <= context.admission_deadline()
             && deadlines_valid
             && context == prepared.context
@@ -1810,7 +1806,6 @@ impl Harness {
         }
         let observation = self.predict_observation(now);
         let expected = if self.operates_after(&observation)
-            && self.slots.len() < MAX_PENDING_EPOCHS
             && self.registered.as_ref().is_some_and(|registered| {
                 now <= registered.context.admission_deadline()
                     && header == registered.close.header

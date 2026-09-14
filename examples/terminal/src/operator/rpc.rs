@@ -368,9 +368,9 @@ impl Read for AcceptedBatchResponse {
 
 /// The operator's typed reply to one submitted send.
 ///
-/// The corrective variant keeps head reads off the payment hot path: a payer signing
-/// from its local state learns the operator's live context and its accepted endpoint
-/// from the rejection itself, adopts them, re-signs the same intent, and retries once.
+/// The corrective variant reports the operator's live context and accepted endpoint.
+/// The wallet keeps its saved authorization until a receipt or authenticated settlement
+/// evidence resolves it, then signs any replacement under a verified live context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AcceptSendResponse {
     /// The send, or its exact replay, is committed with its acceptance.
@@ -379,7 +379,7 @@ pub(crate) enum AcceptSendResponse {
     /// endpoint that does not extend the payer's accepted state. It carries the
     /// operator's live context and the payer's accepted endpoint as the operator sees
     /// it: the cumulative debit, the batch sequence (zero when none), and the payer's
-    /// cumulative out vector, so the wallet can merge and recompute its vector root.
+    /// cumulative out vector. These fields describe the operator's view of the payer.
     Stale {
         context: PaymentContext<Key, Digest>,
         cumulative_debit: u64,
@@ -1147,9 +1147,7 @@ pub(crate) async fn status<E: Network + Clock>(
 /// Reads one payer's live head: the payment context, live account state, and a state
 /// opening against the operator's predecessor root.
 ///
-/// This read is off the payment hot path. A paying wallet signs from its cached context
-/// and learns a moved context from the corrective rejection, so the head serves only the
-/// no-cache fallback, the balance heartbeat, and the recovery-opening refresh.
+/// The wallet authenticates the context and opening against settlement before using them.
 pub(crate) async fn payment_head<E: Network + Clock>(
     network: &E,
     address: SocketAddr,

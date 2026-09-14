@@ -849,7 +849,6 @@ pub(crate) enum SettlementAction {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SettlementModel {
-    max_pending: usize,
     deposit_timeout: u8,
     certified_closes: [CertifiedClose; BATCH_COUNT],
 }
@@ -857,7 +856,6 @@ pub(crate) struct SettlementModel {
 impl Default for SettlementModel {
     fn default() -> Self {
         Self {
-            max_pending: 3,
             deposit_timeout: 2,
             certified_closes: certification::certified_closes(),
         }
@@ -881,13 +879,6 @@ const fn account_bit(account: Account) -> u8 {
 }
 
 impl SettlementModel {
-    pub(crate) fn with_max_pending(max_pending: usize) -> Self {
-        Self {
-            max_pending,
-            ..Self::default()
-        }
-    }
-
     pub(crate) fn call_at(
         self,
         state: &SettlementState,
@@ -1073,7 +1064,6 @@ impl SettlementModel {
     fn can_register(self, state: &SettlementState, id: RegistrationId) -> bool {
         Self::operating(state)
             && state.registered.is_none()
-            && state.pipeline.len() < self.max_pending
             && Self::registration_matches(state, id)
             && Self::carried_admitted(state, &id.registration())
     }
@@ -1671,9 +1661,6 @@ impl SettlementModel {
     }
 
     pub(crate) fn fifo_invariant(state: &SettlementState) -> bool {
-        if state.pipeline.len() > 3 {
-            return false;
-        }
         for (left, batch) in state.pipeline.iter().enumerate() {
             if state.pipeline[..left].contains(batch) {
                 return false;
@@ -1930,7 +1917,6 @@ impl SettlementModel {
             && Self::deadlines_observable(state)
             && Self::hard_fault_has_progress(state)
             && registration_exact
-            && state.pipeline.len() <= self.max_pending
     }
 }
 

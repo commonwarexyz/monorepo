@@ -9,7 +9,7 @@ use crate::{
     chain::{
         client::{Chain as _, Client},
         harness,
-        query::{Evidence, EvidenceResponse},
+        query::{Evidence, EvidenceResponse, Lookup, ReadRequest},
         state::{
             FaultRecord, HardFaultReasonResponse, Record, RegistrationRecord, admitted_key,
             deposit_key, fault_key, registration_key, status_key, withdrawal_key,
@@ -738,7 +738,18 @@ fn unresolved_intent_keeps_exact_bytes_across_hostile_epoch_hints_and_reopen() {
     ] {
         deterministic::Runner::default().start(|context| async move {
             let database = TempDatabase::new();
-            let (control, mut chain) = chain(&context).await;
+            let control = harness::start_with_native(
+                &context,
+                CHAIN,
+                "chain",
+                harness::native(crate::protocol::deployments()),
+                crate::protocol::Timing {
+                    admission_offset: 100,
+                    challenge_duration: 100,
+                },
+            )
+            .await;
+            let mut chain = client_with_holders(&context, &control, CHAIN);
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             let old = register(&control, &mut operator).await;
             let mut listener = context
@@ -784,7 +795,7 @@ fn unresolved_intent_keeps_exact_bytes_across_hostile_epoch_hints_and_reopen() {
             let hostile = context
                 .child("hostile_correction")
                 .spawn(move |_| async move {
-                    for _ in 0..3 {
+                    for _ in 0..crate::chain::client::SUBMIT_ATTEMPTS {
                         respond(&mut listener, |request| {
                             let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                                 panic!("ambiguous intent requested a fresh head or authorization");
@@ -1092,6 +1103,125 @@ fn immutable_anchor_conflict_releases_only_the_invalid_context() {
 }
 
 #[test]
+fn registration_read_lag_keeps_exact_intent_until_anchor_conflict_is_visible() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, _) = chain(&context).await;
+        let mut before_registration = Vec::new();
+        for lookup in [
+            Lookup::Status,
+            Lookup::Anchor { epoch: 0 },
+            Lookup::Registration,
+        ] {
+            let request = ReadRequest::new(deployment(), lookup);
+            before_registration.push((request.encode(), control.read(request).await.encode()));
+        }
+        let corrections = Arc::new(AtomicUsize::new(0));
+        let observed = corrections.clone();
+        let mut query_listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let query_address = query_listener.local_addr().unwrap();
+        let query_control = control.clone();
+        context
+            .child("lagging_registration")
+            .spawn(move |_| async move {
+                loop {
+                    let (_, mut sink, mut stream) = query_listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    assert_eq!(request.method, crate::chain::query::METHOD_READ);
+                    let body = if observed.load(Ordering::Relaxed) < 3 {
+                        before_registration
+                            .iter()
+                            .find(|(key, _)| *key == request.body)
+                            .expect("unresolved intent only reads its settlement context")
+                            .1
+                            .clone()
+                    } else {
+                        query_control
+                            .read(ReadRequest::decode(request.body).unwrap())
+                            .await
+                            .encode()
+                    };
+                    rpc::send_response(&mut sink, &rpc::Response::Success { body })
+                        .await
+                        .unwrap();
+                }
+            });
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![query_address],
+            context.child("lagging_rng"),
+        )
+        .unwrap();
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let head = operator.payment_head(&wallets()[0].public_key()).unwrap();
+        let old = head.context.payment().clone();
+        let live = register(&control, &mut operator).await;
+        assert_ne!(old.anchor(), live.anchor());
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = context
+            .child("corrective_registration")
+            .spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentHead(_)
+                    ));
+                    rpc::Response::Success {
+                        body: payment_head_response(head.context, 100).encode(),
+                    }
+                })
+                .await;
+                let mut expected = None;
+                for _ in 0..3 {
+                    respond(&mut listener, |request| {
+                        let operator_rpc::OperatorRequest::AcceptSend(send) = &request else {
+                            panic!("registration absence must retain the exact authorization");
+                        };
+                        assert_eq!(send.authorization.body().anchor(), old.anchor());
+                        let bytes = send.encode();
+                        assert_eq!(&bytes, expected.get_or_insert(bytes.clone()));
+                        corrections.fetch_add(1, Ordering::Relaxed);
+                        operator_rpc::handle_decoded(&mut operator, request)
+                    })
+                    .await;
+                }
+                relay(&mut listener, &mut operator).await;
+                relay(&mut listener, &mut operator).await;
+            });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let started = context.current();
+        let payment = accepted(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 7)])
+                .await
+                .unwrap(),
+        );
+        assert!(
+            context.current().duration_since(started).unwrap() >= crate::chain::client::POLL * 2
+        );
+        assert_eq!(payment.acceptance.ack.body().anchor(), live.anchor());
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
+        assert_eq!(payment.acceptance.entries[0].count, 1);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
+        assert_eq!(agent.receipt_count(), 1);
+        assert!(agent.pending_payment.is_none());
+        drop(agent);
+        let agent = Agent::open(database.path(), 0).unwrap();
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
+        assert!(agent.pending_payment.is_none());
+        server.await.unwrap();
+    });
+}
+
+#[test]
 fn received_sequence_zero_is_valid_and_survives_reopen() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
@@ -1248,15 +1378,36 @@ fn finalized_zero_balance_preserves_accepted_epoch_state() {
 #[test]
 fn withdrawal_escalation_proves_every_pending_successor_balance() {
     deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
+        let control = harness::start_with_native(
+            &context,
+            CHAIN,
+            "chain",
+            harness::native(crate::protocol::deployments()),
+            crate::protocol::Timing {
+                admission_offset: 100,
+                challenge_duration: 100,
+            },
+        )
+        .await;
+        let mut chain = client_with_holders(&context, &control, CHAIN);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        for epoch in 0..2 {
+        for epoch in 0..6 {
             register(&control, &mut operator).await;
             operator.pay(1, 2, 1).unwrap();
             let result = operator.complete_close(35 + epoch).unwrap();
             applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
         }
         assert!(status(&control).await.last_finalized.is_none());
+        for epoch in 0..6 {
+            assert!(
+                !chain
+                    .admitted(&context, epoch)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .finalized
+            );
+        }
         let mut agent = Agent::new(0).unwrap();
         let action = WithdrawalAction::Amount(NonZeroU64::new(25).unwrap());
         let outcome = agent
@@ -1272,6 +1423,7 @@ fn withdrawal_escalation_proves_every_pending_successor_balance() {
             chain.withdrawal(&context, agent.account()).await.unwrap(),
             Some(request)
         );
+        assert!(status(&control).await.last_finalized.is_none());
     });
 }
 
@@ -1333,7 +1485,7 @@ fn finalized_activity_requires_its_actual_batch_root_and_account() {
 }
 
 #[test]
-fn unfinalized_activity_cannot_resolve_an_ambiguous_intent() {
+fn unfinalized_included_activity_cannot_resolve_an_ambiguous_intent() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
@@ -1376,6 +1528,9 @@ fn unfinalized_activity_cannot_resolve_an_ambiguous_intent() {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("has not finalized"));
+        assert!(status(&control).await.last_finalized.is_none());
+        assert_eq!(agent.store.debits_since(0).unwrap(), 0);
+        assert_eq!(agent.receipt_count(), 0);
         drop(agent);
         let agent = Agent::open(database.path(), 0).unwrap();
         assert_eq!(agent.pending_payment.unwrap().authorization, expected);
@@ -1692,72 +1847,247 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
 }
 
 #[test]
-fn finalized_activity_exclusion_allows_a_new_epoch_intent() {
-    deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let _old = register(&control, &mut operator).await;
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The first payment stages from the head and commits for real.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            relay(&mut listener, &mut operator).await;
-            (listener, operator)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 7)])
+fn admitted_activity_exclusion_allows_a_new_epoch_intent() {
+    for (finalized, prior_accepted) in [(true, true), (true, false), (false, true), (false, false)]
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let (control, mut chain) = chain(&context).await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let old = register(&control, &mut operator).await;
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
-                .unwrap(),
-        );
-        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
-        let (mut listener, mut operator) = staging.await.unwrap();
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
 
-        // The epoch rolls: the close finalizes certifiably and the successor
-        // registers, so the operator's live context moved on.
-        let result = operator.complete_close(11).unwrap();
-        finalize(&control, &result).await;
-        let live = register(&control, &mut operator).await;
-        assert_eq!(live.epoch(), 1);
-
-        // The old epoch excludes the new staged authorization. The fresh epoch starts at zero.
-        let rolling = context.child("rolling").spawn(move |_| async move {
-            for _ in 0..4 {
+            let staging = context.child("staging").spawn(move |_| async move {
                 relay(&mut listener, &mut operator).await;
+                if prior_accepted {
+                    relay(&mut listener, &mut operator).await;
+                } else {
+                    assert!(matches!(
+                        refuse(&mut listener).await,
+                        operator_rpc::OperatorRequest::AcceptSend(_)
+                    ));
+                }
+                (listener, operator)
+            });
+            let mut agent = Agent::new(0).unwrap();
+            let first = agent
+                .pay(&context, &mut chain, operator_address, &[(1, 7)])
+                .await;
+            if prior_accepted {
+                let first = accepted(first.unwrap());
+                assert_eq!(first.epoch, old.epoch());
+                assert_eq!(first.acceptance.entries[0].cumulative, 7);
+            } else {
+                assert!(first.is_err());
+                assert!(agent.pending_payment.is_some());
             }
+            let prior_debit = if prior_accepted { 7 } else { 0 };
+            assert_eq!(agent.store.debits_since(0).unwrap(), prior_debit);
+            let (mut listener, mut operator) = staging.await.unwrap();
+
+            // The admitted close either contains the earlier accepted body or no payer activity.
+            operator.pay(2, 3, 1).unwrap();
+            let result = operator.complete_close(11).unwrap();
+            if finalized {
+                finalize(&control, &result).await;
+            } else {
+                applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
+            }
+            let live = register(&control, &mut operator).await;
+            assert_eq!(live.epoch(), 1);
+            let admitted = chain
+                .admitted(&context, old.epoch())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(admitted.finalized, finalized);
+            let lookup = Holders::default()
+                .committed_account(&context, &chain, &admitted, &agent.account())
+                .await
+                .unwrap();
+            let (_, activity) = lookup
+                .resolve::<Sha256>(&admitted.roots.change, &agent.account())
+                .unwrap();
+            assert_eq!(
+                activity.is_some_and(|activity| activity.has_outgoing()),
+                prior_accepted
+            );
+
+            // The old epoch excludes the new staged authorization. The fresh epoch starts at zero.
+            let rolling = context.child("rolling").spawn(move |_| async move {
+                for _ in 0..4 {
+                    relay(&mut listener, &mut operator).await;
+                }
+            });
+            let amount = if prior_accepted { 3 } else { 7 };
+            let payment = accepted(
+                agent
+                    .pay(&context, &mut chain, operator_address, &[(1, amount)])
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(payment.epoch, live.epoch());
+            assert_eq!(payment.acceptance.entries[0].cumulative, amount);
+            assert_eq!(payment.acceptance.entries[0].count, 1);
+            assert_eq!(agent.store.debits_since(0).unwrap(), prior_debit + amount);
+            assert!(agent.pending_payment.is_none());
+
+            // Adoption moved the signing context forward and kept the verified floor.
+            let cache = agent.cache.as_ref().unwrap();
+            assert_eq!(cache.context, live);
+            assert_eq!(cache.epoch, live.epoch());
+
+            let payment = accepted(
+                agent
+                    .pay(&context, &mut chain, operator_address, &[(1, 2)])
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(payment.epoch, live.epoch());
+            assert_eq!(payment.acceptance.entries[0].cumulative, amount + 2);
+            assert_eq!(payment.acceptance.entries[0].count, 2);
+            assert_eq!(
+                agent.store.debits_since(0).unwrap(),
+                prior_debit + amount + 2
+            );
+            assert_eq!(agent.receipt_count(), if prior_accepted { 3 } else { 2 });
+            assert_eq!(
+                status(&control).await.last_finalized,
+                finalized.then_some(old.epoch())
+            );
+            rolling.await.unwrap();
         });
-        let payment = accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 3)])
-                .await
-                .unwrap(),
-        );
-        assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.store.debits_since(0).unwrap(), 10);
-        assert!(agent.pending_payment.is_none());
+    }
+}
 
-        // Adoption moved the signing context forward and kept the verified floor.
-        let cache = agent.cache.as_ref().unwrap();
-        assert_eq!(cache.context, live);
-        assert_eq!(cache.epoch, live.epoch());
-
-        let payment = accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 2)])
+#[test]
+fn delayed_admission_retries_the_exact_intent_until_successor_payment_completes() {
+    for entries in [vec![(1, 3)], vec![(1, 3), (2, 4)]] {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let total = entries.iter().map(|(_, amount)| amount).sum::<u64>();
+            let (control, mut chain) = chain(&context).await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let old = register(&control, &mut operator).await;
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
-                .unwrap(),
-        );
-        assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.store.debits_since(0).unwrap(), 12);
-        assert_eq!(agent.receipt_count(), 3);
-        rolling.await.unwrap();
-    });
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let staging = context.child("staging").spawn(move |_| async move {
+                relay(&mut listener, &mut operator).await;
+                relay(&mut listener, &mut operator).await;
+                (listener, operator)
+            });
+            let mut agent = Agent::new(0).unwrap();
+            accepted(
+                agent
+                    .pay(&context, &mut chain, address, &[(1, 7)])
+                    .await
+                    .unwrap(),
+            );
+            let (mut listener, mut operator) = staging.await.unwrap();
+            let delayed_control = control.clone();
+            let rolling = context
+                .child("delayed_admission")
+                .spawn(move |context| async move {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let operator_rpc::OperatorRequest::AcceptSend(request) =
+                        operator_rpc::decode_request(rpc::recv_request(&mut stream).await.unwrap())
+                            .unwrap()
+                    else {
+                        panic!("the second payment must sign from the cached epoch");
+                    };
+                    assert_eq!(request.authorization.body().epoch(), old.epoch());
+                    assert_eq!(request.authorization.body().seq(), 2);
+                    assert_eq!(request.authorization.body().cumulative_debit(), 7 + total);
+                    let expected = request.encode();
+                    let result = operator.complete_close(12).unwrap();
+                    let response = operator_rpc::handle_decoded(
+                        &mut operator,
+                        operator_rpc::OperatorRequest::AcceptSend(request),
+                    );
+                    rpc::send_response(&mut sink, &response).await.unwrap();
+
+                    // Admission is unavailable while the wallet receives corrective responses.
+                    let admit_at = context.current() + Duration::from_secs(1);
+                    let mut corrections = 1;
+                    let (mut sink, request) = loop {
+                        let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                        let operator_rpc::OperatorRequest::AcceptSend(request) =
+                            operator_rpc::decode_request(
+                                rpc::recv_request(&mut stream).await.unwrap(),
+                            )
+                            .unwrap()
+                        else {
+                            panic!("the unresolved payment must retry its exact authorization");
+                        };
+                        assert_eq!(request.encode(), expected);
+                        if context.current() >= admit_at {
+                            break (sink, request);
+                        }
+                        let response = operator_rpc::handle_decoded(
+                            &mut operator,
+                            operator_rpc::OperatorRequest::AcceptSend(request),
+                        );
+                        rpc::send_response(&mut sink, &response).await.unwrap();
+                        corrections += 1;
+                    };
+                    assert!(corrections >= 3);
+                    applied(
+                        &delayed_control,
+                        &SettlementTx::Admit(AdmitRequest::from(&result)),
+                    )
+                    .await;
+                    let live = register(&delayed_control, &mut operator).await;
+                    let response = operator_rpc::handle_decoded(
+                        &mut operator,
+                        operator_rpc::OperatorRequest::AcceptSend(request),
+                    );
+                    rpc::send_response(&mut sink, &response).await.unwrap();
+                    relay(&mut listener, &mut operator).await;
+                    relay(&mut listener, &mut operator).await;
+                    live
+                });
+            let started = context.current();
+            let payment = accepted(
+                agent
+                    .pay(&context, &mut chain, address, &entries)
+                    .await
+                    .unwrap(),
+            );
+            let live = rolling.await.unwrap();
+            assert!(context.current().duration_since(started).unwrap() >= Duration::from_secs(1));
+            assert_eq!(payment.epoch, live.epoch());
+            assert_eq!(payment.epoch, 1);
+            assert_eq!(payment.total, total);
+            assert_eq!(payment.acceptance.entries.len(), entries.len());
+            for (recipient, amount) in &entries {
+                let entry = payment
+                    .acceptance
+                    .entries
+                    .iter()
+                    .find(|entry| entry.recipient == wallets()[*recipient].public_key())
+                    .unwrap();
+                assert_eq!(entry.cumulative, *amount);
+                assert_eq!(entry.count, 1);
+            }
+            assert_eq!(agent.store.debits_since(0).unwrap(), 7 + total);
+            assert_eq!(agent.receipt_count(), 1 + entries.len() as u64);
+            assert!(agent.pending_payment.is_none());
+            assert!(status(&control).await.last_finalized.is_none());
+            assert!(
+                !chain
+                    .admitted(&context, 0)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .finalized
+            );
+        });
+    }
 }
 
 #[test]
@@ -6279,18 +6609,57 @@ fn ui_retries_a_durable_payment_after_reopen() {
 
 #[test]
 fn invalidated_receipt_is_terminal_even_without_served_evidence() {
-    for settling in [false, true] {
+    for (epoch, settling) in [(0, false), (0, true), (5, false), (5, true)] {
         deterministic::Runner::default().start(|context| async move {
             let database = TempDatabase::new();
-            let (control, _) = chain(&context).await;
-            let fixture = Box::pin(admit_omitting(&context, &control)).await;
-            let mut chain = client_with_holders(&context, &control, UNREACHABLE);
+            let control = harness::start_with_native(
+                &context,
+                CHAIN,
+                "chain",
+                harness::native(crate::protocol::deployments()),
+                crate::protocol::Timing {
+                    admission_offset: 100,
+                    challenge_duration: 100,
+                },
+            )
+            .await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            for predecessor in 0..epoch {
+                register(&control, &mut operator).await;
+                operator.pay(2, 3, 1).unwrap();
+                let result = operator.complete_close(70 + predecessor).unwrap();
+                applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
+            }
+            let payment = register(&control, &mut operator).await;
+            assert_eq!(payment.epoch(), epoch);
+            let receipt = issued_receipt(&payment, &wallets()[0], &wallets()[1].public_key(), 5);
+            operator.pay(2, 3, 1).unwrap();
+            let result = operator.complete_close(70 + epoch).unwrap();
+            applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
+            let committed = operator
+                .committed_entry(&wallets()[0].public_key(), &receipt.recipient, epoch)
+                .unwrap();
+            let batch_id = result.header.batch_id::<Sha256>();
+            assert_eq!(committed.batch_id, batch_id);
+            let evidence_address = SocketAddr::from(([127, 0, 0, 1], 9_603));
+            let mut chain = client_with_holders(&context, &control, evidence_address);
+            assert!(status(&control).await.last_finalized.is_none());
+            for pending in 0..=epoch {
+                assert!(
+                    !chain
+                        .admitted(&context, pending)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .finalized
+                );
+            }
             let mut agent = Agent::open(database.path(), 1).unwrap();
             let mut listener = context.bind(UNREACHABLE).await.unwrap();
-            let receipt = fixture.held_receipt.clone();
+            let served_receipt = receipt.clone();
             let server = context.child("intake").spawn(move |_| async move {
                 respond(&mut listener, |_| rpc::Response::Success {
-                    body: incoming_response(&[(receipt, 1)]).encode(),
+                    body: incoming_response(&[(served_receipt, 1)]).encode(),
                 })
                 .await;
             });
@@ -6299,28 +6668,51 @@ fn invalidated_receipt_is_terminal_even_without_served_evidence() {
                 .await
                 .unwrap();
             server.await.unwrap();
+            assert_eq!(agent.incoming().total, 5);
+            assert_eq!(agent.store.unreconciled_incoming_epochs().unwrap(), [epoch]);
+            let fetched = garbage_holder(
+                &context,
+                evidence_address,
+                rpc::error_response("evidence withheld".into()),
+            )
+            .await;
             let challenge = commonware_clearing::bajillion::challenge::Challenge::HigherAckEntry {
                 entry: Box::new(commonware_clearing::bajillion::challenge::EntryWitness {
                     ack: commonware_clearing::bajillion::challenge::AckWitness::from_ack(
-                        &fixture.held_receipt.ack,
+                        &receipt.ack,
                     ),
                     recipient: agent.account(),
-                    cumulative: fixture.held_credit,
-                    count: 1,
-                    opening: fixture.held_receipt.opening.clone(),
+                    cumulative: receipt.cumulative,
+                    count: receipt.count,
+                    opening: receipt.opening,
                 }),
-                sender: Box::new(fixture.held_lookup.clone()),
+                sender: Box::new(committed.lookup),
             };
             control
                 .submit(SettlementTx::Challenge(
                     crate::chain::tx::ChallengeRequest {
                         deployment: deployment(),
-                        batch_id: admitted_batch(&fixture),
+                        batch_id,
                         evidence: challenge.encode(),
                     },
                 ))
                 .await;
+            assert!(chain.status(&context).await.unwrap().hard_faulted);
+            assert!(matches!(
+                chain.fault(&context).await.unwrap(),
+                Some(FaultRecord::Faulted(HardFaultReasonResponse::ProvenChallenge {
+                    batch_id: proven,
+                    ..
+                })) if proven == batch_id
+            ));
             if settling {
+                // Terminal settlement waits for the valid predecessor closes to finalize.
+                let deadline = result.context.epoch_context().challenge_deadline();
+                let height = control.advance(0).await;
+                if height <= deadline {
+                    control.advance(deadline - height + 1).await;
+                }
+                assert_eq!(status(&control).await.last_finalized, epoch.checked_sub(1));
                 control
                     .submit(SettlementTx::BeginHardFaultSettlement(
                         crate::chain::tx::BeginHardFaultSettlementRequest {
@@ -6328,12 +6720,17 @@ fn invalidated_receipt_is_terminal_even_without_served_evidence() {
                         },
                     ))
                     .await;
+                assert!(matches!(
+                    chain.fault(&context).await.unwrap(),
+                    Some(FaultRecord::Settling(_))
+                ));
             }
             let summary = agent
-                .reconcile(&context, &mut chain, UNREACHABLE)
+                .reconcile(&context, &mut chain, evidence_address)
                 .await
                 .unwrap();
-            assert_eq!(summary.unenforceable, [0]);
+            assert_eq!(summary.unenforceable, [epoch]);
+            assert_eq!(fetched.load(Ordering::Relaxed), 0);
             assert!(
                 agent
                     .store
@@ -6342,7 +6739,7 @@ fn invalidated_receipt_is_terminal_even_without_served_evidence() {
                     .is_empty()
             );
             drop(agent);
-            let agent = Agent::open(database.path(), 1).unwrap();
+            let mut agent = Agent::open(database.path(), 1).unwrap();
             assert!(
                 agent
                     .store
@@ -6350,6 +6747,12 @@ fn invalidated_receipt_is_terminal_even_without_served_evidence() {
                     .unwrap()
                     .is_empty()
             );
+            let summary = agent
+                .reconcile(&context, &mut chain, evidence_address)
+                .await
+                .unwrap();
+            assert!(summary.is_empty());
+            assert_eq!(fetched.load(Ordering::Relaxed), 0);
         });
     }
 }

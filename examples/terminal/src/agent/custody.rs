@@ -588,25 +588,24 @@ impl Agent {
             .last_finalized
             .map_or(Some(0), |last| last.checked_add(1))
             .context("withdrawal epoch overflow")?;
-        let bound = settlement_config(&chain.genesis().timing())?
-            .max_pending_epochs
-            .get();
-        for offset in 0..bound {
-            let epoch = first
-                .checked_add(offset as u64)
-                .context("withdrawal epoch overflow")?;
-            let Some(admitted) = chain.admitted(ctx, epoch).await? else {
-                break;
-            };
-            ensure!(
-                !admitted.finalized,
-                "the finalized withdrawal root advanced while gathering proofs"
-            );
-            openings.push(
-                self.holders
-                    .successor_opening(ctx, chain, request.account(), &admitted)
-                    .await?,
-            );
+
+        // The observed registration fixes a finite proof range while the operator
+        // continues admitting successors.
+        if let Some(registration) = chain.registration(ctx).await? {
+            for epoch in first..=registration.epoch {
+                let Some(admitted) = chain.admitted(ctx, epoch).await? else {
+                    break;
+                };
+                ensure!(
+                    !admitted.finalized,
+                    "the finalized withdrawal root advanced while gathering proofs"
+                );
+                openings.push(
+                    self.holders
+                        .successor_opening(ctx, chain, request.account(), &admitted)
+                        .await?,
+                );
+            }
         }
         let tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),

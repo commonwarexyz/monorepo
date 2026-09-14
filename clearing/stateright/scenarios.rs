@@ -385,8 +385,8 @@ fn admission_and_challenge_boundaries_are_inclusive() {
 }
 
 #[test]
-fn configured_pipeline_capacity_is_a_hard_admission_bound() {
-    let model = SettlementModel::with_max_pending(2);
+fn admitted_closes_allow_successor_registration_before_finality() {
+    let model = SettlementModel::default();
     let mut state = SettlementState::default();
     step(
         model,
@@ -396,12 +396,9 @@ fn configured_pipeline_capacity_is_a_hard_admission_bound() {
     register_and_admit(model, &mut state, Batch::B0);
     register_and_admit(model, &mut state, Batch::B1);
     queue_withdrawal(model, &mut state, WithdrawalId::Amount);
-    rejected(
-        model,
-        &state,
-        SettlementAction::Register(RegistrationId::B2),
-    );
-    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1]);
+    register_and_admit(model, &mut state, Batch::B2);
+    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1, Batch::B2]);
+    assert_eq!(state.expected_epoch, 0);
 }
 
 #[test]

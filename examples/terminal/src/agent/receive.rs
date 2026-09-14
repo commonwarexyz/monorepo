@@ -309,17 +309,8 @@ impl Agent {
                         .last_finalized
                         .map_or(Some(0), |last| last.checked_add(1))
                         .context("receipt epoch overflow")?;
-                    let bound = crate::protocol::settlement_config(&chain.genesis().timing())?
-                        .max_pending_epochs
-                        .get();
                     let mut found = false;
-                    for offset in 0..bound {
-                        let Some(candidate) = first
-                            .checked_add(offset as u64)
-                            .filter(|candidate| *candidate <= epoch)
-                        else {
-                            break;
-                        };
+                    for candidate in first..=epoch {
                         let Some(record) = chain.admitted(ctx, candidate).await? else {
                             break;
                         };

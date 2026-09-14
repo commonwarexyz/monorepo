@@ -49,7 +49,7 @@ use commonware_clearing::bajillion::{
     transition::{BatchId, Header, OperatorKey, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Encode as _, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey};
@@ -298,8 +298,8 @@ impl Read for NativeTransferRequest {
     }
 }
 
-/// Maximum predecessor-root openings accepted alongside one queued withdrawal.
-const MAX_STATE_OPENINGS: usize = 5;
+/// Every state opening carries at least its account key and balance.
+const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
 
 /// Certificate participant-bitmap length for the fixed clearing committee.
 const CERTIFICATE_PARTICIPANTS: usize = 4;
@@ -541,14 +541,13 @@ impl Read for QueueWithdrawalRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        let request = SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?;
+        let bound = buf.remaining() / MIN_STATE_OPENING_BYTES;
         Ok(Self {
-            request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
+            request,
             openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
                 buf,
-                &(
-                    RangeCfg::new(0..=MAX_STATE_OPENINGS),
-                    super::query::MAX_PROOF_DIGESTS,
-                ),
+                &(RangeCfg::new(0..=bound), super::query::MAX_PROOF_DIGESTS),
             )?,
         })
     }
@@ -1190,7 +1189,7 @@ mod tests {
             Err(CodecError::InvalidLength(_))
         ));
 
-        // An openings count beyond the bound is refused before materializing.
+        // A count that cannot fit the remaining bytes is refused before materializing.
         let bounded = SignedWithdrawal::sign(
             Sha256::hash(&[b"request-bound-deployment"]),
             root,
@@ -1203,7 +1202,7 @@ mod tests {
         );
         let mut oversized_openings = BytesMut::new();
         bounded.write(&mut oversized_openings);
-        (MAX_STATE_OPENINGS + 1).write(&mut oversized_openings);
+        6_usize.write(&mut oversized_openings);
         assert!(matches!(
             QueueWithdrawalRequest::decode(oversized_openings.freeze()),
             Err(CodecError::InvalidLength(_))

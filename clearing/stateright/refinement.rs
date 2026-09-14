@@ -31,7 +31,6 @@ const BATCHES: [spec::Batch; 8] = [
 ];
 fn refinement_config() -> SettlementConfig {
     SettlementConfig::new(
-        NonZeroUsize::new(3).unwrap(),
         EpochDeadlinePolicy::new(
             NonZeroU64::new(3).unwrap(),
             NonZeroU64::new(2).unwrap(),

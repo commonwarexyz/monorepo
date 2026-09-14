@@ -1567,6 +1567,10 @@ impl Store {
         })
     }
 
+    pub(crate) fn withdrawals_frozen(&self) -> Result<bool> {
+        withdrawals_frozen(&self.connection, self.epoch()?)
+    }
+
     pub(crate) fn stage_withdrawal(
         &mut self,
         request: &SignedWithdrawal<Key, Digest>,
@@ -1601,18 +1605,16 @@ impl Store {
 
             // A registration may reach settlement before its read-back or first receipt.
             // Published withdrawal boundaries remain fixed across those crash cuts.
-            let frozen: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)
-                 OR EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)",
-                [sql_u64(epoch, "epoch")?],
-                |row| row.get(0),
-            )?;
             ensure!(
-                !frozen,
+                !withdrawals_frozen(transaction, epoch)?,
                 "withdrawals are frozen once registration publication begins"
             );
 
             let mut account = eligible_account(transaction, epoch, request.account())?;
+            ensure!(
+                account.predecessor > 0,
+                "withdrawal account is absent from the epoch predecessor"
+            );
             let applied_amount = match request.body().action() {
                 WithdrawalAction::Amount(amount) => {
                     let amount = amount.get();
@@ -2117,15 +2119,6 @@ impl Store {
             .optional()?
             .map(|value| from_sql_u64(value, "closing epoch"))
             .transpose()
-    }
-
-    pub(crate) fn pending_close_count(&self) -> Result<usize> {
-        let count = self.connection.query_row(
-            "SELECT count(*) FROM close_jobs WHERE status = 'closing'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        usize::try_from(count).context("pending close count does not fit usize")
     }
 
     pub(crate) fn pending_epochs(&self) -> Result<Vec<u64>> {
@@ -2854,6 +2847,17 @@ fn stage_event(
         account: event.account.clone(),
         amount,
     })
+}
+
+fn withdrawals_frozen(connection: &Connection, epoch: u64) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn validate_applied_withdrawal(

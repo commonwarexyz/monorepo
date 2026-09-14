@@ -171,9 +171,8 @@ const fn nonzero_usize(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("benchmark bound is positive")
 }
 
-fn settlement_config(max_pending_epochs: usize, live_accounts: usize) -> SettlementConfig {
+const fn settlement_config(live_accounts: usize) -> SettlementConfig {
     SettlementConfig::new(
-        nonzero_usize(max_pending_epochs.max(2)),
         EpochDeadlinePolicy::new(
             NonZeroU64::new(ADMISSION_DEADLINE).expect("benchmark admission delay is positive"),
             NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
@@ -278,7 +277,7 @@ impl ChainSource {
         )
     }
 
-    fn fresh_chain(&self, max_pending_epochs: usize) -> TestChain {
+    fn fresh_chain(&self) -> TestChain {
         SettlementChain::new(
             deployment(),
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
@@ -286,7 +285,6 @@ impl ChainSource {
             &(&self.head).into(),
             0,
             settlement_config(
-                max_pending_epochs,
                 usize::try_from(self.head.live_accounts())
                     .expect("benchmark account count fits in usize"),
             ),
@@ -473,7 +471,7 @@ async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSou
 }
 
 fn queue_input(source: &QueueSource) -> QueueInput {
-    let mut chain = source.chain.fresh_chain(source.admissions.len());
+    let mut chain = source.chain.fresh_chain();
     for admission in source.admissions.iter().cloned() {
         admit_fixture(&mut chain, admission);
     }
@@ -491,7 +489,7 @@ async fn close_source(
     let (chain, state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, validator_count).await;
     let withdrawals =
         withdrawal_sources(&state, &accounts, withdrawal_count, WITHDRAWAL_DEADLINE).await;
-    let mut seed_chain = chain.fresh_chain(1);
+    let mut seed_chain = chain.fresh_chain();
     queue_withdrawals(&mut seed_chain, &withdrawals);
     let (_, admission) = admission_fixture(
         state,
@@ -508,7 +506,7 @@ async fn close_source(
 }
 
 fn admit_input(source: &CloseSource) -> AdmitInput {
-    let mut chain = source.chain.fresh_chain(1);
+    let mut chain = source.chain.fresh_chain();
     queue_withdrawals(&mut chain, &source.withdrawals);
     let AdmissionFixture {
         context,
@@ -531,7 +529,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
 }
 
 fn finalize_input(source: &CloseSource) -> TestChain {
-    let mut chain = source.chain.fresh_chain(1);
+    let mut chain = source.chain.fresh_chain();
     queue_withdrawals(&mut chain, &source.withdrawals);
     admit_fixture(&mut chain, source.admission.clone());
     chain
@@ -549,7 +547,7 @@ async fn hard_fault_source(
 }
 
 fn hard_fault_input(source: &HardFaultSource) -> TestChain {
-    let mut chain = source.chain.fresh_chain(1);
+    let mut chain = source.chain.fresh_chain();
     queue_withdrawals(&mut chain, &source.withdrawals);
     chain
         .fault_expired(FAULT_DEADLINE)

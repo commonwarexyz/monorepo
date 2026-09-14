@@ -37,7 +37,7 @@ counts, and check safety and reachability properties:
 | [Certification](certification.rs) | 1,164 | 4 validators, 1 faulty, 1 dealing |
 | [Challenges](challenge.rs) | 1,502 | 5 targets, representative evidence classes |
 | [Claims](claims.rs) | 33 | 2 batches, 2 output positions each |
-| [Settlement](settlement.rs) | 2,649,149 | 3 accounts, 8 candidates, 3 pending slots |
+| [Settlement](settlement.rs) | 2,649,149 | 3 accounts, 8 candidates |
 
 - **Certification** explores valid and invalid verifier outcomes, independent
   missing/incomplete/exact delivery, every exact three-vote quorum, evidence
@@ -66,7 +66,7 @@ cases. Those sequence rules are checked in
 settlement transition function. They exercise accepted and rejected boundaries,
 all three challenge kinds, front/middle/tail faults, all deadline-fault classes,
 Amount and Close claims, and recovery after a later fault. Reachability properties
-also require a full three-close pipeline, four ordered finalizations, exact
+also require three pending closes, four ordered finalizations, exact
 deadline boundaries, and completed recovery paths. Each safety predicate has a
 corrupted negative-control state that must fail it, guarding against vacuous or
 disconnected checks.
