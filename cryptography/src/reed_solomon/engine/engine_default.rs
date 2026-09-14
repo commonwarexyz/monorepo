@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 pub struct DefaultEngine(Box<dyn Engine + Send + Sync>);
 
 impl DefaultEngine {
-    /// Creates new [`DefaultEngine`] by chosing and initializing the underlying engine.
+    /// Creates new [`DefaultEngine`] by choosing and initializing the underlying engine.
     ///
     /// On x86(-64) the engine is chosen in the following order of preference:
     /// 1. `Avx2`

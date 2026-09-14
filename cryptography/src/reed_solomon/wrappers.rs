@@ -255,6 +255,59 @@ mod tests {
     // ROUNDTRIP - TWO ROUNDS
 
     #[test]
+    fn maximum_decoder_indices() {
+        for (original_count, recovery_count) in [(3, 2), (2, 3)] {
+            let original = test_util::generate_original(original_count, 2, 123);
+            let mut encoder = Encoder::new(original_count, recovery_count, 2).unwrap();
+            for shard in &original {
+                encoder.add_original_shard(shard).unwrap();
+            }
+            let encoded = encoder.encode().unwrap();
+            let mut decoder = Decoder::new(original_count, recovery_count, 2).unwrap();
+            assert_eq!(
+                decoder.add_original_shard(usize::MAX, [0; 2]),
+                Err(Error::InvalidOriginalShardIndex {
+                    original_count,
+                    index: usize::MAX
+                })
+            );
+            assert_eq!(
+                decoder.add_recovery_shard(usize::MAX, [0; 2]),
+                Err(Error::InvalidRecoveryShardIndex {
+                    recovery_count,
+                    index: usize::MAX
+                })
+            );
+            for (index, shard) in original.iter().enumerate().skip(1) {
+                decoder.add_original_shard(index, shard).unwrap();
+            }
+            decoder
+                .add_recovery_shard(0, encoded.recovery(0).unwrap())
+                .unwrap();
+            let decoded = decoder.decode_with_recovery().unwrap().unwrap();
+            assert_eq!(decoded.original(0), Some(original[0].as_slice()));
+            assert_eq!(decoded.original(usize::MAX), None);
+            assert_eq!(decoded.recovery(usize::MAX), None);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_working_space() {
+        for (original_count, recovery_count) in [(3, 2), (2, 3)] {
+            for shard_bytes in [usize::MAX - 1, 1 << (usize::BITS - 2)] {
+                assert!(matches!(
+                    Encoder::new(original_count, recovery_count, shard_bytes),
+                    Err(Error::InvalidShardSize { .. })
+                ));
+                assert!(matches!(
+                    Decoder::new(original_count, recovery_count, shard_bytes),
+                    Err(Error::InvalidShardSize { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn roundtrip_two_rounds_reset_low_to_high() {
         let mut encoder = Encoder::new(2, 3, 1024).unwrap();
         let mut decoder = Decoder::new(2, 3, 1024).unwrap();
@@ -287,13 +340,18 @@ mod tests {
     fn failed_encoder_reset_preserves_state() {
         let original = test_util::generate_original(2, 1024, 123);
         let mut encoder = Encoder::new(2, 3, 1024).unwrap();
+        encoder.add_original_shard(&original[0]).unwrap();
 
-        assert_eq!(
-            encoder.reset(3, 2, 3),
-            Err(Error::InvalidShardSize { shard_bytes: 3 })
-        );
+        for (original_count, recovery_count) in [(2, 3), (3, 2)] {
+            for shard_bytes in [0, 3, usize::MAX - 1] {
+                assert_eq!(
+                    encoder.reset(original_count, recovery_count, shard_bytes),
+                    Err(Error::InvalidShardSize { shard_bytes })
+                );
+            }
+        }
 
-        for shard in &original {
+        for shard in original.iter().skip(1) {
             encoder.add_original_shard(shard).unwrap();
         }
         let result = encoder.encode().unwrap();
@@ -313,13 +371,17 @@ mod tests {
         let recovery: Vec<_> = result.recovery_iter().map(<[u8]>::to_vec).collect();
 
         let mut decoder = Decoder::new(2, 3, 1024).unwrap();
-
-        assert_eq!(
-            decoder.reset(3, 2, 3),
-            Err(Error::InvalidShardSize { shard_bytes: 3 })
-        );
-
         decoder.add_recovery_shard(0, &recovery[0]).unwrap();
+
+        for (original_count, recovery_count) in [(2, 3), (3, 2)] {
+            for shard_bytes in [0, 3, usize::MAX - 1] {
+                assert_eq!(
+                    decoder.reset(original_count, recovery_count, shard_bytes),
+                    Err(Error::InvalidShardSize { shard_bytes })
+                );
+            }
+        }
+
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
         let decoded = decoder.decode();
         let restored: BTreeMap<_, _> = match &decoded {
