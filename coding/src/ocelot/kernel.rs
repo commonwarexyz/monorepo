@@ -19,6 +19,8 @@
 #[cfg(target_arch = "x86_64")]
 mod avx512;
 pub mod portable;
+#[cfg(test)]
+mod tests;
 
 /// A computation which can run over an arbitrary [`Kernel`].
 ///
@@ -63,6 +65,11 @@ pub trait Kernel: Copy + Default + Send + Sync + 'static {
     /// Operations are performed in parallel on each lane.
     const LANES: usize;
 
+    /// Minimum number of lanes accepted by the partial load/store operations.
+    ///
+    /// This must be positive and divide [`Self::LANES`].
+    const PARTIAL_GRANULARITY: usize = Self::LANES;
+
     /// Whether to fuse GF(2^8) butterfly updates into one byte loop.
     const FUSED_BUTTERFLY: bool = false;
 
@@ -83,12 +90,30 @@ pub trait Kernel: Copy + Default + Send + Sync + 'static {
     /// If `bytes.len() != Self::LANES`.
     fn load(self, bytes: &[u8]) -> Self::Vector;
 
+    /// Load a non-empty prefix of a vector, setting inactive lanes to zero.
+    ///
+    /// `bytes.len()` must not exceed [`Self::LANES`] and must be a multiple of
+    /// [`Self::PARTIAL_GRANULARITY`].
+    #[inline]
+    fn load_partial(self, bytes: &[u8]) -> Self::Vector {
+        self.load(bytes)
+    }
+
     /// Store a vector into exactly [`Self::LANES`] bytes.
     ///
     /// # Panics
     ///
     /// If `out.len() != Self::LANES`.
     fn store(self, a: Self::Vector, out: &mut [u8]);
+
+    /// Store a non-empty prefix of a vector without writing inactive lanes.
+    ///
+    /// `out.len()` must not exceed [`Self::LANES`] and must be a multiple of
+    /// [`Self::PARTIAL_GRANULARITY`].
+    #[inline]
+    fn store_partial(self, a: Self::Vector, out: &mut [u8]) {
+        self.store(a, out);
+    }
 
     /// Compute the xor operation a ^ b, in each lane.
     ///
