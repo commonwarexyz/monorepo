@@ -6,6 +6,7 @@ on:
     - cron: '0 8 * * *' # Run at 08:00 UTC every day
 
 permissions:
+  contents: read
   # Persist state in the Actions cache between runs when operations-per-run
   # is exhausted mid-backlog.
   actions: write
@@ -20,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Label and close stale PRs
         uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
         with:

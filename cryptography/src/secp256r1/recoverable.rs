@@ -115,19 +115,7 @@ impl Signature {
             signature,
         }
     }
-}
 
-impl crate::Signature for Signature {}
-
-impl crate::Recoverable for Signature {
-    type PublicKey = PublicKey;
-
-    fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey> {
-        self.recover_signer_inner(Some(namespace), msg)
-    }
-}
-
-impl Signature {
     #[inline(always)]
     fn recover_signer_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Option<PublicKey> {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
@@ -137,6 +125,16 @@ impl Signature {
         VerifyingKey::recover_from_msg(payload.as_ref(), &self.signature, self.recovery_id)
             .ok()
             .map(|k| PublicKey(PublicKeyInner::from(k)))
+    }
+}
+
+impl crate::Signature for Signature {}
+
+impl crate::Recoverable for Signature {
+    type PublicKey = PublicKey;
+
+    fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey> {
+        self.recover_signer_inner(Some(namespace), msg)
     }
 }
 

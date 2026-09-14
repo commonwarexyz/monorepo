@@ -156,6 +156,9 @@ impl Report {
             cfg.output,
         );
 
+        if let Some(ring_size) = cfg.effective_ring_size() {
+            println!("ring_size={ring_size}");
+        }
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
         }
@@ -190,6 +193,7 @@ impl Report {
             "io_size": cfg.io_size,
             "inflight": cfg.inflight,
             "worker_threads": cfg.worker_threads,
+            "ring_size": cfg.effective_ring_size(),
             "global_queue_interval": cfg.global_queue_interval,
             "file_size": cfg.file_size,
             "root": cfg.root,
