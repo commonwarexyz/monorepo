@@ -25,7 +25,7 @@
 mod core;
 
 use self::core::Scalar;
-use crate::curve::{G, GAffine};
+use crate::curve::{Backend, G, GAffine, GAffineVec, GVec, LANES, WithBackend, with_backend};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -60,6 +60,19 @@ fn prime_order_product(point: G) -> G {
             .rev()
             .map(|i| PRIME_ORDER[i / 8] >> (i % 8) & 1 == 1),
     )
+}
+
+/// Multiplies every lane by the unreduced subgroup order without combining their results.
+fn prime_order_products(backend: impl Backend, points: [GAffine; LANES]) -> [G; LANES] {
+    let packed = GAffineVec::transpose(points);
+    let mut products = GVec::identity();
+    for i in (0..256).rev() {
+        products = backend.g_double(products);
+        if PRIME_ORDER[i / 8] >> (i % 8) & 1 == 1 {
+            products = backend.g_add_mixed(products, packed);
+        }
+    }
+    products.untranspose()
 }
 
 /// An Ed25519 signing key.
@@ -387,6 +400,11 @@ pub struct StrictVerifyingKey {
     zip215: VerifyingKey,
 }
 
+const INVALID_STRICT_KEY: commonware_codec::Error = commonware_codec::Error::Invalid(
+    "curve25519::StrictVerifyingKey",
+    "public key is not a canonical non-identity prime-order point",
+);
+
 impl Debug for StrictVerifyingKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Debug::fmt(&self.zip215, f)
@@ -433,19 +451,76 @@ impl Read for StrictVerifyingKey {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let bytes = <[u8; Self::SIZE]>::read_cfg(buf, cfg)?;
         let point = GAffine::decompress(&bytes)
-            .map(GAffine::to_extended)
             .filter(|point| point.to_bytes() == bytes)
+            .map(GAffine::to_extended)
             .filter(|point| !point.is_identity() && prime_order_product(*point).is_identity())
-            .ok_or(commonware_codec::Error::Invalid(
-                "curve25519::StrictVerifyingKey",
-                "public key is not a canonical non-identity prime-order point",
-            ))?;
+            .ok_or(INVALID_STRICT_KEY)?;
         Ok(Self {
             zip215: VerifyingKey {
                 bytes: core::VerifyingKeyBytes::new(bytes),
                 point: Some(point),
             },
         })
+    }
+
+    fn read_vec(
+        buf: &mut impl Buf,
+        len: usize,
+        _: &Self::Cfg,
+    ) -> Result<Vec<Self>, commonware_codec::Error> {
+        with_backend(ReadStrictKeys { buf, len })
+    }
+}
+
+struct ReadStrictKeys<'a, B> {
+    buf: &'a mut B,
+    len: usize,
+}
+
+impl<B: Buf> WithBackend for ReadStrictKeys<'_, B> {
+    type Output = Result<Vec<StrictVerifyingKey>, commonware_codec::Error>;
+
+    fn call<C: Backend>(self, backend: C) -> Self::Output {
+        if self.len > self.buf.remaining() / StrictVerifyingKey::SIZE {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut keys = Vec::with_capacity(self.len);
+        for _ in 0..self.len / LANES {
+            let mut bytes = [[0u8; 32]; LANES];
+            self.buf.copy_to_slice(bytes.as_flattened_mut());
+            let decompressed = GAffine::decompress_batch(backend, &bytes);
+            let mut points = [GAffine::IDENTITY; LANES];
+            for ((point, decoded), encoded) in points.iter_mut().zip(decompressed).zip(&bytes) {
+                *point = decoded
+                    .filter(|point| point.to_bytes() == *encoded)
+                    .filter(|point| !point.to_extended().is_identity())
+                    .ok_or(INVALID_STRICT_KEY)?;
+            }
+
+            // Subgroup membership is checked independently in every lane. Combining the
+            // results would allow nonzero torsion components from different keys to cancel.
+            if prime_order_products(backend, points)
+                .iter()
+                .any(|point| !point.is_identity())
+            {
+                return Err(INVALID_STRICT_KEY);
+            }
+            keys.extend(
+                bytes
+                    .into_iter()
+                    .zip(points)
+                    .map(|(bytes, point)| StrictVerifyingKey {
+                        zip215: VerifyingKey {
+                            bytes: core::VerifyingKeyBytes::new(bytes),
+                            point: Some(point.to_extended()),
+                        },
+                    }),
+            );
+        }
+        for _ in 0..self.len % LANES {
+            keys.push(StrictVerifyingKey::read_cfg(self.buf, &())?);
+        }
+        Ok(keys)
     }
 }
 
@@ -645,11 +720,16 @@ impl commonware_cryptography::BatchVerifier for BatchVerifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, BatchVerifier, Signature, SigningKey, StrictVerifyingKey};
-    use crate::curve::{G, GAffine};
-    use commonware_codec::{DecodeExt, Encode};
+    use super::{
+        BatchItem, BatchVerifier, ReadStrictKeys, Signature, SigningKey, StrictVerifyingKey,
+        prime_order_product, prime_order_products,
+    };
+    use crate::curve::{Backend, G, GAffine, LANES, WithBackend, test_backend, with_backend};
+    use bytes::Buf;
+    use commonware_codec::{DecodeExt, Encode, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use rand_core::Rng;
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST";
 
@@ -668,6 +748,221 @@ mod tests {
         }
         assert!(points[7].add(generator).is_identity());
         points
+    }
+
+    // This scalar oracle checks the identity domain using projective canonical encoding,
+    // independently of aggregate decoding and its affine encoding check.
+    fn strict_point(bytes: &[u8; 32]) -> Option<G> {
+        GAffine::decompress(bytes)
+            .map(GAffine::to_extended)
+            .filter(|point| point.to_bytes() == *bytes)
+            .filter(|point| !point.is_identity() && prime_order_product(*point).is_identity())
+    }
+
+    fn identity_encodings() -> Vec<[u8; 32]> {
+        let torsion = torsion_points();
+        let basepoint = GAffine::BASEPOINT.to_extended();
+        let mut encodings: Vec<_> = torsion.iter().map(|point| point.to_bytes()).collect();
+        for prime_point in [basepoint, basepoint.double(), basepoint.negate()] {
+            encodings.extend(
+                torsion
+                    .iter()
+                    .map(|point| prime_point.add(*point).to_bytes()),
+            );
+        }
+        for point in [G::IDENTITY, torsion[4]] {
+            let mut bytes = point.to_bytes();
+            bytes[31] |= 0x80;
+            encodings.push(bytes);
+        }
+        for offset in 0..19 {
+            let mut bytes = [0xff; 32];
+            bytes[0] = 0xed + offset;
+            for sign in [0, 0x80] {
+                bytes[31] = 0x7f | sign;
+                encodings.push(bytes);
+            }
+        }
+        let off_curve = (0u8..=u8::MAX)
+            .map(|first| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = first;
+                bytes
+            })
+            .find(|bytes| GAffine::decompress(bytes).is_none())
+            .unwrap();
+        encodings.push(off_curve);
+        encodings
+    }
+
+    #[test]
+    fn strict_read_vec_preserves_keys_and_signatures() {
+        let signers: Vec<_> = (0..17)
+            .map(|seed| SigningKey::from_seed([seed; 32]))
+            .collect();
+        for count in [0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65] {
+            let expected: Vec<_> = (0..count)
+                .map(|i| signers[i % signers.len()].strict_verifying_key())
+                .collect();
+            let encoded: Vec<_> = expected
+                .iter()
+                .flat_map(|key| key.as_ref().iter().copied())
+                .collect();
+            let decoded =
+                StrictVerifyingKey::read_vec(&mut encoded.as_slice(), count, &()).unwrap();
+            assert_eq!(decoded, expected);
+            let mut batch = BatchVerifier::new(count);
+            for (i, key) in decoded.iter().enumerate() {
+                let bytes: &[u8; 32] = key.as_ref().try_into().unwrap();
+                let expected_point = strict_point(bytes).unwrap();
+                assert!(
+                    key.zip215
+                        .point
+                        .unwrap()
+                        .add(expected_point.negate())
+                        .is_identity()
+                );
+                let message = i.to_le_bytes();
+                let signature = signers[i % signers.len()].sign(NAMESPACE, &message);
+                assert!(key.verify(NAMESPACE, &message, &signature));
+                batch.add(NAMESPACE, &message, key.as_zip215(), &signature);
+            }
+            if count != 0 {
+                assert!(batch.verify(&mut test_rng(), &Sequential));
+            }
+        }
+    }
+
+    #[test]
+    fn strict_read_vec_matches_identity_domain_in_every_position() {
+        let valid = GAffine::BASEPOINT.to_extended().to_bytes();
+        for bytes in identity_encodings() {
+            let accepted = strict_point(&bytes).is_some();
+            assert_eq!(
+                StrictVerifyingKey::decode(bytes.as_slice()).is_ok(),
+                accepted
+            );
+            for position in 0..15 {
+                let mut encodings = [valid; 15];
+                encodings[position] = bytes;
+                let decoded = StrictVerifyingKey::read_vec(
+                    &mut encodings.as_flattened(),
+                    encodings.len(),
+                    &(),
+                );
+                assert_eq!(
+                    decoded.is_ok(),
+                    accepted,
+                    "position {position}, bytes {bytes:?}"
+                );
+                if let Ok(keys) = decoded {
+                    for (key, encoded) in keys.iter().zip(encodings) {
+                        assert_eq!(key.as_ref(), encoded);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strict_read_vec_rejects_cancelling_torsion() {
+        let valid = GAffine::BASEPOINT.to_extended();
+        let torsion = torsion_points()[1];
+        let left = valid.add(torsion);
+        let right = valid.add(torsion.negate());
+        assert!(prime_order_product(left.add(right)).is_identity());
+        for (left_index, right_index) in [(0, 1), (0, 7), (7, 8), (8, 14)] {
+            let mut encodings = [valid.to_bytes(); 15];
+            encodings[left_index] = left.to_bytes();
+            encodings[right_index] = right.to_bytes();
+            assert!(
+                StrictVerifyingKey::read_vec(&mut encodings.as_flattened(), encodings.len(), &(),)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn strict_read_vec_bounds_and_fragmented_input() {
+        let key = SigningKey::from_seed([91; 32]).strict_verifying_key();
+        let encoded: Vec<_> = (0..9).flat_map(|_| key.as_ref().iter().copied()).collect();
+        for split in 0..=encoded.len() {
+            let mut reader = encoded[..split].chain(&encoded[split..]);
+            assert_eq!(
+                StrictVerifyingKey::read_vec(&mut reader, 9, &()).unwrap(),
+                vec![key.clone(); 9]
+            );
+            assert_eq!(reader.remaining(), 0);
+        }
+        for length in 0..encoded.len() {
+            assert!(StrictVerifyingKey::read_vec(&mut &encoded[..length], 9, &()).is_err());
+        }
+        for count in [10, usize::MAX / 32, usize::MAX] {
+            assert!(StrictVerifyingKey::read_vec(&mut encoded.as_slice(), count, &()).is_err());
+        }
+        let mut with_trailing = encoded;
+        with_trailing.push(42);
+        let mut reader = with_trailing.as_slice();
+        assert!(
+            StrictVerifyingKey::read_vec(&mut reader, 0, &())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reader, with_trailing);
+        assert_eq!(
+            StrictVerifyingKey::read_vec(&mut reader, 9, &()).unwrap(),
+            vec![key; 9]
+        );
+        assert_eq!(reader, [42]);
+    }
+
+    #[test]
+    fn strict_read_vec_backends_match_scalar_oracle() {
+        let mut rng = test_rng();
+        let mut encodings = identity_encodings();
+        encodings.extend((0..256).map(|_| {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            bytes
+        }));
+        let valid = GAffine::BASEPOINT.to_bytes();
+        for bytes in &encodings {
+            if let Some(point) = GAffine::decompress(bytes) {
+                assert_eq!(point.to_bytes(), point.to_extended().to_bytes());
+            }
+            let expected = strict_point(bytes).is_some();
+            let mut group = [valid; LANES];
+            group[3] = *bytes;
+            let portable = ReadStrictKeys {
+                buf: &mut group.as_flattened(),
+                len: LANES,
+            }
+            .call(test_backend());
+            let native = StrictVerifyingKey::read_vec(&mut group.as_flattened(), LANES, &());
+            assert_eq!(native.is_ok(), expected);
+            assert_eq!(portable.ok(), native.ok());
+        }
+
+        struct Products([GAffine; LANES]);
+        impl WithBackend for Products {
+            type Output = [G; LANES];
+
+            fn call<B: Backend>(self, backend: B) -> Self::Output {
+                prime_order_products(backend, self.0)
+            }
+        }
+        let points: Vec<_> = encodings.iter().filter_map(GAffine::decompress).collect();
+        for group in points.chunks(LANES) {
+            let mut lanes = [GAffine::IDENTITY; LANES];
+            lanes[..group.len()].copy_from_slice(group);
+            let portable = prime_order_products(test_backend(), lanes);
+            let native = with_backend(Products(lanes));
+            for ((point, portable), native) in lanes.into_iter().zip(portable).zip(native) {
+                let expected = prime_order_product(point.to_extended());
+                assert!(portable.add(expected.negate()).is_identity());
+                assert!(native.add(expected.negate()).is_identity());
+            }
+        }
     }
 
     #[test]

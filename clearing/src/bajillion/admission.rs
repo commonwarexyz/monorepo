@@ -53,7 +53,8 @@ where
     if scheme.committee().commitment::<H>() != *context.committee() {
         return Err(AdmissionError::CommitteeMismatch);
     }
-    let dealing = posted::decode(encoded, context).map_err(|_| AdmissionError::InvalidDealing)?;
+    let dealing = posted::decode_with_strategy(encoded, context, strategy)
+        .map_err(|_| AdmissionError::InvalidDealing)?;
     let prepared = transition::validate_close_with_strategy::<H, P, D, E, S, B, R>(
         state,
         context,

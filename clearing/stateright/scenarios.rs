@@ -61,19 +61,6 @@ const fn withdrawal_claim(batch: Batch) -> SettlementAction {
     }
 }
 
-const fn payout_claim(batch: Batch) -> SettlementAction {
-    let position = batch
-        .candidate()
-        .payout_output
-        .expect("the fixture has a payout output")
-        .position;
-    SettlementAction::ClaimPayout {
-        batch,
-        source: batch,
-        position,
-    }
-}
-
 #[test]
 fn rejected_candidate_preserves_the_exact_live_registration() {
     let model = SettlementModel::default();
@@ -148,28 +135,9 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementAction::QueueWithdrawal(ineligible_destination),
     );
 
-    // Every safety root requires one authenticated opening for the exact account and state.
-    let mut wrong_count = valid;
-    wrong_count.safety_openings[0] = None;
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(wrong_count),
-    );
-
-    let mut extra_opening = valid;
-    extra_opening.safety_openings[1] = extra_opening.safety_openings[0];
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(extra_opening),
-    );
-
+    // Intake requires one authenticated opening for the exact account and finalized root.
     let mut unauthenticated = valid;
-    unauthenticated.safety_openings[0]
-        .as_mut()
-        .unwrap()
-        .authenticated_state = false;
+    unauthenticated.opening.authenticated_state = false;
     rejected(
         model,
         &state,
@@ -177,7 +145,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     );
 
     let mut wrong_account = valid;
-    wrong_account.safety_openings[0].as_mut().unwrap().account = Account::Bob;
+    wrong_account.opening.account = Account::Bob;
     rejected(
         model,
         &state,
@@ -185,11 +153,11 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     );
 
     let mut wrong_root = valid;
-    wrong_root.safety_openings[0].as_mut().unwrap().root = Root::R1;
+    wrong_root.opening.root = Root::R1;
     rejected(model, &state, SettlementAction::QueueWithdrawal(wrong_root));
 
     let mut wrong_state = valid;
-    wrong_state.safety_openings[0].as_mut().unwrap().state = AccountState {
+    wrong_state.opening.state = AccountState {
         active: false,
         balance: 0,
     };
@@ -199,7 +167,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementAction::QueueWithdrawal(wrong_state),
     );
 
-    // Replay identity binds the full body, whose action must be affordable at every safety root.
+    // Replay identity binds the full body, whose amount must be affordable at the finalized root.
     let mut mismatched_replay_key = valid;
     mismatched_replay_key.request.action = WithdrawalAction::Amount(1);
     rejected(
@@ -235,34 +203,6 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     too_late.request.deadline = 13;
     too_late.replay_key = too_late.request.replay_key();
     rejected(model, &state, SettlementAction::QueueWithdrawal(too_late));
-
-    let mut with_successor = SettlementState::default();
-    step(
-        model,
-        &mut with_successor,
-        SettlementAction::RecordDeposit(DepositId::BobTwo),
-    );
-    register_and_admit(model, &mut with_successor, Batch::B0);
-    let mut unaffordable_successor =
-        SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
-    unaffordable_successor.request.action = WithdrawalAction::Amount(9);
-    unaffordable_successor.replay_key = unaffordable_successor.request.replay_key();
-    rejected(
-        model,
-        &with_successor,
-        SettlementAction::QueueWithdrawal(unaffordable_successor),
-    );
-
-    register_and_admit(model, &mut with_successor, Batch::B1);
-    let mut unaffordable_tail =
-        SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
-    unaffordable_tail.request.action = WithdrawalAction::Amount(8);
-    unaffordable_tail.replay_key = unaffordable_tail.request.replay_key();
-    rejected(
-        model,
-        &with_successor,
-        SettlementAction::QueueWithdrawal(unaffordable_tail),
-    );
 
     let mut accepted = state;
     step(
@@ -398,8 +338,8 @@ fn admission_and_challenge_boundaries_are_inclusive() {
 }
 
 #[test]
-fn configured_pipeline_capacity_is_a_hard_admission_bound() {
-    let model = SettlementModel::with_max_pending(2);
+fn admitted_closes_allow_successor_registration_before_finality() {
+    let model = SettlementModel::default();
     let mut state = SettlementState::default();
     step(
         model,
@@ -409,12 +349,82 @@ fn configured_pipeline_capacity_is_a_hard_admission_bound() {
     register_and_admit(model, &mut state, Batch::B0);
     register_and_admit(model, &mut state, Batch::B1);
     queue_withdrawal(model, &mut state, WithdrawalId::Amount);
+    register_and_admit(model, &mut state, Batch::B2);
+    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1, Batch::B2]);
+    assert_eq!(state.expected_epoch, 0);
+}
+
+#[test]
+fn withdrawal_queued_during_registration_waits_for_the_next_boundary() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B0),
+    );
+
+    let queued = SettlementModel::withdrawal_attempt(&state, WithdrawalId::CloseAfterFault);
+    let request = queued.request;
+    step(model, &mut state, SettlementAction::QueueWithdrawal(queued));
+    assert_eq!(state.registered, Some(RegistrationId::B0));
+    assert_eq!(
+        state.pending_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+
+    step(model, &mut state, admission(Batch::B0));
+    assert_eq!(state.pipeline, vec![Batch::B0]);
+    assert_eq!(
+        state.pending_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+    assert_eq!(
+        state.outstanding_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+
+    // The admitted boundary did not carry the later request. A successor
+    // registration must include it verbatim instead of silently consuming it.
     rejected(
         model,
         &state,
-        SettlementAction::Register(RegistrationId::B2),
+        SettlementAction::Register(RegistrationId::B1),
     );
-    assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1]);
+}
+
+#[test]
+fn registered_withdrawal_blocks_another_request_for_the_same_account() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register_and_admit(model, &mut state, Batch::B0);
+    finalize_b0(model, &mut state);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobOne),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B1C),
+    );
+
+    let mut duplicate = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Carried);
+    duplicate.request.action = WithdrawalAction::Amount(1);
+    duplicate.replay_key = duplicate.request.replay_key();
+    rejected(model, &state, SettlementAction::QueueWithdrawal(duplicate));
+    assert_eq!(state.pending_withdrawals, [None, None, None]);
 }
 
 #[test]
@@ -735,7 +745,7 @@ fn tail_fault_precedes_and_drains_its_two_batch_clean_prefix() {
     assert_eq!(state.finalized_batches & 0b11, 0b11);
 
     drain_terminal(model, &mut state);
-    step(model, &mut state, payout_claim(Batch::B1));
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     assert_eq!(state.released, state.total_in);
 }
 
@@ -773,29 +783,40 @@ fn registration_expiry_drains_its_earlier_two_batch_prefix() {
     step(model, &mut state, SettlementAction::Finalize);
 
     drain_terminal(model, &mut state);
-    step(model, &mut state, payout_claim(Batch::B1));
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     assert_eq!(state.released, state.total_in);
 }
 
 #[test]
-fn finalized_reserve_survives_descendant_fault_and_claims_independently() {
+fn absent_recipient_credit_becomes_active_without_a_native_output() {
     let model = SettlementModel::default();
-    let mut state = admit_first_three(model);
-    step(model, &mut state, SettlementAction::Observe(6));
-    step(model, &mut state, SettlementAction::Finalize);
-    step(model, &mut state, SettlementAction::Finalize);
-    assert_eq!(state.payout_reserve[Batch::B1.index()], 1);
+    let mut state = SettlementState::default();
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B2, ChallengeKind::HigherEntry),
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
     );
-    drain_terminal(model, &mut state);
-    assert_eq!(state.claimable, 1);
-    step(model, &mut state, payout_claim(Batch::B1));
+    register_and_admit(model, &mut state, Batch::B0);
+    register_and_admit(model, &mut state, Batch::B1);
+    step(model, &mut state, SettlementAction::Observe(6));
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Finalize);
+
+    assert!(!Batch::B1.candidate().predecessor_state[Account::Carol as usize].active);
+    assert!(Batch::B1.candidate().withdrawal_output.is_none());
+    assert_eq!(state.current_root, Root::R2);
+    assert_eq!(
+        state.current_state[Account::Carol as usize],
+        AccountState {
+            active: true,
+            balance: 1,
+        }
+    );
+    assert_eq!(state.current_liability, 17);
     assert_eq!(state.claimable, 0);
-    assert_eq!(state.released, state.total_in);
-    rejected(model, &state, payout_claim(Batch::B1));
+    assert_eq!(state.withdrawal_reserve, [0; 8]);
+    assert_eq!(state.custody, state.total_in);
+    assert_eq!(state.released, 0);
 }
 
 #[test]
@@ -817,7 +838,6 @@ fn finalized_withdrawal_reserve_survives_a_later_malicious_close() {
     drain_terminal(model, &mut state);
     assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
     step(model, &mut state, withdrawal_claim(Batch::B2));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.released, state.total_in);
 }
 
@@ -834,7 +854,7 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
     step(model, &mut state, SettlementAction::Observe(9));
     step(model, &mut state, SettlementAction::Finalize);
 
-    // Wrong positions, proof roots, and claim namespaces stutter without consuming reserves.
+    // Wrong positions and proof roots stutter without consuming reserves.
     rejected(
         model,
         &state,
@@ -871,24 +891,12 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
             position: 1,
         },
     );
-    rejected(
-        model,
-        &state,
-        SettlementAction::ClaimPayout {
-            batch: Batch::B2,
-            source: Batch::B2,
-            position: 0,
-        },
-    );
-
     // Each exact positioned output consumes only its own batch-scoped reserve.
     step(model, &mut state, withdrawal_claim(Batch::B2));
     rejected(model, &state, withdrawal_claim(Batch::B2));
     step(model, &mut state, withdrawal_claim(Batch::B3));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.withdrawal_reserve, [0; 8]);
-    assert_eq!(state.payout_reserve, [0; 8]);
-    assert_eq!(state.clean_claim_paid, 10);
+    assert_eq!(state.clean_claim_paid, 9);
 }
 
 #[test]
@@ -1161,7 +1169,7 @@ fn uncovered_carried_amount_degrades_at_the_frozen_root() {
 }
 
 #[test]
-fn carried_offset_defers_the_deposit() {
+fn carried_offset_includes_the_deposit_and_preserves_the_account_balance() {
     let model = SettlementModel::default();
     let mut state = SettlementState::default();
     step(
@@ -1176,33 +1184,20 @@ fn carried_offset_defers_the_deposit() {
     );
     step(model, &mut state, admission(Batch::OffsetC));
 
-    // The deferred deposit stays staged with its deadline intact.
-    assert_eq!(state.pending_deposits, [0, 2, 0]);
-    assert_eq!(state.deposit_deadlines[Account::Bob as usize], Some(2));
-
-    // With no successor close admitted before its deadline, the deposit
-    // expires and refunds directly while the carried withdrawal still clears.
+    assert_eq!(state.pending_deposits, [0, 0, 0]);
+    assert_eq!(state.deposit_deadlines[Account::Bob as usize], None);
     step(model, &mut state, SettlementAction::Observe(2));
-    assert_eq!(
-        state.fault,
-        Fault::ExpiredDeposit {
-            account: Account::Bob,
-            expired_at: 2,
-        }
-    );
+    assert!(state.fault.healthy());
     step(model, &mut state, SettlementAction::Observe(4));
     step(model, &mut state, SettlementAction::Finalize);
     assert_eq!(state.last, SettlementEdge::Finalize(Batch::OffsetC));
     step(model, &mut state, withdrawal_claim(Batch::OffsetC));
     assert_eq!(state.clean_claim_paid, 2);
-    step(
-        model,
-        &mut state,
-        SettlementAction::ClaimDeposit(Account::Bob),
-    );
-    assert_eq!(state.refunded_deposits[Account::Bob as usize], 2);
-    drain_terminal(model, &mut state);
-    assert_eq!(state.released, state.total_in);
+    assert_eq!(state.current_liability, 15);
+    assert_eq!(state.custody, 15);
+    assert_eq!(state.refunded_deposits[Account::Bob as usize], 0);
+    assert_eq!(state.released, 2);
+    assert!(state.fault.healthy());
 }
 
 #[test]
@@ -1236,9 +1231,8 @@ fn queued_withdrawal_behind_a_pending_prefix_expires_and_recovers() {
     step(model, &mut state, SettlementAction::Finalize);
     assert!(state.pipeline.is_empty());
     assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
-    assert_eq!(state.payout_reserve[Batch::B1.index()], 1);
     drain_terminal(model, &mut state);
+    assert_eq!(state.recovered_state[Account::Carol as usize], 1);
     step(model, &mut state, withdrawal_claim(Batch::B2));
-    step(model, &mut state, payout_claim(Batch::B1));
     assert_eq!(state.released, state.total_in);
 }

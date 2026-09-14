@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     chain::{
-        client::{Chain, Client, Env},
+        client::{Chain, Client, Env, POLL, SUBMIT_ATTEMPTS},
         state::StatusRecord,
     },
     operator::rpc as operator_rpc,
@@ -26,9 +26,6 @@ use commonware_clearing::bajillion::{
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use std::{net::SocketAddr, time::Duration};
-
-/// Settlement resolutions allowed during one submission.
-const MAX_RESOLUTIONS: usize = 2;
 
 /// Certified anchor polls before an acceptance is reported unconfirmed. The
 /// operator registers on the chain before it releases a receipt, so absence
@@ -61,7 +58,7 @@ pub(crate) enum PaymentOutcome {
 
 /// How the wallet resolved an already-staged pending send before submission.
 enum PendingOutcome {
-    /// The staged context is still live, so resubmit the exact bytes.
+    /// No admitted outcome resolves the intent, so resubmit the exact bytes.
     Live(Box<StagedSend>),
     /// The send's commitment was concluded from a finalized settlement root.
     Resolved(PaymentOutcome),
@@ -81,6 +78,17 @@ impl Agent {
         let (requested, total) = self.payment_entries(entries)?;
         self.pay_requested(ctx, chain, operator, requested, total)
             .await
+    }
+
+    /// Whether a draft entry belongs to the exact unresolved payment.
+    pub(crate) fn pending_payment_contains(&self, receiver: usize, amount: u64) -> bool {
+        let recipient = &self.receivers[receiver % self.receivers.len()].key;
+        self.pending_payment.as_ref().is_some_and(|pending| {
+            pending
+                .entries
+                .iter()
+                .any(|entry| &entry.recipient == recipient && entry.amount == amount)
+        })
     }
 
     /// Resumes the durably staged pending send, when one exists.
@@ -132,15 +140,9 @@ impl Agent {
             None => self.stage(ctx, chain, operator, &requested, total).await?,
         };
 
-        let mut resolutions = 0;
+        let mut attempts = 1;
         loop {
-            // The ledger tracks the slot's lifecycle: the send is durably marked
-            // submitted before the wire attempt, so its row never claims less than what
-            // may have reached the operator.
-            self.store
-                .mark_payment_submitted(&staged.authorization)
-                .context("mark payment submitted")?;
-            let response = operator_rpc::accept_send(
+            let response = match operator_rpc::accept_send(
                 ctx,
                 operator,
                 operator_rpc::AcceptSendRequest {
@@ -149,7 +151,20 @@ impl Agent {
                 },
             )
             .await
-            .context("submit payment")?;
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    return match self.resolve_pending(ctx, chain, operator, staged).await {
+                        Ok(PendingOutcome::Resolved(outcome)) => Ok(outcome),
+                        Ok(PendingOutcome::Live(_) | PendingOutcome::Abandoned) => {
+                            Err(error).context("submit payment")
+                        }
+                        Err(unresolved) => Err(unresolved).context(format!(
+                            "payment submission failed ({error:#}); outcome unresolved"
+                        )),
+                    };
+                }
+            };
             let context = match response {
                 operator_rpc::AcceptSendResponse::Accepted(accepted) => {
                     Self::verify_accepted(&accepted, &staged, total)?;
@@ -165,12 +180,15 @@ impl Agent {
                 "corrective context has an unexpected operator"
             );
             ensure!(
-                resolutions < MAX_RESOLUTIONS,
+                attempts < SUBMIT_ATTEMPTS,
                 "the operator repeatedly rejected the unresolved payment"
             );
-            resolutions += 1;
+            attempts += 1;
             staged = match self.resolve_pending(ctx, chain, operator, staged).await? {
-                PendingOutcome::Live(staged) => *staged,
+                PendingOutcome::Live(staged) => {
+                    ctx.sleep(POLL).await;
+                    *staged
+                }
                 PendingOutcome::Resolved(outcome) => return Ok(outcome),
                 PendingOutcome::Abandoned => {
                     self.stage(ctx, chain, operator, &requested, total).await?
@@ -308,7 +326,9 @@ impl Agent {
         Ok((requested, total))
     }
 
-    /// Resolves only the staged context's immutable registration and finalized activity.
+    /// Resolves the staged authorization against its registration and admitted activity.
+    /// Admission fixes the close, so exclusion is permanent. Inclusion without a receipt
+    /// requires finality before the wallet records a completed payment.
     async fn resolve_pending<E: Env>(
         &mut self,
         ctx: &E,
@@ -337,17 +357,12 @@ impl Agent {
         if invalidated {
             return self.abandon_staged(&staged);
         }
-        ensure!(
-            anchor.is_some(),
-            "the staged context has no irrevocable settlement outcome"
-        );
+        if anchor.is_none() {
+            return Ok(PendingOutcome::Live(Box::new(staged)));
+        }
         let Some(admitted) = chain.admitted(ctx, context.epoch()).await? else {
             return Ok(PendingOutcome::Live(Box::new(staged)));
         };
-        ensure!(
-            admitted.finalized,
-            "the staged epoch has not finalized, so its commitment is not yet decidable"
-        );
         let account = self.account();
         let lookup = self
             .holders
@@ -355,7 +370,7 @@ impl Agent {
             .await?;
         let (_, activity) = lookup
             .resolve::<Sha256>(&admitted.roots.change, &account)
-            .context("verify finalized payer activity")?;
+            .context("verify admitted payer activity")?;
         let Some(activity) = activity.filter(|activity| activity.has_outgoing()) else {
             return self.abandon_staged(&staged);
         };
@@ -363,7 +378,7 @@ impl Agent {
             let prior = self
                 .store
                 .vector_state(context)?
-                .context("finalized activity names an unknown authorization")?;
+                .context("committed activity names an unknown authorization")?;
             let vector = OutVector::new(context.epoch(), account.clone(), prior.entries)?;
             let body = VectorSendBody::new(
                 context,
@@ -374,10 +389,15 @@ impl Agent {
             );
             ensure!(
                 activity.matches_outgoing(context, &body),
-                "finalized activity names an unknown authorization"
+                "committed activity names an unknown authorization"
             );
             return self.abandon_staged(&staged);
         }
+
+        ensure!(
+            admitted.finalized,
+            "the staged epoch has not finalized, so its commitment is not yet decidable"
+        );
 
         let total = entry_total(&staged.entries)?;
         let previous_debit = staged
@@ -440,18 +460,45 @@ impl Agent {
         Ok(PendingOutcome::Abandoned)
     }
 
-    /// Verifies and retains this account's exact finalized balance floor.
-    pub(super) fn verify_head(
+    /// Verifies a payment context and its finalized or admitted predecessor balance floor.
+    pub(super) async fn verify_head<E: Env>(
         &mut self,
+        ctx: &E,
+        chain: &mut Client,
         head: &operator_rpc::PaymentHeadResponse,
         status: &StatusRecord,
     ) -> Result<()> {
         ensure!(
-            status.state_root == head.root,
-            "payer opening is not the exact settlement head"
+            head.context.deployment() == &self.deployment
+                && head.context.payment().operator() == &self.operator
+                && head.context.verify_anchor::<Sha256>(),
+            "payment context is not bound to this deployment and operator"
         );
+        let finalized_epoch = floor_epoch(status)?;
+        let epoch = head.context.payment().epoch();
+        let epoch = if epoch > finalized_epoch {
+            ensure!(
+                !status.hard_faulted,
+                "settlement is permanently hard-faulted"
+            );
+            let predecessor = chain
+                .admitted(ctx, epoch - 1)
+                .await?
+                .context("payer predecessor close has not been admitted")?;
+            ensure!(
+                predecessor.roots.successor == head.root,
+                "payer opening differs from its admitted predecessor"
+            );
+            epoch
+        } else {
+            ensure!(
+                status.state_root == head.root,
+                "payer opening is not the exact settlement head"
+            );
+            finalized_epoch
+        };
         self.retain_head(&head.root, &head.opening)?;
-        self.cache_signing(&head.context, &head.root, floor_epoch(status)?)
+        self.cache_signing(head.context.payment(), &head.root, epoch)
     }
 
     /// Retains a Current membership proof for custody recovery at its exact root.
@@ -504,8 +551,8 @@ impl Agent {
     ///
     /// The operator's head is the fast path. When it is unreachable or unusable, the
     /// signing context is the chain's certified registration and the affordability
-    /// floor is the validators' opening at the certified head, so the operator is
-    /// left with nothing to do but accept the send.
+    /// floor is the validators' opening at the finalized or admitted predecessor root.
+    /// The operator only needs to accept the send.
     async fn stage_against_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -514,18 +561,24 @@ impl Agent {
         requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
-        let operator_error = match operator_head(ctx, operator, self.account(), &self.operator)
-            .await
-        {
-            Ok(head) => {
-                let status = staging_status(ctx, chain, self.deployment).await?;
-                match self.stage_head(&head, &status, total) {
-                    Ok(()) => return self.stage_under(head.context, head.root, requested, total),
-                    Err(error) => error,
+        let operator_error =
+            match operator_head(ctx, operator, self.account(), &self.operator).await {
+                Ok(head) => {
+                    let status = staging_status(ctx, chain, self.deployment).await?;
+                    match self.stage_head(ctx, chain, &head, &status, total).await {
+                        Ok(()) => {
+                            return self.stage_under(
+                                head.context.payment().clone(),
+                                head.root,
+                                requested,
+                                total,
+                            );
+                        }
+                        Err(error) => error,
+                    }
                 }
-            }
-            Err(error) => error,
-        };
+                Err(error) => error,
+            };
         let (context, root) = self
             .stage_chain_head(ctx, chain, total)
             .await
@@ -569,8 +622,10 @@ impl Agent {
 
     /// Admits the operator's head for staging: a live payer row whose live balance
     /// covers `total`, verified against the certified head and retained.
-    fn stage_head(
+    async fn stage_head<E: Env>(
         &mut self,
+        ctx: &E,
+        chain: &mut Client,
         head: &operator_rpc::PaymentHeadResponse,
         status: &StatusRecord,
         total: u64,
@@ -581,13 +636,13 @@ impl Agent {
             head.balance >= total,
             "payer has insufficient available balance"
         );
-        self.verify_head(head, status)
+        self.verify_head(ctx, chain, head, status).await
     }
 
     /// Stages without the operator's head: the signing context is the chain's
-    /// certified registration and the affordability floor is the validators'
-    /// opening at the certified head, verified, retained, and cached like an operator
-    /// head. Returns the context to sign under and the root the opening is retained at.
+    /// certified registration and the balance floor comes from its admitted predecessor
+    /// for a successor epoch, otherwise the finalized head. A completed boundary replaces older
+    /// balances before held credits can contribute to the successor's spending floor.
     async fn stage_chain_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -597,23 +652,40 @@ impl Agent {
         let status = staging_status(ctx, chain, self.deployment).await?;
         let context = registered_context(ctx, chain, &self.operator).await?;
         let account = self.account();
-        let opening = self
-            .holders
-            .validator_opening(ctx, chain, &account, &status)
-            .await?;
-        // The floor covers every close through the finalized head, so the lower bound
-        // adds only the credits held from the next epoch on.
-        let floor_epoch = status
-            .last_finalized
-            .map_or(Some(0), |last| last.checked_add(1))
-            .context("epoch overflow")?;
+        let finalized_epoch = floor_epoch(&status)?;
+        let predecessor = if context.epoch() > finalized_epoch {
+            Some(
+                chain
+                    .admitted(ctx, context.epoch() - 1)
+                    .await?
+                    .context("payer predecessor close has not been admitted")?,
+            )
+        } else {
+            None
+        };
+        let (opening, root, epoch) = match predecessor {
+            Some(admitted) => (
+                self.holders
+                    .successor_opening(ctx, chain, &account, &admitted)
+                    .await?,
+                admitted.roots.successor,
+                context.epoch(),
+            ),
+            None => (
+                self.holders
+                    .validator_opening(ctx, chain, &account, &status)
+                    .await?,
+                status.state_root,
+                finalized_epoch,
+            ),
+        };
         ensure!(
-            self.lower_bound(opening.balance.get(), floor_epoch)? >= total,
+            self.lower_bound(opening.balance.get(), epoch)? >= total,
             "payer has insufficient available balance"
         );
-        self.retain_head(&status.state_root, &opening)?;
-        self.cache_signing(&context, &status.state_root, floor_epoch)?;
-        Ok((context, status.state_root))
+        self.retain_head(&root, &opening)?;
+        self.cache_signing(&context, &root, epoch)?;
+        Ok((context, root))
     }
 
     /// Confirms the send's context is a settlement registration through a certified
@@ -750,7 +822,7 @@ pub(super) async fn operator_head<E: Env>(
             .await
             .context("read payer state")?;
     ensure!(
-        head.context.operator() == bound,
+        head.context.payment().operator() == bound,
         "payment context has an unexpected operator"
     );
     Ok(head)

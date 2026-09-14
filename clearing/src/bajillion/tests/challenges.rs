@@ -56,7 +56,7 @@ fn check(
         &fixture.context,
         &close.header,
         &close.roots,
-        &close.amounts,
+        close.withdrawal_total,
         &challenge,
     )
 }

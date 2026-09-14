@@ -74,7 +74,6 @@ async fn prepare_epoch(
     )
     .unwrap()
     .bind::<Sha256, _, _>(state, &deposits, &withdrawals)
-    .await
     .unwrap();
     let terminals = fixture.accounts[..3]
         .iter()
@@ -191,7 +190,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     assert!(first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &first_close.roots,
-        &first_close.amounts,
+        first_close.withdrawal_total,
     ));
 
     let mut foreign_roots = first_close.roots;
@@ -199,7 +198,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     assert!(!first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &foreign_roots,
-        &first_close.amounts,
+        first_close.withdrawal_total,
     ));
 
     // The accepted header authenticates the root used to check the transferred history.
@@ -346,13 +345,13 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         }
         if index == 1 {
             let encoded = second.prepared.encoded();
-            let mut changed_header = encoded.to_vec();
-            changed_header[0] ^= 1;
+            let mut changed_dealing = encoded.to_vec();
+            changed_dealing[0] ^= 1;
             let mut changed_body = encoded.to_vec();
             *changed_body.last_mut().unwrap() ^= 1;
             for damaged in [
                 encoded.slice(..encoded.len() - 1),
-                Bytes::from(changed_header),
+                Bytes::from(changed_dealing),
                 Bytes::from(changed_body),
             ] {
                 assert!(

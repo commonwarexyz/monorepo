@@ -63,7 +63,7 @@ pub async fn new_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn close_context(
+pub fn close_context(
     deployment: Digest,
     epoch: u64,
     operator: VerifyingKey,
@@ -89,6 +89,5 @@ pub async fn close_context(
     )
     .unwrap()
     .bind::<Sha256, _, _>(state, deposits, withdrawals)
-    .await
     .unwrap()
 }

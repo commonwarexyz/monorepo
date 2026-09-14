@@ -12,10 +12,7 @@ use crate::bajillion::{
         VectorSendBody,
     },
     state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore},
-    transition::{
-        ChallengeIndex, ChangeParts, CloseAmounts, CloseContext, Header, RootBundle,
-        TransitionError,
-    },
+    transition::{ChallengeIndex, ChangeParts, CloseContext, Header, RootBundle, TransitionError},
     vector::{OutTipLookup, OutVector},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -289,7 +286,7 @@ impl<P: PublicKey, D: Digest> Read for ChangeAbsence<P, D> {
         Ok(Self {
             predecessor: Option::<ChangeGuard<P, D>>::read(buf)?,
             successor: Option::<ChangeGuard<P, D>>::read(buf)?,
-            opening: RangeOpening::read_bounded(buf, 2, usize::MAX)?,
+            opening: RangeOpening::read_cfg(buf, &2)?,
         })
     }
 }
@@ -571,7 +568,7 @@ pub fn adjudicate<H, P, D>(
     context: &CloseContext<P, D>,
     header: &Header<D>,
     roots: &RootBundle<D>,
-    amounts: &CloseAmounts,
+    withdrawal_total: u64,
     challenge: &Challenge<P, D>,
 ) -> Result<Verdict, ChallengeError>
 where
@@ -579,7 +576,7 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if !header.verify::<H, P>(context, roots, amounts) {
+    if !header.verify::<H, P>(context, roots, withdrawal_total) {
         return Err(ChallengeError::HeaderRoot);
     }
     match challenge {

@@ -30,7 +30,7 @@ pub(crate) struct ReconcileSummary {
     /// Epochs whose omitted credit was convicted with a proven `HigherAckEntry` challenge.
     pub(crate) convicted: Vec<u64>,
     /// Epochs whose held credit can no longer be enforced: a finalized close understated it
-    /// past the window, or its close never admitted and settlement faulted.
+    /// past the window, or settlement permanently prevents its close from finalizing.
     pub(crate) unenforceable: Vec<u64>,
     /// Epochs that finalized while the operator still withholds the committed-side evidence
     /// needed to verify or convict, reported once per stretch of withholding. The epoch keeps
@@ -115,9 +115,8 @@ impl Agent {
                 continue;
             }
 
-            // Anchor the context to the chain's certified registration. A read failure
-            // aborts the whole intake so the cursor never advances past an unconfirmed
-            // receipt. A proven absence or mismatch skips the receipt like an invalid one.
+            // An immutable registered anchor can confirm or reject a receipt. Absence may
+            // reflect a lagging snapshot, so retry the page before advancing its cursor.
             let epoch = body.epoch();
             let anchor = *body.anchor();
             let registered_anchor = match anchors.get(&epoch) {
@@ -131,7 +130,9 @@ impl Agent {
                     fetched
                 }
             };
-            if registered_anchor != Some(anchor) {
+            let registered_anchor =
+                registered_anchor.context("settlement registration is not visible yet")?;
+            if registered_anchor != anchor {
                 continue;
             }
 
@@ -177,6 +178,7 @@ impl Agent {
             .store
             .record_incoming(&records, page.next_cursor)
             .context("persist verified incoming receipts")?;
+        self.last_reconciled_epoch = self.store.last_reconciled_epoch()?;
         Ok(())
     }
 
@@ -276,6 +278,11 @@ impl Agent {
         // The anchor is the chain's own admission record for this epoch, recency-bounded.
         // An unreachable or lagging chain is a soft retry. Intake only stored
         // chain-registered receipts, so registration itself needs no re-check here.
+        let fault = if status.hard_faulted {
+            chain.fault(ctx).await?
+        } else {
+            None
+        };
         let Ok(admitted) = chain.admitted(ctx, epoch).await else {
             return Ok(());
         };
@@ -290,6 +297,39 @@ impl Agent {
             }
             return Ok(());
         };
+
+        if !admitted.finalized {
+            let invalidated = match fault {
+                Some(FaultRecord::Settling(_)) => true,
+                Some(FaultRecord::Faulted(HardFaultReasonResponse::ProvenChallenge {
+                    batch_id,
+                    ..
+                })) => {
+                    let first = status
+                        .last_finalized
+                        .map_or(Some(0), |last| last.checked_add(1))
+                        .context("receipt epoch overflow")?;
+                    let mut found = false;
+                    for candidate in first..=epoch {
+                        let Some(record) = chain.admitted(ctx, candidate).await? else {
+                            break;
+                        };
+                        if record.batch_id == batch_id {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                }
+                _ => false,
+            };
+            if invalidated {
+                self.store.record_unenforceable(epoch)?;
+                self.withheld.remove(&epoch);
+                summary.unenforceable.push(epoch);
+                return Ok(());
+            }
+        }
 
         let mut uncovered = false;
         for entry in &held {
@@ -384,7 +424,8 @@ impl Agent {
                 // fabricated batch or root could otherwise fake coverage through the window,
                 // or point a challenge at another close and burn the window on a worthless
                 // verdict.
-                if evidence.batch_id != admitted.batch_id || evidence.change_root != admitted.change
+                if evidence.batch_id != admitted.batch_id
+                    || evidence.change_root != admitted.roots.change
                 {
                     return EntryVerdict::Refused;
                 }
@@ -395,7 +436,7 @@ impl Agent {
         // Resolving served evidence is a cryptographic check on an untrusted party, so a
         // failure is refusal, not a fatal error that would shadow the higher epochs.
         let Ok((cumulative, count)) =
-            lookup.resolve::<Sha256>(&admitted.change, &held.payer, account)
+            lookup.resolve::<Sha256>(&admitted.roots.change, &held.payer, account)
         else {
             return EntryVerdict::Refused;
         };
@@ -423,6 +464,7 @@ impl Agent {
             sender: Box::new(lookup),
         };
         let tx = SettlementTx::Challenge(ChallengeRequest {
+            deployment: self.deployment,
             batch_id: admitted.batch_id,
             evidence: challenge.encode(),
         });

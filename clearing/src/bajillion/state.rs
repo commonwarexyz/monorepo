@@ -22,8 +22,6 @@ pub enum SettlementOutput {
     None,
     /// A signed withdrawal releases this amount to its requested destination.
     Withdrawal(u64),
-    /// Credit to an unregistered recipient releases this amount to that recipient.
-    ExternalPayout(u64),
 }
 
 impl Write for SettlementOutput {
@@ -34,10 +32,6 @@ impl Write for SettlementOutput {
                 1_u8.write(buf);
                 amount.write(buf);
             }
-            Self::ExternalPayout(amount) => {
-                2_u8.write(buf);
-                amount.write(buf);
-            }
         }
     }
 }
@@ -46,7 +40,7 @@ impl EncodeSize for SettlementOutput {
     fn encode_size(&self) -> usize {
         match self {
             Self::None => u8::SIZE,
-            Self::Withdrawal(_) | Self::ExternalPayout(_) => u8::SIZE + u64::SIZE,
+            Self::Withdrawal(_) => u8::SIZE + u64::SIZE,
         }
     }
 }
@@ -58,7 +52,6 @@ impl Read for SettlementOutput {
         match u8::read(buf)? {
             0 => Ok(Self::None),
             1 => Ok(Self::Withdrawal(u64::read(buf)?)),
-            2 => Ok(Self::ExternalPayout(u64::read(buf)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -397,10 +390,17 @@ mod tests {
             SettlementOutput::None,
             SettlementOutput::Withdrawal(0),
             SettlementOutput::Withdrawal(9),
-            SettlementOutput::ExternalPayout(7),
         ] {
             assert_eq!(SettlementOutput::decode(output.encode()).unwrap(), output);
         }
+        assert_ne!(
+            SettlementOutput::None.encode(),
+            SettlementOutput::Withdrawal(0).encode()
+        );
+        assert!(
+            SettlementOutput::decode(bytes::Bytes::from_static(&[2, 0, 0, 0, 0, 0, 0, 0, 7]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -492,9 +492,11 @@ mod tests {
         assert_eq!(leaf.terminal_seq(), 0);
         assert!(!leaf.has_outgoing());
 
-        let mut changed_output = row.clone();
-        changed_output.output = SettlementOutput::ExternalPayout(6);
-        assert_ne!(AccountChange::from_row(&changed_output, send_root), leaf);
+        for output in [SettlementOutput::None, SettlementOutput::Withdrawal(7)] {
+            let mut changed_output = row.clone();
+            changed_output.output = output;
+            assert_ne!(AccountChange::from_row(&changed_output, send_root), leaf);
+        }
 
         let mut changed_row = row;
         changed_row.successor = 5;

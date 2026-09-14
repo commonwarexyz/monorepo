@@ -528,7 +528,6 @@ pub type WithdrawalBatchCfg = (RangeCfg<usize>, RangeCfg<usize>);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalBatch<P: PublicKey, D: Digest> {
     requests: Vec<SignedWithdrawal<P, D>>,
-    total: u64,
 }
 
 impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
@@ -542,7 +541,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     pub const fn empty() -> Self {
         Self {
             requests: Vec::new(),
-            total: 0,
         }
     }
 
@@ -553,16 +551,7 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
         {
             return Err(BoundaryError::NonCanonicalWithdrawals);
         }
-        let total = requests.iter().try_fold(0_u64, |total, request| {
-            let amount = match request.body.action {
-                WithdrawalAction::Amount(amount) => amount.get(),
-                WithdrawalAction::Close => 0,
-            };
-            total
-                .checked_add(amount)
-                .ok_or(BoundaryError::ArithmeticOverflow)
-        })?;
-        Ok(Self { requests, total })
+        Ok(Self { requests })
     }
 
     /// Returns the canonical requests.
@@ -578,11 +567,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     /// Returns whether the boundary has no withdrawals.
     pub const fn is_empty(&self) -> bool {
         self.requests.is_empty()
-    }
-
-    /// Returns the checked aggregate of exact withdrawal amounts.
-    pub const fn total(&self) -> u64 {
-        self.total
     }
 
     /// Returns the request for an account, if present.
@@ -643,16 +627,11 @@ impl<P: PublicKey, D: Digest> Read for WithdrawalBatch<P, D> {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let requests = Vec::<SignedWithdrawal<P, D>>::read_cfg(buf, &(cfg.0, cfg.1))?;
-        Self::from_sorted(requests).map_err(|error| match error {
-            BoundaryError::NonCanonicalWithdrawals => CodecError::Invalid(
+        Self::from_sorted(requests).map_err(|_| {
+            CodecError::Invalid(
                 "clearing::WithdrawalBatch",
                 "withdrawal accounts are not strictly sorted and unique",
-            ),
-            BoundaryError::ArithmeticOverflow => CodecError::Invalid(
-                "clearing::WithdrawalBatch",
-                "aggregate withdrawal amount overflows u64",
-            ),
-            _ => unreachable!("batch validation performed signature or context checks"),
+            )
         })
     }
 }
@@ -866,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_totals_never_wrap() {
+    fn deposits_bound_custody_and_withdrawals_preserve_individual_requests() {
         let a = SigningKey::from_seed(1);
         let b = SigningKey::from_seed(2);
         assert_eq!(
@@ -876,12 +855,16 @@ mod tests {
             ]),
             Err(BoundaryError::ArithmeticOverflow)
         );
+        let withdrawals = WithdrawalBatch::new(vec![
+            withdrawal(&a, amount(u64::MAX), b"a"),
+            withdrawal(&b, amount(u64::MAX), b"b"),
+        ])
+        .unwrap();
+        assert_eq!(withdrawals.len(), 2);
         assert_eq!(
-            WithdrawalBatch::new(vec![
-                withdrawal(&a, amount(u64::MAX), b"a"),
-                withdrawal(&b, amount(1), b"b"),
-            ]),
-            Err(BoundaryError::ArithmeticOverflow)
+            WithdrawalBatch::decode_cfg(withdrawals.encode(), &((0..=2).into(), (0..=1).into()))
+                .unwrap(),
+            withdrawals
         );
     }
 
@@ -1029,7 +1012,6 @@ mod tests {
         ])
         .unwrap();
         assert!(requests.requests()[0].account() < requests.requests()[1].account());
-        assert_eq!(requests.total(), 3);
         assert_eq!(
             requests
                 .request_for(&a.public_key())

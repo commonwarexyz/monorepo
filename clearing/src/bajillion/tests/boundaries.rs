@@ -6,7 +6,7 @@ use commonware_runtime::Metrics as _;
 fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
     deterministic::Runner::default().start(|runtime| async move {
         let keys = (20..25).map(SigningKey::from_seed).collect::<Vec<_>>();
-        let [payer, closed, offset, fresh, external] = keys.as_slice() else {
+        let [payer, closed, offset, fresh, recipient] = keys.as_slice() else {
             unreachable!()
         };
         let state = new_state(
@@ -69,7 +69,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-        .await
         .unwrap();
         let mut entries = vec![
             OutEntry {
@@ -83,7 +82,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 count: 1,
             },
             OutEntry {
-                recipient: external.public_key(),
+                recipient: recipient.public_key(),
                 cumulative: 10,
                 count: 1,
             },
@@ -126,7 +125,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         .await
         .unwrap();
         assert_eq!(verified.close().rows.len(), 5);
-        assert_eq!(verified.state().mutations().len(), 3);
+        assert_eq!(verified.state().mutations().len(), 4);
         assert!(
             !verified
                 .state()
@@ -134,16 +133,8 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 .iter()
                 .any(|(key, _)| key == &account_key(&offset.public_key()).unwrap())
         );
-        assert!(
-            !verified
-                .state()
-                .mutations()
-                .iter()
-                .any(|(key, _)| key == &account_key(&external.public_key()).unwrap())
-        );
-        assert_eq!(verified.close().amounts.withdrawal, 115);
-        assert_eq!(verified.close().amounts.payout, 10);
-        assert_eq!(verified.state().head().liability(), 210);
+        assert_eq!(verified.close().withdrawal_total, 115);
+        assert_eq!(verified.state().head().liability(), 220);
         let (state, close) = verified.apply::<_, Sha256>(state).await.unwrap();
         let index = Index::new(&close);
         for (account, balance) in [
@@ -151,7 +142,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             (closed, None),
             (offset, Some(100)),
             (fresh, Some(35)),
-            (external, None),
+            (recipient, Some(10)),
         ] {
             assert_eq!(
                 state
@@ -187,16 +178,13 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             .find(|row| row.account == payer.public_key())
             .unwrap();
         assert_eq!(row.output, SettlementOutput::Withdrawal(0));
-        let payout = close.external_payout_claim(&external.public_key()).unwrap();
-        assert_eq!(
-            payout.verify::<Sha256>(&close.roots.change).unwrap().amount,
-            10
-        );
-        assert!(
-            payout
-                .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                .is_err()
-        );
+        let row = close
+            .rows
+            .iter()
+            .find(|row| row.account == recipient.public_key())
+            .unwrap();
+        assert_eq!(row.output, SettlementOutput::None);
+        assert!(close.withdrawal_claim(&recipient.public_key()).is_err());
         let restored =
             Close::decode_evidence::<Sha256>(close.encode_evidence(), &context, &close.header)
                 .unwrap();
@@ -206,17 +194,11 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 close.withdrawal_claim(request.account()).unwrap()
             );
         }
-        assert_eq!(
-            restored
-                .external_payout_claim(&external.public_key())
-                .unwrap(),
-            payout
-        );
     });
 }
 
 #[test]
-fn withdrawal_validation_batches_native_balance_reads() {
+fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
     deterministic::Runner::default().start(|runtime| async move {
         let mut signers = (30..33).map(SigningKey::from_seed).collect::<Vec<_>>();
         signers.sort_by_key(|signer| signer.public_key());
@@ -248,34 +230,38 @@ fn withdrawal_validation_batches_native_balance_reads() {
             })
         };
         let mut reads = Vec::new();
-        for (label, amount, absent_action, deposit, expected) in [
+        for (label, amount, absent_action, deposit, remaining, releases) in [
             (
                 "covered",
                 90,
                 WithdrawalAction::Amount(NZU64!(30)),
                 30,
-                None,
+                10,
+                [90, 200, 30],
             ),
             (
                 "insufficient",
                 101,
                 WithdrawalAction::Amount(NZU64!(30)),
                 30,
-                Some(CloseError::WithdrawalCoverage),
+                100,
+                [0, 200, 30],
             ),
             (
                 "absent amount",
                 90,
                 WithdrawalAction::Amount(NZU64!(1)),
                 0,
-                Some(CloseError::WithdrawalCoverage),
+                10,
+                [90, 200, 0],
             ),
             (
                 "absent close",
                 90,
                 WithdrawalAction::Close,
                 0,
-                Some(CloseError::BoundaryNoStateChange),
+                10,
+                [90, 200, 0],
             ),
         ] {
             let deposits = if deposit == 0 {
@@ -323,27 +309,14 @@ fn withdrawal_validation_batches_native_balance_reads() {
             )
             .unwrap();
             let before = counts();
-            let bound = epoch
+            let context = epoch
                 .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-                .await;
-            reads.push((label, before, counts()));
-            if let Some(expected) = expected {
-                assert!(
-                    matches!(
-                        (bound.unwrap_err(), expected),
-                        (
-                            CloseError::WithdrawalCoverage,
-                            CloseError::WithdrawalCoverage
-                        ) | (
-                            CloseError::BoundaryNoStateChange,
-                            CloseError::BoundaryNoStateChange
-                        )
-                    ),
-                    "{label}"
-                );
-                continue;
-            }
-            let context = bound.unwrap();
+                .unwrap();
+            assert_eq!(
+                counts(),
+                before,
+                "{label}: binding only checks state identity"
+            );
             let before = counts();
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
@@ -372,12 +345,12 @@ fn withdrawal_validation_batches_native_balance_reads() {
             .unwrap();
             reads.push(("validate", before, counts()));
             assert_eq!(verified.close().header, prepared.close().header);
-            assert_eq!(verified.state().head().liability(), 10);
+            assert_eq!(verified.state().head().liability(), remaining);
             assert_eq!(verified.close().rows.len(), 3);
             for (row, (signer, old, new, withdrawal)) in verified.close().rows.iter().zip([
-                (&signers[0], 100, 10, 90),
-                (&signers[1], 200, 0, 200),
-                (&signers[2], 0, 0, 30),
+                (&signers[0], 100, remaining, releases[0]),
+                (&signers[1], 200, 0, releases[1]),
+                (&signers[2], 0, 0, releases[2]),
             ]) {
                 assert_eq!(row.account, signer.public_key());
                 assert_eq!((row.predecessor, row.successor), (old, new));

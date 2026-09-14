@@ -12,7 +12,7 @@ use commonware_clearing::bajillion::{
         HigherEntryLookup, Verdict, account_lookup, adjudicate, decode_bounded,
         higher_entry_lookup,
     },
-    commitment::{Builder, MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
+    commitment::{Builder, Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{
         AckError, EntryReceipt, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
         VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
@@ -20,8 +20,8 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{State, StateOpening, StateRoot, account_key},
     transition::{
-        ChallengeIndex, Close, CloseAmounts, CloseContext, CloseLimits, Header, OperatorKey,
-        OperatorSignature, OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
+        ChallengeIndex, Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature,
+        OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
         validate_close_with_strategy,
     },
     vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
@@ -78,7 +78,6 @@ struct ChallengeCase {
 #[derive(Arbitrary, Debug)]
 struct CommitmentCase {
     opening: Opening<Digest>,
-    multi: MultiOpening<Digest>,
     range: RangeOpening<Digest>,
     predecessor_root: VectorRoot<Digest>,
     opening_values: Vec<Vec<u8>>,
@@ -318,7 +317,7 @@ fn assert_forged_entry_rejected(
                 context,
                 &close.header,
                 &close.roots,
-                &close.amounts,
+                close.withdrawal_total,
                 &forged
             ),
             Err(ChallengeError::Ack(AckError::InvalidEntryOpening))
@@ -337,11 +336,11 @@ fn exercise_challenge(
     let Close {
         header,
         roots,
-        amounts,
+        withdrawal_total,
         ..
     } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, challenge),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
@@ -352,17 +351,19 @@ fn exercise_challenge(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
+    assert!(
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unsigned).is_err()
+    );
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unscoped),
         Ok(Verdict::Proven(_))
     ));
     assert_forged_entry_rejected(context, close, challenge);
@@ -385,7 +386,7 @@ fn exercise_challenge(
         _ => mutated.len() - 1,
     };
     if let Ok(decoded) = decode_bounded::<VerifyingKey, Digest>(&mutated, maximum) {
-        let _ = adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded);
+        let _ = adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded);
     }
 }
 
@@ -398,11 +399,11 @@ fn exercise_no_contradiction(
     let Close {
         header,
         roots,
-        amounts,
+        withdrawal_total,
         ..
     } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, challenge),
         Ok(Verdict::NoContradiction)
     ));
 
@@ -411,17 +412,19 @@ fn exercise_no_contradiction(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &decoded),
         Ok(Verdict::NoContradiction)
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
+    assert!(
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unsigned).is_err()
+    );
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, *withdrawal_total, &unscoped),
         Ok(Verdict::Proven(_))
     ));
     assert_forged_entry_rejected(context, close, challenge);
@@ -453,15 +456,8 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"challenge-fuzz-committee"]),
-    )
-    .await;
-    let _ = adjudicate::<Sha256, _, _>(
-        &context,
-        &case.header,
-        &case.roots,
-        &CloseAmounts::default(),
-        &case.challenge,
     );
+    let _ = adjudicate::<Sha256, _, _>(&context, &case.header, &case.roots, 0, &case.challenge);
     // One acknowledged send from the payer to the recipient forms the certified close.
     let amount = u64::from(case.amount) + 1;
     let epoch = context.payment().epoch();
@@ -681,8 +677,6 @@ fn bounded_values(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
 
 fn fuzz_commitment(mut case: CommitmentCase) {
     case.opening.proof.siblings.truncate(MAX_PROOF_DIGESTS);
-    case.multi.positions.truncate(MAX_POSITIONS);
-    case.multi.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     case.range.proof.siblings.truncate(MAX_PROOF_DIGESTS);
     let opening_values = bounded_values(case.opening_values);
     let first = opening_values.first().map_or(&[][..], Vec::as_slice);
@@ -692,23 +686,8 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         .verify::<Sha256>(case.kind, &case.predecessor_root, first);
     let _ = case.opening.reconstruct::<Sha256>(case.kind, first);
     let _ = case
-        .multi
-        .verify::<Sha256, _>(case.kind, &case.predecessor_root, &opening_values);
-
-    // Arbitrary range openings verify, narrow, and open only with typed errors.
-    let probe_start = case.range.start.wrapping_add(u32::from(
-        case.positions.first().copied().unwrap_or_default(),
-    ));
-    let probe_count = u32::from(case.positions.get(1).copied().unwrap_or_default());
-    let _ = case
         .range
         .verify::<Sha256, _>(case.kind, &case.predecessor_root, &opening_values);
-    let _ = case
-        .range
-        .narrow::<Sha256, _>(case.kind, &opening_values, probe_start, probe_count);
-    let _ = case
-        .range
-        .open::<Sha256, _>(case.kind, &opening_values, probe_start);
     let mut builder = Builder::<Sha256>::new(case.kind, opening_values.len() as u32)
         .expect("small vector must fit the protocol bound");
     for value in &opening_values {
@@ -721,11 +700,11 @@ fn fuzz_commitment(mut case: CommitmentCase) {
         .expect("builder received its declared length");
     let root = tree.root();
     if opening_values.is_empty() {
-        let multi = tree
-            .multi_opening(&[])
-            .expect("empty vector has a canonical empty multiproof");
+        let range = tree
+            .range_opening(0, 0)
+            .expect("empty vector has a canonical empty range proof");
         assert!(
-            multi
+            range
                 .verify::<Sha256, Vec<u8>>(case.kind, &root, &[])
                 .is_ok()
         );
@@ -754,21 +733,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     }
     positions.sort_unstable();
     positions.dedup();
-    let disclosed = positions
-        .iter()
-        .map(|&position| opening_values[position as usize].clone())
-        .collect::<Vec<_>>();
-    let multi = tree
-        .multi_opening(&positions)
-        .expect("normalized positions are canonical");
-    assert!(
-        multi
-            .verify::<Sha256, _>(case.kind, &root, &disclosed)
-            .is_ok()
-    );
-
-    // Narrowing a verified range opening reproduces the direct sub-range and single openings,
-    // and each result verifies against the same root.
     let start = positions[0];
     let end = positions[positions.len() - 1] + 1;
     let covered = &opening_values[start as usize..end as usize];
@@ -778,40 +742,6 @@ fn fuzz_commitment(mut case: CommitmentCase) {
     range
         .verify::<Sha256, _>(case.kind, &root, covered)
         .expect("direct range opening verifies");
-    for (index, &sub_start) in positions.iter().enumerate() {
-        for &sub_last in &positions[index..] {
-            let sub_count = sub_last - sub_start + 1;
-            let narrowed = range
-                .narrow::<Sha256, _>(case.kind, covered, sub_start, sub_count)
-                .expect("sub-range lies inside the verified range");
-            assert_eq!(
-                narrowed,
-                tree.range_opening(sub_start, sub_count)
-                    .expect("sub-range is in bounds")
-            );
-            assert!(
-                narrowed
-                    .verify::<Sha256, _>(
-                        case.kind,
-                        &root,
-                        &opening_values[sub_start as usize..=sub_last as usize],
-                    )
-                    .is_ok()
-            );
-        }
-        let opened = range
-            .open::<Sha256, _>(case.kind, covered, sub_start)
-            .expect("position lies inside the verified range");
-        assert_eq!(
-            opened,
-            tree.opening(sub_start).expect("position is in bounds")
-        );
-        assert!(
-            opened
-                .verify::<Sha256>(case.kind, &root, &opening_values[sub_start as usize])
-                .is_ok()
-        );
-    }
 }
 
 fn fuzz_vector(case: VectorCase) {
@@ -958,8 +888,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         CloseLimits::new(4, 4, 4, 4, 8, u64::MAX, u64::MAX, u64::MAX),
         Sha256::hash(&[b"committee"]),
-    )
-    .await;
+    );
     let mut terminals = Vec::new();
     for (sender, receiver) in [(&payer, &recipient), (&recipient, &payer)]
         .into_iter()
@@ -1083,27 +1012,29 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         (0, None)
     );
 
-    // A complete frame binds the claimed header, canonical keys, signatures and vector data.
-    let second_key = 33
-        + 33
-        + prepared.close().rows[0]
-            .outgoing
-            .as_ref()
-            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    // Canonical account positions bind every recipient index to one key.
+    let second_key = 1 + 32;
     let mut duplicate = encoded.to_vec();
-    duplicate.copy_within(33..65, second_key);
+    duplicate.copy_within(1..33, second_key);
     assert!(posted::decode::<VerifyingKey, Digest>(duplicate.into(), &context).is_err());
     let mut reordered = encoded.to_vec();
     for offset in 0..32 {
-        reordered.swap(33 + offset, second_key + offset);
+        reordered.swap(1 + offset, second_key + offset);
     }
     assert!(posted::decode::<VerifyingKey, Digest>(reordered.into(), &context).is_err());
-    let vectors_start = second_key
-        + 33
-        + prepared.close().rows[1]
-            .outgoing
-            .as_ref()
-            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    let vectors_start = 1
+        + 2 * 32
+        + prepared
+            .close()
+            .rows
+            .iter()
+            .map(|row| {
+                1 + row
+                    .outgoing
+                    .as_ref()
+                    .map_or(0, |send| 1 + send.payer_signature().encode_size())
+            })
+            .sum::<usize>();
     let sender_vector = vectors_start + usize::from(prepared.close().rows[0].outgoing.is_none());
     let mut bad_index = encoded.to_vec();
     bad_index[sender_vector + 1] = 2;
@@ -1121,17 +1052,17 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             malformed.pop();
         }
         2 => malformed.push(0),
-        3 => malformed[32] = 0x7f,
-        4 => malformed[33] ^= 1,
+        3 => malformed[0] = 0x7f,
+        4 => malformed[1] ^= 1,
         5 => {
             let position = malformed.len() - 2;
             malformed[position] ^= 1;
         }
         6 => {
-            malformed.insert(33, 0);
-            malformed[32] |= 0x80;
+            malformed.insert(1, 0);
+            malformed[0] |= 0x80;
         }
-        _ => malformed.truncate(32),
+        _ => malformed.truncate(1),
     }
     assert!(
         !validate_bytes(
@@ -1155,8 +1086,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         *context.limits(),
         *context.committee(),
-    )
-    .await;
+    );
     assert!(
         !validate_bytes(
             &state,
@@ -1181,31 +1111,26 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         .await
     );
     let close = prepared.close();
-    for which in 0..5 {
+    for which in 0..4 {
         let mut roots = close.roots;
-        let mut amounts = close.amounts;
+        let mut withdrawal_total = close.withdrawal_total;
         let changed = Sha256::hash(&[b"wrong-header-field", &[which]]);
         match which {
             0 => roots.change.digest = changed,
             1 => roots.withdrawal_outputs.digest = changed,
             2 => roots.successor.digest = changed,
-            3 => amounts.withdrawal += 1,
-            _ => amounts.payout += 1,
+            _ => withdrawal_total += 1,
         }
-        assert!(!close.header.verify::<Sha256, _>(&context, &roots, &amounts));
-        let header = Header::new::<Sha256, _>(&context, &roots, &amounts);
-        let mut bytes = encoded.to_vec();
-        bytes[..32].copy_from_slice(header.encode().as_ref());
         assert!(
-            !validate_bytes(
-                &state,
-                &context,
-                &operator_bls,
-                &deposits,
-                &withdrawals,
-                bytes.into()
-            )
-            .await
+            !close
+                .header
+                .verify::<Sha256, _>(&context, &roots, withdrawal_total)
+        );
+        let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
+        assert!(
+            commonware_clearing::bajillion::transition::Close::<VerifyingKey, Digest>::decode_evidence::<Sha256>(
+                close.encode_evidence(), &context, &header,
+            ).is_err()
         );
     }
     assert_eq!(*state.head(), before);
@@ -1350,8 +1275,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         committee.commitment::<Sha256>(),
-    )
-    .await;
+    );
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,
@@ -1418,9 +1342,11 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         .assemble_exact(votes.into_iter().take(committee.quorum()))
         .unwrap();
     assert!(verifier.verify_exact(&prepared.close().header, &certificate));
-    let mut amounts = prepared.close().amounts;
-    amounts.payout += 1;
-    let wrong = Header::new::<Sha256, _>(&context, &prepared.close().roots, &amounts);
+    let wrong = Header::new::<Sha256, _>(
+        &context,
+        &prepared.close().roots,
+        prepared.close().withdrawal_total + 1,
+    );
     assert!(!verifier.verify_exact(&wrong, &certificate));
 }
 

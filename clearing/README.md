@@ -5,85 +5,96 @@
 
 Settle actions at scale.
 
+**Bajillion** nets payments across accounts and settles their combined effects.
+This crate provides signed payment vectors, operator receipts, close validation,
+committee certificates, challenges, and the settlement state machine.
+
+To run it, start with the [terminal example](../examples/terminal/README.md).
+For the records and protocol rules, see the [module documentation](src/bajillion/mod.rs).
+
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
+Bajillion is **ALPHA**: its API, wire format, and storage may change without a
+migration path. See the workspace's [stability levels](../README.md#stability).
 
-Bajillion is **ALPHA**. Its API and wire format may change without a migration path.
+## From payments to settlement
 
-The `bajillion` module provides payer-signed payment vectors, operator acknowledgments,
-complete-close validation, exact-quorum certificates, receipt challenges, and an in-memory
-settlement state machine. The [terminal example](../examples/terminal) integrates these primitives
-with an operator, wallets, consensus, and persistence.
+Every validator keeps the operator's full balance state and receives the same
+**dealing**, containing the signed inputs needed to check one epoch's close.
+It derives incoming credits from payer vectors, applies the registered deposits
+and withdrawals, and reconstructs three commitments:
 
-Every validator retains the operator's complete account state in QMDB Current Ordered with MMB.
-Each canonical 32-byte account key maps to a positive eight-byte balance; absence represents a
-non-live account. A close derives credits from the signed payer vectors and applies one canonical
-batch containing only changed balances. Deposits can create accounts, zero balances remove them,
-and payments to absent recipients become certified external payouts.
-
-The operator sends the same dealing to every validator. It contains account identities, terminal
-payer authorizations, cumulative payment entries, and one combined operator acceptance signature.
-Each validator checks the complete account equations and reconstructs three roots: account
-activity, withdrawal outputs, and successor QMDB state. The activity and output trees provide
-compact BMT openings for challenges and payout claims. Zero-net activity still appears in the
-activity tree even when it needs no QMDB write. Payer-vector BMTs authenticate individual entries.
-
-The 32-byte Header binds those roots, actual withdrawal and external-payout totals, and the exact
-registered epoch context. An external settlement chain verifies an exact `2f + 1` certificate for
-`n = 3f + 1` validators. Each honest signer validates the full dealing and durably retains its
-state and evidence before publishing its vote, so the certificate has at least `f + 1` honest
-holders of the entire close. Committee registration must authenticate proofs of possession.
-The certificate proves the disclosed public relation; private receipts remain necessary to
-challenge an operator's omitted or contradictory acknowledgments.
-
-Payment counters and vectors are scoped to an immutable registered epoch. A wallet saves the
-verified receipt before advancing its endpoint and retries the exact signed request after response
-loss. An unresolved request must be reconciled with its original epoch before a replacement is
-signed. Registration starts an admission deadline; an expired registered epoch cannot be rolled
-forward to avoid that obligation.
-
-Settlement admits certified closes into a FIFO queue and finalizes each after its challenge
-window and predecessors. Finalization reserves withdrawals and external payouts for independent,
-once-only claims. A proven fault or missed deadline stops new work; recovery freezes the last
-finalized QMDB root after the surviving clean prefix drains. Historical Current proofs support
-forced-withdrawal intake and balance recovery, while ordinary withdrawal claims use the output
-BMT. State and proof material must remain available for every pending root and the finalized
-recovery root, including while a close waits behind an earlier deadline.
-
-The payment, boundary, vector, and BMT modules support `no_std`. QMDB state and settlement paths
-require `std` and use generic Commonware runtime traits. Applications supply authenticated time,
-networking, durable storage, and atomic persistence of protocol decisions with votes and asset
-transfers. A database mutation failure consumes the affected state owner; callers must recover
-from durable storage before resuming it.
-
-## Benchmarks
-
-The [benchmark guide](src/bajillion/benches/README.md) defines each measured stage and its
-workload. Run one profile per process; `sizes` verifies actual encoded dealings and proof payloads:
-
-```bash
-COMMONWARE_CLEARING_PROFILE=0 COMMONWARE_CLEARING_BENCH=sizes \
-  cargo bench -p commonware-clearing --features bench --bench bajillion
+```text
+             signed payments + registered epoch boundary
+                                  |
+                         one shared dealing
+                                  |
+                    each validator checks it
+                       against its prior state
+                                  |
+           +----------------------+----------------------+
+           |                      |                      |
+      Activity BMT          Withdrawal BMT          Successor QMDB
+       challenges               claims                balances
+           |                      |                      |
+           +----------------------+----------------------+
+                                  |
+                        Header + certificate
+                                  |
+                    admit --> wait --> finalize
 ```
 
-Use `RUSTFLAGS="--cfg full_bench"` for the dense and sparse matrix through one million live
-accounts. The harness uses 100 validators and an adaptive 16-worker pool. `prepare-apply` includes
-construction, encoding, and canonical batch application to one Current database.
-`receive-apply` includes decoding, full validation, signing, and the same application. Historical
-queries reconstruct a native view on demand; that work belongs to the query cost and is excluded
-from head-advancement measurements. These measurements also exclude journal commit/sync. Separate
-receipt, certificate, challenge, and withdrawal-claim groups exercise their complete verifiers.
+The header binds the three roots to the registered epoch and its predecessor.
+Each signer validates and stores the evidence before voting. A committee of
+`n = 3f + 1` validators certifies a close with exactly `2f + 1` votes.
 
-With 100 validators, the encoded Header and certificate occupy 101 bytes. The three roots and
-two outflow totals add 112 bytes to the admission package. Dealing, admission, proof, and transport
-costs are reported separately. Local runs validate correctness and encoded sizes; published
-latency comparisons require matched runs on a quiet external machine.
+Admission adds the close to an ordered queue and permits the next epoch to
+register. Finalization waits for the challenge deadline and all earlier closes,
+then makes withdrawals claimable. A successful receipt challenge blocks the
+contested close and its descendants. Earlier clean closes can still finalize
+before recovery freezes the surviving state.
 
-## Formal model
+## Balances and evidence
 
-The [executable Stateright model](stateright/README.md) exhausts its finite certification,
-challenge, claim-ledger, and settlement state spaces to completion and pairs them with deterministic
-end-to-end fund-recovery traces. Its documentation records the exact state counts, composition
-boundaries, reachability matrix, and the refinement obligations that remain with the Rust
-implementation and embedding.
+QMDB Current Ordered with MMB maps a canonical 32-byte account key to a positive
+eight-byte balance. Absence means zero. Payments can create a recipient's balance
+without an onchain account. Balances can accumulate across closes until their
+owners choose to withdraw.
+
+A close writes only changed balances. Activity that nets to zero still appears
+in the activity BMT, and payer-vector BMTs authenticate individual payment entries.
+Payment counters belong to epoch evidence. Withdrawal claims use the output
+BMT, and balance recovery uses historical QMDB proofs.
+
+Receipts let their holders challenge omitted or contradictory payments. Wallets
+save verified receipts and keep them available through the challenge deadline.
+
+## Embedding the protocol
+
+Applications supply networking, authenticated time, durable storage, and custody.
+The main responsibilities are:
+
+- Store evidence before voting and advance canonical state from admitted closes.
+- Serve proofs for pending closes and the finalized recovery state.
+- Retain receipts and get any challenge included before its deadline.
+- Persist protocol decisions and their asset transfers atomically.
+
+The [module documentation](src/bajillion/mod.rs) defines the full contract,
+including committee assumptions, retention, retries, and recovery. The terminal
+example implements these responsibilities in a running application.
+
+Payment, boundary, vector, and BMT types support `no_std`. QMDB, complete-close
+validation, challenges, and settlement require `std` and use Commonware runtime
+traits.
+
+## Tests, models, and benchmarks
+
+Run crate tests from the repository root:
+
+```bash
+just test -p commonware-clearing
+```
+
+- [Lifecycle models](stateright/README.md)
+- [Arithmetic proofs](verus/README.md)
+- [Benchmarks](src/bajillion/benches/README.md)
