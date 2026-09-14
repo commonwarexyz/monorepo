@@ -140,6 +140,15 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 /// Observer invoked on every handoff proposal request.
 type HandoffProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
+/// Handler that takes ownership of a proposal response so tests can decide
+/// when it completes.
+type ProposeController<D> = Box<dyn Fn(D, oneshot::Sender<D>) + Send + 'static>;
+
+/// Handler that takes ownership of a handoff proposal response so tests can
+/// decide when it completes.
+type HandoffProposeController<D> =
+    Box<dyn Fn(D, oneshot::Sender<HandoffProposal<D>>) + Send + 'static>;
+
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
 type VerifyObserver<H, P> =
@@ -216,6 +225,12 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Invoked on every handoff proposal request received by the application.
     handoff_propose_observer: Option<HandoffProposeObserver<H, P>>,
 
+    /// Takes ownership of regular proposal responses when configured.
+    propose_controller: Option<ProposeController<H::Digest>>,
+
+    /// Takes ownership of handoff proposal responses when configured.
+    handoff_propose_controller: Option<HandoffProposeController<H::Digest>>,
+
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
@@ -269,6 +284,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 verified: HashSet::new(),
                 propose_observer: None,
                 handoff_propose_observer: None,
+                propose_controller: None,
+                handoff_propose_controller: None,
                 verify_observer: None,
                 pending_proposes: Vec::new(),
                 pending_handoff_proposes: Vec::new(),
@@ -309,6 +326,17 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_handoff_propose_observer(&mut self, observer: HandoffProposeObserver<H, P>) {
         self.handoff_propose_observer = Some(observer);
+    }
+
+    pub fn set_propose_controller(&mut self, controller: ProposeController<H::Digest>) {
+        self.propose_controller = Some(controller);
+    }
+
+    pub fn set_handoff_propose_controller(
+        &mut self,
+        controller: HandoffProposeController<H::Digest>,
+    ) {
+        self.handoff_propose_controller = Some(controller);
     }
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
@@ -484,7 +512,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             continue;
                         }
                         let digest = self.propose(context).await;
-                        response.send_lossy(digest);
+                        if let Some(controller) = &self.propose_controller {
+                            controller(digest, response);
+                        } else {
+                            response.send_lossy(digest);
+                        }
                     }
                     Message::ProposeHandoff {
                         context,
@@ -508,7 +540,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             continue;
                         }
                         let digest = self.propose(context).await;
-                        response.send_lossy(HandoffProposal::Proposed(digest));
+                        if let Some(controller) = &self.handoff_propose_controller {
+                            controller(digest, response);
+                        } else {
+                            response.send_lossy(HandoffProposal::Proposed(digest));
+                        }
                     }
                     Message::Verify {
                         context,
