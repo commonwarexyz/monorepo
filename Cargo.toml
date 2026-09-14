@@ -82,6 +82,7 @@ disallowed_types = "deny"
 disallowed_macros = "deny"
 disallowed_methods = "deny"
 undocumented_unsafe_blocks = "deny"
+multiple_inherent_impl = "deny"
 unused-async = "warn"
 large_futures = "warn"
 # This generates false positives for methods that are correct, and the contortions
