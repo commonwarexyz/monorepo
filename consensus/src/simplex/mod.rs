@@ -251,9 +251,9 @@
 //! [`elector::Elector::elect_without_certificate`]) can offer a pipelined handoff to the
 //! application. The incoming leader's application may then propose on the outgoing term's final
 //! view as soon as it holds a valid proposal for that view, or defer until the view certifies. If
-//! no such proposal arrives, the leader proposes on entering the term as usual. Non-leader validators keep the same behavior: they
-//! buffer votes for the next term start and verify the early proposal against explicitly
-//! certified ancestry once the outgoing view certifies.
+//! no such proposal arrives, the leader proposes on entering the term as usual. Non-leader
+//! validators keep the same behavior: they buffer votes for the next term start and verify the
+//! early proposal against explicitly certified ancestry once the outgoing view certifies.
 //!
 //! The gain is largest with rotating leaders, where every view is a term boundary. Each
 //! proposal is distributed in parallel with its parent's votes, so sustained view time drops

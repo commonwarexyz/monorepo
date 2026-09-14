@@ -189,24 +189,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Generate a payload for a pipelined term handoff whose parent has not yet been certified.
+        /// Generate a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// Returning [`HandoffProposal::Proposed`] has the same verification and
-        /// certification commitments as returning a payload from [`Automaton::propose`].
-        /// Returning [`HandoffProposal::AwaitCertification`] explicitly declines
-        /// speculative construction while allowing consensus to retry through the ordinary
-        /// proposal path once the parent is certified.
+        /// [`HandoffProposal::Proposed`] carries the same verification and certification
+        /// commitments as a payload from [`Automaton::propose`].
+        /// [`HandoffProposal::AwaitCertification`] declines this request; consensus issues
+        /// an ordinary [`Automaton::propose`] once the parent certifies. Closing the
+        /// response abandons the local proposal opportunity for this view. Parent
+        /// certification does not retry it.
         ///
-        /// Return the receiver promptly and perform pending decision or construction work
-        /// behind it. Consensus awaits this method before processing further events.
-        /// Keep the response pending while that work is in progress. Consensus may drop
-        /// the receiver when the request is no longer needed, including when parent
-        /// certification allows an ordinary proposal request. Stop pending work when the
-        /// receiver closes.
-        ///
-        /// Dropping the response sender abandons the proposal opportunity for this view;
-        /// parent certification does not retry it. Use [`HandoffProposal::AwaitCertification`]
-        /// to defer construction until the parent certifies.
+        /// Return the receiver promptly and do any work behind it. Consensus drops the
+        /// receiver when the request is no longer needed, including when the parent
+        /// certifies first. Stop work when the receiver closes.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
@@ -373,11 +367,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
         /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
         /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before
-        /// requesting that ordinary path again. The parent is necessarily uncertified when this
-        /// hook is called, so certification status is implicit rather than duplicated in the
-        /// arguments.
+        /// requesting that ordinary path again.
         ///
-        /// This future may be cancelled before it completes and must be cancellation-safe.
+        /// This future may be dropped before completion; cancellation must leave application
+        /// state valid.
         fn handoff_policy(
             &mut self,
             _context: (E, Self::Context),
