@@ -685,7 +685,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable::Config as JournalConfig,
+        journal::contiguous::{Contiguous as _, variable::Config as JournalConfig},
         merkle::{mmb, mmr},
         metadata::{Config as MetadataConfig, Metadata},
         qmdb::{
@@ -697,10 +697,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Blob as _, BufferPooler, Runner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs},
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::VecU64};
     use core::future::Future;
@@ -2030,6 +2030,257 @@ mod tests {
             assert_eq!(db.get_metadata(), Some(Sha256::fill(2)));
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Witness config holding one witness per section, so every commit occupies its own blobs.
+    fn sectioned_witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+        let mut cfg = witness_config(partition, pooler);
+        cfg.items_per_section = NZU64!(1);
+        cfg
+    }
+
+    /// Seed a db with the bootstrap witness plus `commits` synced metadata-only commits,
+    /// returning the size and root after each commit. Every commit appends exactly its commit
+    /// operation, so the witness at position `p` has size `p + 1`.
+    async fn seed_witness_sections(
+        context: deterministic::Context,
+        witness_cfg: JournalConfig<()>,
+        commits: u8,
+    ) -> Vec<(Location<mmr::Family>, Digest)> {
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        let mut db: TestDb<mmr::Family> = Db::init(context, cfg, None).await.unwrap();
+        let mut states = Vec::new();
+        for i in 1..=commits {
+            let batch = db
+                .new_batch()
+                .merkleize(&db, Some(Sha256::fill(i)), db.inactivity_floor_loc())
+                .await;
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            states.push((db.size(), db.root()));
+        }
+        states
+    }
+
+    /// Leave the data blob of the witness at `position` with a partial trailing page, as a crash
+    /// mid-write would. Paged tail recovery repairs (resizes and syncs) such a tail when the blob
+    /// is opened.
+    async fn tear_witness_data(
+        context: &deterministic::Context,
+        witness_cfg: &JournalConfig<()>,
+        position: u64,
+    ) {
+        let partition = format!("{}_data", witness_cfg.partition);
+        let (blob, len) = context
+            .open(&partition, &position.to_be_bytes())
+            .await
+            .unwrap();
+        blob.resize(len - 1).await.unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    /// Bounded init through a delayed-sync backend, returning the db and the durability calls
+    /// initialization made.
+    async fn open_bounded_counting(
+        context: &deterministic::Context,
+        label: &'static str,
+        witness_cfg: JournalConfig<()>,
+        cap: Location<mmr::Family>,
+    ) -> (DelayedDb, usize) {
+        let pending = PendingSyncs::default();
+        pending.arm();
+        let delayed = DelayedSyncContext {
+            inner: context.child(label),
+            pending: pending.clone(),
+        };
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        let db = drive_pending_syncs(&pending, DelayedDb::init(delayed, cfg, Some(cap)))
+            .await
+            .unwrap();
+        (db, pending.calls())
+    }
+
+    /// Bounded initialization opens no witness section the bound discards, so a torn tail there
+    /// costs no repair.
+    #[test_traced]
+    fn test_compact_bounded_initialization_ignores_discarded_witness_sections() {
+        deterministic::Runner::default().start(|context| async move {
+            let control_cfg =
+                sectioned_witness_config("immutable-skip-discarded-control", &context);
+            let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn", &context);
+            let states =
+                seed_witness_sections(context.child("control"), control_cfg.clone(), 2).await;
+            assert_eq!(
+                states,
+                seed_witness_sections(context.child("torn"), torn_cfg.clone(), 2).await
+            );
+            let (size, root) = states[0];
+
+            // The witness at position 1 has size `size`, so the bound discards position 2 and
+            // must not open it. Tear its data blob: repairing the tail would sync it.
+            tear_witness_data(&context, &torn_cfg, 2).await;
+
+            let (control, control_calls) =
+                open_bounded_counting(&context, "control_cap", control_cfg, size).await;
+            let (torn, torn_calls) =
+                open_bounded_counting(&context, "torn_cap", torn_cfg, size).await;
+            assert_eq!(control.size(), size);
+            assert_eq!(control.root(), root);
+            assert_eq!(torn.size(), size);
+            assert_eq!(torn.root(), root);
+            assert_eq!(
+                torn_calls, control_calls,
+                "the discarded torn section must not be repaired"
+            );
+            control.destroy().await.unwrap();
+            torn.destroy().await.unwrap();
+        });
+    }
+
+    /// A torn tail in a retained witness section is still repaired under a bound. The witness it
+    /// held is lost and initialization falls back to the previous one.
+    #[test_traced]
+    fn test_compact_bounded_initialization_repairs_retained_witness_section() {
+        deterministic::Runner::default().start(|context| async move {
+            // Both witnesses share a section, so the bootstrap witness survives the torn tail
+            // page and ends mid-page, where recovery must rewrite rather than only shrink.
+            let clean_cfg = witness_config("immutable-repair-retained-clean", &context);
+            let torn_cfg = witness_config("immutable-repair-retained-torn", &context);
+            let mut states = Vec::new();
+            for (label, witness_cfg) in [("clean", &clean_cfg), ("torn", &torn_cfg)] {
+                let cfg = Config {
+                    strategy: Sequential,
+                    witness: witness_cfg.clone(),
+                    commit_codec_config: (),
+                };
+                let db: TestDb<mmr::Family> =
+                    Db::init(context.child(label), cfg, None).await.unwrap();
+                let genesis = db.root();
+
+                // Commit without syncing so the witness at position 1 lies above the recovery
+                // watermark, where a torn tail is a crash shape rather than corruption.
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, Some(Sha256::fill(1)), db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                states.push((genesis, db.size(), db.root()));
+            }
+            assert_eq!(states[0], states[1]);
+            let (genesis, size, root) = states[0];
+            tear_witness_data(&context, &torn_cfg, 0).await;
+
+            // Section 0 lies below the bound, so both twins open it. The torn twin trims its
+            // tail and republishes the journal without the lost witness.
+            let (clean, clean_calls) =
+                open_bounded_counting(&context, "clean_cap", clean_cfg, size).await;
+            let (torn, torn_calls) =
+                open_bounded_counting(&context, "torn_cap", torn_cfg, size).await;
+            assert_eq!(clean.size(), size);
+            assert_eq!(clean.root(), root);
+            assert_eq!(torn.size(), Location::new(1));
+            assert_eq!(torn.root(), genesis);
+            assert!(
+                torn_calls > clean_calls,
+                "the retained torn section is repaired"
+            );
+            clean.destroy().await.unwrap();
+            torn.destroy().await.unwrap();
+        });
+    }
+
+    /// A compact-sync import lands at the journal end whatever its size, so afterwards witness
+    /// positions can exceed sizes. Bounded initialization still selects by size, widening its
+    /// view when the positions below the bound cannot settle the selection.
+    #[test_traced("INFO")]
+    fn test_compact_bounded_initialization_after_import_below_positions() {
+        deterministic::Runner::default().start(|context| async move {
+            // A source state of size 2, captured from its witness journal.
+            let src_cfg = sectioned_witness_config("immutable-import-below-src", &context);
+            let (src_size, src_root) =
+                seed_witness_sections(context.child("src"), src_cfg.clone(), 1).await[0];
+            let journal =
+                witness::Journal::<_, mmr::Family, Digest>::init(context.child("src_tip"), src_cfg)
+                    .await
+                    .unwrap();
+            let (_, _, src_pinned) = witness::tests::tip(&journal).await;
+            drop(journal);
+
+            // The destination has used positions 0 through 3, so the import lands at position 4.
+            let dst_cfg = sectioned_witness_config("immutable-import-below-dst", &context);
+            seed_witness_sections(context.child("dst"), dst_cfg.clone(), 3).await;
+            let journal = witness::Journal::init(context.child("import"), dst_cfg.clone())
+                .await
+                .unwrap();
+            let imported = TestDb::<mmr::Family>::init_from_sync(
+                Sequential,
+                journal,
+                (),
+                src_size - 1,
+                src_pinned,
+                Operation::Commit(Some(Sha256::fill(1)), Location::new(0)),
+            )
+            .unwrap();
+            assert_eq!(imported.root(), src_root);
+            drop(imported.commit().await.unwrap());
+            let journal = witness::Journal::<_, mmr::Family, Digest>::init(
+                context.child("placed"),
+                dst_cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.bounds(), 4..5);
+            drop(journal);
+
+            // Three more commits occupy positions 5 through 7 with sizes 3 through 5.
+            let cfg = Config {
+                strategy: Sequential,
+                witness: dst_cfg.clone(),
+                commit_codec_config: (),
+            };
+            let mut db: TestDb<mmr::Family> =
+                Db::init(context.child("reopen"), cfg, None).await.unwrap();
+            assert_eq!(db.size(), src_size);
+            let mut states = vec![(src_size, src_root)];
+            for i in 2..=4u8 {
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, Some(Sha256::fill(i)), db.inactivity_floor_loc())
+                    .await;
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.sync().await.unwrap();
+                states.push((db.size(), db.root()));
+            }
+            drop(db);
+
+            // From the tip down: a view ending at the bound with a smaller witness, an empty view
+            // at the bound, and a bound below the retained start all widen and select by size.
+            for (size, root) in states.into_iter().rev() {
+                let db = open_bounded::<mmr::Family>(
+                    context.child("bounded").with_attribute("cap", *size),
+                    dst_cfg.clone(),
+                    size,
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.size(), size);
+                assert_eq!(db.root(), root);
+            }
+            assert!(matches!(
+                open_bounded::<mmr::Family>(context.child("pruned"), dst_cfg, Location::new(1))
+                    .await,
+                Err(Error::HistoricalFloorPruned(pruned)) if pruned == Location::new(1)
+            ));
         });
     }
 
