@@ -582,13 +582,47 @@ impl<I: Impl> Transform<I> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plans for transform workspaces, schedules, and locators.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::{Shards, Transform, WORK_ALIGN};
     use crate::ocelot::{Impl8, code::Impl, impl16::Impl16, kernel::portable::Portable};
-    use arbitrary::Unstructured;
+    use arbitrary::{Arbitrary, Unstructured};
+    #[cfg(test)]
     use commonware_invariants::minifuzz::Builder;
     use commonware_math::algebra::Ring as _;
+
+    /// A bounded property check for transform support code.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check workspace reset, resize, alignment, and shard partitioning.
+        Workspace,
+        /// Compare fused transform schedules with their unfused equivalents.
+        Schedules,
+        /// Compare the GF(2^8) locator with direct evaluation.
+        Locator8,
+        /// Compare the GF(2^16) locator with direct evaluation.
+        Locator16,
+        /// Compare the GF(2^8) FWT locator with direct evaluation.
+        FwtLocator8,
+        /// Compare the GF(2^16) FWT locator with direct evaluation.
+        FwtLocator16,
+    }
+
+    impl Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Workspace => fuzz_workspace(u),
+                Self::Schedules => fuzz_schedules(u),
+                Self::Locator8 => fuzz_locator(u, &Transform::new(Impl8::new(Portable)), false),
+                Self::Locator16 => fuzz_locator(u, &Transform::new(Impl16::new(Portable)), false),
+                Self::FwtLocator8 => fuzz_locator(u, &Transform::new(Impl8::new(Portable)), true),
+                Self::FwtLocator16 => fuzz_locator(u, &Transform::new(Impl16::new(Portable)), true),
+            }
+        }
+    }
+
     fn copy(work: &Shards) -> Shards {
         let mut copy = Shards::new(work.count, work.len);
         copy.data_mut().copy_from_slice(work.data());
@@ -656,6 +690,28 @@ mod tests {
         Ok(())
     }
 
+    fn fuzz_workspace(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let mut work = Shards::new(1, 1);
+        for _ in 0..8 {
+            let count = u.int_in_range(1..=128)?;
+            let capacity = u.int_in_range(1..=4096)?;
+            work.reset(count, capacity);
+            for len in [capacity, u.int_in_range(1..=capacity)?, capacity] {
+                work.resize(len);
+                assert_eq!(work.data().as_ptr().align_offset(WORK_ALIGN), 0);
+                assert_eq!(work.shards().count(), count);
+                for (index, shard) in work.shards_mut().enumerate() {
+                    assert_eq!(shard.len(), len);
+                    shard.fill(index as u8);
+                }
+                for (index, shard) in work.shards().enumerate() {
+                    assert!(shard.iter().all(|&byte| byte == index as u8));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn locator_reference<I: Impl>(
         transform: &Transform<I>,
         erased: &[usize],
@@ -706,6 +762,7 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
     fn check_locator_tables<I: Impl>(transform: &Transform<I>) {
         let tables = transform
             .tables
@@ -754,27 +811,7 @@ mod tests {
         Builder::default()
             .with_seed(0)
             .with_search_limit(256)
-            .test(|u| {
-                let mut work = Shards::new(1, 1);
-                for _ in 0..8 {
-                    let count = u.int_in_range(1..=128)?;
-                    let capacity = u.int_in_range(1..=4096)?;
-                    work.reset(count, capacity);
-                    for len in [capacity, u.int_in_range(1..=capacity)?, capacity] {
-                        work.resize(len);
-                        assert_eq!(work.data().as_ptr().align_offset(WORK_ALIGN), 0);
-                        assert_eq!(work.shards().count(), count);
-                        for (index, shard) in work.shards_mut().enumerate() {
-                            assert_eq!(shard.len(), len);
-                            shard.fill(index as u8);
-                        }
-                        for (index, shard) in work.shards().enumerate() {
-                            assert!(shard.iter().all(|&byte| byte == index as u8));
-                        }
-                    }
-                }
-                Ok(())
-            });
+            .test(|u| Plan::Workspace.run(u));
     }
 
     #[test]
@@ -782,37 +819,41 @@ mod tests {
         Builder::default()
             .with_seed(0)
             .with_search_limit(512)
-            .test(fuzz_schedules);
+            .test(|u| Plan::Schedules.run(u));
     }
 
     #[test]
-    fn minifuzz_locator() {
-        let gf8 = Transform::new(Impl8::new(Portable));
-        let gf16 = Transform::new(Impl16::new(Portable));
+    fn minifuzz_locator8() {
         Builder::default()
             .with_seed(0)
             .with_search_limit(256)
-            .test(|u| fuzz_locator(u, &gf8, false));
-        Builder::default()
-            .with_seed(0)
-            .with_search_limit(256)
-            .test(|u| fuzz_locator(u, &gf16, false));
+            .test(|u| Plan::Locator8.run(u));
     }
 
     #[test]
-    fn minifuzz_fwt_locator() {
-        let gf8 = Transform::new(Impl8::new(Portable));
-        let gf16 = Transform::new(Impl16::new(Portable));
-        check_locator_tables(&gf8);
-        check_locator_tables(&gf16);
+    fn minifuzz_locator16() {
         Builder::default()
             .with_seed(0)
             .with_search_limit(256)
-            .test(|u| fuzz_locator(u, &gf8, true));
+            .test(|u| Plan::Locator16.run(u));
+    }
+
+    #[test]
+    fn minifuzz_fwt_locator8() {
+        check_locator_tables(&Transform::new(Impl8::new(Portable)));
         Builder::default()
             .with_seed(0)
             .with_search_limit(256)
-            .test(|u| fuzz_locator(u, &gf16, true));
+            .test(|u| Plan::FwtLocator8.run(u));
+    }
+
+    #[test]
+    fn minifuzz_fwt_locator16() {
+        check_locator_tables(&Transform::new(Impl16::new(Portable)));
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| Plan::FwtLocator16.run(u));
     }
 
     #[test]

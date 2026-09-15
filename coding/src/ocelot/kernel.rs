@@ -18,6 +18,8 @@
 
 #[cfg(target_arch = "x86_64")]
 mod avx512;
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 pub mod portable;
 #[cfg(test)]
 mod tests;

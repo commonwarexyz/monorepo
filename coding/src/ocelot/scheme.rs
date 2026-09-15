@@ -1011,30 +1011,61 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plans for Ocelot coding schemes.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
-    use crate::ocelot::{Impl8, Impl16, field::gf8::GF8, kernel::portable::Portable};
+    use crate::ocelot::{Impl8, kernel::portable::Portable};
+    #[cfg(test)]
+    use crate::ocelot::{Impl16, field::gf8::GF8};
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    #[cfg(test)]
     use commonware_invariants::minifuzz;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZU16, NZUsize, test_rng};
+    #[cfg(test)]
+    use commonware_parallel::Rayon;
+    use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
+    #[cfg(test)]
+    use commonware_utils::{NZUsize, test_rng};
     use std::num::NonZeroU16;
 
+    #[cfg(test)]
     const CONFIG: Config = Config {
         minimum_shards: NZU16!(3),
         extra_shards: NZU16!(4),
     };
     const STRATEGY: Sequential = Sequential;
+    #[cfg(test)]
     const FUZZ_CASES: u64 = 64;
     const FUZZ_MAX_DATA_LEN: usize = 256;
 
     type Basic = OcelotX<Impl8<Portable>, Sha256>;
     type Hinted = OcelotHintedX<Impl8<Portable>, Sha256, CHECKSUMS>;
+    #[cfg(test)]
     type Hinted16 = OcelotHintedX<Impl16<Portable>, Sha256, { CHECKSUMS * 2 }>;
 
-    fn config(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<(Config, usize, usize)> {
+    /// A bounded property check for an Ocelot coding scheme.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check basic-scheme roundtrips and rejection paths.
+        Basic,
+        /// Check hinted-scheme roundtrips and rejection paths.
+        Hinted,
+    }
+
+    impl Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Basic => fuzz_basic(u),
+                Self::Hinted => fuzz_hinted(u),
+            }
+        }
+    }
+
+    fn config(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, usize, usize)> {
         let original = u.int_in_range(2u16..=4)?;
         let recovery = u.int_in_range(original..=6)?;
         Ok((
@@ -1047,13 +1078,13 @@ mod tests {
         ))
     }
 
-    fn data(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    fn data(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
         let len = u.int_in_range(0..=FUZZ_MAX_DATA_LEN)?;
         Ok(u.bytes(len)?.to_vec())
     }
 
     fn shuffled_indices(
-        u: &mut arbitrary::Unstructured<'_>,
+        u: &mut Unstructured<'_>,
         total: usize,
         count: usize,
     ) -> arbitrary::Result<Vec<usize>> {
@@ -1134,7 +1165,7 @@ mod tests {
         );
     }
 
-    fn fuzz_basic(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+    fn fuzz_basic(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let (config, original, recovery) = config(u)?;
         let data = data(u)?;
         let total = original + recovery;
@@ -1245,7 +1276,7 @@ mod tests {
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(FUZZ_CASES)
-            .test(fuzz_basic);
+            .test(|u| Plan::Basic.run(u));
     }
 
     fn assert_hinted_decode(
@@ -1295,7 +1326,7 @@ mod tests {
         }
     }
 
-    fn fuzz_hinted(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+    fn fuzz_hinted(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let (config, original, recovery) = config(u)?;
         let data = data(u)?;
         let total = original + recovery;
@@ -1541,7 +1572,7 @@ mod tests {
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(FUZZ_CASES)
-            .test(fuzz_hinted);
+            .test(|u| Plan::Hinted.run(u));
     }
 
     #[test]
@@ -1868,6 +1899,7 @@ mod tests {
         ));
     }
 
+    #[cfg(test)]
     fn raw_codeword(originals: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
         let refs: Vec<_> = originals.iter().map(Vec::as_slice).collect();
         let recovery = Encoder::new(Impl8::new(Portable)).encode(

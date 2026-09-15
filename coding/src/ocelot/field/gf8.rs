@@ -376,17 +376,40 @@ impl<K: Kernel> Ring for GF8Vec<K> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plans for GF(2^8) arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use crate::ocelot::kernel::portable::Portable;
+    use arbitrary::{Arbitrary, Unstructured};
+
+    /// Property checks for GF(2^8) and its portable packed representation.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check the scalar field laws.
+        Field,
+        /// Check the portable packed-vector ring laws.
+        VectorRing,
+    }
+
+    impl Plan {
+        /// Run this property check using bytes from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Field => commonware_math::algebra::test_suites::fuzz_field::<GF8>(u),
+                Self::VectorRing => {
+                    commonware_math::algebra::test_suites::fuzz_ring::<GF8Vec<Portable>>(u)
+                }
+            }
+        }
+    }
 
     #[test]
     fn minifuzz_field() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(100)
-            .test(commonware_math::algebra::test_suites::fuzz_field::<GF8>);
+            .test(|u| Plan::Field.run(u));
     }
 
     #[test]
@@ -394,6 +417,6 @@ mod tests {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(100)
-            .test(commonware_math::algebra::test_suites::fuzz_ring::<GF8Vec<Portable>>);
+            .test(|u| Plan::VectorRing.run(u));
     }
 }
