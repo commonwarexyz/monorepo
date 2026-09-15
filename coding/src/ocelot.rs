@@ -441,14 +441,6 @@ impl<K: Kernel> Impl for Impl8<K> {
         self.kernel.run(AddInto { dst, src });
     }
 
-    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
-        self.kernel.run(DerivativeFour { quarters });
-    }
-
-    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
-        self.kernel.run(DerivativeSixteen { blocks });
-    }
-
     fn sub_into(self, dst: &mut [u8], src: &[u8]) {
         self.add_into(dst, src);
     }
@@ -463,6 +455,14 @@ impl<K: Kernel> Impl for Impl8<K> {
 
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: GF8) {
         self.mul_add(dst, src, c);
+    }
+
+    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
+        self.kernel.run(DerivativeFour { quarters });
+    }
+
+    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
+        self.kernel.run(DerivativeSixteen { blocks });
     }
 
     fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: GF8) {
@@ -531,6 +531,69 @@ impl<K: Kernel> Impl for Impl8<K> {
 
 // Inline only the byte loops into the kernel's feature-enabled entry point.
 // Worker callbacks can enter these without inlining the surrounding protocol.
+struct AddInto<'a> {
+    dst: &'a mut [u8],
+    src: &'a [u8],
+}
+
+// K::LANES cannot be used as a const generic argument to as_chunks.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+impl WithKernel for AddInto<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn call<K: Kernel>(self, kernel: K) {
+        let Self { dst, src } = self;
+        assert_eq!(dst.len(), src.len(), "shard lengths differ");
+        let mut dst = dst.chunks_exact_mut(K::LANES);
+        let mut src = src.chunks_exact(K::LANES);
+        for (d, s) in dst.by_ref().zip(src.by_ref()) {
+            let sum = GF8Vec::load_bytes(kernel, d) + GF8Vec::load_bytes(kernel, s);
+            sum.store_bytes(d);
+        }
+        for (d, s) in dst.into_remainder().iter_mut().zip(src.remainder()) {
+            *d = (GF8::from(*d) + GF8::from(*s)).into();
+        }
+    }
+}
+
+struct MulAdd<'a, const ADD: bool> {
+    dst: &'a mut [u8],
+    src: &'a [u8],
+    c: GF8,
+}
+
+// K::LANES cannot be used as a const generic argument to as_chunks.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+impl<const ADD: bool> WithKernel for MulAdd<'_, ADD> {
+    type Output = ();
+
+    #[inline(always)]
+    fn call<K: Kernel>(self, kernel: K) {
+        let Self { dst, src, c } = self;
+        assert_eq!(dst.len(), src.len(), "shard lengths differ");
+        let mut dst = dst.chunks_exact_mut(K::LANES);
+        let mut src = src.chunks_exact(K::LANES);
+        for (d, s) in dst.by_ref().zip(src.by_ref()) {
+            let product = GF8Vec::load_bytes(kernel, s) * c;
+            let sum = if ADD {
+                GF8Vec::load_bytes(kernel, d) + product
+            } else {
+                product
+            };
+            sum.store_bytes(d);
+        }
+        for (d, s) in dst.into_remainder().iter_mut().zip(src.remainder()) {
+            let product = GF8::from(*s) * c;
+            *d = if ADD {
+                (GF8::from(*d) + product).into()
+            } else {
+                product.into()
+            };
+        }
+    }
+}
+
 struct DerivativeFour<'a> {
     quarters: [&'a mut [u8]; 4],
 }
@@ -635,69 +698,6 @@ impl WithKernel for DerivativeSixteen<'_> {
                 }
                 blocks[output][offset] = sum;
             }
-        }
-    }
-}
-
-struct AddInto<'a> {
-    dst: &'a mut [u8],
-    src: &'a [u8],
-}
-
-// K::LANES cannot be used as a const generic argument to as_chunks.
-#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-impl WithKernel for AddInto<'_> {
-    type Output = ();
-
-    #[inline(always)]
-    fn call<K: Kernel>(self, kernel: K) {
-        let Self { dst, src } = self;
-        assert_eq!(dst.len(), src.len(), "shard lengths differ");
-        let mut dst = dst.chunks_exact_mut(K::LANES);
-        let mut src = src.chunks_exact(K::LANES);
-        for (d, s) in dst.by_ref().zip(src.by_ref()) {
-            let sum = GF8Vec::load_bytes(kernel, d) + GF8Vec::load_bytes(kernel, s);
-            sum.store_bytes(d);
-        }
-        for (d, s) in dst.into_remainder().iter_mut().zip(src.remainder()) {
-            *d = (GF8::from(*d) + GF8::from(*s)).into();
-        }
-    }
-}
-
-struct MulAdd<'a, const ADD: bool> {
-    dst: &'a mut [u8],
-    src: &'a [u8],
-    c: GF8,
-}
-
-// K::LANES cannot be used as a const generic argument to as_chunks.
-#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-impl<const ADD: bool> WithKernel for MulAdd<'_, ADD> {
-    type Output = ();
-
-    #[inline(always)]
-    fn call<K: Kernel>(self, kernel: K) {
-        let Self { dst, src, c } = self;
-        assert_eq!(dst.len(), src.len(), "shard lengths differ");
-        let mut dst = dst.chunks_exact_mut(K::LANES);
-        let mut src = src.chunks_exact(K::LANES);
-        for (d, s) in dst.by_ref().zip(src.by_ref()) {
-            let product = GF8Vec::load_bytes(kernel, s) * c;
-            let sum = if ADD {
-                GF8Vec::load_bytes(kernel, d) + product
-            } else {
-                product
-            };
-            sum.store_bytes(d);
-        }
-        for (d, s) in dst.into_remainder().iter_mut().zip(src.remainder()) {
-            let product = GF8::from(*s) * c;
-            *d = if ADD {
-                (GF8::from(*d) + product).into()
-            } else {
-                product.into()
-            };
         }
     }
 }
@@ -991,223 +991,98 @@ impl WithKernel for ChecksumRange<'_> {
 mod tests {
     use super::{
         Impl8,
-        code::{Encoder, Impl, test_suites::fuzz_code},
+        code::{
+            Encoder,
+            test_suites::{
+                DefaultImpl, ImplPlan, fuzz_code, fuzz_impl, fuzz_impl_matches_reference,
+            },
+        },
         field::gf8::GF8,
         kernel::{Kernel, WithKernel, portable::Portable, with_kernel},
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
-    use rand_core::Rng as _;
 
     const OCELOT8: Impl8<Portable> = Impl8::new(Portable);
 
-    struct TestCode;
+    fn elements(bytes: &[u8]) -> Vec<GF8> {
+        bytes.iter().copied().map(GF8::from).collect()
+    }
 
-    impl WithKernel for TestCode {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            commonware_invariants::minifuzz::test(|u| fuzz_code(u, Impl8::new(kernel)));
-        }
+    fn layout(elements: &[GF8]) -> Vec<u8> {
+        elements.iter().copied().map(u8::from).collect()
     }
 
     #[test]
-    fn test_ocelot8() {
-        with_kernel(TestCode);
+    fn minifuzz_code() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| fuzz_code(u, OCELOT8));
     }
 
-    struct TestButterflies;
+    #[test]
+    fn minifuzz_impl_contract() {
+        for plan in ImplPlan::ALL {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| {
+                    fuzz_impl(
+                        u,
+                        OCELOT8,
+                        plan,
+                        Portable::LANES,
+                        elements,
+                        layout,
+                        GF8::from,
+                    )
+                });
+        }
+        for plan in ImplPlan::DEFAULTS {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| {
+                    fuzz_impl(
+                        u,
+                        DefaultImpl(OCELOT8),
+                        plan,
+                        Portable::LANES,
+                        elements,
+                        layout,
+                        GF8::from,
+                    )
+                });
+        }
+    }
 
-    impl WithKernel for TestButterflies {
+    struct FuzzImplDifferential;
+
+    impl WithKernel for FuzzImplDifferential {
         type Output = ();
 
         fn call<K: Kernel>(self, kernel: K) {
-            let imp = Impl8::new(kernel);
-            let mut rng = test_rng();
-            for len in (0..=2 * K::LANES + 1).chain([3 * K::LANES + 1]) {
-                let mut x = vec![0; len + 2];
-                let mut y = vec![0; len + 2];
-                rng.fill_bytes(&mut x);
-                rng.fill_bytes(&mut y);
-                for c in 0..=255 {
-                    let mut actual_x = x.clone();
-                    let mut actual_y = y.clone();
-                    let mut expected_x = x.clone();
-                    let mut expected_y = y.clone();
-                    for i in 1..=len {
-                        let a = GF8(x[i]) + GF8(y[i]) * GF8(c);
-                        let b = GF8(y[i]) + a;
-                        expected_x[i] = a.into();
-                        expected_y[i] = b.into();
-                    }
-                    imp.fft_butterfly(&mut actual_x[1..1 + len], &mut actual_y[1..1 + len], GF8(c));
-                    assert_eq!(actual_x, expected_x);
-                    assert_eq!(actual_y, expected_y);
-                    imp.ifft_butterfly(
-                        &mut actual_x[1..1 + len],
-                        &mut actual_y[1..1 + len],
-                        GF8(c),
-                    );
-                    assert_eq!(actual_x, x);
-                    assert_eq!(actual_y, y);
-                }
-            }
-
-            for len in (0..=2 * K::LANES + 1).chain([3 * K::LANES + 1]) {
-                let mut original: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len + 2]);
-                for quarter in &mut original {
-                    rng.fill_bytes(quarter);
-                }
-                let mut actual = original.clone();
-                let mut expected = original.clone();
-                for i in 1..=len {
-                    let d = original[3][i];
-                    expected[0][i] = original[1][i] ^ original[2][i];
-                    expected[1][i] = d;
-                    expected[2][i] = d;
-                    expected[3][i] = 0;
-                }
-                let [q0, q1, q2, q3] = &mut actual;
-                imp.derivative_four([
-                    &mut q0[1..=len],
-                    &mut q1[1..=len],
-                    &mut q2[1..=len],
-                    &mut q3[1..=len],
-                ]);
-                assert_eq!(actual, expected);
-            }
-
-            for len in (0..=2 * K::LANES + 1).chain([3 * K::LANES + 1]) {
-                let mut original: [Vec<u8>; 16] = std::array::from_fn(|_| vec![0; len + 2]);
-                for block in &mut original {
-                    rng.fill_bytes(block);
-                }
-                let mut actual = original.clone();
-                let mut expected = original.clone();
-                for output in 0..16 {
-                    for i in 1..=len {
-                        expected[output][i] = (0..4)
-                            .filter(|bit| output & (1 << bit) == 0)
-                            .fold(0, |sum, bit| sum ^ original[output | (1 << bit)][i]);
-                    }
-                }
-                imp.derivative_sixteen(actual.each_mut().map(|block| &mut block[1..=len]));
-                assert_eq!(actual, expected);
-            }
-
-            for shard_len in [1, 3, K::LANES, K::LANES + 1, 2 * K::LANES + 3] {
-                let shard_count = 3;
-                let len = shard_len * shard_count;
-                let mut original: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len + 2]);
-                for quarter in &mut original {
-                    rng.fill_bytes(quarter);
-                }
-                for coefficients in [[GF8(0), GF8(1), GF8(0)], [GF8(0x53), GF8(0xff), GF8(0x80)]] {
-                    let mut actual = original.clone();
-                    let mut expected = original.clone();
-                    for i in 1..=len {
-                        let mut values = [
-                            GF8(expected[0][i]),
-                            GF8(expected[1][i]),
-                            GF8(expected[2][i]),
-                            GF8(expected[3][i]),
-                        ];
-                        let [c0, c1, c2] = coefficients;
-                        let apply = |values: &mut [GF8; 4], x: usize, y: usize, c: GF8| {
-                            let mut a = values[x];
-                            let mut b = values[y];
-                            a += &(b * c);
-                            b += &a;
-                            values[x] = a;
-                            values[y] = b;
-                        };
-                        apply(&mut values, 0, 2, c2);
-                        apply(&mut values, 1, 3, c2);
-                        apply(&mut values, 0, 1, c0);
-                        apply(&mut values, 2, 3, c1);
-                        for (quarter, value) in expected.iter_mut().zip(values) {
-                            quarter[i] = value.0;
-                        }
-                    }
-                    let [q0, q1, q2, q3] = &mut actual;
-                    imp.fft_butterfly_two_layers(
-                        [
-                            &mut q0[1..=len],
-                            &mut q1[1..=len],
-                            &mut q2[1..=len],
-                            &mut q3[1..=len],
-                        ],
-                        shard_len,
-                        coefficients,
-                    );
-                    assert_eq!(actual, expected);
-                    let [q0, q1, q2, q3] = &mut actual;
-                    imp.ifft_butterfly_two_layers(
-                        [
-                            &mut q0[1..=len],
-                            &mut q1[1..=len],
-                            &mut q2[1..=len],
-                            &mut q3[1..=len],
-                        ],
-                        shard_len,
-                        coefficients,
-                    );
-                    assert_eq!(actual, original);
-                }
+            for plan in ImplPlan::ALL {
+                commonware_invariants::minifuzz::Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(100)
+                    .test(|u| {
+                        fuzz_impl_matches_reference(
+                            u,
+                            Impl8::new(kernel),
+                            OCELOT8,
+                            plan,
+                            K::LANES,
+                            elements,
+                        )
+                    });
             }
         }
     }
 
     #[test]
-    fn butterflies_match_scalar() {
-        TestButterflies.call(Portable);
-        with_kernel(TestButterflies);
-    }
-
-    struct TestUnalignedArithmetic;
-
-    impl WithKernel for TestUnalignedArithmetic {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let mut rng = test_rng();
-            let imp = Impl8::new(kernel);
-            for len in [0, 1, 63, 64, 65, 129] {
-                let mut src = vec![0; len + K::LANES];
-                let mut actual = vec![0; len + K::LANES];
-                rng.fill_bytes(&mut src);
-                rng.fill_bytes(&mut actual);
-                let unaligned =
-                    |bytes: &[u8]| (K::LANES - bytes.as_ptr() as usize % K::LANES) % K::LANES + 1;
-                let src_offset = unaligned(&src);
-                let dst_offset = unaligned(&actual);
-                let src = &src[src_offset..src_offset + len];
-                let range = dst_offset..dst_offset + len;
-                let mut expected = actual.clone();
-                imp.add_into(&mut actual[range.clone()], src);
-                OCELOT8.add_into(&mut expected[range.clone()], src);
-                assert_eq!(actual, expected);
-                for c in [0, 1, 0x53, 255] {
-                    let mut overwritten = actual.clone();
-                    overwritten[range.clone()].fill(0xa5);
-                    imp.mul_into(&mut overwritten[range.clone()], src, GF8(c));
-                    let mut expected_overwrite = overwritten.clone();
-                    for (dst, &src) in expected_overwrite[range.clone()].iter_mut().zip(src) {
-                        *dst = (GF8::from(src) * GF8(c)).into();
-                    }
-                    assert_eq!(overwritten, expected_overwrite);
-
-                    imp.mul_add(&mut actual[range.clone()], src, GF8(c));
-                    OCELOT8.mul_add(&mut expected[range.clone()], src, GF8(c));
-                    assert_eq!(actual, expected);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unaligned_arithmetic_matches_portable() {
-        with_kernel(TestUnalignedArithmetic);
+    fn minifuzz_impl_matches_portable() {
+        with_kernel(FuzzImplDifferential);
     }
 
     #[test]

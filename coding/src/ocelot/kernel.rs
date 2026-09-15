@@ -22,56 +22,10 @@ pub mod portable;
 #[cfg(test)]
 mod tests;
 
-/// A computation which can run over an arbitrary [`Kernel`].
-///
-/// [`with_kernel`] hands its caller a kernel whose concrete type is only known
-/// at runtime, so the computation must be generic over kernels. Plain closures
-/// can't have generic call methods, so we use a trait instead: implement it on
-/// a struct capturing the computation's inputs, and return its results from
-/// [`Self::call`].
-pub trait WithKernel {
-    /// The result of the computation.
-    type Output;
-
-    /// Run the computation with a concrete kernel.
-    fn call<K: Kernel>(self, kernel: K) -> Self::Output;
-}
-
-/// Run a computation with the best [`Kernel`] this CPU supports.
-///
-/// This is the only way to gain access to a kernel, so that accelerated
-/// kernels are only constructed where their instructions are available.
-pub fn with_kernel<F: WithKernel>(f: F) -> F::Output {
-    #[cfg(target_arch = "x86_64")]
-    if let Some(kernel) = avx512::Avx512::new() {
-        // SAFETY: constructing `kernel` checked every feature enabled by its call method.
-        return unsafe { kernel.call(f) };
-    }
-    f.call(portable::Portable)
-}
-
+/// Basic byte-vector operations used by Ocelot.
 pub trait Kernel: Copy + Default + Send + Sync + 'static {
-    /// Run a computation with this kernel's target features enabled.
-    #[inline]
-    fn run<F: WithKernel>(self, f: F) -> F::Output {
-        f.call(self)
-    }
-
     /// The type we use to hold several bytes.
     type Vector: Copy + Send + Sync;
-
-    /// The number of bytes in each [`Self::Vector`].
-    ///
-    /// Operations are performed in parallel on each lane.
-    const LANES: usize;
-
-    /// Minimum number of lanes accepted by the partial load/store operations.
-    ///
-    /// This must be positive and divide [`Self::LANES`].
-    const PARTIAL_GRANULARITY: usize = Self::LANES;
-
-    /// Whether to fuse GF(2^8) butterfly updates into one byte loop.
-    const FUSED_BUTTERFLY: bool = false;
 
     /// A representation of a constant value used in each lane.
     ///
@@ -79,6 +33,25 @@ pub trait Kernel: Copy + Default + Send + Sync + 'static {
     /// kernel to knowing this. In general, this can be helpful, so we make the
     /// distinction.
     type Constant: Copy;
+
+    /// The number of bytes in each [`Self::Vector`].
+    ///
+    /// Operations are performed in parallel on each lane.
+    const LANES: usize;
+
+    /// Lane-count granularity accepted by the partial load/store operations.
+    ///
+    /// This must be positive and divide [`Self::LANES`].
+    const PARTIAL_GRANULARITY: usize = Self::LANES;
+
+    /// Whether to fuse GF(2^8) butterfly updates into one byte loop.
+    const FUSED_BUTTERFLY: bool = false;
+
+    /// Run a computation with this kernel's target features enabled.
+    #[inline]
+    fn run<F: WithKernel>(self, f: F) -> F::Output {
+        f.call(self)
+    }
 
     /// Take a single value, and prepare it as a constant in each lane.
     fn splat(self, x: u8) -> Self::Constant;
@@ -130,4 +103,32 @@ pub trait Kernel: Copy + Default + Send + Sync + 'static {
 
     /// Perform a GF(2^8) multiplication by a constant in each lane.
     fn gf8_mul_constant(self, a: Self::Vector, b: Self::Constant) -> Self::Vector;
+}
+
+/// A computation which can run over an arbitrary [`Kernel`].
+///
+/// [`with_kernel`] hands its caller a kernel whose concrete type is only known
+/// at runtime, so the computation must be generic over kernels. Plain closures
+/// can't have generic call methods, so we use a trait instead: implement it on
+/// a struct capturing the computation's inputs, and return its results from
+/// [`Self::call`].
+pub trait WithKernel {
+    /// The result of the computation.
+    type Output;
+
+    /// Run the computation with a concrete kernel.
+    fn call<K: Kernel>(self, kernel: K) -> Self::Output;
+}
+
+/// Run a computation with the best [`Kernel`] this CPU supports.
+///
+/// This is the only way to gain access to a kernel, so that accelerated
+/// kernels are only constructed where their instructions are available.
+pub fn with_kernel<F: WithKernel>(f: F) -> F::Output {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(kernel) = avx512::Avx512::new() {
+        // SAFETY: constructing `kernel` checked every feature enabled by its call method.
+        return unsafe { kernel.call(f) };
+    }
+    f.call(portable::Portable)
 }

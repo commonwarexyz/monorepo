@@ -22,8 +22,6 @@ commonware_macros::stability_scope!(ALPHA {
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
 
-    // TODO: remove this once we have a full impl.
-    #[allow(dead_code)]
     mod ocelot;
     pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16};
 
