@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message, Round};
+use super::{Config, Mailbox, Message, Round, verifier::Verification};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -93,6 +93,7 @@ where
     batch_size: Histogram,
     verify_latency: histogram::Timed,
     recover_latency: histogram::Timed,
+    recover_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -130,6 +131,10 @@ where
             "recover_latency",
             "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
+        );
+        let recover_fallback = context.counter(
+            "recover_fallback",
+            "number of failed optimistic certificate recoveries",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
@@ -169,6 +174,7 @@ where
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency),
                 recover_latency: histogram::Timed::new(recover_latency),
+                recover_fallback,
             },
             Mailbox::new(sender),
         )
@@ -325,7 +331,12 @@ where
     ) {
         loop {
             let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some((batch, failed)) = round
+            let Some(Verification {
+                batch,
+                invalid: failed,
+                certificate,
+                fallback,
+            }) = round
                 .try_verify(self.context.as_mut(), &self.strategy)
                 .await
             else {
@@ -335,14 +346,22 @@ where
 
             timer.observe(self.context.as_ref());
 
-            trace!(%view, batch, "batch verified votes");
+            trace!(%view, batch, "processed votes");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
+            if fallback {
+                self.recover_fallback.inc();
+            }
 
             for invalid in failed {
                 if let Some(signer) = self.scheme.participants().key(invalid) {
                     commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
+            }
+            if let Some(certificate) = certificate {
+                let kind = certificate.kind();
+                debug!(%view, %kind, "recovered certificate, forwarding to voter");
+                voter.recovered(certificate);
             }
         }
 
