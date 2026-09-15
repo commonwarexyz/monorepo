@@ -444,18 +444,76 @@ impl<K: Kernel> Ring for GF16Vec<K> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plans for GF(2^16) arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use crate::ocelot::kernel::portable::Portable;
+    use arbitrary::{Arbitrary, Unstructured};
+
+    /// Property checks for GF(2^16) and its portable packed representation.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check the scalar field laws.
+        Field,
+        /// Check portable packed-vector operations against scalar operations.
+        Vector,
+    }
+
+    impl Plan {
+        /// Run this property check using bytes from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Field => commonware_math::algebra::test_suites::fuzz_field::<GF16>(u),
+                Self::Vector => fuzz_vec(u),
+            }
+        }
+    }
+
+    fn fuzz_vec(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        commonware_math::algebra::test_suites::fuzz_ring::<GF16Vec<Portable>>(u)?;
+
+        let a: GF16Vec<Portable> = u.arbitrary()?;
+        let b: GF16Vec<Portable> = u.arbitrary()?;
+        let c: GF16 = u.arbitrary()?;
+        let (mut a_elements, mut b_elements) = (
+            vec![GF16::ZERO; Portable::LANES],
+            vec![GF16::ZERO; Portable::LANES],
+        );
+        a.store(&mut a_elements);
+        b.store(&mut b_elements);
+
+        let product = a_elements
+            .iter()
+            .zip(&b_elements)
+            .map(|(&a, &b)| a * b)
+            .collect::<Vec<_>>();
+        let constant_product = a_elements.iter().map(|&a| a * c).collect::<Vec<_>>();
+        assert_eq!(a * b, GF16Vec::load(&product));
+        assert_eq!(a * c, GF16Vec::load(&constant_product));
+        Ok(())
+    }
 
     #[test]
     fn minifuzz_field() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(100)
-            .test(commonware_math::algebra::test_suites::fuzz_field::<GF16>);
+            .test(|u| Plan::Field.run(u));
     }
+
+    #[test]
+    fn minifuzz_vec() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::Vector.run(u));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn extension_polynomial_is_irreducible() {
@@ -470,35 +528,5 @@ mod tests {
             let x = GF8(x);
             x.mul_inner(x) + x != DELTA
         }));
-    }
-
-    #[test]
-    fn minifuzz_vec() {
-        commonware_invariants::minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(100)
-            .test(|u| {
-                commonware_math::algebra::test_suites::fuzz_ring::<GF16Vec<Portable>>(u)?;
-
-                let a: GF16Vec<Portable> = u.arbitrary()?;
-                let b: GF16Vec<Portable> = u.arbitrary()?;
-                let c: GF16 = u.arbitrary()?;
-                let (mut a_elements, mut b_elements) = (
-                    vec![GF16::ZERO; Portable::LANES],
-                    vec![GF16::ZERO; Portable::LANES],
-                );
-                a.store(&mut a_elements);
-                b.store(&mut b_elements);
-
-                let product = a_elements
-                    .iter()
-                    .zip(&b_elements)
-                    .map(|(&a, &b)| a * b)
-                    .collect::<Vec<_>>();
-                let constant_product = a_elements.iter().map(|&a| a * c).collect::<Vec<_>>();
-                assert_eq!(a * b, GF16Vec::load(&product));
-                assert_eq!(a * c, GF16Vec::load(&constant_product));
-                Ok(())
-            });
     }
 }
