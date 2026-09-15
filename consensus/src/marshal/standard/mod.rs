@@ -41,9 +41,11 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
+    mod pipeline;
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        Automaton, CertifiableAutomaton, HandoffPolicy, HandoffProposal, Heightable, Relay,
+        Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -1983,6 +1985,16 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        async fn propose_handoff(
+            &mut self,
+            context: Self::Context,
+        ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+            match self {
+                Self::Inline(inline) => inline.propose_handoff(context).await,
+                Self::Deferred(deferred) => deferred.propose_handoff(context).await,
+            }
+        }
+
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -3254,6 +3266,13 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
+                let optimistic_rx = wrapper.propose_handoff(reproposal_context.clone()).await;
+                assert_eq!(
+                    optimistic_rx.await.expect("optimistic decision missing"),
+                    HandoffProposal::AwaitCertification,
+                    "{kind:?}: application deferral must precede automatic boundary reproposal"
+                );
+
                 let reproposal_rx = wrapper.propose(reproposal_context).await;
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
@@ -3271,6 +3290,35 @@ mod tests {
                 assert!(
                     marshal.get_verified(reproposal_round).await.is_some(),
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
+                );
+
+                // Accepting a handoff enters the same automatic boundary
+                // re-proposal path without invoking the application builder.
+                let pipeline_round =
+                    Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
+                let pipeline_context = Ctx {
+                    round: pipeline_round,
+                    leader: default_leader(),
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                let pipeline_app =
+                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Pipeline);
+                let mut pipeline = Wrapper::new(
+                    kind,
+                    context.child("pipeline_wrapper"),
+                    pipeline_app,
+                    marshal.clone(),
+                );
+                let pipeline_rx = pipeline.propose_handoff(pipeline_context).await;
+                assert_eq!(
+                    pipeline_rx.await.expect("pipeline result missing"),
+                    HandoffProposal::Proposed(boundary_digest),
+                    "{kind:?}: accepted handoff should re-propose the boundary block"
+                );
+                let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
+                assert!(
+                    certify_rx.await.expect("pipeline certify result missing"),
+                    "{kind:?}: pipelined boundary re-proposal must certify"
                 );
             });
         }

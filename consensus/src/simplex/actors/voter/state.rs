@@ -13,7 +13,7 @@ use crate::{
     },
     types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
 };
-use commonware_cryptography::{Digest, certificate};
+use commonware_cryptography::{Digest, PublicKey, certificate};
 use commonware_runtime::{
     Clock, Metrics,
     telemetry::metrics::{Counter, CounterFamily, Gauge, GaugeExt, MetricsExt as _},
@@ -79,6 +79,45 @@ impl ParentPayloadError {
             | Self::ParentBeforeFinalized { .. } => true,
             Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
         }
+    }
+}
+
+/// A proposal opportunity selected by the consensus state machine.
+pub(super) enum ProposalRequest<D: Digest, P: PublicKey> {
+    /// An ordinary proposal on certified or intra-term ancestry.
+    Regular(Context<D, P>),
+    /// A term-start proposal on the outgoing term's uncertified final view.
+    Handoff(Context<D, P>),
+}
+
+impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
+    /// Returns the proposal context.
+    pub(super) const fn context(&self) -> &Context<D, P> {
+        match self {
+            Self::Regular(context) | Self::Handoff(context) => context,
+        }
+    }
+
+    /// Returns the proposal context.
+    pub(super) fn into_context(self) -> Context<D, P> {
+        match self {
+            Self::Regular(context) | Self::Handoff(context) => context,
+        }
+    }
+
+    /// Splits the request into its proposal context and handoff status.
+    #[cfg(test)]
+    pub(super) fn into_parts(self) -> (Context<D, P>, bool) {
+        match self {
+            Self::Regular(context) => (context, false),
+            Self::Handoff(context) => (context, true),
+        }
+    }
+}
+
+impl<D: Digest, P: PublicKey> Viewable for ProposalRequest<D, P> {
+    fn view(&self) -> View {
+        self.context().view()
     }
 }
 
@@ -157,6 +196,11 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// Every entry remains above the retention floor, so [`Self::prune`] skips
     /// this set.
     failed_certifications: BTreeSet<View>,
+
+    /// Pipelined handoff requests that the application chose to defer, keyed
+    /// by child view and the captured parent. These local decisions are not
+    /// persisted, so the application is consulted again after restart.
+    deferred_handoffs: BTreeMap<View, (View, D)>,
 
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
@@ -244,6 +288,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             failed_certifications: BTreeSet::new(),
+            deferred_handoffs: BTreeMap::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -890,9 +935,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         round.latch_timeout(now, reason);
     }
 
-    /// Returns proposal context for the lowest locally admissible tracked view
-    /// ready to propose.
-    pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
+    /// Returns a request for the lowest locally admissible tracked view ready
+    /// to propose, distinguishing pipelined handoffs from ordinary proposals.
+    pub(super) fn try_propose(&mut self) -> Option<ProposalRequest<D, S::PublicKey>> {
         // Nothing above the next term start is admissible (see
         // [`Self::admits_outbound`]), so bound the scan rather than walking every
         // tracked future round (certificates can land arbitrarily far ahead).
@@ -927,6 +972,20 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     continue;
                 }
             };
+            let is_handoff = view.is_term_start(self.term_length())
+                && view.previous() == Some(parent_view)
+                && self.explicit_ancestry_payload(parent_view).is_none();
+            if self
+                .deferred_handoffs
+                .get(&view)
+                .is_some_and(|(view, payload)| {
+                    is_handoff && *view == parent_view && payload == &parent_payload
+                })
+            {
+                continue;
+            }
+            self.deferred_handoffs.remove(&view);
+
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -934,13 +993,53 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             else {
                 continue;
             };
-            return Some(Context {
+            let context = Context {
                 round: Rnd::new(self.epoch, view),
                 leader: leader.key,
                 parent: (parent_view, parent_payload),
+            };
+            return Some(if is_handoff {
+                ProposalRequest::Handoff(context)
+            } else {
+                ProposalRequest::Regular(context)
             });
         }
         None
+    }
+
+    /// Records that the application declined a pipelined handoff request.
+    ///
+    /// [`Self::try_propose`] skips the view while the same handoff remains
+    /// preferred, and proposes again once the captured parent certifies or
+    /// different ancestry replaces it.
+    pub fn defer_handoff(&mut self, context: &Context<D, S::PublicKey>) {
+        let view = context.view();
+        if let Some(round) = self.views.get_mut(&view) {
+            round.clear_proposal_request();
+        }
+        self.deferred_handoffs.insert(view, context.parent);
+    }
+
+    /// Releases a pending handoff once its captured parent is explicitly certified.
+    ///
+    /// Returns true when the caller should cancel the handoff receiver and issue
+    /// an ordinary proposal request for the same view. Regular requests are
+    /// never released.
+    pub(super) fn release_certified_handoff(
+        &mut self,
+        request: &ProposalRequest<D, S::PublicKey>,
+    ) -> bool {
+        let ProposalRequest::Handoff(context) = request else {
+            return false;
+        };
+        if self.explicit_ancestry_payload(context.parent.0) != Some(&context.parent.1) {
+            return false;
+        }
+        let Some(round) = self.views.get_mut(&context.view()) else {
+            return false;
+        };
+        round.clear_proposal_request();
+        true
     }
 
     /// Records a proposal built by the automaton if its captured parent remains
@@ -1340,6 +1439,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
+        self.deferred_handoffs = self.deferred_handoffs.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -1415,12 +1515,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// before the certificate that unlocks the view exists.
     ///
     /// `None` when `view` does not start a term or the elector does not elect
-    /// early (see [`Elector::elect_early`]).
+    /// early (see [`Elector::elect_without_certificate`]).
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
         }
-        self.elector.elect_early(Rnd::new(self.epoch, view))
+        self.elector
+            .elect_without_certificate(Rnd::new(self.epoch, view))
     }
 
     /// Returns true when a pipelined handoff may build on `parent`: `parent`
@@ -1713,8 +1814,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// gate, but a locally endorsed pipelined handoff links directly to the
     /// outgoing term's tip before it certifies and must retain that barrier.
     /// The barrier keys on round state (an own notarize vote on a tip-linked
-    /// proposal), not the elector opt-in, so replay preserves it across a
-    /// restart that removes the opt-in. It also matches non-endorsement
+    /// proposal), not the transient application decision, so replay preserves
+    /// it across a restart. It also matches non-endorsement
     /// term-start votes: those are cast only on explicitly certified
     /// ancestry, and append-ordered journal replay restores the parent's
     /// certification before the vote, so the barrier is already satisfied
@@ -2048,8 +2149,8 @@ mod tests {
         )
     }
 
-    /// Like [setup_state_from_config], but opts `config` into pipelined
-    /// handoffs and fixes `view_retention` at 10.
+    /// Like [setup_state_from_config], but fixes `view_retention` at 10 for
+    /// pipelined-handoff tests.
     fn setup_state_with_handoff(
         context: &mut deterministic::Context,
         validators: usize,
@@ -2057,15 +2158,7 @@ mod tests {
         epoch: u64,
         config: RoundRobin,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
-        setup_state_from_config(
-            context,
-            validators,
-            signer,
-            epoch,
-            10,
-            config.with_pipelined_handoff(),
-            4,
-        )
+        setup_state_from_config(context, validators, signer, epoch, 10, config, 4)
     }
 
     /// The stable-term elector config shared by the pipelined-handoff tests.
@@ -2113,7 +2206,7 @@ mod tests {
             Participant::new(0)
         }
 
-        fn elect_early(&self, _round: Rnd) -> Option<Participant> {
+        fn elect_without_certificate(&self, _round: Rnd) -> Option<Participant> {
             None
         }
     }
@@ -4656,7 +4749,8 @@ mod tests {
             let parent = propose_and_notarize_view1(&mut state, 118);
             let child_context = state
                 .try_propose()
-                .expect("optimistic child proposal should start");
+                .expect("optimistic child proposal should start")
+                .into_context();
             assert_eq!(child_context.view(), View::new(2));
             assert_eq!(child_context.parent, (View::new(1), parent.payload));
 
@@ -6787,7 +6881,8 @@ mod tests {
             // Child proposal selection should build on the now-certified parent view.
             let propose_context = state
                 .try_propose()
-                .expect("child view should be able to build on certified parent");
+                .expect("child view should be able to build on certified parent")
+                .into_context();
             assert_eq!(propose_context.round.view(), child_view);
             assert_eq!(propose_context.parent, (parent_view, payload));
         });
@@ -6960,7 +7055,8 @@ mod tests {
 
             let proposal = state
                 .try_propose()
-                .expect("term-start proposal should use prior-term certified parent");
+                .expect("term-start proposal should use prior-term certified parent")
+                .into_context();
             assert_eq!(proposal.round.view(), View::new(6));
             assert_eq!(proposal.parent, (parent_view, parent_payload));
         });
@@ -7009,7 +7105,8 @@ mod tests {
 
         let context = state
             .try_propose()
-            .expect("outgoing leader should propose the term tip");
+            .expect("outgoing leader should propose the term tip")
+            .into_context();
         let tip = fetch_proposal(5, 4, 65);
         assert!(state.proposed(&context, tip.payload));
         assert!(state.construct_notarize(View::new(5)).is_some());
@@ -7035,7 +7132,8 @@ mod tests {
             // in the outgoing view.
             let ctx = state
                 .try_propose()
-                .expect("handoff proposal should use the uncertified tip");
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(state.current_view(), View::new(5));
@@ -7080,7 +7178,8 @@ mod tests {
 
             let child_context = state
                 .try_propose()
-                .expect("handoff proposal should use the uncertified tip");
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
             let child = fetch_proposal(6, 5, 66);
             assert!(state.proposed(&child_context, child.payload));
             assert!(state.construct_notarize(View::new(6)).is_some());
@@ -7109,11 +7208,10 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_certification_barrier_survives_optout_restart() {
+    fn pipelined_handoff_certification_barrier_survives_restart() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            // The elector no longer opts into pipelined handoffs, but the
-            // journal holds an early vote issued under the opt-in.
+            // The journal holds an early vote issued before the restart.
             let (
                 Fixture {
                     schemes, verifier, ..
@@ -7167,7 +7265,8 @@ mod tests {
 
             let child_context = state
                 .try_propose()
-                .expect("handoff proposal should use the uncertified tip");
+                .expect("handoff proposal should use the uncertified tip")
+                .into_context();
             let child = fetch_proposal(6, 5, 66);
             assert!(state.proposed(&child_context, child.payload));
             assert!(state.construct_notarize(View::new(6)).is_some());
@@ -7218,7 +7317,8 @@ mod tests {
             assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
             let ctx = state
                 .try_propose()
-                .expect("replayed outgoing vote should restore the handoff");
+                .expect("replayed outgoing vote should restore the handoff")
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
 
@@ -7234,7 +7334,42 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_requires_optin() {
+    fn pipelined_handoff_does_not_require_recovered_parent_leader() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 0, 9, handoff_terms());
+
+            // Enter the outgoing term without reconstructing any of its rounds.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(state.epoch(), View::new(5)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+
+            // A bare notarization for the outgoing tip elects the incoming
+            // leader, but does not reveal the outgoing leader.
+            let tip = fetch_proposal(10, 9, 110);
+            let notarization = build_notarization(&verifier, &schemes, &tip);
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.leader_index(View::new(10)), None);
+            assert_eq!(state.leader_index(View::new(11)), Some(Participant::new(0)));
+
+            let (handoff, is_handoff) = state
+                .try_propose()
+                .expect("recovered tip should allow a handoff")
+                .into_parts();
+            assert!(is_handoff);
+            assert_eq!(handoff.round.view(), View::new(11));
+            assert_eq!(handoff.parent, (View::new(10), tip.payload));
+        });
+    }
+
+    #[test]
+    fn pipelined_handoff_application_can_defer() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
@@ -7245,19 +7380,29 @@ mod tests {
             ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms(), 0);
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            // Without the opt-in, the term start waits for certified ancestry.
+            let handoff = state
+                .try_propose()
+                .expect("application should receive the handoff opportunity");
+            let (handoff, is_handoff) = handoff.into_parts();
+            assert_eq!(handoff.parent, (View::new(5), tip.payload));
+            assert!(is_handoff);
+            state.defer_handoff(&handoff);
+
+            // Deferral suppresses repeated handoff requests for this parent.
             assert!(state.try_propose().is_none());
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             assert!(state.add_notarization(tip_notarization).0);
             assert!(state.certified(View::new(5), true).is_some());
 
-            let ctx = state
+            let request = state
                 .try_propose()
                 .expect("term-start proposal should follow certification");
+            let (ctx, is_handoff) = request.into_parts();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(state.current_view(), View::new(6));
+            assert!(!is_handoff);
         });
     }
 
@@ -7282,7 +7427,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("term-start proposal should use the certified parent");
+                .expect("term-start proposal should use the certified parent")
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
         });
@@ -7314,7 +7460,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("term-start proposal should use the certified fallback");
+                .expect("term-start proposal should use the certified fallback")
+                .into_context();
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
 
             // Late certification makes the outgoing tip preferred, but the
@@ -7345,7 +7492,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("handoff proposal should use the outgoing tip");
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // The tip's term is abandoned while the application is building.
@@ -7373,7 +7521,8 @@ mod tests {
 
             let initial = state
                 .try_propose()
-                .expect("handoff proposal should use the outgoing tip");
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
             assert_eq!(initial.parent.0, View::new(5));
             assert!(state.try_propose().is_none());
 
@@ -7388,7 +7537,8 @@ mod tests {
             // certified fallback and still permits only one pending build.
             let retry = state
                 .try_propose()
-                .expect("rejected handoff should retry on certified ancestry");
+                .expect("rejected handoff should retry on certified ancestry")
+                .into_context();
             assert_eq!(retry.round.view(), View::new(6));
             assert_eq!(retry.parent, (View::new(4), certified.payload));
             assert!(state.try_propose().is_none());
@@ -7418,7 +7568,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("handoff proposal should use the outgoing tip");
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // Local certification rejects the tip while the application is building.
@@ -7444,7 +7595,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("handoff proposal should use the outgoing tip");
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
             let ours = fetch_proposal(6, 5, 66);
 
             // The outgoing leader equivocates while the application is building.
@@ -7468,7 +7620,8 @@ mod tests {
 
             let proposal_context = state
                 .try_propose()
-                .expect("handoff proposal should use the outgoing tip");
+                .expect("handoff proposal should use the outgoing tip")
+                .into_context();
             assert_eq!(proposal_context.parent, (View::new(5), tip.payload));
 
             // A certificate from the other three validators replaces the tip
@@ -7544,7 +7697,8 @@ mod tests {
 
             let ctx = state
                 .try_propose()
-                .expect("handoff proposal should pipeline single-view terms");
+                .expect("handoff proposal should pipeline single-view terms")
+                .into_context();
             assert_eq!(ctx.round.view(), View::new(2));
             assert_eq!(ctx.parent, (View::new(1), first.payload));
             assert_eq!(state.current_view(), View::new(1));
@@ -7621,7 +7775,8 @@ mod tests {
             assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
             let proposal = state
                 .try_propose()
-                .expect("term-start proposal should skip the blocked chain");
+                .expect("term-start proposal should skip the blocked chain")
+                .into_context();
             assert_eq!(proposal.parent, (View::new(1), payload_v1));
 
             // View 2's notarization finally arrives, and certification

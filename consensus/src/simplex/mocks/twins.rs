@@ -338,10 +338,10 @@ where
         self.fallback.elect(round, certificate)
     }
 
-    fn elect_early(&self, _round: Round) -> Option<Participant> {
+    fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {
         // Scripted `round_leaders` answer `elect` during the attack prefix, so
         // delegating to the fallback could contradict the script and violate
-        // the `elect_early == elect` contract.
+        // the `elect_without_certificate == elect` contract.
         None
     }
 }

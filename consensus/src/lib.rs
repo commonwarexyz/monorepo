@@ -174,12 +174,46 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
+    /// An application's response to a pipelined handoff proposal request.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HandoffProposal<D> {
+        /// Use the supplied payload for the handoff.
+        Proposed(D),
+        /// Wait until the parent has been certified before requesting a proposal again.
+        AwaitCertification,
+    }
+
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
     ///
     /// This trait is required by consensus implementations (like Simplex) that support a certification
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
+        /// Generate a payload for a term-start proposal whose parent is not yet certified.
+        ///
+        /// [`HandoffProposal::Proposed`] carries the same verification and certification
+        /// commitments as a payload from [`Automaton::propose`].
+        /// [`HandoffProposal::AwaitCertification`] declines this request; consensus issues
+        /// an ordinary [`Automaton::propose`] once the parent certifies. Closing the
+        /// response abandons the local proposal opportunity for this view. Parent
+        /// certification does not retry it.
+        ///
+        /// Return the receiver promptly and do any work behind it. Consensus drops the
+        /// receiver when the request is no longer needed, including when the parent
+        /// certifies first. Stop work when the receiver closes.
+        fn propose_handoff(
+            &mut self,
+            _context: Self::Context,
+        ) -> impl Future<Output = oneshot::Receiver<HandoffProposal<Self::Digest>>> + Send
+        {
+            #[allow(clippy::async_yields_async)]
+            async move {
+                let (sender, receiver) = oneshot::channel();
+                sender.send_lossy(HandoffProposal::AwaitCertification);
+                receiver
+            }
+        }
+
         /// Determine whether a verified payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
@@ -283,6 +317,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
+    /// An application's policy for a pipelined term handoff.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HandoffPolicy {
+        /// Proceed through the ordinary proposal path without waiting for parent certification.
+        Pipeline,
+        /// Wait for the parent to certify before proposing.
+        AwaitCertification,
+    }
+
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     pub trait Application<E>: Clone + Send + 'static
@@ -317,6 +360,23 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
+
+        /// Decide whether to build on a parent that has not yet been certified.
+        ///
+        /// Returning [`HandoffPolicy::Pipeline`] allows the marshal to continue through its
+        /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
+        /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
+        /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before
+        /// requesting that ordinary path again.
+        ///
+        /// This future may be dropped before completion; cancellation must leave application
+        /// state valid.
+        fn handoff_policy(
+            &mut self,
+            _context: (E, Self::Context),
+        ) -> impl Future<Output = HandoffPolicy> + Send {
+            async move { HandoffPolicy::AwaitCertification }
+        }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///
