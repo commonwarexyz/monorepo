@@ -63,11 +63,11 @@ const _: () = assert!(MAX_BLOCK_BYTES >= MAX_TX_BYTES);
 /// Bitmap chunk size (bytes) for the current database's activity bitmap.
 const CHUNK: usize = 64;
 
-/// Bytes in one state key: 32 entropy bytes then one domain tag byte.
+/// Bytes in one state key: 32 entropy bytes, an ordered u64, and a domain tag.
 ///
 /// The translator indexes a key prefix, so the entropy comes first and the
 /// tag last (see [`crate::chain::state`] for the key derivation).
-pub(crate) const KEY_BYTES: usize = 33;
+pub(crate) const KEY_BYTES: usize = 41;
 
 /// One settlement state key.
 pub(crate) type StateKey = FixedBytes<KEY_BYTES>;

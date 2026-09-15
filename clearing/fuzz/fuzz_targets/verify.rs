@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
         VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
     },
     posted,
-    qmdb::{State, StateOpening, StateRoot, account_key},
+    qmdb::{StateOpening, StateRoot, account_key},
     transition::{
         ChallengeIndex, Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature,
         OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
@@ -280,17 +280,35 @@ fn invalidate_operator_half(
 }
 
 fn invalidate_scope(challenge: &mut TestChallenge) {
-    match challenge {
+    let opening = match challenge {
         Challenge::HigherAckDebit { payer, .. } => match payer.as_mut() {
-            AccountLookup::Present(opening) => opening.proof.proof.leaf_count ^= 1,
-            AccountLookup::Absent(change) => change.opening.proof.leaf_count ^= 1,
+            AccountLookup::Present(opening) => &mut opening.proof,
+            AccountLookup::Absent(change) => {
+                change
+                    .opening
+                    .get_or_insert(commonware_clearing::bajillion::logs::Opening {
+                        start: 0,
+                        proof: Default::default(),
+                    })
+            }
         },
         Challenge::HigherAckEntry { sender, .. } => match sender.as_mut() {
-            HigherEntryLookup::Present { proof, .. } => proof.proof.leaf_count ^= 1,
-            HigherEntryLookup::Absent(absence) => absence.opening.proof.leaf_count ^= 1,
+            HigherEntryLookup::Present { proof, .. } => proof,
+            HigherEntryLookup::Absent(absence) => {
+                absence
+                    .opening
+                    .get_or_insert(commonware_clearing::bajillion::logs::Opening {
+                        start: 0,
+                        proof: Default::default(),
+                    })
+            }
         },
-        Challenge::AckFork { left, right } => *right = left.clone(),
-    }
+        Challenge::AckFork { left, right } => {
+            *right = left.clone();
+            return;
+        }
+    };
+    opening.proof.leaves = commonware_storage::merkle::Location::new(*opening.proof.leaves ^ 1);
 }
 
 // Claims one more unit than the genuine entry opening authenticates. Returns whether the
@@ -456,6 +474,10 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"challenge-fuzz-committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     let _ = adjudicate::<Sha256, _, _>(&context, &case.header, &case.roots, 0, &case.challenge);
     // One acknowledged send from the payer to the recipient forms the certified close.
@@ -837,7 +859,7 @@ async fn validate_bytes(
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
     encoded: Bytes,
 ) -> bool {
-    let before = *state.head();
+    let before = *state.state().head();
     let accepted = match posted::decode(encoded, context) {
         Ok(dealing) => validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             state,
@@ -853,7 +875,7 @@ async fn validate_bytes(
         .is_ok(),
         Err(_) => false,
     };
-    assert_eq!(*state.head(), before);
+    assert_eq!(*state.state().head(), before);
     accepted
 }
 
@@ -888,6 +910,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         CloseLimits::new(4, 4, 4, 4, 8, u64::MAX, u64::MAX, u64::MAX),
         Sha256::hash(&[b"committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     let mut terminals = Vec::new();
     for (sender, receiver) in [(&payer, &recipient), (&recipient, &payer)]
@@ -986,7 +1012,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         .await
         .is_err()
     );
-    let before = *state.head();
+    let before = *state.state().head();
     assert_eq!(prepared.close().rows.len(), 2);
     assert_eq!(
         prepared.state().mutations().len(),
@@ -998,7 +1024,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         let lookup = account_lookup::<Sha256, _, _>(&index, account).unwrap();
         assert_eq!(
             lookup
-                .resolve::<Sha256>(&prepared.close().roots.change, account)
+                .resolve::<Sha256>(
+                    &prepared.close().roots.activity_range(&context).unwrap(),
+                    account
+                )
                 .unwrap()
                 .0,
             amount
@@ -1007,7 +1036,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     assert_eq!(
         account_lookup::<Sha256, _, _>(&index, &absent.public_key())
             .unwrap()
-            .resolve::<Sha256>(&prepared.close().roots.change, &absent.public_key())
+            .resolve::<Sha256>(
+                &prepared.close().roots.activity_range(&context).unwrap(),
+                &absent.public_key()
+            )
             .unwrap(),
         (0, None)
     );
@@ -1086,6 +1118,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         *context.limits(),
         *context.committee(),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     assert!(
         !validate_bytes(
@@ -1116,8 +1152,8 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         let mut withdrawal_total = close.withdrawal_total;
         let changed = Sha256::hash(&[b"wrong-header-field", &[which]]);
         match which {
-            0 => roots.change.digest = changed,
-            1 => roots.withdrawal_outputs.digest = changed,
+            0 => roots.change.root = changed,
+            1 => roots.withdrawal_outputs.root = changed,
             2 => roots.successor.digest = changed,
             _ => withdrawal_total += 1,
         }
@@ -1126,15 +1162,9 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
                 .header
                 .verify::<Sha256, _>(&context, &roots, withdrawal_total)
         );
-        let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
-        assert!(
-            commonware_clearing::bajillion::transition::Close::<VerifyingKey, Digest>::decode_evidence::<Sha256>(
-                close.encode_evidence(), &context, &header,
-            ).is_err()
-        );
     }
-    assert_eq!(*state.head(), before);
-    let old_opening = state.opening(payer.public_key()).await.unwrap();
+    assert_eq!(*state.state().head(), before);
+    let old_opening = state.state().opening(payer.public_key()).await.unwrap();
     assert_eq!(
         old_opening.verify::<Sha256>(&before.root()).unwrap().get(),
         balance
@@ -1161,15 +1191,40 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     let absent_key = account_key(&absent.public_key()).unwrap();
     assert_eq!(
         state
+            .state()
             .lookup(&absent_key)
             .await
             .unwrap()
-            .resolve::<Sha256>(&state.root(), &absent_key)
+            .resolve::<Sha256>(&state.state().root(), &absent_key)
             .unwrap(),
         None
     );
     let (next, close) = prepared.apply(state).await.unwrap();
     state = next.commit().await.unwrap();
+    let epoch = commonware_clearing::bajillion::custody::Epoch::load(
+        state.logs(),
+        context.payment().epoch(),
+    )
+    .await
+    .unwrap();
+    let heads = *state.logs().head();
+    let source_proof = epoch.source_proof(state.logs(), &heads).await.unwrap();
+    let source = source_proof.verify::<Sha256, VerifyingKey>(&heads).unwrap();
+    assert_eq!(source.context(), &context);
+    let mut foreign_heads = heads;
+    foreign_heads.activity.root = Sha256::hash(&[b"foreign-source-head"]);
+    assert!(
+        source_proof
+            .verify::<Sha256, VerifyingKey>(&foreign_heads)
+            .is_err()
+    );
+    let mut damaged = source_proof.clone();
+    let mut metadata = damaged.metadata.to_vec();
+    let last = metadata.len() - 1;
+    metadata[last] ^= 1;
+    damaged.metadata = metadata.into();
+    assert!(damaged.verify::<Sha256, VerifyingKey>(&heads).is_err());
+
     let expected_payer = if case.zero_net {
         balance
     } else {
@@ -1187,6 +1242,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         let key = account_key(&account).unwrap();
         assert_eq!(
             state
+                .state()
                 .get(&key)
                 .await
                 .unwrap()
@@ -1196,10 +1252,11 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         );
         assert_eq!(
             state
+                .state()
                 .lookup(&key)
                 .await
                 .unwrap()
-                .resolve::<Sha256>(&state.root(), &key)
+                .resolve::<Sha256>(&state.state().root(), &key)
                 .unwrap()
                 .map(NonZeroU64::get)
                 .unwrap_or(0),
@@ -1207,6 +1264,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         );
         assert_eq!(
             state
+                .state()
                 .lookup_at(before.root(), before.operations(), &key)
                 .await
                 .unwrap()
@@ -1217,27 +1275,26 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             balance
         );
     }
-    assert_eq!(state.root(), close.roots.successor);
-    assert_eq!(state.liability(), balance * 2);
-    let current = *state.head();
+    assert_eq!(state.state().root(), close.roots.successor);
+    assert_eq!(state.state().liability(), balance * 2);
+    let current = *state.state().head();
     let foreign_root = StateRoot::new(Sha256::hash(&[b"unretained"]));
     assert!(
         state
+            .state()
             .lookup_at(foreign_root, before.operations(), &absent_key)
             .await
             .is_err()
     );
-    assert_eq!(*state.head(), current);
+    assert_eq!(*state.state().head(), current);
     drop(state);
-    let reopened = State::<_, Sha256>::open(
-        runtime.child("replica"),
-        support::config(&runtime, "transition"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(*reopened.head(), current);
+    let reopened = support::open_state(runtime.child("replica"), "transition")
+        .await
+        .unwrap();
+    assert_eq!(*reopened.state().head(), current);
     assert_eq!(
         reopened
+            .state()
             .get(&account_key(&payer.public_key()).unwrap())
             .await
             .unwrap()
@@ -1275,6 +1332,10 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         committee.commitment::<Sha256>(),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -1286,7 +1347,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
     )
     .await
     .unwrap();
-    let before = *state.head();
+    let before = *state.state().head();
     let mut votes = Vec::new();
     for private in validators {
         let scheme = bls12381::Scheme::signer(committee.clone(), private).unwrap();
@@ -1325,7 +1386,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         );
         votes.push(vote);
     }
-    assert_eq!(*state.head(), before);
+    assert_eq!(*state.state().head(), before);
     let verifier = bls12381::Scheme::verifier(committee.clone());
     let _ = verifier.verify_exact(&prepared.close().header, &case.certificate);
     assert!(

@@ -17,6 +17,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, HigherEntryLookup},
+    custody::Source,
     payment::PaymentContext,
 };
 use commonware_codec::Encode as _;
@@ -165,12 +166,21 @@ impl Agent {
         }
         match receipt_epoch(ctx, chain, self.deployment, &context).await? {
             ReceiptEpoch::Live(_) => {}
-            ReceiptEpoch::Finalized(admitted) => {
+            ReceiptEpoch::Finalized(source) => {
                 let lookup = self
-                    .incoming_lookup(ctx, chain, operator, epoch, &admitted, &payer)
+                    .incoming_lookup(
+                        ctx,
+                        chain,
+                        operator,
+                        epoch,
+                        source.heads(),
+                        source.activity_range(),
+                        None,
+                        &payer,
+                    )
                     .await?;
                 let (cumulative, count) =
-                    lookup.resolve::<Sha256>(&admitted.roots.change, &payer, &account)?;
+                    lookup.resolve::<Sha256>(source.activity_range(), &payer, &account)?;
                 if cumulative < receipt.cumulative || count < receipt.count {
                     return Ok(None);
                 }
@@ -196,14 +206,13 @@ impl Agent {
     /// This is a background assurance loop that never gates payments or claims. For every epoch
     /// holding credits, per payer edge, the committed close's public terminal entry must be at
     /// or above the wallet's highest held cumulative credit and payment count. The trust story
-    /// is anchored: the chain certifies the batch identity and change root of the close it
-    /// admitted for the epoch (read with the recency bound, so the admitted-or-absent verdict
-    /// holds at a certified tip no older than the recency threshold), and committed-side
-    /// evidence is trusted only when it verifies under that anchor. The evidence comes from
-    /// validators, which retain the complete close. The operator is a fallback when every
-    /// validator declines. Missing, unanchored, or unprovable evidence leaves that epoch
-    /// unresolved without blocking other epochs. After finalization the challenge window
-    /// is closed, so withheld evidence raises an alarm and remains retryable at every age.
+    /// is anchored: before finality the chain certifies the admitted activity range; after
+    /// finality a native source proof binds that range to paired activity and payout heads.
+    /// Committed-side evidence is trusted only when it verifies under the corresponding range.
+    /// The operator is a fallback for the live admitted path when every native holder declines.
+    /// Missing, unanchored, or unprovable evidence leaves that epoch unresolved without blocking
+    /// other epochs. After finalization the challenge window is closed, so withheld evidence
+    /// raises an alarm and remains retryable at every age.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -285,18 +294,57 @@ impl Agent {
         }
         let account = self.account();
 
+        let finalized_source = if status.last_finalized.is_some_and(|last| epoch <= last) {
+            let (checkpoint, tip) = chain.payout_checkpoint(ctx).await?;
+            ensure!(
+                checkpoint.deployment == self.deployment
+                    && checkpoint.last_finalized == tip.finalized,
+                "reconciliation checkpoint has another deployment or finalization boundary"
+            );
+            if tip.finalized.is_some_and(|last| epoch <= last) {
+                let source = match chain.source(ctx, epoch, tip).await {
+                    Ok(source) => source,
+                    Err(_) => {
+                        if self.withheld.insert(epoch) {
+                            summary.withheld.push(epoch);
+                        }
+                        return Ok(());
+                    }
+                };
+                let body = held[0].receipt.ack.body();
+                let receipt_context =
+                    PaymentContext::new(*body.anchor(), epoch, operator_key.clone());
+                if source.context().payment() != &receipt_context {
+                    self.store.record_protected(epoch)?;
+                    self.withheld.remove(&epoch);
+                    summary.protected.push(epoch);
+                    return Ok(());
+                }
+                Some(source)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // The anchor is the chain's own admission record for this epoch, recency-bounded.
         // An unreachable or lagging chain is a soft retry. Intake only stored
         // chain-registered receipts, so registration itself needs no re-check here.
-        let fault = if status.hard_faulted {
+        let fault = if finalized_source.is_none() && status.hard_faulted {
             chain.fault(ctx).await?
         } else {
             None
         };
-        let Ok(admitted) = chain.admitted(ctx, epoch).await else {
-            return Ok(());
+        let admitted = if finalized_source.is_some() {
+            None
+        } else {
+            let Ok(admitted) = chain.admitted(ctx, epoch).await else {
+                return Ok(());
+            };
+            admitted
         };
-        let Some(admitted) = admitted else {
+        if finalized_source.is_none() && admitted.is_none() {
             // No close admitted yet. If settlement faulted, this epoch's close never will, so
             // its held credit is enforcement-dead: record it loudly rather than retry forever.
             if status.hard_faulted {
@@ -306,9 +354,10 @@ impl Agent {
                 summary.unenforceable.push(epoch);
             }
             return Ok(());
-        };
+        }
 
-        if !admitted.finalized
+        if let Some(admitted) = admitted.as_ref()
+            && !admitted.finalized
             && let Some(fault) = fault
             && invalidated_epoch(ctx, chain, epoch, status, &fault).await?
         {
@@ -321,10 +370,25 @@ impl Agent {
         let mut uncovered = false;
         let mut refused = false;
         for entry in &held {
-            match self
-                .assess_entry(ctx, chain, operator, epoch, &admitted, &account, entry)
-                .await
-            {
+            let verdict = match finalized_source.as_ref() {
+                Some(source) => {
+                    self.assess_finalized_entry(ctx, chain, epoch, source, &account, entry)
+                        .await
+                }
+                None => {
+                    self.assess_entry(
+                        ctx,
+                        chain,
+                        operator,
+                        epoch,
+                        admitted.as_ref().expect("checked above"),
+                        &account,
+                        entry,
+                    )
+                    .await
+                }
+            };
+            match verdict {
                 // One proven challenge invalidates the whole close, so record it immediately and
                 // stop: continuing would resubmit distinct evidence under the same batch and trip
                 // the chain's evidence-replay guard, aborting before the conviction is recorded.
@@ -355,10 +419,15 @@ impl Agent {
         } else if refused {
             // Finalized close evidence remains accountable at every age. An unavailable
             // edge stays unresolved and alarms once until evidence is served.
-            if admitted.finalized && self.withheld.insert(epoch) {
+            if (finalized_source.is_some()
+                || admitted.as_ref().is_some_and(|admitted| admitted.finalized))
+                && self.withheld.insert(epoch)
+            {
                 summary.withheld.push(epoch);
             }
-        } else if admitted.finalized {
+        } else if finalized_source.is_some()
+            || admitted.as_ref().is_some_and(|admitted| admitted.finalized)
+        {
             self.store
                 .mark_reconciled(epoch)
                 .context("record reconciled epoch")?;
@@ -372,24 +441,71 @@ impl Agent {
         Ok(())
     }
 
+    /// Checks finalized coverage under the source's current authenticated activity head.
+    async fn assess_finalized_entry<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &Client,
+        epoch: u64,
+        source: &Source<Key, Digest>,
+        account: &Key,
+        held: &super::store::HeldEntry,
+    ) -> EntryVerdict {
+        let Ok(lookup) = self
+            .holders
+            .committed_entry_at(
+                ctx,
+                chain,
+                epoch,
+                source.heads(),
+                source.activity_range(),
+                &held.payer,
+                account,
+            )
+            .await
+        else {
+            return EntryVerdict::Refused;
+        };
+        let Ok((cumulative, count)) =
+            lookup.resolve::<Sha256>(source.activity_range(), &held.payer, account)
+        else {
+            return EntryVerdict::Refused;
+        };
+        if cumulative >= held.cumulative && count >= held.count {
+            EntryVerdict::Covered
+        } else {
+            EntryVerdict::Uncovered
+        }
+    }
+
     /// Fetches committed entry evidence from validators, with an authenticated operator fallback.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "live and finalized callers supply distinct authenticated source owners"
+    )]
     async fn incoming_lookup<E: Env>(
         &mut self,
         ctx: &E,
         chain: &Client,
         operator: SocketAddr,
         epoch: u64,
-        admitted: &AdmittedRootsResponse,
+        heads: commonware_clearing::bajillion::logs::Heads<Digest>,
+        range: &commonware_clearing::bajillion::transition::ActivityRange<Digest>,
+        admitted: Option<&AdmittedRootsResponse>,
         payer: &Key,
     ) -> Result<HigherEntryLookup<Key, Digest>> {
         let account = self.account();
-        if let Ok(lookup) = self
+        let holder_error = match self
             .holders
-            .committed_entry(ctx, chain, admitted, payer, &account)
+            .committed_entry_at(ctx, chain, epoch, heads, range, payer, &account)
             .await
         {
-            return Ok(lookup);
-        }
+            Ok(lookup) => return Ok(lookup),
+            Err(error) => error,
+        };
+        let Some(admitted) = admitted else {
+            return Err(holder_error.context("finalized native activity is unavailable"));
+        };
         let evidence = operator_rpc::committed_entry(
             ctx,
             operator,
@@ -424,7 +540,16 @@ impl Agent {
         held: &super::store::HeldEntry,
     ) -> EntryVerdict {
         let Ok(lookup) = self
-            .incoming_lookup(ctx, chain, operator, epoch, admitted, &held.payer)
+            .incoming_lookup(
+                ctx,
+                chain,
+                operator,
+                epoch,
+                admitted.roots.logs(),
+                &admitted.activity_range(),
+                Some(admitted),
+                &held.payer,
+            )
             .await
         else {
             return EntryVerdict::Refused;
@@ -433,7 +558,7 @@ impl Agent {
         // Resolving served evidence is a cryptographic check on an untrusted party, so a
         // failure is a retryable refusal rather than a fatal error.
         let Ok((cumulative, count)) =
-            lookup.resolve::<Sha256>(&admitted.roots.change, &held.payer, account)
+            lookup.resolve::<Sha256>(&admitted.activity_range(), &held.payer, account)
         else {
             return EntryVerdict::Refused;
         };

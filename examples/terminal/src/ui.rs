@@ -1109,16 +1109,11 @@ pub(crate) fn fraud_arc() -> Result<()> {
         }
         let record = registered.context("the registered epoch left no certified record")?;
         ensure!(record.epoch == 0, "the certified record is not epoch 0");
-        let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
-            context.child("fraud_balances"),
-            crate::protocol::state_config(
-                "fraud-balances",
-                &context,
-                commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
-            ),
+        let state = crate::protocol::init_replica(
+            context.child("fraud_replica"), "fraud-replica",
+            commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
             crate::protocol::genesis_balances(&crate::protocol::deployments()[0])?,
-        )
-        .await?;
+        ).await?;
         let mut fraud_rng = context.child("fraud_rng");
         let fraud = Box::pin(omitting_close(
             state,
@@ -1134,7 +1129,7 @@ pub(crate) fn fraud_arc() -> Result<()> {
         let (committed, _) = fraud
             .held_lookup
             .resolve::<Sha256>(
-                &fraud.result.roots.change,
+                &fraud.result.roots.activity_range(&fraud.result.context)?,
                 fraud.held_receipt.ack.body().payer(),
                 &fraud.receiver,
             )

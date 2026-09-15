@@ -18,8 +18,9 @@
 //! fresh cryptographic randomness from its caller.
 //!
 //! A committee has `n = 3f + 1` validators and tolerates at most `f` Byzantine members. Every honest
-//! signer checks the complete dealing and retains its evidence before publishing a vote. An exact
-//! `q = 2f + 1` certificate therefore includes at least `f + 1` honest holders of the entire close.
+//! signer checks the complete dealing and durably retains the native state and original proof
+//! sources before publishing a vote. An exact `q = 2f + 1` certificate therefore includes at least
+//! `f + 1` honest holders of those sources.
 //! Certification proves the disclosed public relation. It cannot prove that the operator never
 //! signed an additional private receipt.
 //!
@@ -71,31 +72,41 @@
 //! produce no database write. The batch boundary is part of the authenticated history even when
 //! no balances change.
 //!
-//! The activity BMT includes every disclosed sender, recipient, and boundary/output participant.
-//! Activity that nets to zero still needs terminal evidence, even though it needs no balance
-//! mutation. A compact activity value commits the terminal epoch debit and sequence, outgoing
-//! vector root and settlement output. A separate BMT indexes withdrawal outputs in request order.
-//! Payer-vector BMTs remain nested under their signed endpoints.
+//! A cumulative native keyless MMR contains every disclosed sender, recipient, and boundary
+//! participant. Each epoch contributes one contiguous range sorted by canonical account bytes.
+//! Activity that nets to zero still has terminal evidence. Its compact guard commits the account
+//! and a value containing terminal debit, sequence, outgoing vector root, and settlement output.
+//! A second keyless MMR appends every withdrawal output in request order, including zero releases.
+//! Payer-vector BMTs remain nested under their signed endpoints. Native Commit leaves separate
+//! epoch ranges; payout identities are sparse Append locations and never identify those markers.
+//! The activity Commit stores the original context and proof sources; payout Commit metadata is
+//! empty. Native Commit operations remain outside every activity and payout row interval.
 //!
-//! `transition::Header` binds the exact registered context and predecessor state, the activity,
-//! withdrawal-output, and successor QMDB roots, and the actual withdrawal total. Settlement
-//! derives successor liability from its registered deposits, predecessor liability, and this
-//! certified outflow. The dealing carries inputs from which validators
-//! reconstruct this header. External settlement additionally receives the roots and withdrawal total.
+//! `transition::Header` binds the exact registered context and predecessors, all three successor
+//! roots and native counts, canonical log floors, independent ProposalId, and withdrawal total.
+//! Every validator derives the append extension from its retained predecessor. Settlement checks
+//! the exact quorum certificate and derives successor liability from its registered deposits and
+//! certified outflow. The operator identifies its proposal without constructing the native trees.
+//! Registration captures log floors from one finalized snapshot; later finalizations cannot
+//! change the inputs used by signers processing that same proposal.
 //!
 //! `transition::prepare_dealing` encodes accepted activity without reading account state.
 //! `admission::seal` decodes and validates the complete dealing against the exact predecessor and
-//! registered committee, returning the vote and owned candidate/evidence. The application durably
-//! retains the evidence and its predecessor state before publishing the vote. Validators advance
-//! their canonical replica to the close selected by settlement. QMDB mutation failures consume
-//! the affected database owner; an embedding must not continue using it.
+//! registered committee, returning the vote and owned native candidate. Before publishing the
+//! vote, the application applies and synchronizes all three candidate stores and publishes a
+//! durable shared checkpoint and signing decision. It keeps the canonical parent until settlement
+//! selects the successor. QMDB mutation failures consume the affected database owner; an embedding
+//! must not continue using it.
 //!
-//! Canonical QMDB history and proof material must remain available for predecessor and pending
-//! roots and the last finalized recovery root. Pending roots may outlive their own challenge
-//! deadlines while earlier FIFO entries wait. Historical Current proofs require the activity
-//! bitmap as well as the operation history. The state service retains canonical batches and uses
-//! QMDB replay/rewind for historical proof construction; operation inclusion alone does not prove
-//! that an old balance was current. Retention and seek costs belong to the state owner.
+//! Canonical history and proof material protect the predecessor, every pending close, and the
+//! latest finalized recovery state. A pending close may outlive its own challenge deadline while
+//! an earlier FIFO entry waits. Native Current historical views reconstruct current-value proofs
+//! from retained operation history and pinned nodes. Operation inclusion alone does not prove an
+//! old balance was current. A shared durable checkpoint names all three native boundaries;
+//! recovery rewinds all ahead stores to that common checkpoint, then catches up through native
+//! operation transfer. Before discarding an unadmitted candidate, the application selects its
+//! durable parent checkpoint before truncating any store. Pruning follows a complete canonical
+//! checkpoint and preserves every protected source and Current historical boundary.
 //!
 //! # Registration and settlement
 //!
@@ -169,9 +180,26 @@
 //! the registered predecessor and boundary deposits. Intervening payments can change either
 //! request's final release; recovery always uses the surviving finalized balance.
 //!
-//! Clean finalization moves the aggregate withdrawal amount into an independent reserve. A
-//! withdrawal claim opens its certified destination and amount in the output BMT and consumes
-//! `(batch, position)` once. These reserves remain independently claimable through later faults.
+//! Clean FIFO finalization updates one approved cumulative payout root/count and issues only its
+//! new nonempty interval of Append locations. The external ledger stores disjoint unclaimed
+//! `(deployment, start) -> end` ranges. A claim supplies the containing start, proves its output at
+//! the latest approved head, and atomically replaces that interval with up to two fragments while
+//! releasing its amount. Zero releases also consume their locations. No finalized epoch root or
+//! spent-position set is retained in this ledger; its size is bounded by outstanding outputs.
+//! Claims have no expiry and remain available through faults without another Bajillion vote.
+//!
+//! Replicas that retain longer native history serve old outputs and refreshed proofs as the
+//! approved head advances. This availability duty is separate from validator challenge history:
+//! an old unclaimed output does not pin hot validator pruning. A stale path alone does not provide
+//! a current-root claim witness, and a missing source is an error rather than evidence of absence.
+//!
+//! Each activity Commit retains its original context, terminal sequences, outgoing-vector leaves
+//! and exact signed withdrawals. Native operation walks and those leaves reconstruct requested
+//! proofs. A Commit opening under the current finalized activity head authenticates an older
+//! source and its Guard interval; the same settlement snapshot authenticates the payout head.
+//! This permits retirement of old epoch roots and anchors after their live obligations end.
+//! Source authentication discloses the bounded metadata record. Onchain challenges against a
+//! pending admitted root still use compact Guard and payer-vector openings.
 //!
 //! Once the surviving clean prefix drains, hard-fault recovery freezes the last finalized QMDB
 //! root and liability. Each live account proves its positive balance at that root and is consumed
@@ -196,11 +224,17 @@ pub mod boundary;
 #[cfg(feature = "std")]
 pub mod challenge;
 pub mod commitment;
+#[cfg(feature = "std")]
+pub mod custody;
+#[cfg(feature = "std")]
+pub mod logs;
 pub mod payment;
 #[cfg(feature = "std")]
 pub mod posted;
 #[cfg(feature = "std")]
 pub mod qmdb;
+#[cfg(feature = "std")]
+pub mod replica;
 #[cfg(feature = "std")]
 pub mod serve;
 #[cfg(feature = "std")]

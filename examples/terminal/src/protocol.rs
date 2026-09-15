@@ -4,15 +4,17 @@ use anyhow::{Context, Result, ensure};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
     admission::{Committee, Vote, bls12381, seal},
-    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
     challenge::{HigherEntryLookup, higher_entry_lookup},
-    commitment::{Builder as VectorBuilder, Opening, VectorKind, VectorRoot},
+    commitment::{Opening, VectorRoot},
+    logs::{Floors, Heads, Logs},
     payment::{EntryReceipt, PaymentContext, VectorAck, VectorSendBody},
-    qmdb::{PreparedState, State, StateRoot},
+    qmdb::{State, StateRoot},
+    replica::{PreparedReplica, Replica},
     settlement::{EpochDeadlinePolicy, Genesis as ConfiguredGenesis, SettlementConfig},
     transition::{
-        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
-        OperatorKey, OperatorSignature, OperatorVariant, RootBundle, Terminal, WithdrawalClaim,
+        ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
+        OperatorSignature, OperatorVariant, ProposalId, RootBundle, Terminal, WithdrawalClaim,
         prepare_dealing,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
@@ -32,7 +34,9 @@ use commonware_cryptography::{
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, Signature, SigningKey, StrictVerifyingKey,
 };
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::Rayon;
+#[cfg(test)]
+use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
@@ -50,155 +54,29 @@ pub(crate) type Key = StrictVerifyingKey;
 pub(crate) type Ack = VectorAck<Key, Digest>;
 pub(crate) type Receipt = EntryReceipt<Key, Digest>;
 
-/// Binds a withdrawal output to its authorizing account in the same certified close.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WithdrawalWitness {
-    pub(crate) context: CloseContext<Key, Digest>,
-    pub(crate) withdrawal_total: u64,
-    pub(crate) request: SignedWithdrawal<Key, Digest>,
-    pub(crate) opening: Opening<Digest>,
-    pub(crate) claim: WithdrawalClaim<Digest>,
+/// Both finalized native log heads from one settlement checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PayoutTip {
+    pub(crate) heads: Heads<Digest>,
+    pub(crate) finalized: Option<u64>,
 }
-
-impl WithdrawalWitness {
-    pub(crate) fn new(
-        context: &CloseContext<Key, Digest>,
-        withdrawal_total: u64,
-        withdrawals: &WithdrawalBatch<Key, Digest>,
-        claim: WithdrawalClaim<Digest>,
-    ) -> Result<Self> {
-        let request = withdrawals
-            .requests()
-            .get(claim.position() as usize)
-            .context("withdrawal output has no corresponding request")?
-            .clone();
-        let mut tree = VectorBuilder::<Sha256>::new(
-            VectorKind::Withdrawal,
-            u32::try_from(withdrawals.len())?,
-        )?;
-        for request in withdrawals.requests() {
-            tree.add_encoded(&request.encode())?;
-        }
-        let tree = tree.build(&Sequential)?;
-        ensure!(
-            tree.root() == *context.withdrawal_root(),
-            "withdrawal boundary differs from its context"
-        );
-        Ok(Self {
-            context: context.clone(),
-            withdrawal_total,
-            request,
-            opening: tree.opening(claim.position())?,
-            claim,
-        })
-    }
-
-    pub(crate) fn batch_id(&self, roots: &RootBundle<Digest>) -> BatchId<Digest> {
-        Header::new::<Sha256, Key>(&self.context, roots, self.withdrawal_total).batch_id::<Sha256>()
-    }
-
-    /// Verifies both positions and their descriptor; certification authenticates the returned batch.
-    pub(crate) fn verify(
-        &self,
-        roots: &RootBundle<Digest>,
-        deployment: &Digest,
-        account: &Key,
-        destination: &[u8],
-    ) -> Result<BatchId<Digest>> {
-        ensure!(
-            self.context.deployment() == deployment
-                && self.context.epoch_context().verify_anchor::<Sha256>(),
-            "withdrawal evidence has an invalid deployment context"
-        );
-        ensure!(
-            self.request.account() == account,
-            "withdrawal evidence belongs to another account"
-        );
-        ensure!(
-            self.opening.position == self.claim.position(),
-            "withdrawal request and output positions differ"
-        );
-        self.opening.verify::<Sha256>(
-            VectorKind::Withdrawal,
-            self.context.withdrawal_root(),
-            &self.request.encode(),
-        )?;
-        let output = self.claim.verify::<Sha256>(&roots.withdrawal_outputs)?;
-        ensure!(
-            self.request.body().destination().as_ref() == destination
-                && output.destination().as_ref() == destination,
-            "withdrawal evidence pays another destination"
-        );
-        Ok(self.batch_id(roots))
-    }
-}
-
-impl Write for WithdrawalWitness {
+impl Write for PayoutTip {
     fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.withdrawal_total.write(buf);
-        self.request.write(buf);
-        self.opening.write(buf);
-        self.claim.write(buf);
+        self.heads.write(buf);
+        self.finalized.write(buf);
     }
 }
-
-impl EncodeSize for WithdrawalWitness {
+impl EncodeSize for PayoutTip {
     fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.withdrawal_total.encode_size()
-            + self.request.encode_size()
-            + self.opening.encode_size()
-            + self.claim.encode_size()
+        self.heads.encode_size() + self.finalized.encode_size()
     }
 }
-
-impl Read for WithdrawalWitness {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let destination = RangeCfg::new(0..=MAX_DESTINATION_BYTES);
-        Ok(Self {
-            context: CloseContext::read(buf)?,
-            withdrawal_total: u64::read(buf)?,
-            request: SignedWithdrawal::read_cfg(buf, &destination)?,
-            opening: Opening::read(buf)?,
-            claim: WithdrawalClaim::read_cfg(buf, &destination)?,
-        })
-    }
-}
-
-/// A complete withdrawal witness for operator delivery and durable wallet caching.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WithdrawalEvidence {
-    pub(crate) roots: RootBundle<Digest>,
-    pub(crate) witness: WithdrawalWitness,
-}
-
-impl WithdrawalEvidence {
-    pub(crate) fn batch_id(&self) -> BatchId<Digest> {
-        self.witness.batch_id(&self.roots)
-    }
-}
-
-impl Write for WithdrawalEvidence {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.roots.write(buf);
-        self.witness.write(buf);
-    }
-}
-
-impl EncodeSize for WithdrawalEvidence {
-    fn encode_size(&self) -> usize {
-        self.roots.encode_size() + self.witness.encode_size()
-    }
-}
-
-impl Read for WithdrawalEvidence {
+impl Read for PayoutTip {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            roots: RootBundle::read(buf)?,
-            witness: WithdrawalWitness::read(buf)?,
+            heads: Heads::read(buf)?,
+            finalized: Option::read(buf)?,
         })
     }
 }
@@ -554,6 +432,7 @@ pub(crate) struct EpochRegistration {
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) context: EpochContext<Key, Digest>,
+    pub(crate) floors: Option<Floors>,
 }
 
 /// Immutable root-independent input prepared for full-validator execution.
@@ -576,58 +455,67 @@ impl PreparedEpoch {
         &self.encoded
     }
 
-    /// Validates a validator-certified close and reconstructs its retained claims.
+    /// Binds a validator certificate and supplied native openings to this exact proposal.
     pub(crate) fn certify(
         &self,
         certified: CertifiedEpoch,
         deal_micros: u128,
         seal_micros: u128,
     ) -> Result<SettlementResult> {
-        let close = certified.validate(&self.registration.context, &self.encoded)?;
+        certified.validate(&self.registration.context, &self.encoded)?;
+        if let Some(floors) = self.registration.floors {
+            ensure!(
+                certified.context.floors() == floors,
+                "certified close differs from the adopted native boundary"
+            );
+        }
         let verifier = bls12381::Scheme::verifier(committee()?);
         ensure!(
             verifier.verify_exact(&certified.header, &certified.certificate),
             "assembled certificate failed verification"
         );
 
-        let withdrawal_claims = self
+        ensure!(
+            certified.withdrawal_claims.len() == self.registration.withdrawals.len(),
+            "certified close omitted withdrawal custody evidence"
+        );
+        let output_start = certified.context.predecessor_logs().payouts.operations;
+        for (position, (request, claim)) in self
             .registration
             .withdrawals
             .requests()
             .iter()
+            .zip(&certified.withdrawal_claims)
             .enumerate()
-            .map(|(position, request)| {
-                let claim = close
-                    .withdrawal_claim(request.account())
-                    .context("assemble withdrawal claim")?;
+        {
+            ensure!(
+                output_start.checked_add(u64::try_from(position)?) == Some(claim.position()),
+                "withdrawal claim has the wrong native position"
+            );
+            let output = claim.verify::<Sha256>(&certified.roots.withdrawal_outputs)?;
+            ensure!(
+                output.destination() == request.body().destination(),
+                "withdrawal claim has the wrong request destination"
+            );
+            if let WithdrawalAction::Amount(amount) = request.body().action() {
                 ensure!(
-                    u32::try_from(position).ok() == Some(claim.position()),
-                    "withdrawal claim has the wrong request position"
+                    output.amount() == 0 || output.amount() == amount.get(),
+                    "withdrawal claim has the wrong requested amount"
                 );
-                ensure!(
-                    claim.output().destination() == request.body().destination(),
-                    "withdrawal claim has the wrong request destination"
-                );
-                if let WithdrawalAction::Amount(amount) = request.body().action() {
-                    ensure!(
-                        claim.output().amount() == 0 || claim.output().amount() == amount.get(),
-                        "withdrawal claim has the wrong requested amount"
-                    );
-                }
-                Ok(claim)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            }
+        }
+        let range = certified.roots.activity_range(&certified.context)?;
+        let rows = range.end - range.start;
 
         Ok(SettlementResult {
             context: certified.context,
-            evidence: certified.evidence,
             withdrawals: self.registration.withdrawals.clone(),
             header: certified.header,
             roots: certified.roots,
             certificate: certified.certificate,
             withdrawal_total: certified.withdrawal_total,
-            withdrawal_claims,
-            rows: close.rows.len(),
+            withdrawal_claims: certified.withdrawal_claims,
+            rows: usize::try_from(rows)?,
             dealing_bytes: self.encoded.len(),
             prepare_micros: self.prepare_micros,
             deal_micros,
@@ -643,7 +531,7 @@ pub(crate) struct CertifiedEpoch {
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
     pub(crate) withdrawal_total: u64,
-    pub(crate) evidence: Bytes,
+    pub(crate) withdrawal_claims: Vec<WithdrawalClaim<Digest>>,
     pub(crate) certificate: bls12381::Certificate,
 }
 
@@ -653,25 +541,22 @@ impl CertifiedEpoch {
         &self,
         expected_context: &EpochContext<Key, Digest>,
         expected_input: &Bytes,
-    ) -> Result<Close<Key, Digest>> {
+    ) -> Result<()> {
         ensure!(
             self.context.epoch_context() == expected_context,
             "certified close has the wrong registered context"
         );
-        let close =
-            Close::decode_evidence::<Sha256>(self.evidence.clone(), &self.context, &self.header)
-                .context("validate certified close evidence")?;
         ensure!(
-            close.header == self.header
-                && close.roots == self.roots
-                && close.withdrawal_total == self.withdrawal_total,
-            "certified close artifacts disagree"
-        );
-        ensure!(
-            close.encoded() == expected_input,
+            self.roots.proposal
+                == ProposalId::for_dealing::<Sha256, Key>(expected_context, expected_input),
             "certified close has the wrong dealing"
         );
-        Ok(close)
+        ensure!(
+            self.header
+                == Header::new::<Sha256, Key>(&self.context, &self.roots, self.withdrawal_total),
+            "certified descriptor does not match its header"
+        );
+        Ok(())
     }
 }
 
@@ -679,7 +564,6 @@ impl CertifiedEpoch {
 #[derive(Clone)]
 pub(crate) struct SettlementResult {
     pub(crate) context: CloseContext<Key, Digest>,
-    pub(crate) evidence: Bytes,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
@@ -696,7 +580,6 @@ pub(crate) struct SettlementResult {
 impl Write for SettlementResult {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
-        self.evidence.write(buf);
         self.withdrawals.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
@@ -713,7 +596,6 @@ impl Write for SettlementResult {
 impl EncodeSize for SettlementResult {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
-            + self.evidence.encode_size()
             + self.withdrawals.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
@@ -733,7 +615,6 @@ impl Read for SettlementResult {
         let context = CloseContext::read(buf)?;
         Ok(Self {
             context,
-            evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=crate::rpc::MAX_BODY_SIZE))?,
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -761,13 +642,8 @@ impl Read for SettlementResult {
     }
 }
 
-/// One close the in-process simulation sealed for every quorum validator:
-/// the material the harness serves validator evidence from, exactly what a
-/// real validator retains (see [`crate::chain::da`]) with the bound context
-/// the simulation held in memory.
+/// One in-process committee result used to seed deterministic proof fixtures.
 pub(crate) struct RetainedClose {
-    pub(crate) operations: u64,
-    pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) mutations: commonware_clearing::bajillion::qmdb::Mutations,
     pub(crate) context: CloseContext<Key, Digest>,
@@ -782,6 +658,18 @@ static RETAINED: Mutex<Vec<Arc<RetainedClose>>> = Mutex::new(Vec::new());
 /// Snapshot of every close the in-process simulation retains.
 pub(crate) fn retained_closes() -> Vec<Arc<RetainedClose>> {
     RETAINED.lock().clone()
+}
+
+/// Opens the in-process committee's retained close for a test fixture.
+#[cfg(test)]
+pub(crate) fn fixture_close(result: &SettlementResult) -> Arc<Close<Key, Digest>> {
+    let retained = RETAINED.lock();
+    let retained = retained
+        .iter()
+        .find(|retained| retained.header == result.header)
+        .expect("fixture close was sealed by the in-process committee");
+    assert_eq!(retained.context, result.context);
+    retained.close.clone()
 }
 
 #[derive(Clone)]
@@ -1028,6 +916,23 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
         init_buffer: NZUsize!(2097152),
         init_concurrency: (),
     }
+}
+
+/// Opens the three native stores with the configured balance allocation and empty flat logs.
+pub(crate) async fn init_replica<E, S>(
+    context: E,
+    prefix: &str,
+    strategy: S,
+    balances: Vec<(commonware_clearing::bajillion::qmdb::AccountKey, NonZeroU64)>,
+) -> Result<Replica<E, Sha256, Key, S>>
+where
+    E: commonware_storage::Context + commonware_runtime::Spawner,
+    S: commonware_parallel::Strategy,
+{
+    let config = crate::chain::da::replica_config(prefix, &context, strategy);
+    let state = State::init(context.child("state"), config.state, balances).await?;
+    let logs = Logs::open(context.child("logs"), config.logs).await?;
+    Ok(Replica::from_parts(state, logs))
 }
 
 impl Write for Account {
@@ -1492,6 +1397,7 @@ impl Protocol {
             deposits,
             withdrawals,
             context,
+            floors: None,
         })
     }
 
@@ -1529,9 +1435,9 @@ impl Protocol {
     pub(crate) async fn complete<E, R: CryptoRng>(
         &self,
         epoch: PreparedEpoch,
-        state: &State<E, Sha256, Rayon>,
+        state: &Replica<E, Sha256, Key, Rayon>,
         rng: &mut R,
-    ) -> Result<(SettlementResult, PreparedState<Digest, Rayon>)>
+    ) -> Result<(SettlementResult, PreparedReplica<Key, Digest, Rayon>)>
     where
         E: commonware_storage::Context + commonware_runtime::Spawner,
     {
@@ -1542,10 +1448,10 @@ impl Protocol {
     async fn complete_with_strategy<E, R, S>(
         &self,
         epoch: PreparedEpoch,
-        state: &State<E, Sha256, S>,
+        state: &Replica<E, Sha256, Key, S>,
         rng: &mut R,
         strategy: &S,
-    ) -> Result<(SettlementResult, PreparedState<Digest, S>)>
+    ) -> Result<(SettlementResult, PreparedReplica<Key, Digest, S>)>
     where
         E: commonware_storage::Context + commonware_runtime::Spawner,
         R: CryptoRng,
@@ -1560,6 +1466,10 @@ impl Protocol {
                 state,
                 &epoch.registration.deposits,
                 &epoch.registration.withdrawals,
+                epoch.registration.floors.unwrap_or(Floors {
+                    activity: state.logs().head().activity.floor,
+                    payouts: state.logs().head().payouts.floor,
+                }),
             )
             .context("bind close to validator state")?;
         let mut votes = Vec::<Vote>::new();
@@ -1595,14 +1505,18 @@ impl Protocol {
             header: close.header,
             roots: close.roots,
             withdrawal_total: close.withdrawal_total,
-            evidence: close.encode_evidence(),
+            withdrawal_claims: epoch
+                .registration
+                .withdrawals
+                .requests()
+                .iter()
+                .map(|request| close.withdrawal_claim::<Sha256>(request.account()))
+                .collect::<Result<Vec<_>, _>>()?,
             certificate,
         };
         let retained = RetainedClose {
-            operations: candidate.head().operations(),
-            deposits: epoch.registration.deposits.clone(),
             withdrawals: epoch.registration.withdrawals.clone(),
-            mutations: candidate.mutations().to_vec(),
+            mutations: candidate.state().mutations().to_vec(),
             context,
             header: close.header,
             roots: close.roots,
@@ -1625,7 +1539,7 @@ impl Protocol {
         let accounts = accounts.to_vec();
         commonware_runtime::deterministic::Runner::default().start(move |context| async move {
             let state = fixture_state(context, &protocol, &accounts, &[]).await?;
-            Ok(ConfiguredGenesis::from(state.head()))
+            Ok(ConfiguredGenesis::from(state.state().head()))
         })
     }
 
@@ -1673,23 +1587,29 @@ impl Protocol {
         let account = account.clone();
         commonware_runtime::deterministic::Runner::default().start(move |context| async move {
             let state = fixture_state(context, &protocol, &accounts, &history).await?;
-            state.opening(account).await.context("open fixture account")
+            state
+                .state()
+                .opening(account)
+                .await
+                .context("open fixture account")
         })
     }
 }
 
 #[cfg(test)]
+#[commonware_macros::boxed]
 async fn fixture_state<E>(
     context: E,
     protocol: &Protocol,
     accounts: &[Account],
     history: &[SettlementResult],
-) -> Result<State<E, Sha256>>
+) -> Result<Replica<E, Sha256, Key>>
 where
     E: commonware_storage::Context + commonware_runtime::Spawner + commonware_runtime::BufferPooler,
 {
-    let config = state_config("fixture-validator", &context, Sequential);
-    let mut state = State::<_, Sha256>::open(context, config).await?;
+    let config = crate::chain::da::replica_config("fixture-validator", &context, Sequential);
+    let logs = Logs::open(context.child("logs"), config.logs).await?;
+    let mut state = State::<_, Sha256>::open(context.child("state"), config.state).await?;
     ensure!(
         state.is_bootstrap(),
         "fixture validator storage is not fresh"
@@ -1710,6 +1630,7 @@ where
         )
         .await?;
     state = state.apply(candidate).await?.commit().await?;
+    let mut state = Replica::from_parts(state, logs);
 
     for (expected_epoch, result) in history.iter().enumerate() {
         ensure!(
@@ -1721,16 +1642,11 @@ where
                 && result.context.payment().operator() == &protocol.operator.public_key()
                 && result.context.committee()
                     == &protocol.validators.committee.commitment::<Sha256>()
-                && result.context.predecessor_root() == &state.root()
-                && result.context.predecessor_liability() == state.liability(),
+                && result.context.predecessor_root() == &state.state().root()
+                && result.context.predecessor_liability() == state.state().liability(),
             "fixture validator history has the wrong predecessor or deployment"
         );
-        let close = Close::decode_evidence::<Sha256>(
-            result.evidence.clone(),
-            &result.context,
-            &result.header,
-        )
-        .context("decode fixture validator history")?;
+        let close = fixture_close(result);
         ensure!(
             close.header == result.header
                 && close.roots == result.roots
@@ -1753,9 +1669,18 @@ where
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let prepared = state.prepare(state.head(), mutations).await?;
+        let prepared = state
+            .prepare(
+                &state.head(),
+                mutations,
+                close.activity_input(),
+                close.withdrawal_evidence().0.to_vec(),
+                result.context.floors(),
+            )
+            .await?;
         ensure!(
-            prepared.root() == result.roots.successor,
+            prepared.state().root() == result.roots.successor
+                && prepared.head().logs == result.roots.logs(),
             "fixture validator mutations differ from certified history"
         );
         state = state.apply(prepared).await?.commit().await?;
@@ -1851,7 +1776,7 @@ pub(crate) fn omitting_boundary() -> Result<(DepositEvent, DepositBatch<Key>)> {
 /// operator-signed receipt credits Bob, but the admitted close instead
 /// credits a deposit to Carol and omits Bob entirely.
 pub(crate) async fn omitting_close<E, R: CryptoRng>(
-    state: State<E, Sha256, Rayon>,
+    state: Replica<E, Sha256, Key, Rayon>,
     rng: &mut R,
     admission_deadline: u64,
     challenge_deadline: u64,
@@ -1876,12 +1801,16 @@ where
     )?;
     let prepared = protocol.prepare(registration, Vec::new())?;
     let (result, candidate) = protocol.complete(prepared, &state, rng).await?;
-    let close =
-        Close::decode_evidence::<Sha256>(result.evidence.clone(), &result.context, &result.header)
-            .context("decode the omitting close")?;
+    let close = RETAINED
+        .lock()
+        .iter()
+        .find(|retained| retained.header == result.header)
+        .context("omitting close was not retained")?
+        .close
+        .clone();
 
     // The omitting close excludes the paying sender entirely, so its composed lookup is an
-    // ordered change-vector absence and the public terminal entry resolves to zero.
+    // ordered activity absence and the public terminal entry resolves to zero.
     let index = ChallengeIndex::new::<Sha256>(&result.context, &close)
         .context("index the omitting close")?;
     let held_lookup =
@@ -1945,7 +1874,9 @@ pub(crate) fn encoded_artifacts(result: &SettlementResult) -> (Vec<u8>, Vec<u8>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_clearing::bajillion::{payment::SendAuthorization, qmdb::account_key};
+    use commonware_clearing::bajillion::{
+        boundary::SignedWithdrawal, payment::SendAuthorization, qmdb::account_key,
+    };
     use commonware_codec::DecodeExt as _;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::TestRng;
@@ -1956,7 +1887,7 @@ mod tests {
             header: result.header,
             roots: result.roots,
             withdrawal_total: result.withdrawal_total,
-            evidence: result.evidence.clone(),
+            withdrawal_claims: result.withdrawal_claims.clone(),
             certificate: result.certificate.clone(),
         }
     }
@@ -2006,19 +1937,7 @@ mod tests {
         );
 
         let mut poisoned = result;
-        let mut close = Close::decode_evidence::<Sha256>(
-            poisoned.evidence.clone(),
-            &poisoned.context,
-            &poisoned.header,
-        )
-        .unwrap();
-        let row = close
-            .rows
-            .iter_mut()
-            .find(|row| row.account == account.key)
-            .unwrap();
-        row.successor = row.successor.checked_add(1).unwrap();
-        poisoned.evidence = close.encode_evidence();
+        poisoned.roots.successor = genesis.root();
         assert!(
             protocol
                 .fixture_opening(std::slice::from_ref(&account), &[poisoned], &account.key,)
@@ -2031,30 +1950,20 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let wallet = wallets().remove(0);
-            let config = state_config("zero-withdrawal", &context, protocol.strategy().clone());
-            let state = State::<_, Sha256, Rayon>::open(context, config)
-                .await
-                .unwrap();
-            let candidate = state
-                .prepare(
-                    state.head(),
-                    vec![(
-                        account_key(&wallet.public_key()).unwrap(),
-                        NonZeroU64::new(10),
-                    )],
-                )
-                .await
-                .unwrap();
-            let state = state
-                .apply(candidate)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let state = init_replica(
+                context,
+                "zero-withdrawal",
+                protocol.strategy().clone(),
+                vec![(
+                    account_key(&wallet.public_key()).unwrap(),
+                    NonZeroU64::new(10).unwrap(),
+                )],
+            )
+            .await
+            .unwrap();
             let request = SignedWithdrawal::sign(
                 deployment(),
-                state.root().digest,
+                state.state().root().digest,
                 wallet.public_key().encode(),
                 WithdrawalAction::Amount(NonZeroU64::new(10).unwrap()),
                 50,
@@ -2062,7 +1971,12 @@ mod tests {
             );
             let withdrawals = WithdrawalBatch::new(vec![request.clone()]).unwrap();
             let registration = protocol
-                .registration(0, DepositBatch::empty(), withdrawals, state.liability())
+                .registration(
+                    0,
+                    DepositBatch::empty(),
+                    withdrawals,
+                    state.state().liability(),
+                )
                 .unwrap();
             let vector = OutVector::new(
                 0,
@@ -2095,42 +2009,18 @@ mod tests {
             assert_eq!(result.withdrawal_claims.len(), 1);
             let claim = result.withdrawal_claims[0].clone();
             assert_eq!(claim.output().amount(), 0);
-            assert_eq!(successor.head().liability(), 10);
+            assert_eq!(successor.head().state.liability(), 10);
             let encoded = result.encode();
             assert_eq!(
                 SettlementResult::decode(encoded.clone()).unwrap().encode(),
                 encoded
             );
-            let witness = WithdrawalWitness::new(
-                &result.context,
-                result.withdrawal_total,
-                &result.withdrawals,
-                claim,
-            )
-            .unwrap();
-            assert_eq!(witness.request, request);
-            assert_eq!(
-                WithdrawalWitness::decode(witness.encode()).unwrap(),
-                witness
-            );
-            assert_eq!(
-                witness
-                    .verify(
-                        &result.roots,
-                        &deployment(),
-                        &wallet.public_key(),
-                        wallet.public_key().as_ref()
-                    )
-                    .unwrap(),
-                result.header.batch_id::<Sha256>(),
-            );
-
             let alternate_registration = protocol
                 .registration(
                     0,
                     DepositBatch::empty(),
                     WithdrawalBatch::new(vec![request]).unwrap(),
-                    state.liability(),
+                    state.state().liability(),
                 )
                 .unwrap();
             let alternate = protocol
@@ -2151,7 +2041,7 @@ mod tests {
                     0,
                     DepositBatch::empty(),
                     result.withdrawals.clone(),
-                    state.liability(),
+                    state.state().liability(),
                     20,
                     21,
                 )
@@ -2170,10 +2060,6 @@ mod tests {
             let mut wrong_roots = certified(&result);
             wrong_roots.roots = alternate.roots;
             assert!(certification_input.certify(wrong_roots, 0, 0).is_err());
-
-            let mut wrong_evidence = certified(&result);
-            wrong_evidence.evidence = alternate.evidence.clone();
-            assert!(certification_input.certify(wrong_evidence, 0, 0).is_err());
 
             let mut wrong_certificate = certified(&result);
             wrong_certificate.certificate = alternate.certificate;

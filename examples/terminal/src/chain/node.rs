@@ -30,10 +30,11 @@ use crate::{
         ingress::Submission,
         light::{self, Verified},
         query::{
-            Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest, EvidenceResponse,
-            METHOD_EVIDENCE, ReadRequest,
+            Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, METHOD_EVIDENCE,
+            ReadRequest,
         },
         setup::{NetworkConfig, OperatorConfig, read_genesis},
+        state::Record,
         tx::{AdmitRequest, SettlementTx},
         types::{Block, Database, now},
         validator::{
@@ -54,7 +55,7 @@ use commonware_actor::{
     mailbox::{self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender},
 };
 use commonware_broadcast::buffered;
-use commonware_clearing::bajillion::admission::bls12381;
+use commonware_clearing::bajillion::{admission::bls12381, transition::CloseContext};
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
     Epochable as _, Reporter, Reporters,
@@ -207,10 +208,40 @@ where
             .get(&request.key())
             .await
             .context("read applied settlement state")?;
+        let unclaimed = if matches!(
+            request.lookup,
+            crate::chain::query::Lookup::Unclaimed { .. }
+        ) {
+            let proof = match &record {
+                Some(record) => crate::chain::query::ReadProof::Present {
+                    record: record.clone(),
+                    proof: guard.key_value_proof(request.key()).await?,
+                },
+                None => crate::chain::query::ReadProof::Absent {
+                    proof: guard.exclusion_proof(&request.key()).await?,
+                },
+            };
+            proof.unclaimed(request)
+        } else {
+            None
+        };
+        let payout_tip = if request.lookup.requires_payout_tip() {
+            match guard
+                .get(&crate::chain::state::payout_head_key(&request.deployment))
+                .await?
+            {
+                Some(Record::PayoutHead(head)) => Some(head),
+                _ => return Ok(None),
+            }
+        } else {
+            None
+        };
         Ok(Some(Verified {
             height: tip.height,
             timestamp: tip.timestamp,
             record,
+            unclaimed,
+            payout_tip,
         }))
     }
 }
@@ -275,7 +306,7 @@ pub(crate) enum Message {
     /// Submit the certified close and complete once the local certified
     /// state admitted the exact batch and roots.
     Admit {
-        request: Box<AdmitRequest>,
+        request: Box<(CloseContext<Key, Digest>, AdmitRequest)>,
         response: oneshot::Sender<Result<()>>,
     },
 }
@@ -322,10 +353,14 @@ impl Mailbox {
     }
 
     /// Submits the certified close and completes on certified admission.
-    pub(crate) async fn admit(&self, request: AdmitRequest) -> Result<()> {
+    pub(crate) async fn admit(
+        &self,
+        context: CloseContext<Key, Digest>,
+        request: AdmitRequest,
+    ) -> Result<()> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Admit {
-            request: Box::new(request),
+            request: Box::new((context, request)),
             response,
         });
         receiver.await.map_err(|_| PipelineStopped)?
@@ -405,8 +440,12 @@ impl Pipeline {
     }
 
     /// Submits the certified close and blocks until certified admission.
-    pub(crate) fn admit(&self, request: AdmitRequest) -> Result<()> {
-        futures::executor::block_on(self.mailbox.admit(request))
+    pub(crate) fn admit(
+        &self,
+        context: CloseContext<Key, Digest>,
+        request: AdmitRequest,
+    ) -> Result<()> {
+        futures::executor::block_on(self.mailbox.admit(context, request))
     }
 }
 
@@ -532,10 +571,12 @@ where
                             resend_at = self.context.current() + RESEND;
                         }
                         Message::Admit { request, response } => {
+                            let (context, request) = *request;
                             let result = client::admit(
                                 self.context.as_present(),
                                 &mut self.chain,
-                                *request,
+                                &context,
+                                request,
                             )
                             .await;
                             response.send_lossy(result);
@@ -691,6 +732,7 @@ where
         let request = EvidenceRequest::new(
             *prepared.context().deployment(),
             EvidenceLookup::CloseEvidence {
+                epoch: prepared.context().payment().epoch(),
                 batch_id: result.header.batch_id::<Sha256>(),
             },
         )
@@ -713,11 +755,8 @@ where
                 let Ok(EvidenceResponse::Served(Evidence::Close {
                     header,
                     roots,
-                    body:
-                        EvidenceBody::Complete {
-                            context: close_context,
-                            evidence,
-                        },
+                    context: close_context,
+                    withdrawal_claims,
                 })) = EvidenceResponse::decode(body)
                 else {
                     continue;
@@ -733,7 +772,7 @@ where
                     header,
                     roots,
                     withdrawal_total: result.withdrawal_total,
-                    evidence,
+                    withdrawal_claims,
                     certificate: certificate.clone(),
                 };
                 if let Ok(result) = prepared.certify(certified, 0, 0) {
@@ -1324,19 +1363,15 @@ mod tests {
                 let address = SocketAddr::from(([127, 0, 0, 1], 9400 + index));
                 holders.push(address);
                 let mut listener = context.bind(address).await.unwrap();
-                let mut evidence = result.evidence.clone();
+                let mut roots = result.roots;
                 if index == 0 {
-                    let mut bytes = evidence.to_vec();
-                    bytes[0] ^= 1;
-                    evidence = bytes.into();
+                    roots.change.operations += 1;
                 }
                 let response = EvidenceResponse::Served(Evidence::Close {
                     header: result.header,
-                    roots: result.roots,
-                    body: EvidenceBody::Complete {
-                        context: result.context.clone(),
-                        evidence,
-                    },
+                    roots,
+                    withdrawal_claims: result.withdrawal_claims.clone(),
+                    context: result.context.clone(),
                 })
                 .encode();
                 let requests = requests.clone();
@@ -1461,6 +1496,7 @@ mod tests {
             other_accounts[1].balance -= 1;
             let other = protocol.fixture_complete(&other_accounts, &[],
                 protocol.prepare(crate::protocol::EpochRegistration {
+                    floors: None,
                     context: result.context.epoch_context().clone(),
                     deposits: commonware_clearing::bajillion::boundary::DepositBatch::empty(),
                     withdrawals: commonware_clearing::bajillion::boundary::WithdrawalBatch::empty(),

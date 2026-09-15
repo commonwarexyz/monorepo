@@ -209,7 +209,7 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.value.send_root
     }
 
-    /// Projects the exact leaf committed by the change vector.
+    /// Projects the exact guard appended to the activity log.
     pub fn guard<H: Hasher<Digest = D>>(&self) -> ChangeGuard<P, D> {
         ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
     }
@@ -249,6 +249,21 @@ impl<D: Digest> ChangeValue<D> {
     /// Returns the committed outgoing-vector root.
     pub const fn send_root(&self) -> VectorRoot<D> {
         self.send_root
+    }
+}
+
+impl ChangeValueCore {
+    #[cfg(feature = "std")]
+    pub(crate) const fn from_sources(
+        output: SettlementOutput,
+        terminal_debit: u64,
+        terminal_seq: u64,
+    ) -> Self {
+        Self {
+            output,
+            terminal_debit,
+            terminal_seq,
+        }
     }
 }
 

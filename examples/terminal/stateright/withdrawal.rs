@@ -11,7 +11,7 @@
 //! across chain progress. Replay of an older certificate is outside this domain.
 
 use stateright::{Checker, Expectation, HasDiscoveries, Model, Property};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type Epoch = u8;
 pub type Root = u8;
@@ -117,11 +117,8 @@ pub struct PacketId {
     pub queued: u8,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct OutputId {
-    pub epoch: Epoch,
-    pub account: usize,
-}
+/// Stable native payout-log Append location. Commit locations are never output IDs.
+pub type OutputId = u64;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransferId {
@@ -158,6 +155,8 @@ pub enum Action {
     CaptureRead,
     DeliverRead,
     Restart,
+    Fault,
+    Refresh(OutputId),
     Claim(OutputId),
     Acknowledge(OutputId),
 }
@@ -186,6 +185,7 @@ pub struct Projection {
     pub boundary: [Option<RequestId>; ACCOUNTS],
     pub frozen: bool,
     pub adopted: bool,
+    pub faulted: bool,
     pub acknowledgements: [Option<Acknowledgement>; REQUESTS],
     pub receipts: [Option<RequestId>; ACCOUNTS],
     pub anchors: [Option<PacketId>; EPOCHS],
@@ -193,10 +193,12 @@ pub struct Projection {
     pub finalized: Option<Epoch>,
     pub root: Root,
     pub finalized_balances: [u64; ACCOUNTS],
+    pub payout_head: u64,
+    pub unclaimed: BTreeMap<u64, u64>,
     pub outputs: [[Option<u64>; ACCOUNTS]; EPOCHS],
-    /// A certified release exists even when its authenticated amount is zero.
+    /// Certified consumption exists even when its authenticated amount is zero.
     pub released: [[Option<u64>; ACCOUNTS]; EPOCHS],
-    /// Oldest positive output still offered by the operator for each account.
+    /// Oldest output still offered by the operator for each account.
     pub claim_head: [Option<OutputId>; ACCOUNTS],
     pub custody: u64,
     pub claimable: u64,
@@ -226,7 +228,15 @@ struct Authorization {
 struct Close {
     requests: u8,
     outputs: [Option<u64>; ACCOUNTS],
+    output_ids: [Option<OutputId>; ACCOUNTS],
+    payout_operations: u64,
     successor: [u64; ACCOUNTS],
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ClaimCache {
+    head: u64,
+    start: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -256,6 +266,7 @@ pub struct State {
     authorizations: [Option<Authorization>; REQUESTS],
     prepared: Option<PacketId>,
     adopted: bool,
+    faulted: bool,
     packets: BTreeSet<PacketId>,
     paid: u8,
     closes: [Option<Close>; EPOCHS],
@@ -266,6 +277,9 @@ pub struct State {
     admitted: [bool; EPOCHS],
     root: Root,
     finalized_balances: [u64; ACCOUNTS],
+    finalized_payout_head: u64,
+    unclaimed: BTreeMap<u64, u64>,
+    claim_cache: [Option<ClaimCache>; EPOCHS * ACCOUNTS],
     released: [[Option<u64>; ACCOUNTS]; EPOCHS],
     acknowledged: u8,
     reconciliation: Option<Reconciliation>,
@@ -274,13 +288,40 @@ pub struct State {
 impl State {
     fn claim_head(&self, account: usize) -> Option<OutputId> {
         self.closes.iter().enumerate().find_map(|(epoch, close)| {
-            (close.is_some_and(|c| c.outputs[account].is_some_and(|amount| amount > 0))
-                && self.acknowledged & (1 << (epoch * ACCOUNTS + account)) == 0)
-                .then_some(OutputId {
-                    epoch: epoch as Epoch,
-                    account,
-                })
+            close
+                .and_then(|close| close.output_ids[account])
+                .filter(|_| self.acknowledged & (1 << (epoch * ACCOUNTS + account)) == 0)
         })
+    }
+
+    fn output(&self, id: OutputId) -> Option<(usize, usize, u64)> {
+        self.closes.iter().enumerate().find_map(|(epoch, close)| {
+            let close = close.as_ref()?;
+            close
+                .output_ids
+                .iter()
+                .position(|candidate| *candidate == Some(id))
+                .map(|account| (epoch, account, close.outputs[account].unwrap()))
+        })
+    }
+
+    fn output_id(&self, epoch: usize, account: usize) -> Option<OutputId> {
+        self.closes
+            .get(epoch)
+            .and_then(Option::as_ref)
+            .and_then(|close| close.output_ids.get(account).copied().flatten())
+    }
+
+    fn claim_slot(&self, id: OutputId) -> Option<usize> {
+        self.output(id)
+            .map(|(epoch, account, _)| epoch * ACCOUNTS + account)
+    }
+
+    fn containing_start(&self, id: OutputId) -> Option<u64> {
+        self.unclaimed
+            .range(..=id)
+            .next_back()
+            .and_then(|(start, end)| (id < *end).then_some(*start))
     }
 
     fn boundary(&self) -> u8 {
@@ -366,6 +407,7 @@ impl WithdrawalModel {
             authorizations: [None; REQUESTS],
             prepared: None,
             adopted: false,
+            faulted: false,
             packets: BTreeSet::new(),
             paid: u8::from(self.instance.debit == 0) | (u8::from(self.instance.credit == 0) << 1),
             closes: [None; EPOCHS],
@@ -376,6 +418,9 @@ impl WithdrawalModel {
             admitted: [false; EPOCHS],
             root: 0,
             finalized_balances: INITIAL_BALANCES,
+            finalized_payout_head: 1,
+            unclaimed: BTreeMap::new(),
+            claim_cache: [None; EPOCHS * ACCOUNTS],
             released: [[None; ACCOUNTS]; EPOCHS],
             acknowledged: 0,
             reconciliation: None,
@@ -399,6 +444,7 @@ impl WithdrawalModel {
             boundary: std::array::from_fn(|account| request_for(boundary, account)),
             frozen: state.prepared.is_some(),
             adopted: state.adopted,
+            faulted: state.faulted,
             acknowledgements: std::array::from_fn(|i| state.acknowledgement(RequestId::ALL[i])),
             receipts: state.receipts,
             anchors: state.anchors,
@@ -406,6 +452,8 @@ impl WithdrawalModel {
             finalized: state.root.checked_sub(1),
             root: state.root,
             finalized_balances: state.finalized_balances,
+            payout_head: state.finalized_payout_head,
+            unclaimed: state.unclaimed.clone(),
             outputs: state
                 .closes
                 .map(|close| close.map_or([None; ACCOUNTS], |c| c.outputs)),
@@ -434,6 +482,22 @@ impl WithdrawalModel {
     }
 
     fn apply(&self, state: &mut State, action: Action) -> Outcome {
+        if state.faulted
+            && matches!(
+                action,
+                Action::Sign(_)
+                    | Action::Queue(_)
+                    | Action::Apply(_)
+                    | Action::Freeze
+                    | Action::Publish(_)
+                    | Action::ObserveRegistration
+                    | Action::Pay(_)
+                    | Action::Cut
+                    | Action::Admit(_)
+            )
+        {
+            return Outcome::Rejected;
+        }
         match action {
             Action::Sign(id) => {
                 if state.signed[id.index()].is_some() {
@@ -510,7 +574,9 @@ impl WithdrawalModel {
                 })
             }
             Action::Freeze => {
-                if state.epoch as usize >= EPOCHS {
+                if state.epoch as usize >= EPOCHS
+                    || (state.epoch > 0 && !state.admitted[usize::from(state.epoch - 1)])
+                {
                     return Outcome::Rejected;
                 }
                 let requests = state.boundary();
@@ -646,9 +712,24 @@ impl WithdrawalModel {
                     outputs[id.account()] = Some(output);
                     state.balances[id.account()] = tail - output;
                 }
+                let row_start = state
+                    .epoch
+                    .checked_sub(1)
+                    .and_then(|epoch| state.closes[epoch as usize])
+                    .map_or(1, |close| close.payout_operations);
+                let mut next = row_start;
+                let output_ids = std::array::from_fn(|account| {
+                    outputs[account].map(|_| {
+                        let id = next;
+                        next += 1;
+                        id
+                    })
+                });
                 state.closes[state.epoch as usize] = Some(Close {
                     requests,
                     outputs,
+                    output_ids,
+                    payout_operations: next + 1,
                     successor: state.balances,
                 });
                 state.epoch += 1;
@@ -685,9 +766,13 @@ impl WithdrawalModel {
                 if state.root as usize >= EPOCHS || !state.admitted[state.root as usize] {
                     return Outcome::Rejected;
                 }
-                state.finalized_balances = state.closes[state.root as usize]
-                    .expect("admission owns a close")
-                    .successor;
+                let close = state.closes[state.root as usize].expect("admission owns a close");
+                state.finalized_balances = close.successor;
+                let end = close.payout_operations - 1;
+                if state.finalized_payout_head < end {
+                    state.unclaimed.insert(state.finalized_payout_head, end);
+                }
+                state.finalized_payout_head = close.payout_operations;
                 state.root += 1;
                 Outcome::Accepted
             }
@@ -730,37 +815,72 @@ impl WithdrawalModel {
                 state.reconciliation = None;
                 Outcome::Accepted
             }
-            Action::Claim(output) => {
-                let epoch = output.epoch as usize;
-                if epoch >= EPOCHS || output.account >= ACCOUNTS {
-                    return Outcome::Rejected;
-                }
-                if state.released[epoch][output.account].is_some() {
+            Action::Fault => {
+                if state.faulted {
                     return Outcome::Unchanged;
                 }
-                let Some(close) = state.closes[epoch] else {
+                state.faulted = true;
+                Outcome::Accepted
+            }
+            Action::Refresh(output) => {
+                let Some((epoch, account, _)) = state.output(output) else {
                     return Outcome::Rejected;
                 };
-                let Some(amount) = close.outputs[output.account] else {
-                    return Outcome::Rejected;
-                };
-                let total = close.outputs.into_iter().flatten().sum::<u64>();
-                let released = state.released[epoch].iter().flatten().sum::<u64>();
-                if output.epoch >= state.root || total == released {
+                if epoch >= state.root as usize {
                     return Outcome::Rejected;
                 }
-                state.released[epoch][output.account] = Some(amount);
+                let slot = epoch * ACCOUNTS + account;
+                state.claim_cache[slot] = Some(ClaimCache {
+                    head: state.finalized_payout_head,
+                    start: state.containing_start(output),
+                });
+                Outcome::Accepted
+            }
+            Action::Claim(output) => {
+                let Some((epoch, account, amount)) = state.output(output) else {
+                    return Outcome::Rejected;
+                };
+                let slot = epoch * ACCOUNTS + account;
+                let Some(cache) = state.claim_cache[slot] else {
+                    return Outcome::Rejected;
+                };
+                if cache.head != state.finalized_payout_head {
+                    return Outcome::Rejected;
+                }
+                if state.released[epoch][account].is_some() {
+                    return Outcome::Unchanged;
+                }
+                if epoch >= state.root as usize {
+                    return Outcome::Rejected;
+                }
+                let Some(start) = state.containing_start(output) else {
+                    return Outcome::Rejected;
+                };
+                if cache.start != Some(start) {
+                    return Outcome::Rejected;
+                }
+                let end = state
+                    .unclaimed
+                    .remove(&start)
+                    .expect("covering interval exists");
+                if start < output {
+                    state.unclaimed.insert(start, output);
+                }
+                if output + 1 < end {
+                    state.unclaimed.insert(output + 1, end);
+                }
+                state.claim_cache[slot] = None;
+                state.released[epoch][account] = Some(amount);
                 Outcome::Accepted
             }
             Action::Acknowledge(output) => {
-                if output.epoch as usize >= EPOCHS
-                    || output.account >= ACCOUNTS
-                    || !state.released[output.epoch as usize][output.account]
-                        .is_some_and(|amount| amount > 0)
-                {
+                let Some((epoch, account, _)) = state.output(output) else {
+                    return Outcome::Rejected;
+                };
+                if state.released[epoch][account].is_none() {
                     return Outcome::Rejected;
                 }
-                state.acknowledged |= 1 << (output.epoch as usize * ACCOUNTS + output.account);
+                state.acknowledged |= 1 << (epoch * ACCOUNTS + account);
                 Outcome::Accepted
             }
         }
@@ -936,9 +1056,6 @@ impl WithdrawalModel {
             return false;
         }
         for epoch in 0..EPOCHS {
-            let total =
-                state.closes[epoch].map_or(0, |c| c.outputs.into_iter().flatten().sum::<u64>());
-            let released = state.released[epoch].iter().flatten().sum::<u64>();
             for account in 0..ACCOUNTS {
                 let output = state.closes[epoch].and_then(|c| c.outputs[account]);
                 if state.released[epoch][account].is_some()
@@ -946,16 +1063,18 @@ impl WithdrawalModel {
                 {
                     return false;
                 }
-                let id = OutputId {
-                    epoch: epoch as Epoch,
-                    account,
+                let Some(id) = state.output_id(epoch, account) else {
+                    if output.is_some() {
+                        return false;
+                    }
+                    continue;
                 };
-                let first = self.step(state, Action::Claim(id));
+                let refreshed = self.step(state, Action::Refresh(id));
+                let first = self.step(&refreshed.state, Action::Claim(id));
                 let second = self.step(&first.state, Action::Claim(id));
                 if state.released[epoch][account].is_none()
                     && output.is_some()
                     && epoch < state.root as usize
-                    && total > released
                     && (first.outcome != Outcome::Accepted
                         || first.state.released[epoch][account] != output)
                 {
@@ -968,12 +1087,11 @@ impl WithdrawalModel {
                     return false;
                 }
                 let bit = 1 << (epoch * ACCOUNTS + account);
-                let positive_release =
-                    state.released[epoch][account].is_some_and(|amount| amount > 0);
-                if state.acknowledged & bit != 0 && !positive_release {
+                let released = state.released[epoch][account].is_some();
+                if state.acknowledged & bit != 0 && !released {
                     return false;
                 }
-                if positive_release {
+                if released {
                     let acknowledgement = self.step(state, Action::Acknowledge(id));
                     if acknowledgement.outcome != Outcome::Accepted
                         || acknowledgement.state.acknowledged & bit == 0
@@ -992,6 +1110,27 @@ impl WithdrawalModel {
                     return false;
                 }
             }
+        }
+        let outstanding = state
+            .closes
+            .iter()
+            .enumerate()
+            .take(state.root as usize)
+            .flat_map(|(_, close)| close.iter())
+            .flat_map(|close| close.output_ids.into_iter().flatten())
+            .filter(|id| {
+                state
+                    .output(*id)
+                    .is_some_and(|(epoch, account, _)| state.released[epoch][account].is_none())
+            })
+            .collect::<BTreeSet<_>>();
+        let covered = state
+            .unclaimed
+            .iter()
+            .flat_map(|(start, end)| *start..*end)
+            .collect::<BTreeSet<_>>();
+        if outstanding != covered || state.unclaimed.len() > outstanding.len() {
+            return false;
         }
         true
     }
@@ -1032,6 +1171,7 @@ impl WithdrawalModel {
             || state.adopted
             || state.epoch as usize >= EPOCHS
             || state.anchors[state.epoch as usize].is_some()
+            || (state.epoch > 0 && !state.admitted[usize::from(state.epoch - 1)])
         {
             return true;
         }
@@ -1157,14 +1297,15 @@ impl WithdrawalModel {
                     append(Action::Restart, &mut state, &mut actions);
                     append(Action::Apply(RequestId::A0), &mut state, &mut actions);
                     append(Action::Queue(RequestId::A0), &mut state, &mut actions);
-                    let output = OutputId {
-                        epoch: 1,
-                        account: 0,
-                    };
+                    let output = state
+                        .output_id(1, 0)
+                        .expect("finalized tail owns a global payout index");
+                    append(Action::Refresh(output), &mut state, &mut actions);
                     append(Action::Claim(output), &mut state, &mut actions);
                     append(Action::Restart, &mut state, &mut actions);
+                    append(Action::Refresh(output), &mut state, &mut actions);
                     append(Action::Claim(output), &mut state, &mut actions);
-                    if state.released[1][0].is_some_and(|amount| amount > 0) {
+                    if state.released[1][0].is_some() {
                         append(Action::Acknowledge(output), &mut state, &mut actions);
                         append(Action::Restart, &mut state, &mut actions);
                         append(Action::Acknowledge(output), &mut state, &mut actions);
@@ -1310,17 +1451,28 @@ impl Model for WithdrawalModel {
         actions.push(Action::Restart);
         for epoch in 0..EPOCHS {
             for account in 0..ACCOUNTS {
-                if state.closes[epoch].is_some_and(|c| c.outputs[account].is_some()) {
-                    actions.push(Action::Claim(OutputId {
-                        epoch: epoch as Epoch,
-                        account,
-                    }));
+                if let Some(output) = state.output_id(epoch, account) {
+                    let slot = epoch * ACCOUNTS + account;
+                    let current = state.claim_cache[slot].is_some_and(|cache| {
+                        cache.head == state.finalized_payout_head
+                            && cache.start == state.containing_start(output)
+                    });
+                    if epoch < state.root as usize
+                        && state.released[epoch][account].is_none()
+                        && !current
+                    {
+                        actions.push(Action::Refresh(output));
+                    }
+                    if current && state.released[epoch][account].is_none() {
+                        actions.push(Action::Claim(output));
+                    }
                 }
-                if state.released[epoch][account].is_some_and(|amount| amount > 0) {
-                    actions.push(Action::Acknowledge(OutputId {
-                        epoch: epoch as Epoch,
-                        account,
-                    }));
+                if state.released[epoch][account].is_some() {
+                    actions.push(Action::Acknowledge(
+                        state
+                            .output_id(epoch, account)
+                            .expect("released output owns a global payout index"),
+                    ));
                 }
             }
         }
@@ -1449,6 +1601,38 @@ fn stale_released(state: &State, mixed: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn apply_all(
+        model: &WithdrawalModel,
+        state: &mut State,
+        actions: impl IntoIterator<Item = Action>,
+    ) {
+        for action in actions {
+            let transition = model.step(state, action);
+            assert_ne!(transition.outcome, Outcome::Rejected, "{action:?}");
+            *state = transition.state;
+        }
+    }
+
+    fn close_and_finalize(model: &WithdrawalModel, state: &mut State, epoch: Epoch, requests: u8) {
+        let packet = PacketId {
+            epoch,
+            requests,
+            queued: 0,
+        };
+        apply_all(
+            model,
+            state,
+            [
+                Action::Freeze,
+                Action::Publish(packet),
+                Action::ObserveRegistration,
+                Action::Cut,
+                Action::Admit(epoch),
+                Action::Finalize,
+            ],
+        );
+    }
+
     #[test]
     fn exhaustive_withdrawal_lifecycle() {
         let mut total = 0;
@@ -1497,5 +1681,146 @@ mod tests {
                 trace.instance
             );
         }
+    }
+
+    #[test]
+    fn zero_output_requires_a_certified_claim() {
+        let model = WithdrawalModel::new(Instance {
+            primary: Withdrawal::Amount(0),
+            debit: 0,
+            credit: 0,
+        });
+        let mut state = model.initial_state();
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Sign(RequestId::A0), Action::Apply(RequestId::A0)],
+        );
+        close_and_finalize(&model, &mut state, 0, RequestId::A0.bit());
+
+        let account = RequestId::A0.account();
+        let output = state.output_id(0, account).unwrap();
+        assert_eq!(state.released[0][account], None);
+        let refreshed = model.step(&state, Action::Refresh(output));
+        assert_eq!(refreshed.outcome, Outcome::Accepted);
+        let claimed = model.step(&refreshed.state, Action::Claim(output));
+        assert_eq!(claimed.outcome, Outcome::Accepted);
+        assert_eq!(claimed.state.released[0][account], Some(0));
+    }
+
+    #[test]
+    fn stale_head_and_interval_hint_refresh_the_same_output_identity() {
+        let model = WithdrawalModel::default();
+        let mut state = model.initial_state();
+        apply_all(
+            &model,
+            &mut state,
+            [
+                Action::Sign(RequestId::A0),
+                Action::Sign(RequestId::B0),
+                Action::Apply(RequestId::A0),
+                Action::Apply(RequestId::B0),
+            ],
+        );
+        close_and_finalize(
+            &model,
+            &mut state,
+            0,
+            RequestId::A0.bit() | RequestId::B0.bit(),
+        );
+        let first = state.output_id(0, 0).unwrap();
+        let second = state.output_id(0, 1).unwrap();
+        assert_eq!(second, first + 1);
+
+        apply_all(
+            &model,
+            &mut state,
+            [
+                Action::Refresh(first),
+                Action::Refresh(second),
+                Action::Claim(first),
+            ],
+        );
+        assert_eq!(
+            model.step(&state, Action::Claim(second)).outcome,
+            Outcome::Rejected
+        );
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Refresh(second), Action::Claim(second)],
+        );
+
+        // An empty finalized epoch changes the current native head without changing identity.
+        let model = WithdrawalModel::default();
+        let mut state = model.initial_state();
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Sign(RequestId::A0), Action::Apply(RequestId::A0)],
+        );
+        close_and_finalize(&model, &mut state, 0, RequestId::A0.bit());
+        let output = state.output_id(0, 0).unwrap();
+        apply_all(&model, &mut state, [Action::Refresh(output)]);
+        let old_head = state.claim_cache[state.claim_slot(output).unwrap()]
+            .unwrap()
+            .head;
+        close_and_finalize(&model, &mut state, 1, 0);
+        assert_ne!(state.finalized_payout_head, old_head);
+        assert_eq!(
+            model.step(&state, Action::Claim(output)).outcome,
+            Outcome::Rejected
+        );
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Refresh(output), Action::Claim(output)],
+        );
+
+        // A different valid path at the same head cannot release the global index twice.
+        let released = state.released;
+        apply_all(&model, &mut state, [Action::Refresh(output)]);
+        assert_eq!(
+            model.step(&state, Action::Claim(output)).outcome,
+            Outcome::Unchanged
+        );
+        assert_eq!(state.released, released);
+    }
+
+    #[test]
+    fn faulted_clean_prefix_claims_without_new_admission() {
+        let model = WithdrawalModel::default();
+        let mut state = model.initial_state();
+        apply_all(
+            &model,
+            &mut state,
+            [
+                Action::Sign(RequestId::A0),
+                Action::Apply(RequestId::A0),
+                Action::Freeze,
+                Action::Publish(PacketId {
+                    epoch: 0,
+                    requests: RequestId::A0.bit(),
+                    queued: 0,
+                }),
+                Action::ObserveRegistration,
+                Action::Cut,
+                Action::Admit(0),
+                Action::Fault,
+                Action::Finalize,
+            ],
+        );
+        let output = state.output_id(0, 0).unwrap();
+        let admissions = state.admitted;
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Refresh(output), Action::Claim(output)],
+        );
+        assert_eq!(state.admitted, admissions);
+        assert_eq!(
+            model.step(&state, Action::Admit(1)).outcome,
+            Outcome::Rejected
+        );
     }
 }

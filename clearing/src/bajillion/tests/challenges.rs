@@ -436,7 +436,11 @@ fn entry_absence_and_empty_vectors_convict() {
             assert!(matches!(sender, HigherEntryLookup::Present { .. }));
             assert_eq!(
                 sender
-                    .resolve::<Sha256>(&close.roots.change, payer, &recipient)
+                    .resolve::<Sha256>(
+                        &close.roots.activity_range(&fixture.context).unwrap(),
+                        payer,
+                        &recipient
+                    )
                     .unwrap(),
                 (0, 0)
             );

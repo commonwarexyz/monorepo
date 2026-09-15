@@ -16,7 +16,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    boundary::SignedWithdrawal, payment::PaymentContext, qmdb::StateOpening,
+    boundary::SignedWithdrawal, custody::Source, payment::PaymentContext, qmdb::StateOpening,
 };
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Clock, Network};
@@ -394,8 +394,8 @@ pub(super) enum ReceiptEpoch {
     Unresolved,
     /// The native challenge window remains live, with an optional immutable admitted close.
     Live(Option<AdmittedRootsResponse>),
-    /// Coverage must be verified under this immutable finalized close.
-    Finalized(AdmittedRootsResponse),
+    /// Coverage must be verified under this source authenticated at paired finalized heads.
+    Finalized(Box<Source<Key, Digest>>),
     /// The published fault does not establish whether this nonfinal admitted close survives.
     Faulted(AdmittedRootsResponse),
     /// The context can never settle: its anchor conflicts, it never admitted, or it was invalidated.
@@ -414,7 +414,18 @@ pub(super) async fn receipt_epoch<E: Env>(
         "settlement client has an unexpected deployment"
     );
     let epoch = context.epoch();
-    match chain.anchor(ctx, epoch).await? {
+    let anchor = match chain.anchor(ctx, epoch).await {
+        Ok(anchor) => anchor,
+        Err(anchor_error) => {
+            return match finalized_receipt_source(ctx, chain, deployment, context).await {
+                Ok(Some(verdict)) => Ok(verdict),
+                Ok(None) => Err(anchor_error),
+                Err(source_error) => Err(source_error
+                    .context(format!("receipt anchor is unavailable ({anchor_error:#})"))),
+            };
+        }
+    };
+    match anchor {
         Some(anchor) if anchor != *context.anchor() => return Ok(ReceiptEpoch::Invalidated),
         None => {
             let status = chain.recent_status(ctx).await?;
@@ -425,6 +436,11 @@ pub(super) async fn receipt_epoch<E: Env>(
             {
                 // The absence must follow the permanent boundary, since a registration
                 // can become visible between the initial anchor and boundary reads.
+                if let Some(verdict) =
+                    finalized_receipt_source(ctx, chain, deployment, context).await?
+                {
+                    return Ok(verdict);
+                }
                 return Ok(match chain.anchor(ctx, epoch).await? {
                     Some(anchor) if anchor == *context.anchor() => ReceiptEpoch::Unresolved,
                     _ => ReceiptEpoch::Invalidated,
@@ -439,7 +455,9 @@ pub(super) async fn receipt_epoch<E: Env>(
     if let Some(record) = admitted
         && record.finalized
     {
-        return Ok(ReceiptEpoch::Finalized(record));
+        return finalized_receipt_source(ctx, chain, deployment, context)
+            .await?
+            .context("finalized source is not visible yet");
     }
     let registration = if admitted.is_none() {
         chain.registration(ctx).await?
@@ -459,7 +477,9 @@ pub(super) async fn receipt_epoch<E: Env>(
             return Ok(ReceiptEpoch::Invalidated);
         };
         if record.finalized {
-            return Ok(ReceiptEpoch::Finalized(record));
+            return finalized_receipt_source(ctx, chain, deployment, context)
+                .await?
+                .context("finalized source is not visible yet");
         }
         if invalidated_epoch(ctx, chain, epoch, &status, &fault).await? {
             return Ok(ReceiptEpoch::Invalidated);
@@ -467,12 +487,9 @@ pub(super) async fn receipt_epoch<E: Env>(
         return Ok(ReceiptEpoch::Faulted(record));
     }
     if status.last_finalized.is_some_and(|last| last >= epoch) {
-        let record = chain
-            .admitted(ctx, epoch)
+        return finalized_receipt_source(ctx, chain, deployment, context)
             .await?
-            .context("finalized close is not visible yet")?;
-        ensure!(record.finalized, "finalized close is not visible yet");
-        return Ok(ReceiptEpoch::Finalized(record));
+            .context("finalized source is not visible yet");
     }
 
     // Native admission deadlines strictly increase, challenge duration is fixed, and each
@@ -490,6 +507,28 @@ pub(super) async fn receipt_epoch<E: Env>(
         return Ok(ReceiptEpoch::Live(None));
     }
     Ok(ReceiptEpoch::Unresolved)
+}
+
+/// Resolves finalized receipt authority directly from one paired native checkpoint.
+async fn finalized_receipt_source<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    deployment: Digest,
+    context: &PaymentContext<Key, Digest>,
+) -> Result<Option<ReceiptEpoch>> {
+    let (status, tip) = chain.payout_checkpoint(ctx).await?;
+    ensure!(
+        status.deployment == deployment && status.last_finalized == tip.finalized,
+        "receipt checkpoint has another deployment or finalization boundary"
+    );
+    if !tip.finalized.is_some_and(|last| context.epoch() <= last) {
+        return Ok(None);
+    }
+    let source = chain.source(ctx, context.epoch(), tip).await?;
+    if source.context().payment() != context {
+        return Ok(Some(ReceiptEpoch::Invalidated));
+    }
+    Ok(Some(ReceiptEpoch::Finalized(Box::new(source))))
 }
 
 /// Whether the published fault boundary permanently invalidates this nonfinal admitted epoch.

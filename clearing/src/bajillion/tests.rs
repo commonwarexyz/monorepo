@@ -4,15 +4,19 @@ use crate::bajillion::{
         AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness, Verdict,
         account_lookup, adjudicate, higher_entry_lookup,
     },
+    custody::{Epoch, SourceProof},
+    logs::{self, ActivityInput, Floors, Heads, Logs},
     payment::{
         AckError, EntryReceipt, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck,
         VectorSendBody,
     },
     posted,
     qmdb::{self, Mutations, State, StateHead, StateLookup, StateOpening, StateRoot, account_key},
+    replica::{PreparedReplica, Replica},
     transition::{
         ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, PreparedClose, Terminal,
-        TransitionError as CloseError, prepare_close_with_strategy, validate_close_with_strategy,
+        TransitionError as CloseError, WithdrawalOutput, prepare_close_with_strategy,
+        validate_close_with_strategy,
     },
     vector::{OutEntry, OutVector},
 };
@@ -42,6 +46,8 @@ use core::num::NonZeroU64;
 
 mod boundaries;
 mod challenges;
+mod flat_logs;
+mod native_custody;
 mod ordering;
 mod rotation;
 mod state;
@@ -53,7 +59,7 @@ const OPENING_BALANCE: u64 = 1_000_000;
 const OPERATOR_SEED: u64 = 1;
 const ACCOUNT_SEED_START: u64 = 10_000;
 
-pub(crate) type TestState = State<deterministic::Context, Sha256>;
+pub(crate) type TestState = Replica<deterministic::Context, Sha256, VerifyingKey>;
 
 pub(crate) fn config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<Sequential> {
     let page_cache = CacheRef::from_pooler(context, NZU16!(4092), NZUsize!(16));
@@ -82,6 +88,48 @@ pub(crate) fn config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<
     }
 }
 
+pub(crate) fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Config<Sequential> {
+    let activity = config(context, &format!("{prefix}-activity"));
+    let payouts = config(context, &format!("{prefix}-payouts"));
+    logs::Config {
+        activity: commonware_storage::qmdb::keyless::Config {
+            merkle: activity.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: activity.journal_config.partition,
+                items_per_section: commonware_utils::NZU64!(4096),
+                compression: None,
+                codec_config: commonware_codec::RangeCfg::new(..=16 * 1024 * 1024),
+                page_cache: activity.journal_config.page_cache,
+                write_buffer: commonware_utils::NZUsize!(4096),
+                replay_buffer: commonware_utils::NZUsize!(4096),
+            },
+        },
+        payouts: commonware_storage::qmdb::keyless::Config {
+            merkle: payouts.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: payouts.journal_config.partition,
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: commonware_codec::RangeCfg::new(0..=1024),
+                page_cache: payouts.journal_config.page_cache,
+                write_buffer: NZUsize!(4096),
+                replay_buffer: NZUsize!(4096),
+            },
+        },
+    }
+}
+
+pub(crate) async fn open_state(
+    context: deterministic::Context,
+    prefix: &str,
+) -> Result<TestState, crate::bajillion::replica::Error> {
+    let cfg = crate::bajillion::replica::Config {
+        state: config(&context, prefix),
+        logs: logs_config(&context, prefix),
+    };
+    Replica::open(context, cfg).await
+}
+
 pub(crate) async fn new_state(
     context: deterministic::Context,
     prefix: &str,
@@ -98,44 +146,102 @@ pub(crate) async fn new_state(
         .collect::<Vec<_>>();
     genesis.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let config = config(&context, prefix);
-    State::init(context, config, genesis).await.unwrap()
+    let log_config = logs_config(&context, prefix);
+    let state = State::init(context.child("state"), config, genesis)
+        .await
+        .unwrap();
+    let logs = Logs::open(context.child("logs"), log_config).await.unwrap();
+    Replica::from_parts(state, logs)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Accepted {
     pub head: StateHead<ShaDigest>,
     pub mutations: Mutations,
+    pub logs: Heads<ShaDigest>,
+    pub activity: ActivityInput<VerifyingKey, ShaDigest>,
+    pub outputs: Vec<WithdrawalOutput>,
 }
 
-// Test journals keep accepted heads separate from mutation payloads. A recovered prefix
-// binds through its head; only missing records supply mutations to preparation.
+impl Accepted {
+    pub(crate) const fn genesis(state: &TestState, mutations: Mutations) -> Self {
+        Self {
+            head: *state.state().head(),
+            mutations,
+            logs: *state.logs().head(),
+            activity: ActivityInput::new(vec![], Bytes::new()),
+            outputs: vec![],
+        }
+    }
+
+    pub(crate) fn prepared(prepared: &PreparedClose<VerifyingKey, ShaDigest>) -> Self {
+        Self {
+            head: *prepared.state().head(),
+            mutations: prepared.state().mutations().to_vec(),
+            logs: *prepared.replica().logs().head(),
+            activity: prepared.close().activity_input(),
+            outputs: prepared.close().withdrawal_evidence().0.to_vec(),
+        }
+    }
+}
+
+// Accepted records authenticate all three native heads; only missing records supply replay values.
 #[commonware_macros::boxed]
 pub(crate) async fn replay_state(
     context: deterministic::Context,
     prefix: &str,
     accepted: &[Accepted],
-) -> Result<TestState, qmdb::Error> {
-    let cfg = config(&context, prefix);
-    let mut state = TestState::open(context, cfg).await?;
-    let start = if state.is_bootstrap() {
+) -> Result<TestState, crate::bajillion::replica::Error> {
+    let mut replica = open_state(context, prefix).await?;
+    let start = if replica.state().is_bootstrap() {
         0
     } else {
         accepted
             .iter()
-            .position(|record| record.head == *state.head())
+            .position(|record| {
+                record.head == *replica.state().head() && record.logs == *replica.logs().head()
+            })
             .ok_or(qmdb::Error::Predecessor)?
             + 1
     };
-    for record in &accepted[start..] {
-        let prepared = state
-            .prepare(state.head(), record.mutations.clone())
+    for (index, record) in accepted.iter().enumerate().skip(start) {
+        let prepared = replica
+            .state()
+            .prepare(replica.state().head(), record.mutations.clone())
             .await?;
         if prepared.head() != &record.head {
-            return Err(qmdb::Error::Predecessor);
+            return Err(qmdb::Error::Predecessor.into());
         }
-        state = state.apply(prepared).await?;
+        if index == 0 {
+            if record.logs != *replica.logs().head()
+                || !record.activity.guards().is_empty()
+                || !record.activity.metadata().is_empty()
+                || !record.outputs.is_empty()
+            {
+                return Err(qmdb::Error::Predecessor.into());
+            }
+            let (state, logs) = replica.into_parts();
+            replica = Replica::from_parts(state.apply(prepared).await?, logs);
+        } else {
+            let logs = replica
+                .logs()
+                .prepare(
+                    replica.logs().head(),
+                    record.activity.clone(),
+                    record.outputs.clone(),
+                    Floors {
+                        activity: record.logs.activity.floor,
+                        payouts: record.logs.payouts.floor,
+                    },
+                )
+                .await?;
+            if logs.head() != &record.logs {
+                return Err(qmdb::Error::Predecessor.into());
+            }
+            replica = replica.apply(PreparedReplica::new(prepared, logs)).await?;
+        }
     }
-    Ok(state)
+    Ok(replica)
 }
 
 struct Fixture {
@@ -191,13 +297,13 @@ async fn fixture(
             .collect(),
     )
     .await;
-    let genesis = Accepted {
-        head: *state.head(),
-        mutations: accounts
+    let genesis = Accepted::genesis(
+        &state,
+        accounts
             .iter()
             .map(|(key, _)| (account_key(key).unwrap(), NonZeroU64::new(OPENING_BALANCE)))
             .collect(),
-    };
+    );
     let operator = SigningKey::from_seed(OPERATOR_SEED);
     let operator_bls_private = BlsPrivate::new(Scalar::from(OPERATOR_SEED));
     let operator_bls =
@@ -210,14 +316,22 @@ async fn fixture(
         operator.public_key(),
         &deposits,
         &withdrawals,
-        state.liability(),
+        state.state().liability(),
         98,
         99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"close-test-committee"]),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+    .bind::<Sha256, _, _>(
+        &state,
+        &deposits,
+        &withdrawals,
+        Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    )
     .unwrap();
     let mut acks = Vec::new();
     let mut terminals = Vec::new();
@@ -312,11 +426,14 @@ fn full_dealing_derives_balances_and_preserves_idle_accounts() {
                 expected[(sender + offset) % 8] += 1;
             }
         }
-        let (state, close) = prepared.apply::<_, Sha256>(fixture.state).await.unwrap();
-        assert_eq!(state.root(), close.roots.successor);
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(fixture.state))
+            .await
+            .unwrap();
+        assert_eq!(state.state().root(), close.roots.successor);
         for ((public, _), balance) in fixture.accounts.iter().zip(expected) {
             assert_eq!(
                 state
+                    .state()
                     .get(&account_key(public).unwrap())
                     .await
                     .unwrap()
@@ -325,7 +442,7 @@ fn full_dealing_derives_balances_and_preserves_idle_accounts() {
                 balance
             );
         }
-        assert_eq!(state.live_accounts(), 24);
+        assert_eq!(state.state().live_accounts(), 24);
     });
 }
 
@@ -335,19 +452,22 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         let fixture = fixture(runtime, 8, 8, 8, 2).await;
         assert_eq!(fixture.prepared.close().rows.len(), 8);
         assert!(fixture.prepared.state().mutations().is_empty());
-        let before = fixture.state.root();
-        let before_operations = fixture.state.head().operations();
+        let before = fixture.state.state().root();
+        let before_operations = fixture.state.state().head().operations();
         let prepared = validate(&fixture, fixture.prepared.encoded().clone())
             .await
             .unwrap();
-        let (state, close) = prepared.apply::<_, Sha256>(fixture.state).await.unwrap();
-        assert_ne!(state.root(), before);
-        assert!(state.head().operations() > before_operations);
-        let after_operations = state.head().operations();
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(fixture.state))
+            .await
+            .unwrap();
+        assert_ne!(state.state().root(), before);
+        assert!(state.state().head().operations() > before_operations);
+        let after_operations = state.state().head().operations();
         let index = ChallengeIndex::new::<Sha256>(&fixture.context, &close).unwrap();
         for ((account, _), ack) in fixture.accounts.iter().zip(&fixture.acks) {
             assert_eq!(
                 state
+                    .state()
                     .get(&account_key(account).unwrap())
                     .await
                     .unwrap()
@@ -378,14 +498,22 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            state.liability(),
+            state.state().liability(),
             100,
             101,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
+        .bind::<Sha256, _, _>(
+            &state,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
         let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
@@ -399,10 +527,10 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         .unwrap();
         assert!(empty.close().rows.is_empty());
         assert!(empty.state().mutations().is_empty());
-        let previous = state.root();
-        let (state, _) = empty.apply::<_, Sha256>(state).await.unwrap();
-        assert_ne!(state.root(), previous);
-        assert!(state.head().operations() > after_operations);
+        let previous = state.state().root();
+        let (state, _) = Box::pin(empty.apply::<_, Sha256>(state)).await.unwrap();
+        assert_ne!(state.state().root(), previous);
+        assert!(state.state().head().operations() > after_operations);
     });
 }
 
@@ -411,7 +539,7 @@ fn complete_wire_rejects_tampering_truncation_and_trailing_bytes_without_mutatio
     deterministic::Runner::default().start(|context| async move {
         let fixture = fixture(context, 8, 8, 4, 1).await;
         let wire = fixture.prepared.encoded();
-        let before = *fixture.state.head();
+        let before = *fixture.state.state().head();
         for length in 0..wire.len() {
             assert!(
                 posted::decode::<VerifyingKey, ShaDigest>(wire.slice(..length), &fixture.context)
@@ -432,7 +560,7 @@ fn complete_wire_rejects_tampering_truncation_and_trailing_bytes_without_mutatio
         assert!(
             posted::decode::<VerifyingKey, ShaDigest>(trailing.into(), &fixture.context).is_err()
         );
-        assert_eq!(*fixture.state.head(), before);
+        assert_eq!(*fixture.state.state().head(), before);
         validate(&fixture, wire.clone()).await.unwrap();
     });
 }
@@ -441,7 +569,7 @@ fn complete_wire_rejects_tampering_truncation_and_trailing_bytes_without_mutatio
 fn forged_payer_and_operator_acceptance_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
         let fixture = fixture(context, 8, 8, 4, 1).await;
-        let before = *fixture.state.head();
+        let before = *fixture.state.state().head();
         for forge_payer in [false, true] {
             let mut terminals = fixture.terminals.clone();
             if forge_payer {
@@ -465,7 +593,7 @@ fn forged_payer_and_operator_acceptance_are_rejected() {
             .await
             .unwrap();
             assert!(validate(&fixture, forged.encoded().clone()).await.is_err());
-            assert_eq!(*fixture.state.head(), before);
+            assert_eq!(*fixture.state.state().head(), before);
         }
     });
 }
@@ -484,7 +612,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
                 .collect(),
         )
         .await;
-        assert_eq!(same.root(), fixture.state.root());
+        assert_eq!(same.state().root(), fixture.state.state().root());
         let dealing = posted::decode(fixture.prepared.encoded().clone(), &fixture.context).unwrap();
         let valid = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
             &same,
@@ -499,7 +627,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
         .await
         .unwrap();
         assert_eq!(valid.close().roots, fixture.prepared.close().roots);
-        let (advanced, _) = valid.apply::<_, Sha256>(same).await.unwrap();
+        let (advanced, _) = Box::pin(valid.apply::<_, Sha256>(same)).await.unwrap();
         let divergent = new_state(
             runtime,
             "divergent",
@@ -511,7 +639,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
         )
         .await;
         for state in [&advanced, &divergent] {
-            let before = *state.head();
+            let before = *state.state().head();
             let dealing =
                 posted::decode(fixture.prepared.encoded().clone(), &fixture.context).unwrap();
             assert!(
@@ -528,7 +656,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
                 .await
                 .is_err()
             );
-            assert_eq!(*state.head(), before);
+            assert_eq!(*state.state().head(), before);
         }
     });
 }
@@ -539,7 +667,6 @@ mod conformance {
     use commonware_conformance::Conformance;
 
     struct FullDealing;
-    struct RetainedEvidence;
 
     impl Conformance for FullDealing {
         async fn commit(seed: u64) -> Vec<u8> {
@@ -558,12 +685,14 @@ mod conformance {
         }
     }
 
-    impl Conformance for RetainedEvidence {
+    struct SourceEvidence;
+
+    impl Conformance for SourceEvidence {
         async fn commit(seed: u64) -> Vec<u8> {
-            deterministic::Runner::seeded(seed).start(|context| async move {
+            deterministic::Runner::seeded(seed).start(|runtime| async move {
                 let live = 4 + seed as usize % 9;
                 let fixture = fixture(
-                    context,
+                    runtime,
                     live,
                     seed as usize % (live + 1),
                     4,
@@ -576,7 +705,7 @@ mod conformance {
                 .unwrap();
                 let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
                     *fixture.context.deployment(),
-                    fixture.state.root().digest,
+                    fixture.state.state().root().digest,
                     Bytes::from(format!("destination-{seed}")),
                     if seed.is_multiple_of(2) {
                         WithdrawalAction::Close
@@ -593,14 +722,22 @@ mod conformance {
                     fixture.operator.public_key(),
                     &deposits,
                     &withdrawals,
-                    fixture.state.liability(),
+                    fixture.state.state().liability(),
                     98,
                     99,
                     CloseLimits::protocol_maximum(),
                     *fixture.context.committee(),
                 )
                 .unwrap()
-                .bind::<Sha256, _, _>(&fixture.state, &deposits, &withdrawals)
+                .bind::<Sha256, _, _>(
+                    &fixture.state,
+                    &deposits,
+                    &withdrawals,
+                    Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
                 .unwrap();
                 let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                     &fixture.state,
@@ -612,14 +749,28 @@ mod conformance {
                 )
                 .await
                 .unwrap();
-                let close = prepared.close();
-                let encoded = close.encode_evidence();
-                Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
-                    encoded.clone(),
-                    &context,
-                    &close.header,
-                )
-                .unwrap();
+                let (state, _) = Box::pin(prepared.apply::<_, Sha256>(fixture.state))
+                    .await
+                    .unwrap();
+                let epoch = Epoch::load(state.logs(), EPOCH).await.unwrap();
+                let heads = *state.logs().head();
+                let proof = epoch.source_proof(state.logs(), &heads).await.unwrap();
+                assert_eq!(
+                    proof
+                        .verify::<Sha256, VerifyingKey>(&heads)
+                        .unwrap()
+                        .context(),
+                    &context
+                );
+                let encoded = proof.encode();
+                assert_eq!(
+                    SourceProof::<ShaDigest>::decode_cfg(
+                        encoded.clone(),
+                        &commonware_codec::RangeCfg::new(..=proof.metadata.len())
+                    )
+                    .unwrap(),
+                    proof
+                );
                 encoded.to_vec()
             })
         }
@@ -627,6 +778,6 @@ mod conformance {
 
     commonware_conformance::conformance_tests! {
         FullDealing => 64,
-        RetainedEvidence => 64,
+        SourceEvidence => 64,
     }
 }

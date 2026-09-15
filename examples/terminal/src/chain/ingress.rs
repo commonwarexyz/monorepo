@@ -28,7 +28,7 @@ use commonware_consensus::{Reporter, marshal::Update};
 use commonware_cryptography::{Hasher as _, Sha256, ed25519, sha256::Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{ContextCell, Handle, IoBuf, Spawner, spawn_cell};
+use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Network, Spawner, spawn_cell};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{
     Acknowledgement,
@@ -40,14 +40,28 @@ use futures::FutureExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
+    net::SocketAddr,
     num::NonZeroUsize,
     sync::Arc,
+    time::Duration,
 };
 
 /// Serves pending settlement transactions to block proposals.
 ///
 /// Handles are cloned per proposal, so they must be cheap to clone.
 pub(crate) trait Provider: Clone + Send + Sync + 'static {
+    /// Retargets a payout witness to the deterministic execution head of a proposal.
+    fn payout_proof(
+        &mut self,
+        _deployment: Digest,
+        _head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+        _index: u64,
+    ) -> impl Future<
+        Output = Option<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>>,
+    > + Send {
+        async { None }
+    }
+
     /// Returns at most `max` pending transactions whose aggregate encoded
     /// size is at most `budget`. Other entries remain available for later drains.
     fn drain(
@@ -61,6 +75,69 @@ pub(crate) trait Provider: Clone + Send + Sync + 'static {
 impl Provider for () {
     async fn drain(&mut self, _: usize, _: usize) -> Vec<SettlementTx> {
         Vec::new()
+    }
+}
+
+/// A proposal's ingress queue and native proof sources.
+pub(crate) struct WitnessProvider<E> {
+    context: Arc<E>,
+    ingress: Mailbox,
+    holders: Arc<Vec<SocketAddr>>,
+}
+
+impl<E> Clone for WitnessProvider<E> {
+    fn clone(&self) -> Self {
+        Self {
+            context: Arc::clone(&self.context),
+            ingress: self.ingress.clone(),
+            holders: Arc::clone(&self.holders),
+        }
+    }
+}
+
+impl<E> WitnessProvider<E> {
+    pub(crate) fn new(context: E, ingress: Mailbox, holders: Vec<SocketAddr>) -> Self {
+        Self {
+            context: Arc::new(context),
+            ingress,
+            holders: Arc::new(holders),
+        }
+    }
+}
+
+impl<E: Clock + Network> Provider for WitnessProvider<E> {
+    async fn payout_proof(
+        &mut self,
+        deployment: Digest,
+        head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+        index: u64,
+    ) -> Option<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>> {
+        let mut ingress = self.ingress.clone();
+        let local = self
+            .context
+            .timeout(Duration::from_secs(2), async move {
+                ingress.payout_proof(deployment, head, index).await
+            })
+            .await;
+        if let Ok(Some(claim)) = local
+            && claim.position() == index
+            && claim.verify::<Sha256>(&head).is_ok()
+        {
+            return Some(claim);
+        }
+        crate::chain::client::fetch_payout_proof(
+            self.context.as_ref(),
+            &self.holders,
+            deployment,
+            head,
+            index,
+        )
+        .await
+        .ok()
+    }
+
+    async fn drain(&mut self, max: usize, budget: usize) -> Vec<SettlementTx> {
+        self.ingress.drain(max, budget).await
     }
 }
 
@@ -163,17 +240,23 @@ impl<A: Acknowledgement> Policy for Message<A> {
 /// Inbox for the ingress [`Actor`].
 pub(crate) struct Mailbox<A: Acknowledgement = Exact> {
     sender: MailboxSender<Message<A>>,
+    witnesses: Arc<commonware_utils::sync::Mutex<Option<crate::chain::da::Mailbox>>>,
 }
 
 impl<A: Acknowledgement> Clone for Mailbox<A> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            witnesses: self.witnesses.clone(),
         }
     }
 }
 
 impl<A: Acknowledgement> Mailbox<A> {
+    pub(crate) fn attach_witnesses(&self, witnesses: crate::chain::da::Mailbox) {
+        *self.witnesses.lock() = Some(witnesses);
+    }
+
     /// Submits owned bytes for bounded qualification. Acceptance is advisory.
     pub(crate) async fn submit_raw(&self, bytes: IoBuf) -> anyhow::Result<Submission> {
         if bytes.remaining() > MAX_TX_BYTES {
@@ -186,6 +269,28 @@ impl<A: Acknowledgement> Mailbox<A> {
 }
 
 impl<A: Acknowledgement> Provider for Mailbox<A> {
+    async fn payout_proof(
+        &mut self,
+        deployment: Digest,
+        head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+        index: u64,
+    ) -> Option<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>> {
+        let witnesses = self.witnesses.lock().clone()?;
+        match witnesses
+            .serve(crate::chain::query::EvidenceRequest::new(
+                deployment,
+                crate::chain::query::EvidenceLookup::Payout { head, index },
+            ))
+            .await
+            .ok()?
+        {
+            crate::chain::query::EvidenceResponse::Served(
+                crate::chain::query::Evidence::Payout(claim),
+            ) => Some(claim),
+            _ => None,
+        }
+    }
+
     async fn drain(&mut self, max: usize, budget: usize) -> Vec<SettlementTx> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Drain {
@@ -336,7 +441,10 @@ where
                 #[cfg(test)]
                 completed: None,
             },
-            Mailbox { sender },
+            Mailbox {
+                sender,
+                witnesses: Arc::new(commonware_utils::sync::Mutex::new(None)),
+            },
         )
     }
 

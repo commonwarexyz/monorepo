@@ -23,9 +23,8 @@ use crate::{
     protocol::{
         Account, AccountIdentity, Ack, Deployment, DepositEvent, Entry, EpochRegistration, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, Protocol, SettlementResult, Timing,
-        WithdrawalEvidence, WithdrawalWitness, ensure_amount_withdrawal_horizon,
-        ensure_balance_intake_horizon, ensure_close_horizon, identities, openable_epoch_after,
-        short_digest,
+        ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon, ensure_close_horizon,
+        identities, openable_epoch_after, short_digest,
     },
     store::CommitUnknown,
 };
@@ -34,14 +33,13 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::{HigherEntryLookup, higher_entry_lookup},
+    challenge::HigherEntryLookup,
     commitment::{VectorKind, VectorRoot},
+    logs::LogHead,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
     settlement::Genesis,
-    transition::{
-        BatchId, ChallengeIndex, Close, EpochContext, RootBundle, Terminal, WithdrawalClaim,
-    },
+    transition::{BatchId, EpochContext, RootBundle, Terminal, WithdrawalClaim},
     vector::{OutEntry, OutVector},
 };
 #[cfg(test)]
@@ -119,7 +117,7 @@ impl SendOutcome {
 /// exceeds it.
 pub(crate) struct CommittedEntry {
     pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) change_root: VectorRoot<Digest>,
+    pub(crate) change_root: commonware_clearing::bajillion::logs::LogHead<Digest>,
     pub(crate) lookup: HigherEntryLookup<Key, Digest>,
 }
 
@@ -169,7 +167,7 @@ enum ResultFailure {
 /// Complete local operator. Only public state and signed artifacts enter SQLite.
 pub(crate) struct Operator {
     store: Store,
-    balances: qmdb::Handle,
+    balances: Option<qmdb::Handle>,
     protocol: Arc<Protocol>,
     identities: Vec<AccountIdentity>,
     #[cfg(test)]
@@ -178,7 +176,7 @@ pub(crate) struct Operator {
     /// backend. `None` runs the in-process harness certification instead.
     pipeline: Option<Pipeline>,
     epoch_fee: u64,
-    genesis_root: StateRoot<Digest>,
+    genesis: commonware_clearing::bajillion::settlement::Genesis<Digest>,
     registration: EpochRegistration,
     #[cfg(test)]
     initial_accounts: Vec<Account>,
@@ -211,10 +209,12 @@ impl Operator {
             &accounts(),
             None,
             4 * 1024,
+            true,
         )
     }
 
     /// Opens the operator from the identity and initial balances of its certified deployment.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_remote(
         path: &Path,
         workers: NonZeroUsize,
@@ -223,6 +223,7 @@ impl Operator {
         clearing: commonware_cryptography_curve25519::signing::SigningKey,
         ack: commonware_cryptography::bls12381::primitives::group::Private,
         epoch_fee: u64,
+        proof_replica: bool,
     ) -> Result<Self> {
         let protocol = Protocol::with_signer(workers, *config.digest(), clearing, ack)?;
         ensure!(
@@ -251,6 +252,7 @@ impl Operator {
             &config.accounts,
             Some(*config.genesis()),
             epoch_fee,
+            proof_replica,
         )
     }
 
@@ -266,9 +268,11 @@ impl Operator {
             &accounts(),
             None,
             4 * 1024,
+            true,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_store(
         mut store: Store,
         identities: Vec<AccountIdentity>,
@@ -277,6 +281,7 @@ impl Operator {
         initial_accounts: &[Account],
         configured: Option<Genesis<Digest>>,
         epoch_fee: u64,
+        proof_replica: bool,
     ) -> Result<Self> {
         let protocol = Arc::new(protocol);
         #[cfg(test)]
@@ -295,13 +300,22 @@ impl Operator {
         );
         let configured_genesis_root = configured.root();
         store.bind_genesis(configured_genesis_root)?;
-        let balances = qmdb::Handle::open(
-            &store.database_path(),
-            initial_accounts,
-            Arc::clone(&protocol),
-            store.epoch_reader(),
-            Some(configured),
-        )?;
+        let balances = if proof_replica {
+            qmdb::Handle::open(
+                &store.database_path(),
+                initial_accounts,
+                Arc::clone(&protocol),
+                store.epoch_reader(),
+                Some(configured),
+            )
+            .map_err(|error| {
+                tracing::warn!(?error, "optional operator proof replica is unavailable");
+                error
+            })
+            .ok()
+        } else {
+            None
+        };
         let current = store.load_current()?;
         let registration = registration_for(&protocol, &current)?;
         store.ensure_current_context(registration.context.payment())?;
@@ -336,7 +350,7 @@ impl Operator {
             #[cfg(test)]
             wallets: wallets(),
             pipeline,
-            genesis_root: configured_genesis_root,
+            genesis: configured,
             registration,
             #[cfg(test)]
             initial_accounts: initial_accounts.to_vec(),
@@ -441,9 +455,13 @@ impl Operator {
             balance: state.current,
             root: self
                 .balances
+                .as_ref()
+                .context("optional proof replica is unavailable")?
                 .root(self.registration.context.payment().epoch())?,
             opening: self
                 .balances
+                .as_ref()
+                .context("optional proof replica is unavailable")?
                 .opening(self.registration.context.payment().epoch(), account)?,
         })
     }
@@ -478,8 +496,7 @@ impl Operator {
         self.store.incoming_payments(receiver, after, limit)
     }
 
-    /// Opens retained, locally certified activity evidence for a payer-recipient edge.
-    /// Close evidence is stored independently of the operational account history.
+    /// Opens a locally certified payer-recipient edge from the optional native replica.
     pub(crate) fn committed_entry(
         &self,
         payer: &Key,
@@ -487,30 +504,10 @@ impl Operator {
         epoch: u64,
     ) -> Result<CommittedEntry> {
         self.ensure_store_usable()?;
-        let result = self
-            .store
-            .stored_result(epoch)?
-            .context("close evidence is not retained")?;
-        let close =
-            Close::decode_evidence::<Sha256>(result.evidence, &result.context, &result.header)?;
-        let index = ChallengeIndex::new::<Sha256>(&result.context, &close)
-            .context("index committed close for entry evidence")?;
-
-        // A changed payer has a row and an aligned out vector (empty for a credit-only
-        // row). An absent payer has neither, and the lookup constructor requires the
-        // matching pairing.
-        let vector = close
-            .rows
-            .binary_search_by(|row| row.account.cmp(payer))
-            .ok()
-            .map(|position| &close.out_vectors[position]);
-        let lookup = higher_entry_lookup::<Sha256, _, _>(&index, payer, vector, recipient)
-            .context("compose committed entry lookup")?;
-        Ok(CommittedEntry {
-            batch_id: close.header.batch_id::<Sha256>(),
-            change_root: close.roots.change,
-            lookup,
-        })
+        self.balances
+            .as_ref()
+            .context("operator proof replica unavailable")?
+            .committed_entry(epoch, payer, recipient)
     }
 
     pub(crate) fn accept_send(
@@ -755,7 +752,7 @@ impl Operator {
             self.protocol.deployment(),
             self.store
                 .latest_finalized_root()?
-                .map_or(self.genesis_root, |(_, root)| root)
+                .map_or(self.genesis.root(), |(_, root)| root)
                 .digest,
             destination,
             action,
@@ -763,6 +760,12 @@ impl Operator {
             wallet.signer(),
         );
         self.apply_withdrawal(request, false)
+    }
+
+    pub(crate) const fn genesis(
+        &self,
+    ) -> commonware_clearing::bajillion::settlement::Genesis<Digest> {
+        self.genesis
     }
 
     pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalOpening> {
@@ -776,16 +779,22 @@ impl Operator {
                     .context("finalized checkpoint overflow")?,
                 root,
             ),
-            None => (0, self.genesis_root),
+            None => (0, self.genesis.root()),
         };
         ensure!(
-            self.balances.root(epoch)? == root,
+            self.balances
+                .as_ref()
+                .context("optional proof replica is unavailable")?
+                .root(epoch)?
+                == root,
             "proof replica differs from finalized root"
         );
         Ok(WithdrawalOpening {
             root,
             opening: self
                 .balances
+                .as_ref()
+                .context("optional proof replica is unavailable")?
                 .opening(epoch, account)
                 .context("open withdrawing account")?,
         })
@@ -1039,7 +1048,7 @@ impl Operator {
                 let persisted = if self.pipeline.is_some() {
                     self.record_admission(&result)
                 } else {
-                    self.store.finish_close(&result, self.genesis_root)
+                    self.store.finish_close(&result, self.genesis.root())
                 };
                 if let Err(error) = persisted {
                     let message = format!("epoch {epoch} close completion failed: {error:#}");
@@ -1051,8 +1060,10 @@ impl Operator {
                     }
                     return Err(error.context(format!("operator fenced: {message}")));
                 }
-                if self.pipeline.is_none() {
-                    self.balances.notify();
+                if self.pipeline.is_none()
+                    && let Some(balances) = &self.balances
+                {
+                    balances.notify();
                 }
                 if let Err(error) = self.start_next_persisted_close() {
                     let message = format!("next close could not be scheduled: {error:#}");
@@ -1154,9 +1165,32 @@ impl Operator {
     /// Freezes withdrawal intake before publishing the live epoch's signed boundary.
     /// Confirmed deposits can invalidate an unadopted request; retries rebuild from
     /// the durable boundary and the immutable deployment fee.
+    #[cfg(test)]
     pub(crate) fn signed_registration(
         &mut self,
         queued: &WithdrawalBatch<Key, Digest>,
+    ) -> Result<RegisterEpochRequest> {
+        let epoch = self.registration.context.payment().epoch();
+        let openings = self
+            .registration
+            .withdrawals
+            .requests()
+            .iter()
+            .filter(|request| queued.request_for(request.account()).is_none())
+            .map(|request| {
+                self.balances
+                    .as_ref()
+                    .context("optional proof replica is unavailable")?
+                    .opening(epoch, request.account())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.signed_registration_with_openings(queued, openings)
+    }
+
+    pub(crate) fn signed_registration_with_openings(
+        &mut self,
+        queued: &WithdrawalBatch<Key, Digest>,
+        openings: Vec<StateOpening<Key, Digest>>,
     ) -> Result<RegisterEpochRequest> {
         self.ensure_operating()?;
         self.next_openable_epoch()?;
@@ -1188,12 +1222,7 @@ impl Operator {
             predecessor_liability,
             deposits_root,
 
-            openings: withdrawals
-                .requests()
-                .iter()
-                .filter(|request| queued.request_for(request.account()).is_none())
-                .map(|request| self.balances.opening(epoch, request.account()))
-                .collect::<Result<Vec<_>>>()?,
+            openings,
             withdrawals,
             fee: self.epoch_fee,
             signature,
@@ -1230,9 +1259,13 @@ impl Operator {
                 self.registration.context.payment().anchor() == &record.anchor,
                 "the adopted context diverged from the certified registration"
             );
+            ensure!(
+                self.registration.floors == Some(record.floors),
+                "the adopted native boundary diverged from the certified registration"
+            );
             return Ok(());
         }
-        let replacement = self.protocol.registration_at(
+        let mut replacement = self.protocol.registration_at(
             epoch,
             self.registration.deposits.clone(),
             self.registration.withdrawals.clone(),
@@ -1244,12 +1277,14 @@ impl Operator {
             replacement.context.payment().anchor() == &record.anchor,
             "the rebuilt context does not match the certified registration"
         );
+        replacement.floors = Some(record.floors);
         let adopted = self.store.adopt_deadlines(
             epoch,
             self.registration.context.payment(),
             replacement.context.payment(),
             record.admission_deadline,
             record.challenge_deadline,
+            record.floors,
         );
         self.guard_store(adopted)?;
         self.registration = replacement;
@@ -1287,35 +1322,15 @@ impl Operator {
         }
     }
 
-    pub(crate) fn withdrawal_evidence(&self, account: &Key) -> Result<WithdrawalEvidence> {
-        self.ensure_store_usable()?;
-        let (epoch, claim) = self.store.withdrawal_evidence(account)?;
-        let result = self
-            .store
-            .stored_result(epoch)?
-            .context("withdrawal close is not retained")?;
-        Ok(WithdrawalEvidence {
-            roots: result.roots,
-            witness: WithdrawalWitness::new(
-                &result.context,
-                result.withdrawal_total,
-                &result.withdrawals,
-                claim,
-            )?,
-        })
-    }
-
-    pub(crate) fn acknowledge_withdrawal_claim(
-        &mut self,
-        batch_id: BatchId<Digest>,
-        account: &Key,
-        claim: &WithdrawalClaim<Digest>,
-    ) -> Result<()> {
-        self.ensure_store_usable()?;
-        let result = self
-            .store
-            .acknowledge_withdrawal_claim(batch_id, account, claim);
-        self.guard_store(result)
+    pub(crate) fn payout_proof(
+        &self,
+        head: LogHead<Digest>,
+        index: u64,
+    ) -> Result<WithdrawalClaim<Digest>> {
+        self.balances
+            .as_ref()
+            .context("operator proof replica unavailable")?
+            .payout_proof(head, index)
     }
 
     #[cfg(test)]
@@ -1351,7 +1366,7 @@ impl Operator {
         let epoch = payment_context.epoch();
         let protocol = Arc::clone(&self.protocol);
         let reader = self.store.epoch_reader();
-        let genesis_root = self.genesis_root;
+        let genesis_root = self.genesis.root();
         #[cfg(test)]
         let initial_accounts = self.initial_accounts.clone();
         let pipeline = self.pipeline.clone();
@@ -1433,10 +1448,12 @@ impl Operator {
                         }
                         result
                     };
-                    if let Some(pipeline) = &pipeline {
-                        pipeline.admit(AdmitRequest::from(&result))?;
+                    if let Some(balances) = &balances {
+                        balances.notify();
                     }
-                    balances.notify();
+                    if let Some(pipeline) = &pipeline {
+                        pipeline.admit(result.context.clone(), AdmitRequest::from(&result))?;
+                    }
                     Ok(result)
                 })();
                 let _ = sender.send(result);
@@ -1522,7 +1539,7 @@ impl Operator {
     fn record_admission(&mut self, result: &SettlementResult) -> Result<()> {
         let predecessor = self
             .certified_tip()?
-            .map_or(self.genesis_root, |(_, root)| root);
+            .map_or(self.genesis.root(), |(_, root)| root);
         ensure!(
             self.next_construction_epoch()? == Some(result.context.payment().epoch())
                 && *result.context.predecessor_root() == predecessor,
@@ -1564,20 +1581,41 @@ impl Operator {
             "certified admission differs from the durable operator close"
         );
         if record.finalized {
+            self.observe_finalized(epoch)?;
+        }
+        Ok(())
+    }
+
+    /// Finishes owned certified closes through the authenticated FIFO finalization boundary.
+    pub(crate) fn observe_finalized(&mut self, finalized: u64) -> Result<()> {
+        self.ensure_store_usable()?;
+        while let Some(admitted) = self.admitted.front() {
+            let epoch = admitted.epoch;
+            if epoch > finalized {
+                break;
+            }
             let result = self
                 .store
                 .stored_result(epoch)?
                 .context("admitted close has no retained result")?;
             ensure!(
-                result.context.payment().epoch() == epoch
+                result.context.deployment() == &self.protocol.deployment()
+                    && result.context.payment().epoch() == epoch
                     && result.header.batch_id::<Sha256>() == admitted.batch_id
-                    && result.roots == admitted.roots,
+                    && result.roots == admitted.roots
+                    && result.header.verify::<Sha256, _>(
+                        &result.context,
+                        &result.roots,
+                        result.withdrawal_total
+                    ),
                 "retained close differs from its admitted identity"
             );
-            let finalized = self.store.finish_close(&result, self.genesis_root);
-            self.guard_store(finalized)?;
+            let finished = self.store.finish_close(&result, self.genesis.root());
+            self.guard_store(finished)?;
             self.admitted.pop_front();
-            self.balances.notify();
+            if let Some(balances) = &self.balances {
+                balances.notify();
+            }
             println!("epoch {epoch} close finalized");
             self.verify_recovered_predecessor()?;
         }
@@ -1734,7 +1772,7 @@ impl Operator {
                 .fixture_complete(&self.initial_accounts, &history, prepared, seed)?;
         self.store
             .epoch_reader()
-            .record_result(&result, self.genesis_root)?;
+            .record_result(&result, self.genesis.root())?;
         Ok(result)
     }
 
@@ -1761,8 +1799,10 @@ impl Operator {
         self.registration = successor;
         self.validate_current_epoch()?;
         let result = self.complete_prepared(prepared, seed)?;
-        self.store.finish_close(&result, self.genesis_root)?;
-        self.balances.catch_up()?;
+        self.store.finish_close(&result, self.genesis.root())?;
+        if let Some(balances) = &self.balances {
+            let _ = balances.catch_up();
+        }
         Ok(result)
     }
 
@@ -1773,8 +1813,10 @@ impl Operator {
         rng: &mut R,
     ) -> Result<CloseFinished> {
         let result = self.complete_prepared(prepared, rng.next_u64())?;
-        self.store.finish_close(&result, self.genesis_root)?;
-        self.balances.catch_up()?;
+        self.store.finish_close(&result, self.genesis.root())?;
+        if let Some(balances) = &self.balances {
+            let _ = balances.catch_up();
+        }
         Ok(CloseFinished {
             epoch: result.context.payment().epoch(),
             header_digest: short_digest(result.header.digest()),
@@ -1823,7 +1865,7 @@ pub(super) fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<
     // An epoch that never registered rebuilds under the deterministic
     // placeholder deadlines its contexts were staged with.
     let liability = predecessor_liability(data)?;
-    match data.deadlines {
+    let mut registration = match data.deadlines {
         Some((admission_deadline, challenge_deadline)) => protocol.registration_at(
             data.epoch,
             staged,
@@ -1833,7 +1875,9 @@ pub(super) fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<
             challenge_deadline,
         ),
         None => protocol.registration(data.epoch, staged, withdrawals, liability),
-    }
+    }?;
+    registration.floors = data.floors;
+    Ok(registration)
 }
 
 fn registration_with_deposit(

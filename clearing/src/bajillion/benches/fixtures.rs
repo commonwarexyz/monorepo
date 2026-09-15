@@ -4,8 +4,10 @@ use commonware_clearing::bajillion::{
         AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup, adjudicate,
         higher_entry_lookup,
     },
+    logs::{self, Floors, Logs},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{self, State, account_key},
+    replica::Replica,
     transition::{
         ChallengeIndex, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
         OperatorVariant, PreparedClose, RootBundle, Terminal, prepare_close_with_strategy,
@@ -26,7 +28,9 @@ use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::{Rayon, Strategy};
-use commonware_runtime::{BufferPooler, deterministic, utils::buffer::paged::CacheRef};
+use commonware_runtime::{
+    BufferPooler, Supervisor as _, deterministic, utils::buffer::paged::CacheRef,
+};
 use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
     qmdb::current::FixedConfig, translator::EightCap,
@@ -44,7 +48,7 @@ pub(crate) const EPOCH: u64 = 7;
 pub(crate) const OPENING_BALANCE: u64 = 1_000_000;
 const OPERATOR_SEED: u64 = 1;
 const ACCOUNT_SEED_START: u64 = 10_000;
-pub(crate) type BenchState = State<deterministic::Context, Sha256, Rayon>;
+pub(crate) type BenchState = Replica<deterministic::Context, Sha256, VerifyingKey, Rayon>;
 type BenchTerminal = Terminal<VerifyingKey, Digest>;
 type BenchAck = VectorAck<VerifyingKey, Digest>;
 
@@ -251,6 +255,37 @@ pub(crate) fn accounts(live: usize) -> Vec<(VerifyingKey, SigningKey)> {
     accounts
 }
 
+pub(crate) fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Config<Rayon> {
+    let activity = state_config(context, &format!("{prefix}-activity"));
+    let payouts = state_config(context, &format!("{prefix}-payouts"));
+    logs::Config {
+        activity: commonware_storage::qmdb::keyless::Config {
+            merkle: activity.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: activity.journal_config.partition,
+                items_per_section: commonware_utils::NZU64!(4096),
+                compression: None,
+                codec_config: commonware_codec::RangeCfg::new(..=16 * 1024 * 1024),
+                page_cache: activity.journal_config.page_cache,
+                write_buffer: commonware_utils::NZUsize!(4096),
+                replay_buffer: commonware_utils::NZUsize!(4096),
+            },
+        },
+        payouts: commonware_storage::qmdb::keyless::Config {
+            merkle: payouts.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: payouts.journal_config.partition,
+                items_per_section: NZU64!(4096),
+                compression: None,
+                codec_config: commonware_codec::RangeCfg::new(0..=1024),
+                page_cache: payouts.journal_config.page_cache,
+                write_buffer: NZUsize!(65536),
+                replay_buffer: NZUsize!(65536),
+            },
+        },
+    }
+}
+
 pub(crate) async fn new_state(
     runtime: deterministic::Context,
     accounts: &[(VerifyingKey, SigningKey)],
@@ -265,6 +300,10 @@ pub(crate) async fn new_state(
         })
         .collect();
     let config = state_config(&runtime, "benchmark");
+    let log_cfg = logs_config(&runtime, "benchmark");
+    let logs = Logs::open(runtime.child("logs"), log_cfg)
+        .await
+        .expect("open native logs");
     let state = State::open(runtime, config)
         .await
         .expect("open native state");
@@ -273,7 +312,8 @@ pub(crate) async fn new_state(
         .prepare(state.head(), genesis)
         .await
         .expect("prepare canonical genesis");
-    state.apply(genesis).await.expect("apply canonical genesis")
+    let state = state.apply(genesis).await.expect("apply canonical genesis");
+    Replica::from_parts(state, logs)
 }
 
 pub(crate) fn epoch_context(
@@ -290,14 +330,22 @@ pub(crate) fn epoch_context(
         operator.public_key(),
         deposits,
         withdrawals,
-        state.liability(),
+        state.state().liability(),
         98,
         99,
         CloseLimits::protocol_maximum(),
         committee,
     )
     .expect("epoch context")
-    .bind::<Sha256, _, _>(state, deposits, withdrawals)
+    .bind::<Sha256, _, _>(
+        state,
+        deposits,
+        withdrawals,
+        Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    )
     .expect("bound context")
 }
 

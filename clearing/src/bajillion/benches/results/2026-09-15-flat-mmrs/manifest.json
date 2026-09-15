@@ -1,0 +1,510 @@
+{
+  "started_utc": "20260915T085626Z",
+  "finished_utc": "2026-09-15T09:02:45.197268+00:00",
+  "base": "c71324e3c4619e10e8f6ebe619484f782547ff7e",
+  "tracked_patch_sha256": "79d3e81de5a9118c18834d8b1f24240851a2584aefe547fe814292d40819c3c0",
+  "untracked_sha256": {
+    "clearing/src/bajillion/benches/native_fixtures.rs": "ab2a6ec15db9dd23ee762ffd85e6fedb71898c347142ad62c7192ec0ab7a2f65",
+    "clearing/src/bajillion/benches/native_proofs.rs": "9e3fc40178ec328ea99b89b9620cc5cb25daca118ea56e13ba0a40a90dc86907",
+    "clearing/src/bajillion/benches/native_transition.rs": "02e28ed2c82583768034b119c65eeaec99f650a1a54a4767f93bf4d23b67fe52",
+    "clearing/src/bajillion/custody.rs": "782d04bd8b62694afcfe1524828423a364fd8b6f4448beaf5577e5f83178ae75",
+    "clearing/src/bajillion/logs.rs": "be17e529480da8b8ef2b783f57762f96d92ceb7b15a3257d677bf3a69119b4e7",
+    "clearing/src/bajillion/replica.rs": "7a5547dc92b514104290e38caa874201df89f65416139802366ca2cab4bb9358",
+    "clearing/src/bajillion/tests/flat_logs.rs": "d2ea7a146916a4a5efe38498fab0e6d22200ad7b5ae4ece30812ee4ad9f79506",
+    "clearing/src/bajillion/tests/native_custody.rs": "04294ae5f564d47eb8bbad9e3bb5aeb87a87b776dec0723855b2883c82f43a12",
+    "examples/terminal/src/chain/da/checkpoint.rs": "e7d765fe4f4be9ed5043b3febfd770b11c0ff0462a662c6b89ec7d945e8ee19f",
+    "examples/terminal/src/chain/da/config.rs": "6f320a35428fe5096074bf4d0fcdd745b92f8d422742951d3d7dbae7e8798460",
+    "examples/terminal/src/chain/da/durability.rs": "c4999526a63cc2ebce5403611c0bd2b49808a56a43a1ce570b6d56c32c4695f7",
+    "examples/terminal/src/chain/da/sync.rs": "4db12bed33d6563064c440fd0020a2629f69ed31fc5abf3a1230c4acb0c47f88",
+    "examples/terminal/src/chain/da/sync/tests.rs": "5997aa0acc4883539c9732ed99b38bd9a630134f95b00ade5f841ffddcc88e1d",
+    "examples/terminal/src/chain/da/tests.rs": "5f74307825ebe4855a8720e7ad7e2c5007ffd157fe99d5f15cffa1daeaf34359",
+    "examples/terminal/src/chain/query/source_frame.rs": "11f42003dfd7678053d81f719ad20fe6de24a0fae1d2cc9e0566f49c8460b417",
+    "examples/terminal/src/chain/tests/flat_payouts.rs": "76d47410b707ce17f35c895bbc6589959984629096f75c497fa73c70971cf6aa"
+  },
+  "lockfile_sha256": "ed12ad6a56b72437a00ffbf5aedb1819ce7900fe8c1bbec8850bac8a6c9a03c2",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "hardware": "hw.model: Mac17,8\nhw.ncpu: 18\nhw.memsize: 68719476736\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.5.1\nBuildVersion:\t\t25F80\n",
+  "build_environment": {
+    "rustc_wrapper": "rustc-wrapper-sccache",
+    "rustflags": null,
+    "cargo_profile_overrides": {},
+    "cargo_build_overrides": {},
+    "wrapper_scope": "unsets CARGO_TARGET_DIR, then executes sccache; adds no compiler flags"
+  },
+  "scope": "Native deterministic memory storage. Commit includes native journal work, not durable SSD I/O. Fixed predecessor is restored outside timers. Phase and complete pipeline groups overlap.",
+  "commands": [
+    {
+      "selector": "native-sizes",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--test"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-sizes",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024,65536",
+        "COMMONWARE_CLEARING_ROWS": "0,1,2,128,1024",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1,512,1024"
+      },
+      "log": "native-sizes.log",
+      "exit_code": 0,
+      "log_sha256": "4510601c6849e761f3282c930ab21fb9c3efbc5586f5390d55018d6abfb56fbd",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "native-source-sizes",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--test"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-source-sizes",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024",
+        "COMMONWARE_CLEARING_ROWS": "0,128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1024"
+      },
+      "log": "native-source-sizes.log",
+      "exit_code": 0,
+      "log_sha256": "3b0458c19dd22d2e3fad54a0e35573078a11f12c6038559fe45ce4cc542a74a6",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "challenge-sizes",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--test"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "challenge-sizes",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "challenge-sizes.log",
+      "exit_code": 0,
+      "log_sha256": "9e753c19d8f23a7854adceddc309033df0d0ab085a00336f16f4ed96ce277f6d",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "native-transition-check",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--test"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-transition-check",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1024"
+      },
+      "log": "native-transition-check.log",
+      "exit_code": 0,
+      "log_sha256": "8686e6fbe49713c95b721ec8afa3fe22368f8e8eacc068daf9a83bcc684750b8",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "native-proofs",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "20",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-proofs",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024,65536",
+        "COMMONWARE_CLEARING_ROWS": "0,1,2,128,1024",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1,512,1024"
+      },
+      "log": "native-proofs.log",
+      "exit_code": 0,
+      "log_sha256": "9fc738d4eded389094bd25b71a87ce7ee30a83c5f84839a6df144830dea60137",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "native-source-proofs",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "20",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-source-proofs",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1024"
+      },
+      "log": "native-source-proofs.log",
+      "exit_code": 0,
+      "log_sha256": "0a30450bcf4ebe875a26a41316a3fc97568e8b1f4244d77b745deac7d569e47d",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "native-transition",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "10",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "native-transition",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0,1024",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0,1024"
+      },
+      "log": "native-transition.log",
+      "exit_code": 0,
+      "log_sha256": "e09a838704e7b236596c7be683c7d9dcb03af1fbd684b10f3b1edf6f5e975ae0",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "adjudicate",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "20",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "adjudicate",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "adjudicate.log",
+      "exit_code": 0,
+      "log_sha256": "4989efae64096396a3872cab62ec8ec2722336641587334f278d733fd17046e1",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "prepare",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "10",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "prepare",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "prepare.log",
+      "exit_code": 0,
+      "log_sha256": "078f92bd7f9d05cbf82c76a60c5b22a5b29d071f9687bea8cee6856c48715829",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "receive-apply",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "10",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "receive-apply",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "receive-apply.log",
+      "exit_code": 0,
+      "log_sha256": "88aa292b5084891ca0cc4075435c010c3a6dcefd11640acf520e0f2116c7fc7d",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "sign-vote",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "10",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "sign-vote",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "sign-vote.log",
+      "exit_code": 0,
+      "log_sha256": "5af22b82264d1ae91c424437241cc3c14a46457b78e5394e2138883667bf02d4",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    },
+    {
+      "selector": "verify-certificate",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--",
+        "--sample-size",
+        "10",
+        "--warm-up-time",
+        "0.25",
+        "--measurement-time",
+        "1"
+      ],
+      "environment": {
+        "COMMONWARE_CLEARING_BENCH": "verify-certificate",
+        "COMMONWARE_CLEARING_ACCOUNTS": "1024",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_ROWS": "128",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "0"
+      },
+      "log": "verify-certificate.log",
+      "exit_code": 0,
+      "log_sha256": "04c1c1f18ab51023601e572ea260cd1c99443e5fc2461ba45937ce50176cf916",
+      "binary_sha256": [
+        "6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e"
+      ]
+    }
+  ],
+  "source_archive": "source-inputs.tar.gz",
+  "source_archive_sha256": "5bb514174959a3e69e0b12f6227393bd7c9839fd3f558587940727661a15d1ab",
+  "bytes_sha256": "1e27f9705fdd39a4c38a0b380c145ffd59ec28b2bfa586deb713395a8ba4ff29",
+  "raw_checks_sha256": "88e69a45b49ebfd4401687832a7f8ea7cad27cbfbb4415de2acc28be7392f0f7",
+  "timings_sha256": "45e6b13dfee4d82dfafdf326d625c3c4243da03fccfe8612eddcc6f3ae768d2c",
+  "samples_sha256": "40abf884a465fd0bd1254a9a82c4da7e34b4ca03c6f47f609a4324a5e704aadf",
+  "timing_benchmarks": 163,
+  "timing_samples": 2940,
+  "timing_inventory": {
+    "native_activity_verify": {
+      "benchmarks": 48,
+      "sample_size": 20,
+      "samples": 960
+    },
+    "native_payout_verify": {
+      "benchmarks": 64,
+      "sample_size": 20,
+      "samples": 1280
+    },
+    "source_verify": {
+      "benchmarks": 8,
+      "sample_size": 20,
+      "samples": 160
+    },
+    "source_account_claim_verify": {
+      "benchmarks": 8,
+      "sample_size": 20,
+      "samples": 160
+    },
+    "native_prepare_state_logs": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "decode": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "validate_prepare_state_logs": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "apply_state_logs": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "commit_state_logs_memory": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "decode_validate_apply": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "decode_validate_apply_commit_memory": {
+      "benchmarks": 4,
+      "sample_size": 10,
+      "samples": 40
+    },
+    "adjudicate": {
+      "benchmarks": 3,
+      "sample_size": 20,
+      "samples": 60
+    },
+    "prepare": {
+      "benchmarks": 1,
+      "sample_size": 10,
+      "samples": 10
+    },
+    "receive_apply": {
+      "benchmarks": 1,
+      "sample_size": 10,
+      "samples": 10
+    },
+    "sign_vote": {
+      "benchmarks": 1,
+      "sample_size": 10,
+      "samples": 10
+    },
+    "verify_certificate": {
+      "benchmarks": 1,
+      "sample_size": 10,
+      "samples": 10
+    }
+  }
+}

@@ -72,9 +72,17 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
             .context
             .epoch_context()
             .clone()
-            .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
+            .bind::<Sha256, _, _>(
+                &state,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
             .unwrap();
-        let original = state.root();
+        let original = state.state().root();
         let candidate = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
             &state,
             &context,
@@ -87,13 +95,17 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
         )
         .await
         .unwrap();
-        assert_eq!(state.root(), original);
+        assert_eq!(state.state().root(), original);
         assert_ne!(
             candidate.close().roots.successor,
             fixture.prepared.close().roots.successor
         );
         assert_ne!(candidate.close().header, fixture.prepared.close().header);
         assert_eq!(
+            candidate.close().activity_input().guards(),
+            fixture.prepared.close().activity_input().guards()
+        );
+        assert_ne!(
             candidate.close().roots.change,
             fixture.prepared.close().roots.change
         );
@@ -116,7 +128,7 @@ fn preparing_dealing_enforces_the_sender_entry_limit() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                fixture.state.liability(),
+                fixture.state.state().liability(),
                 98,
                 99,
                 CloseLimits::new(4, 4, 0, limit, 4, 100, 0, 0),
@@ -301,14 +313,22 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                fixture.state.liability(),
+                fixture.state.state().liability(),
                 98,
                 99,
                 limits,
                 *fixture.context.committee(),
             )
             .unwrap()
-            .bind::<Sha256, _, _>(&fixture.state, &fixture.deposits, &fixture.withdrawals)
+            .bind::<Sha256, _, _>(
+                &fixture.state,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
             .unwrap();
             assert!(
                 decode_with_each_strategy(fixture.prepared.encoded().clone(), &context).is_err()
@@ -360,8 +380,8 @@ fn keyed_dealing_strategies_preserve_alignment_and_authenticated_state() {
             for length in cuts {
                 assert!(decode_with_each_strategy(wire.slice(..length), &fixture.context).is_err());
             }
-            let (state, close) = prepared.apply(fixture.state).await.unwrap();
-            assert_eq!(state.root(), close.roots.successor);
+            let (state, close) = Box::pin(prepared.apply(fixture.state)).await.unwrap();
+            assert_eq!(state.state().root(), close.roots.successor);
         });
     }
 }
@@ -380,8 +400,8 @@ fn headers_bind_every_root_amount_and_registered_context() {
         for which in 0..3 {
             let mut roots = close.roots;
             match which {
-                0 => roots.change.digest = foreign,
-                1 => roots.withdrawal_outputs.digest = foreign,
+                0 => roots.change.root = foreign,
+                1 => roots.withdrawal_outputs.root = foreign,
                 _ => roots.successor.digest = foreign,
             }
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
@@ -401,14 +421,22 @@ fn headers_bind_every_root_amount_and_registered_context() {
             fixture.operator.public_key(),
             &fixture.deposits,
             &fixture.withdrawals,
-            fixture.state.liability(),
+            fixture.state.state().liability(),
             98,
             99,
             CloseLimits::protocol_maximum(),
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&fixture.state, &fixture.deposits, &fixture.withdrawals)
+        .bind::<Sha256, _, _>(
+            &fixture.state,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
         assert!(!close.header.verify::<Sha256, VerifyingKey>(
             &next,
@@ -419,72 +447,63 @@ fn headers_bind_every_root_amount_and_registered_context() {
 }
 
 #[test]
-fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
+fn source_proofs_round_trip_and_reject_corruption_or_foreign_heads() {
     deterministic::Runner::default().start(|runtime| async move {
         let fixture = fixture(runtime, 8, 8, 4, 2).await;
-        let close = fixture.prepared.close();
-        let encoded = close.encode_evidence();
-        let restored =
-            Close::decode_evidence::<Sha256>(encoded.clone(), &fixture.context, &close.header)
-                .unwrap();
-        assert_eq!(restored.encoded(), close.encoded());
-        assert_eq!(restored.header, close.header);
-        assert_eq!(restored.roots, close.roots);
-        assert_eq!(restored.withdrawal_total, close.withdrawal_total);
-        let original = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
-        let reopened = ChallengeIndex::new::<Sha256>(&fixture.context, &restored).unwrap();
+        let (state, close) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
+            .await
+            .unwrap();
+        let heads = *state.logs().head();
+        let epoch = Epoch::load(state.logs(), EPOCH).await.unwrap();
+        let proof = epoch.source_proof(state.logs(), &heads).await.unwrap();
+        let encoded = proof.encode();
+        let bounds = commonware_codec::RangeCfg::new(..=proof.metadata.len());
+        let restored = SourceProof::<ShaDigest>::decode_cfg(encoded.clone(), &bounds).unwrap();
+        assert_eq!(restored, proof);
+        let source = restored.verify::<Sha256, VerifyingKey>(&heads).unwrap();
+        assert_eq!(source.context(), &fixture.context);
+        let original = ChallengeIndex::new::<Sha256>(&fixture.context, &close).unwrap();
         for (account, _) in &fixture.accounts {
             assert_eq!(
                 account_lookup::<Sha256, _, _>(&original, account).unwrap(),
-                account_lookup::<Sha256, _, _>(&reopened, account).unwrap()
+                epoch
+                    .account_lookup(state.logs(), &heads, account)
+                    .await
+                    .unwrap()
             );
         }
         for length in [0, 31, encoded.len() / 2, encoded.len() - 1] {
             assert!(
-                Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
-                    encoded.slice(..length),
-                    &fixture.context,
-                    &close.header
-                )
-                .is_err()
+                SourceProof::<ShaDigest>::decode_cfg(encoded.slice(..length), &bounds).is_err()
             );
         }
-        for position in [0, 32, 64, 96, 104] {
+        for position in [0, 32, 64, 96, 104, encoded.len() - 1] {
             let mut damaged = encoded.to_vec();
             damaged[position] ^= 1;
-            assert!(
-                Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
-                    damaged.into(),
-                    &fixture.context,
-                    &close.header
-                )
-                .is_err(),
-                "damaged {position}"
-            );
+            if let Ok(decoded) = SourceProof::<ShaDigest>::decode_cfg(Bytes::from(damaged), &bounds)
+            {
+                assert!(
+                    decoded.verify::<Sha256, VerifyingKey>(&heads).is_err(),
+                    "damaged {position}"
+                );
+            }
         }
         let mut trailing = encoded.to_vec();
         trailing.push(0);
-        assert!(
-            Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
-                trailing.into(),
-                &fixture.context,
-                &close.header
-            )
-            .is_err()
-        );
+        assert!(SourceProof::<ShaDigest>::decode_cfg(Bytes::from(trailing), &bounds).is_err());
+        let mut foreign = heads;
+        foreign.activity.root = Sha256::hash(&[b"foreign-retained-source"]);
+        assert!(restored.verify::<Sha256, VerifyingKey>(&foreign).is_err());
         let wrong = crate::bajillion::transition::Header::new::<Sha256, VerifyingKey>(
             &fixture.context,
             &close.roots,
             close.withdrawal_total + 1,
         );
-        assert!(
-            Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
-                encoded,
-                &fixture.context,
-                &wrong
-            )
-            .is_err()
-        );
+        assert!(!wrong.verify::<Sha256, VerifyingKey>(
+            &fixture.context,
+            &close.roots,
+            close.withdrawal_total
+        ));
     });
 }
 
@@ -492,7 +511,7 @@ fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
 fn malformed_terminal_material_is_rejected_before_state_preparation() {
     deterministic::Runner::default().start(|runtime| async move {
         let fixture = fixture(runtime, 8, 8, 4, 2).await;
-        let before = *fixture.state.head();
+        let before = *fixture.state.state().head();
         for case in 0..6 {
             let mut terminals = fixture.terminals.clone();
             match case {
@@ -535,7 +554,7 @@ fn malformed_terminal_material_is_rejected_before_state_preparation() {
                 .is_err(),
                 "case {case}"
             );
-            assert_eq!(*fixture.state.head(), before);
+            assert_eq!(*fixture.state.state().head(), before);
         }
     });
 }
@@ -579,15 +598,21 @@ fn complete_proof_service_matches_direct_activity_and_entry_openings() {
                 );
             }
         }
-        let mut wrong_root = close.clone();
-        wrong_root.roots.change.digest = Sha256::hash(&[b"wrong-activity-root"]);
-        let served = crate::bajillion::serve::Index::new(&wrong_root);
-        assert!(served.account_lookup::<Sha256>(&accounts[0]).is_err());
-        assert!(
-            served
-                .higher_entry_lookup::<Sha256>(&accounts[0], &accounts[1])
-                .is_err()
-        );
+        for field in 0..3 {
+            let mut altered = close.clone();
+            match field {
+                0 => altered.roots.change.root = Sha256::hash(&[b"wrong-activity-root"]),
+                1 => altered.roots.change.operations += 1,
+                _ => altered.roots.change.floor += 1,
+            }
+            let served = crate::bajillion::serve::Index::new(&altered);
+            assert!(served.account_lookup::<Sha256>(&accounts[0]).is_err());
+            assert!(
+                served
+                    .higher_entry_lookup::<Sha256>(&accounts[0], &accounts[1])
+                    .is_err()
+            );
+        }
     });
 }
 

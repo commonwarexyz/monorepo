@@ -34,7 +34,7 @@ and withdrawals, and reconstructs three commitments:
                                   |
            +----------------------+----------------------+
            |                      |                      |
-      Activity BMT          Withdrawal BMT          Successor QMDB
+      Activity MMR            Payout MMR             Current QMDB
        challenges               claims                balances
            |                      |                      |
            +----------------------+----------------------+
@@ -44,9 +44,11 @@ and withdrawals, and reconstructs three commitments:
                     admit --> wait --> finalize
 ```
 
-The header binds the three roots to the registered epoch and its predecessor.
-Each signer validates and stores the evidence before voting. A committee of
-`n = 3f + 1` validators certifies a close with exactly `2f + 1` votes.
+The header binds the three roots, operation counts, and pruning floors to the
+registered epoch and its predecessor. Each signer synchronizes all three native
+databases and records their common checkpoint and signing decision before
+publishing a vote. A committee of `n = 3f + 1` validators certifies a close with
+exactly `2f + 1` votes.
 
 Admission adds the close to an ordered queue and permits the next epoch to
 register. Finalization waits for the challenge deadline and all earlier closes,
@@ -62,9 +64,12 @@ without an onchain account. Balances can accumulate across closes until their
 owners choose to withdraw.
 
 A close writes only changed balances. Activity that nets to zero still appears
-in the activity BMT, and payer-vector BMTs authenticate individual payment entries.
-Payment counters belong to epoch evidence. Withdrawal claims use the output
-BMT, and balance recovery uses historical QMDB proofs.
+in its sorted range of the cumulative activity log. Payer-vector BMTs authenticate
+individual payment entries. The activity Commit retains the original context,
+terminal sequences and entries, and exact withdrawal requests needed to rebuild
+source proofs from native history. Withdrawal claims prove output membership
+under the current finalized payout head; balance recovery uses historical Current
+QMDB proofs.
 
 Receipts let their holders challenge omitted or contradictory payments. Wallets
 save verified receipts and keep them available through the challenge deadline.
@@ -74,7 +79,9 @@ save verified receipts and keep them available through the challenge deadline.
 Applications supply networking, authenticated time, durable storage, and custody.
 The main responsibilities are:
 
-- Store evidence before voting and advance canonical state from admitted closes.
+- Synchronize the three databases and checkpoint before publishing votes.
+- Rewind all three to their common durable checkpoint after an interrupted update,
+  then catch up from an authenticated native replica.
 - Serve proofs for pending closes and the finalized recovery state.
 - Retain receipts and get any challenge included before its deadline.
 - Persist protocol decisions and their asset transfers atomically.

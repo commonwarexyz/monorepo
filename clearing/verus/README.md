@@ -39,7 +39,10 @@ predecessor + deposit + credit - debit
 The debit must be covered. Inputs and results fit `u64`, while intermediate
 arithmetic is widened to allow netting. Zero successor balance means absence
 from QMDB. A withdrawal that releases zero still produces `Withdrawal(0)`,
-distinct from having no withdrawal action.
+distinct from having no withdrawal action. Each output, including `Withdrawal(0)`,
+occupies a native payout Append location; the interval ledger consumes that
+location independently of its monetary amount. These log and ledger guarantees
+are checked by the Stateright and production tests, outside this arithmetic proof.
 
 ## What is proved
 

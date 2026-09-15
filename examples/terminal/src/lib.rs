@@ -43,8 +43,9 @@ pub fn run_operator(
     node_dir: PathBuf,
     database: PathBuf,
     workers: NonZeroUsize,
+    proof_replica: bool,
 ) -> Result<()> {
-    service::run_operator(bind, node_dir, database, workers)
+    service::run_operator(bind, node_dir, database, workers, proof_replica)
 }
 
 /// Runs one wallet-owning Ratatui agent as a chain client, bound to one

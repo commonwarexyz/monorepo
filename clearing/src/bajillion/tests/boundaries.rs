@@ -31,7 +31,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         let withdrawals = WithdrawalBatch::new(vec![
             SignedWithdrawal::sign(
                 deployment,
-                state.root().digest,
+                state.state().root().digest,
                 Bytes::from_static(b"payer-destination"),
                 WithdrawalAction::Amount(NZU64!(90)),
                 99,
@@ -39,7 +39,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state.root().digest,
+                state.state().root().digest,
                 Bytes::from_static(b"close-destination"),
                 WithdrawalAction::Close,
                 99,
@@ -47,7 +47,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             ),
             SignedWithdrawal::sign(
                 deployment,
-                state.root().digest,
+                state.state().root().digest,
                 Bytes::from_static(b"offset-destination"),
                 WithdrawalAction::Amount(NZU64!(10)),
                 99,
@@ -61,14 +61,22 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             operator.public_key(),
             &deposits,
             &withdrawals,
-            state.liability(),
+            state.state().liability(),
             98,
             99,
             CloseLimits::protocol_maximum(),
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+        .bind::<Sha256, _, _>(
+            &state,
+            &deposits,
+            &withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
         let mut entries = vec![
             OutEntry {
@@ -135,7 +143,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         );
         assert_eq!(verified.close().withdrawal_total, 115);
         assert_eq!(verified.state().head().liability(), 220);
-        let (state, close) = verified.apply::<_, Sha256>(state).await.unwrap();
+        let (state, close) = Box::pin(verified.apply::<_, Sha256>(state)).await.unwrap();
         let index = Index::new(&close);
         for (account, balance) in [
             (payer, Some(75)),
@@ -146,6 +154,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         ] {
             assert_eq!(
                 state
+                    .state()
                     .get(&account_key(&account.public_key()).unwrap())
                     .await
                     .unwrap()
@@ -164,7 +173,9 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             (closed, 105, b"close-destination".as_slice()),
             (offset, 10, b"offset-destination".as_slice()),
         ] {
-            let claim = close.withdrawal_claim(&account.public_key()).unwrap();
+            let claim = close
+                .withdrawal_claim::<Sha256>(&account.public_key())
+                .unwrap();
             let output = claim
                 .verify::<Sha256>(&close.roots.withdrawal_outputs)
                 .unwrap();
@@ -184,15 +195,29 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             .find(|row| row.account == recipient.public_key())
             .unwrap();
         assert_eq!(row.output, SettlementOutput::None);
-        assert!(close.withdrawal_claim(&recipient.public_key()).is_err());
-        let restored =
-            Close::decode_evidence::<Sha256>(close.encode_evidence(), &context, &close.header)
-                .unwrap();
+        assert!(
+            close
+                .withdrawal_claim::<Sha256>(&recipient.public_key())
+                .is_err()
+        );
+        let epoch = Epoch::load(state.logs(), EPOCH).await.unwrap();
+        let heads = *state.logs().head();
+        let source = epoch
+            .source_proof(state.logs(), &heads)
+            .await
+            .unwrap()
+            .verify::<Sha256, VerifyingKey>(&heads)
+            .unwrap();
         for request in withdrawals.requests() {
+            let claim = epoch
+                .withdrawal_claim(state.logs(), &heads, request.account())
+                .await
+                .unwrap();
             assert_eq!(
-                restored.withdrawal_claim(request.account()).unwrap(),
-                close.withdrawal_claim(request.account()).unwrap()
+                claim,
+                close.withdrawal_claim::<Sha256>(request.account()).unwrap()
             );
+            source.verify_withdrawal::<Sha256>(request, &claim).unwrap();
         }
     });
 }
@@ -223,7 +248,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                     .lines()
                     .find_map(|line| {
                         let (name, value) = line.split_once(' ')?;
-                        name.ends_with(suffix)
+                        (name.contains("_balances_") && name.ends_with(suffix))
                             .then(|| value.parse::<u64>().unwrap())
                     })
                     .expect("native QMDB read counter")
@@ -285,7 +310,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                     .map(|(signer, action)| {
                         SignedWithdrawal::sign(
                             deployment,
-                            state.root().digest,
+                            state.state().root().digest,
                             Bytes::from_static(b"destination"),
                             action,
                             99,
@@ -301,7 +326,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                 operator.public_key(),
                 &deposits,
                 &withdrawals,
-                state.liability(),
+                state.state().liability(),
                 98,
                 99,
                 CloseLimits::protocol_maximum(),
@@ -310,7 +335,15 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
             .unwrap();
             let before = counts();
             let context = epoch
-                .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+                .bind::<Sha256, _, _>(
+                    &state,
+                    &deposits,
+                    &withdrawals,
+                    Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
                 .unwrap();
             assert_eq!(
                 counts(),

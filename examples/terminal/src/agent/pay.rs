@@ -330,28 +330,30 @@ impl Agent {
         accepted: Option<operator_rpc::AcceptedBatchResponse>,
     ) -> Result<PendingOutcome> {
         let context = &staged.context;
-        let admitted = match receipt_epoch(ctx, chain, self.deployment, context).await? {
-            ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
-            ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
-            ReceiptEpoch::Live(None) => {
-                return match accepted {
-                    Some(accepted) => Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
-                        Box::new(self.record_payment(accepted, &staged, false)?),
-                    ))),
-                    None => Ok(PendingOutcome::Live(Box::new(staged))),
-                };
-            }
-            ReceiptEpoch::Live(Some(admitted))
-            | ReceiptEpoch::Finalized(admitted)
-            | ReceiptEpoch::Faulted(admitted) => admitted,
-        };
+        let (heads, range, source_finalized) =
+            match receipt_epoch(ctx, chain, self.deployment, context).await? {
+                ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
+                ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
+                ReceiptEpoch::Live(None) => {
+                    return match accepted {
+                        Some(accepted) => Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
+                            Box::new(self.record_payment(accepted, &staged, false)?),
+                        ))),
+                        None => Ok(PendingOutcome::Live(Box::new(staged))),
+                    };
+                }
+                ReceiptEpoch::Live(Some(admitted)) | ReceiptEpoch::Faulted(admitted) => {
+                    (admitted.roots.logs(), admitted.activity_range(), false)
+                }
+                ReceiptEpoch::Finalized(source) => (source.heads(), *source.activity_range(), true),
+            };
         let account = self.account();
         let lookup = self
             .holders
-            .committed_account(ctx, chain, &admitted, &account)
+            .committed_account_at(ctx, chain, context.epoch(), heads, &range, &account)
             .await?;
         let (_, activity) = lookup
-            .resolve::<Sha256>(&admitted.roots.change, &account)
+            .resolve::<Sha256>(&range, &account)
             .context("verify admitted payer activity")?;
         let Some(activity) = activity.filter(|activity| activity.has_outgoing()) else {
             return self.abandon_staged(&staged);
@@ -378,7 +380,7 @@ impl Agent {
 
         // Activity is immutable, but evidence retrieval can cross finalization or a fault.
         // Only a fresh live verdict can authorize a newly acquired preconfirmation.
-        let finalized = if admitted.finalized {
+        let finalized = if source_finalized {
             true
         } else {
             match receipt_epoch(ctx, chain, self.deployment, context).await? {

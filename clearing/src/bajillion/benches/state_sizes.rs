@@ -1,4 +1,9 @@
-use super::fixtures::{BenchState, runner, state_config};
+use super::fixtures::{runner, state_config};
+type BenchState = commonware_clearing::bajillion::qmdb::State<
+    commonware_runtime::deterministic::Context,
+    Sha256,
+    commonware_parallel::Rayon,
+>;
 use commonware_clearing::bajillion::qmdb::{AccountKey, StateHead, StateLookup, account_key};
 use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};

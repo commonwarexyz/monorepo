@@ -5,13 +5,13 @@
 
 use crate::bajillion::{
     challenge::{self, AccountLookup, ChangeAbsence, ChangeOpening, HigherEntryLookup},
-    transition::{ChangeParts, Close, TransitionError, WithdrawalClaim},
+    transition::{ActivityRange, ChangeParts, Close, TransitionError, WithdrawalClaim},
 };
 use alloc::boxed::Box;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use thiserror::Error;
 
-/// A view of retained BMT evidence for every account in one close.
+/// A view of retained native activity evidence for every account in one close.
 pub struct Index<'a, P: PublicKey, D: Digest> {
     close: &'a Close<P, D>,
 }
@@ -20,12 +20,20 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
     pub const fn new(close: &'a Close<P, D>) -> Self {
         Self { close }
     }
+
+    fn activity_range(&self) -> Result<&ActivityRange<D>, ServeError> {
+        let range = self.close.activity_range();
+        if range.head != self.close.roots.change {
+            return Err(TransitionError::ChangeRoot.into());
+        }
+        Ok(range)
+    }
     /// Opens the public epoch debit or proves that the account had no activity.
     pub fn account_lookup<H: Hasher<Digest = D>>(
         &self,
         account: &P,
     ) -> Result<AccountLookup<P, D>, ServeError> {
-        let lookup = match self.close.changes.change_parts(account)? {
+        let lookup = match self.close.changes.change_parts::<H>(account)? {
             ChangeParts::Present { leaf, proof } => {
                 AccountLookup::Present(Box::new(ChangeOpening {
                     value: leaf.value(),
@@ -42,7 +50,7 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
                 opening,
             }),
         };
-        lookup.resolve::<H>(&self.close.roots.change, account)?;
+        lookup.resolve::<H>(self.activity_range()?, account)?;
         Ok(lookup)
     }
     /// Opens the compact activity value for a participating account.
@@ -61,7 +69,7 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
         payer: &P,
         recipient: &P,
     ) -> Result<HigherEntryLookup<P, D>, ServeError> {
-        let lookup = match self.close.changes.change_parts(payer)? {
+        let lookup = match self.close.changes.change_parts::<H>(payer)? {
             ChangeParts::Present { leaf, proof } => {
                 let index = self
                     .close
@@ -90,7 +98,7 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
                 opening,
             }),
         };
-        lookup.resolve::<H>(&self.close.roots.change, payer, recipient)?;
+        lookup.resolve::<H>(self.activity_range()?, payer, recipient)?;
         Ok(lookup)
     }
     /// Opens an output for one registered withdrawal.
@@ -98,7 +106,7 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
         &self,
         account: &P,
     ) -> Result<WithdrawalClaim<D>, ServeError> {
-        let claim = self.close.withdrawal_claim(account)?;
+        let claim = self.close.withdrawal_claim::<H>(account)?;
         claim.verify::<H>(&self.close.roots.withdrawal_outputs)?;
         Ok(claim)
     }

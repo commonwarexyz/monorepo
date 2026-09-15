@@ -6,9 +6,7 @@ use crate::{
         harness,
         ingress::Submission,
         light::Verified,
-        query::{
-            Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest, EvidenceResponse, ReadRequest,
-        },
+        query::{Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, ReadRequest},
         state::StatusRecord,
         tx::QueueWithdrawalRequest,
     },
@@ -20,12 +18,14 @@ use crate::{
 };
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
+    logs::LogHead,
     qmdb::{StateLookup, StateOpening, account_key},
+    transition::{WithdrawalClaim, WithdrawalOutput},
 };
 use commonware_runtime::deterministic;
 use commonware_utils::channel::{mpsc, oneshot};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -155,11 +155,20 @@ struct Native {
     packets: BTreeMap<PacketId, RegisterEpochRequest>,
     closes: Vec<SettlementResult>,
     payments: [Option<operator_rpc::AcceptSendRequest>; 2],
+    claim_cache: BTreeMap<OutputId, CachedClaim>,
+    acknowledged_claims: BTreeSet<OutputId>,
 }
 
 struct SavedRequest {
     request: SignedWithdrawal<Key, Digest>,
     opening: StateOpening<Key, Digest>,
+}
+
+#[derive(Clone)]
+struct CachedClaim {
+    head: LogHead<Digest>,
+    start: Option<u64>,
+    claim: WithdrawalClaim<Digest>,
 }
 
 impl Native {
@@ -182,6 +191,8 @@ impl Native {
             packets: BTreeMap::new(),
             closes: Vec::new(),
             payments: [None, None],
+            claim_cache: BTreeMap::new(),
+            acknowledged_claims: BTreeSet::new(),
         }
     }
 
@@ -216,33 +227,49 @@ impl Native {
         );
         let wallet = wallets().remove(account);
         let status = self.status(context).await;
-        let lookup = match status.last_finalized {
+        let mut chain = self.client(context);
+        let operations = match status.last_finalized {
             Some(epoch) => {
-                let admitted = self
-                    .client(context)
+                let admitted = chain
                     .admitted(context, epoch)
                     .await?
                     .context("finalized admission is missing")?;
-                EvidenceLookup::SuccessorState {
-                    batch: admitted.batch_id.into_digest(),
-                    account: wallet.public_key(),
-                }
+                ensure!(
+                    admitted.finalized && admitted.roots.successor == status.state_root,
+                    "finalized admission differs from the status root"
+                );
+                admitted.roots.successor_operations
             }
-            None => EvidenceLookup::GenesisState {
-                account: wallet.public_key(),
-            },
+            None => {
+                let registered = chain.registered(context).await?;
+                let genesis = registered.deployment.genesis();
+                ensure!(
+                    genesis.root() == status.state_root,
+                    "registered genesis differs from the status root"
+                );
+                genesis.operations()
+            }
+        };
+        let lookup = EvidenceLookup::State {
+            root: status.state_root,
+            operations,
+            account: wallet.public_key(),
         };
         let evidence = self
             .control
             .evidence(EvidenceRequest::new(deployment(), lookup))
             .await;
-        let opening = match evidence {
-            EvidenceResponse::Served(Evidence::Genesis(opening))
-            | EvidenceResponse::Served(Evidence::Close {
-                body: EvidenceBody::State(opening),
-                ..
-            }) => opening,
-            _ => bail!("signing account has no finalized membership"),
+        let EvidenceResponse::Served(Evidence::State(lookup)) = evidence else {
+            bail!("signing account has no finalized state proof");
+        };
+        lookup.resolve::<Sha256>(&status.state_root, &account_key(&wallet.public_key())?)?;
+        let StateLookup::Present(value) = lookup else {
+            bail!("signing account has no finalized membership");
+        };
+        let opening = StateOpening {
+            account: wallet.public_key(),
+            balance: value.balance,
+            proof: value.proof,
         };
         opening.verify::<Sha256>(&status.state_root)?;
         let deadline = status.height
@@ -479,23 +506,50 @@ impl Native {
         outcome
     }
 
-    fn claim(&self, output: OutputId) -> Result<operator_rpc::AcknowledgeWithdrawalRequest> {
-        let close = self
-            .closes
-            .get(usize::from(output.epoch))
-            .context("claim close is unavailable")?;
-        let account = wallets().remove(output.account).public_key();
-        let position = close
-            .withdrawals
-            .requests()
+    fn claim(
+        &self,
+        output: OutputId,
+    ) -> Result<(SignedWithdrawal<Key, Digest>, WithdrawalClaim<Digest>)> {
+        self.closes
             .iter()
-            .position(|request| request.account() == &account)
-            .context("claim account has no withdrawal output")?;
-        Ok(operator_rpc::AcknowledgeWithdrawalRequest {
-            batch_id: close.header.batch_id::<Sha256>(),
-            account,
-            claim: close.withdrawal_claims[position].clone(),
-        })
+            .find_map(|close| {
+                close
+                    .withdrawals
+                    .requests()
+                    .iter()
+                    .zip(&close.withdrawal_claims)
+                    .find(|(_, claim)| claim.position() == output)
+                    .map(|(request, claim)| (request.clone(), claim.clone()))
+            })
+            .context("claim output is unavailable")
+    }
+
+    async fn payout_proof(
+        &self,
+        context: &deterministic::Context,
+        head: LogHead<Digest>,
+        index: u64,
+        expected: &WithdrawalOutput,
+    ) -> Result<WithdrawalClaim<Digest>> {
+        let operator_claim = { self.operator().lock().payout_proof(head, index) };
+        let claim = match operator_claim {
+            Ok(claim) => claim,
+            Err(_) => {
+                self.client(context)
+                    .payout_proof(context, head, index)
+                    .await?
+            }
+        };
+        ensure!(claim.position() == index, "payout proof has another index");
+        ensure!(
+            claim.output() == expected,
+            "payout proof has another output"
+        );
+        ensure!(
+            claim.verify::<Sha256>(&head)? == *expected,
+            "payout proof authenticates another output"
+        );
+        Ok(claim)
     }
 
     async fn execute(
@@ -558,6 +612,16 @@ impl Native {
                 }
             }
             Action::Freeze => {
+                let epoch = self.operator().lock().registration_boundary()?.0.epoch();
+                if epoch > 0
+                    && self
+                        .client(context)
+                        .admitted(context, epoch - 1)
+                        .await?
+                        .is_none()
+                {
+                    return Ok(Outcome::Rejected);
+                }
                 let packets = self.packets.len();
                 self.freeze(context).await?;
                 if self.packets.len() == packets {
@@ -721,48 +785,86 @@ impl Native {
                 self.restart().await;
                 Outcome::Accepted
             }
-            Action::Claim(output) => {
-                let claim = self.claim(output)?;
-                let before = self
-                    .client(context)
-                    .withdrawal_release(context, claim.batch_id, claim.claim.position())
+            Action::Fault => {
+                if self.status(context).await.hard_faulted {
+                    Outcome::Unchanged
+                } else {
+                    let registration = self
+                        .client(context)
+                        .registration(context)
+                        .await?
+                        .context("fault action requires an active registration")?;
+                    let height = self.status(context).await.height;
+                    if height <= registration.admission_deadline {
+                        self.control
+                            .advance(registration.admission_deadline - height + 1)
+                            .await;
+                    }
+                    if self.status(context).await.hard_faulted {
+                        Outcome::Accepted
+                    } else {
+                        Outcome::Rejected
+                    }
+                }
+            }
+            Action::Refresh(output) => {
+                let (_, source) = self.claim(output)?;
+                let status = self.client(context).payout_status(context, output).await?;
+                let claim = self
+                    .payout_proof(context, status.head, output, source.output())
                     .await?;
+                self.claim_cache.insert(
+                    output,
+                    CachedClaim {
+                        head: status.head,
+                        start: status.interval.map(|interval| interval.start),
+                        claim,
+                    },
+                );
+                Outcome::Accepted
+            }
+            Action::Claim(output) => {
+                let Some(cached) = self.claim_cache.get(&output).cloned() else {
+                    return Ok(Outcome::Rejected);
+                };
+                let before = self.client(context).payout_status(context, output).await?;
+                if before.head != cached.head
+                    || before.interval.map(|interval| interval.start) != cached.start
+                {
+                    return Ok(Outcome::Rejected);
+                }
+                if before.interval.is_none() {
+                    return Ok(Outcome::Unchanged);
+                }
                 self.control
                     .submit(SettlementTx::ClaimWithdrawal(
                         crate::chain::tx::WithdrawalClaimRequest {
                             deployment: deployment(),
-                            batch_id: claim.batch_id,
-                            claim: claim.claim.clone(),
+                            start: cached.start.expect("unclaimed output has a range start"),
+                            claim: cached.claim,
                         },
                     ))
                     .await;
-                let after = self
-                    .client(context)
-                    .withdrawal_release(context, claim.batch_id, claim.claim.position())
+                let after = self.client(context).payout_status(context, output).await?;
+                let expected = self.claim(output)?.1.output().clone();
+                self.payout_proof(context, after.head, output, &expected)
                     .await?;
-                if before.is_some() && before == after {
-                    Outcome::Unchanged
-                } else if after.is_some() {
+                if after.interval.is_none() {
                     Outcome::Accepted
                 } else {
                     Outcome::Rejected
                 }
             }
             Action::Acknowledge(output) => {
-                let request = operator_rpc::OperatorRequest::AcknowledgeWithdrawal(Box::new(
-                    self.claim(output)?,
-                ));
-                let response = prepare_request(
-                    context,
-                    &mut self.client(context),
-                    self.operator(),
-                    &request,
-                    TIMING,
-                )
-                .await?;
-                if response
-                    .is_some_and(|response| matches!(response, rpc::Response::Success { .. }))
+                self.claim(output)?;
+                if self
+                    .client(context)
+                    .payout_status(context, output)
+                    .await?
+                    .interval
+                    .is_none()
                 {
+                    self.acknowledged_claims.insert(output);
                     Outcome::Accepted
                 } else {
                     Outcome::Rejected
@@ -805,12 +907,7 @@ impl Native {
             }
         }
         let mut chain = self.client(context);
-        let status = chain.recent_status(context).await?;
-        ensure!(
-            !status.hard_faulted,
-            "trace left the timely lease domain at height {}",
-            status.height
-        );
+        let (status, payout_tip) = chain.payout_checkpoint(context).await?;
         let registered = chain.registration(context).await?;
         let mut receipts = [None; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
@@ -825,71 +922,80 @@ impl Native {
         let mut admitted = [false; model::EPOCHS];
         let mut adopted = false;
         for epoch in 0..model::EPOCHS {
-            let lookup = chain.request(Lookup::Anchor {
-                epoch: epoch as u64,
-            });
-            match chain.recent(context, &lookup).await?.record {
-                Some(Record::Anchor(anchor)) => {
-                    if payment.epoch() == epoch as u64 {
-                        adopted = payment.anchor() == &anchor;
-                    }
-                    let requests = if let Some(close) = self.closes.get(epoch) {
-                        ensure!(
-                            close.context.payment().anchor() == &anchor,
-                            "stored close differs from permanent native anchor"
-                        );
-                        self.request_mask(&close.withdrawals)?
-                    } else {
-                        let registered = registered
-                            .as_ref()
-                            .filter(|record| {
-                                record.epoch == epoch as u64 && record.anchor == anchor
-                            })
-                            .context("uncut native anchor has no current registration")?;
-                        let request = self
-                            .packets
-                            .values()
-                            .find(|request| {
-                                request.epoch == epoch as u64
-                                    && request
-                                        .withdrawals
-                                        .root::<Sha256>()
-                                        .is_ok_and(|root| root == registered.withdrawals_root)
-                            })
-                            .context("native registration differs from every delivered packet")?;
-                        self.request_mask(&request.withdrawals)?
-                    };
-                    anchors[epoch] = Some(PacketId {
-                        epoch: epoch.try_into()?,
-                        requests,
-                        queued: 0,
-                    });
+            if payout_tip
+                .finalized
+                .is_some_and(|last| epoch as u64 <= last)
+            {
+                let source = chain.source(context, epoch as u64, payout_tip).await?;
+                let anchor = *source.context().payment().anchor();
+                if payment.epoch() == epoch as u64 {
+                    adopted = payment.anchor() == &anchor;
                 }
-                None => {}
-                Some(_) => bail!("native anchor lookup has another record type"),
+                anchors[epoch] = Some(PacketId {
+                    epoch: epoch.try_into()?,
+                    requests: self.request_mask(source.withdrawals())?,
+                    queued: 0,
+                });
+                admitted[epoch] = true;
+                continue;
+            }
+            if let Some(anchor) = chain.anchor(context, epoch as u64).await? {
+                if payment.epoch() == epoch as u64 {
+                    adopted = payment.anchor() == &anchor;
+                }
+                let requests = if let Some(close) = self.closes.get(epoch) {
+                    ensure!(
+                        close.context.payment().anchor() == &anchor,
+                        "stored close differs from permanent native anchor"
+                    );
+                    self.request_mask(&close.withdrawals)?
+                } else {
+                    let registered = registered
+                        .as_ref()
+                        .filter(|record| record.epoch == epoch as u64 && record.anchor == anchor)
+                        .context("uncut native anchor has no current registration")?;
+                    let request = self
+                        .packets
+                        .values()
+                        .find(|request| {
+                            request.epoch == epoch as u64
+                                && request
+                                    .withdrawals
+                                    .root::<Sha256>()
+                                    .is_ok_and(|root| root == registered.withdrawals_root)
+                        })
+                        .context("native registration differs from every delivered packet")?;
+                    self.request_mask(&request.withdrawals)?
+                };
+                anchors[epoch] = Some(PacketId {
+                    epoch: epoch.try_into()?,
+                    requests,
+                    queued: 0,
+                });
             }
             admitted[epoch] = chain.admitted(context, epoch as u64).await?.is_some();
         }
         let mut outputs = [[None; model::ACCOUNTS]; model::EPOCHS];
         let mut released = [[None; model::ACCOUNTS]; model::EPOCHS];
+        let mut unclaimed = BTreeMap::new();
         let mut claim_head = [None; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
-            match self
-                .operator()
-                .lock()
-                .withdrawal_evidence(&wallets[account].public_key())
-            {
-                Ok(evidence) => {
-                    claim_head[account] = Some(OutputId {
-                        epoch: evidence.witness.context.payment().epoch().try_into()?,
-                        account,
-                    });
-                }
-                Err(error)
-                    if error.to_string()
-                        == "there is no finalized withdrawal claim for this account" => {}
-                Err(error) => return Err(error),
-            }
+            let key = wallets[account].public_key();
+            claim_head[account] = self.closes.iter().find_map(|close| {
+                close
+                    .withdrawals
+                    .request_for(&key)
+                    .and_then(|request| {
+                        close
+                            .withdrawals
+                            .requests()
+                            .iter()
+                            .position(|candidate| candidate == request)
+                    })
+                    .and_then(|ordinal| close.withdrawal_claims.get(ordinal))
+                    .map(WithdrawalClaim::position)
+                    .filter(|position| !self.acknowledged_claims.contains(position))
+            });
         }
         for close in &self.closes {
             let epoch: usize = close.context.payment().epoch().try_into()?;
@@ -908,73 +1014,72 @@ impl Native {
                         .verify::<Sha256>(&close.roots.withdrawal_outputs)?
                         .amount(),
                 );
-                if let Some(release) = chain
-                    .withdrawal_release(
-                        context,
-                        close.header.batch_id::<Sha256>(),
-                        claim.position(),
-                    )
-                    .await?
+                if status
+                    .last_finalized
+                    .is_some_and(|finalized| epoch as u64 <= finalized)
                 {
+                    let payout = chain.payout_status(context, claim.position()).await?;
                     ensure!(
-                        release.claim == Sha256::hash(&[&claim.encode()]),
-                        "released claim differs from retained output"
+                        payout.head == payout_tip.heads.payouts,
+                        "payout status differs from the current finalized head"
                     );
-                    released[epoch][account] = Some(release.released.amount);
+                    let expected = claim.output();
+                    self.payout_proof(context, payout.head, claim.position(), expected)
+                        .await?;
+                    match payout.interval {
+                        Some(interval) => {
+                            ensure!(
+                                interval.start <= claim.position()
+                                    && claim.position() < interval.end,
+                                "payout status interval does not contain its output"
+                            );
+                            if let Some(prior) = unclaimed.insert(interval.start, interval.end) {
+                                ensure!(prior == interval.end, "payout interval views disagree");
+                            }
+                        }
+                        None => released[epoch][account] = Some(expected.amount()),
+                    }
                 }
             }
         }
+        let state_operations = match status.last_finalized {
+            Some(epoch) => {
+                let close = chain
+                    .admitted(context, epoch)
+                    .await?
+                    .context("finalized close is absent")?;
+                ensure!(
+                    close.finalized && close.roots.successor == status.state_root,
+                    "status root differs from finalized admission"
+                );
+                close.roots.successor_operations
+            }
+            None => {
+                let registered = chain.registered(context).await?;
+                let genesis = registered.deployment.genesis();
+                ensure!(
+                    genesis.root() == status.state_root,
+                    "registered genesis differs from the status root"
+                );
+                genesis.operations()
+            }
+        };
         let mut finalized_balances = [0; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
             let key = wallets[account].public_key();
-            let lookup = match status.last_finalized {
-                Some(epoch) => {
-                    let close = chain
-                        .admitted(context, epoch)
-                        .await?
-                        .context("finalized close is absent")?;
-                    ensure!(
-                        close.roots.successor == status.state_root,
-                        "status root differs from finalized admission"
-                    );
-                    EvidenceLookup::SuccessorState {
-                        batch: close.batch_id.into_digest(),
-                        account: key.clone(),
-                    }
-                }
-                None => EvidenceLookup::GenesisState {
-                    account: key.clone(),
-                },
+            let lookup = EvidenceLookup::State {
+                root: status.state_root,
+                operations: state_operations,
+                account: key.clone(),
             };
             finalized_balances[account] = match self
                 .control
                 .evidence(EvidenceRequest::new(deployment(), lookup))
                 .await
             {
-                EvidenceResponse::Served(Evidence::Genesis(opening))
-                | EvidenceResponse::Served(Evidence::Close {
-                    body: EvidenceBody::State(opening),
-                    ..
-                }) => {
-                    ensure!(
-                        opening.account == key,
-                        "finalized proof is for another account"
-                    );
-                    opening.verify::<Sha256>(&status.state_root)?.get()
-                }
-                EvidenceResponse::Served(Evidence::GenesisAbsent(proof))
-                | EvidenceResponse::Served(Evidence::Close {
-                    body: EvidenceBody::StateAbsent(proof),
-                    ..
-                }) => {
-                    ensure!(
-                        StateLookup::Absent(proof)
-                            .resolve::<Sha256>(&status.state_root, &account_key(&key)?)?
-                            .is_none(),
-                        "absence proof returned a balance"
-                    );
-                    0
-                }
+                EvidenceResponse::Served(Evidence::State(lookup)) => lookup
+                    .resolve::<Sha256>(&status.state_root, &account_key(&key)?)?
+                    .map_or(0, |balance| balance.get()),
                 _ => bail!("validator did not serve finalized state evidence"),
             };
         }
@@ -994,6 +1099,7 @@ impl Native {
             boundary,
             frozen: self.operator().lock().withdrawals_frozen()?,
             adopted,
+            faulted: status.hard_faulted,
             acknowledgements,
             receipts,
             anchors,
@@ -1003,6 +1109,8 @@ impl Native {
                 .last_finalized
                 .map_or(0, |epoch| u8::try_from(epoch + 1).unwrap()),
             finalized_balances,
+            payout_head: payout_tip.heads.payouts.operations,
+            unclaimed,
             outputs,
             released,
             claim_head,
@@ -1058,7 +1166,7 @@ fn generated_withdrawal_lifecycle_traces_match_native_service() {
     );
     for trace in traces {
         deterministic::Runner::timed(Duration::from_secs(60)).start(move |context| async move {
-            replay(&context, trace).await;
+            Box::pin(replay(&context, trace)).await;
         });
     }
 }

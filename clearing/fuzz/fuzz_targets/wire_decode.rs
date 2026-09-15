@@ -12,13 +12,18 @@ use commonware_clearing::bajillion::{
         AccountLookup, AckWitness, ChallengeError, ChangeAbsence, ChangeOpening, EntryWitness,
         HigherEntryLookup, adjudicate, decode_bounded,
     },
-    commitment::{Opening, RangeOpening, VectorKind, VectorRoot, empty_root},
+    commitment::{Opening, RangeOpening, VectorRoot},
+    custody::{SourceMetadata, SourceProof, SourceRow},
+    logs::{Floors, Heads, LogHead, Opening as LogOpening},
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     posted,
-    qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
+    qmdb::{StateHead, StateLookup, StateOpening, StateRoot, StateValueOpening},
+    replica::ReplicaHead,
+    settlement::UnclaimedInterval,
     state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
-        BatchId, CloseContext, CloseLimits, Header, RootBundle, WithdrawalClaim, WithdrawalOutput,
+        BatchId, CloseContext, CloseLimits, Header, ProposalId, RootBundle, WithdrawalClaim,
+        WithdrawalOutput,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -81,14 +86,30 @@ async fn semantic_header(
         u64::from(seed) + 1,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"wire-decode-committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
-    let roots = RootBundle {
-        change: empty_root::<Sha256>(VectorKind::Change),
-        withdrawal_outputs: empty_root::<Sha256>(VectorKind::WithdrawalOutput),
-        successor: state.root(),
-    };
-    let withdrawal_total = 0;
-    let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
+    let prepared = commonware_clearing::bajillion::transition::prepare_close_with_strategy::<
+        Sha256,
+        _,
+        _,
+        _,
+        _,
+    >(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        vec![],
+        &commonware_parallel::Sequential,
+    )
+    .await
+    .unwrap();
+    let roots = prepared.close().roots;
+    let withdrawal_total = prepared.close().withdrawal_total;
+    let header = prepared.close().header;
     (context, header, roots, withdrawal_total)
 }
 
@@ -123,6 +144,10 @@ async fn dealing_roundtrip(bytes: &[u8], limits: CloseLimits, runtime: determini
         1,
         limits,
         Sha256::hash(&[b"committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     if let Ok(dealing) = posted::decode::<VerifyingKey, Digest>(bytes.to_vec().into(), &context) {
         assert_eq!(dealing.encoded().as_ref(), bytes);
@@ -160,7 +185,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 44 {
+    match selector % 56 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -219,6 +244,18 @@ fuzz_target!(|data: &[u8]| {
         42 => roundtrip::<CloseLimits>(bytes, &()),
         43 => deterministic::Runner::seeded(u64::from(limit_selector))
             .start(|runtime| async move { dealing_roundtrip(bytes, close_limits, runtime).await }),
+        44 => roundtrip::<LogHead<Digest>>(bytes, &()),
+        45 => roundtrip::<Heads<Digest>>(bytes, &()),
+        46 => roundtrip::<Floors>(bytes, &()),
+        47 => roundtrip::<LogOpening<Digest>>(bytes, &()),
+        48 => roundtrip::<UnclaimedInterval>(bytes, &()),
+        49 => roundtrip::<ProposalId<Digest>>(bytes, &()),
+        50 => roundtrip::<StateHead<Digest>>(bytes, &()),
+        51 => roundtrip::<ReplicaHead<Digest>>(bytes, &()),
+        52 => roundtrip::<SourceProof<Digest>>(bytes, &RangeCfg::new(..=bytes.len())),
+        53 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
+        54 => roundtrip::<SourceMetadata<VerifyingKey, Digest>>(bytes, &()),
+        55 => roundtrip::<SourceRow<VerifyingKey>>(bytes, &RangeCfg::new(..=bytes.len())),
         _ => unreachable!(),
     }
 

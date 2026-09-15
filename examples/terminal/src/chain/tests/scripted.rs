@@ -8,7 +8,7 @@ pub(super) struct Schedule {
     payment_head_before_finality: bool,
     payments: Vec<operator_rpc::AcceptedBatchResponse>,
     closes: Vec<u64>,
-    withdrawal: Vec<operator_rpc::AcknowledgeWithdrawalRequest>,
+    withdrawal: Vec<(u64, SignedWithdrawal<Key, Digest>)>,
 }
 
 async fn tick(context: &deterministic::Context) {
@@ -18,6 +18,7 @@ async fn tick(context: &deterministic::Context) {
     context.sleep(POLL).await;
 }
 
+#[commonware_macros::boxed]
 pub(super) async fn serve<L: Listener>(
     context: deterministic::Context,
     mut listener: L,
@@ -115,12 +116,15 @@ pub(super) async fn serve<L: Listener>(
                 );
                 schedule.lock().closes.push(request.expected_epoch);
             }
-            operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
-                schedule.lock().withdrawal.push((**request).clone());
-            }
             _ => {}
         }
         let payment = matches!(&request, operator_rpc::OperatorRequest::AcceptSend(_));
+        let withdrawal = match &request {
+            operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
+                Some(request.request.clone())
+            }
+            _ => None,
+        };
         let response = match prepare_request(
             &context,
             &mut chain,
@@ -134,6 +138,13 @@ pub(super) async fn serve<L: Listener>(
             Ok(None) => operator_rpc::handle_decoded(&mut operator.lock(), request),
             Err(error) => rpc::error_response(format!("{error:#}")),
         };
+        if let Some(withdrawal) = withdrawal
+            && let rpc::Response::Success { body } = &response
+        {
+            let ack = operator_rpc::WithdrawalAck::decode(body.clone()).unwrap();
+            assert_eq!(ack.digest, operator_rpc::withdrawal_digest(&withdrawal));
+            schedule.lock().withdrawal.push((ack.epoch, withdrawal));
+        }
         if payment
             && let rpc::Response::Success { body } = &response
             && let operator_rpc::AcceptSendResponse::Accepted(accepted) =
@@ -234,7 +245,7 @@ pub(super) async fn run(
     };
     anyhow::ensure!(
         withdrawals.len() == 2,
-        "expected exactly two withdrawal acknowledgements"
+        "expected exactly two accepted withdrawal requests"
     );
     anyhow::ensure!(
         epochs.len() == 4,
@@ -248,17 +259,28 @@ pub(super) async fn run(
         closes == vec![0, epochs[2], epochs[3]],
         "close requests must identify each completed work arc: {closes:?}"
     );
-    for (withdrawal, (amount, account)) in withdrawals
+    let (_, tip) = chain.payout_checkpoint(&context).await?;
+    for ((epoch, withdrawal), (amount, account)) in withdrawals
         .iter()
         .zip([(3, Agent::new(0)?.account()), (2, eve_account.clone())])
     {
-        let release = chain
-            .withdrawal_release(&context, withdrawal.batch_id, withdrawal.claim.position())
-            .await?
-            .context("certified withdrawal release")?;
+        let source = chain.source(&context, *epoch, tip).await?;
+        let position = source
+            .withdrawal_index(&account)
+            .ok_or_else(|| anyhow::anyhow!("script request has no finalized source"))?;
+        let source_claim = chain
+            .payout_proof(&context, tip.heads.payouts, position)
+            .await?;
+        let issued = source.verify_withdrawal::<Sha256>(withdrawal, &source_claim)?;
+        let status = chain.payout_status(&context, position).await?;
+        let proof = chain.payout_proof(&context, status.head, position).await?;
+        let output = proof.verify::<Sha256>(&status.head)?;
         anyhow::ensure!(
-            release.released.amount == amount && release.released.destination == account.encode(),
-            "incorrect withdrawal release"
+            status.interval.is_none()
+                && output == issued
+                && output.amount() == amount
+                && output.destination() == &account.encode(),
+            "incorrect withdrawal consumption"
         );
     }
     let status = chain.status(&context).await?;

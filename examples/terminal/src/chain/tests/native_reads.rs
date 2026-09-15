@@ -403,7 +403,7 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
         let result = commonware_macros::select! {
             result = async {
                 loop {
-                    match crate::chain::client::admit(&context, &mut race, request.clone()).await {
+                    match crate::chain::client::admit(&context, &mut race, &close.result.context, request.clone()).await {
                         Err(error) if error.is::<crate::chain::client::AdmissionPending>() => {},
                         result => break result,
                     }
@@ -901,6 +901,7 @@ fn certified_registry_fits_busy_block() {
         };
         drop(guard);
         let response = CertifiedRead {
+            payout: None,
             finalization: fixture
                 .marshal
                 .get_finalization(busy.height)

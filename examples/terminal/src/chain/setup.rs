@@ -72,7 +72,7 @@ use std::{
 pub(crate) type Identity = Output<MinSig, PublicKey>;
 
 /// One validator's evidence-serving identity: its dealt clearing committee
-/// public key and the query address that serves its retained dealings.
+/// public key and the query address that serves its native proofs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatorEntry {
     pub(crate) clearing: ClearingPublic,
@@ -144,7 +144,7 @@ impl Genesis {
             .map(|validator| validator.query))
     }
 
-    /// Every committee validator retains the complete close, in participant order.
+    /// Configured validator query endpoints in participant order.
     pub(crate) fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
         (0..committee()?.members().len())
             .map(|i| {

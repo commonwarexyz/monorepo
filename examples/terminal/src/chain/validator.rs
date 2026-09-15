@@ -224,6 +224,9 @@ pub struct Validator {
     /// Validator node directory containing config, genesis, and storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
+    /// Retain native Bajillion history for historical proof serving.
+    #[arg(long)]
+    pub retain_native_history: bool,
 }
 
 /// Start every validator actor and run until one stops.
@@ -404,7 +407,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     // Stateful actor wrapping the settlement application.
     let finalized = Finalized::default();
-    let application: App<Scheme, ingress::Mailbox> = App::new(
+    let application: App<Scheme, ingress::WitnessProvider<tokio::Context>> = App::new(
         genesis_block.clone(),
         genesis_output.timing(),
         genesis_output.native.clone(),
@@ -415,7 +418,13 @@ pub async fn run(context: tokio::Context, args: Validator) {
         StatefulConfig {
             application,
             db_config: db_config(partition_prefix, page_cache.clone()),
-            provider: ingress_mailbox.clone(),
+            provider: ingress::WitnessProvider::new(
+                context.child("proposal_witnesses"),
+                ingress_mailbox.clone(),
+                genesis_output
+                    .holders()
+                    .expect("valid validator query directory"),
+            ),
             marshal: (marshal.clone(), floor),
             mailbox_size: MAILBOX_SIZE,
             plan,
@@ -466,6 +475,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (sealer, sealer_mailbox) = da::Sealer::new(
         context.child("sealer"),
         da::Config {
+            retain_history: args.retain_native_history,
             scheme: clearing,
             registry,
             db: db.clone(),
@@ -474,10 +484,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
             fetch_timeout: Duration::from_secs(2),
         },
     );
+    ingress_mailbox.attach_witnesses(sealer_mailbox.clone());
     let sealer_handle = sealer.start(settlement_da_network);
 
-    // Certified query server over the applied database, serving evidence
-    // from the sealer's retained dealings.
+    // Certified reads use the applied database; evidence comes from retained native operations.
     let query_handle = query::start(
         context.child("query"),
         query::Config {
