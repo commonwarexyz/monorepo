@@ -337,6 +337,13 @@ where
         // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
+
+    fn elect_early(&self, _round: Round) -> Option<Participant> {
+        // Scripted `round_leaders` answer `elect` during the attack prefix, so
+        // delegating to the fallback could contradict the script and violate
+        // the `elect_early == elect` contract.
+        None
+    }
 }
 
 /// Controls how multi-round scenarios are constructed.
