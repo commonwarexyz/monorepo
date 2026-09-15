@@ -441,12 +441,24 @@ impl<K: Kernel> Impl for Impl8<K> {
         self.kernel.run(AddInto { dst, src });
     }
 
+    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
+        self.kernel.run(DerivativeFour { quarters });
+    }
+
+    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
+        self.kernel.run(DerivativeSixteen { blocks });
+    }
+
     fn sub_into(self, dst: &mut [u8], src: &[u8]) {
         self.add_into(dst, src);
     }
 
     fn mul_add(self, dst: &mut [u8], src: &[u8], c: GF8) {
-        self.kernel.run(MulAdd { dst, src, c });
+        self.kernel.run(MulAdd::<true> { dst, src, c });
+    }
+
+    fn mul_into(self, dst: &mut [u8], src: &[u8], c: GF8) {
+        self.kernel.run(MulAdd::<false> { dst, src, c });
     }
 
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: GF8) {
@@ -519,6 +531,114 @@ impl<K: Kernel> Impl for Impl8<K> {
 
 // Inline only the byte loops into the kernel's feature-enabled entry point.
 // Worker callbacks can enter these without inlining the surrounding protocol.
+struct DerivativeFour<'a> {
+    quarters: [&'a mut [u8]; 4],
+}
+
+// K::LANES cannot be used as a const generic argument to as_chunks.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+impl WithKernel for DerivativeFour<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn call<K: Kernel>(self, kernel: K) {
+        let [q0, q1, q2, q3] = self.quarters;
+        assert_eq!(q0.len(), q1.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q2.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q3.len(), "quarter lengths differ");
+        let mut q0 = q0.chunks_exact_mut(K::LANES);
+        let mut q1 = q1.chunks_exact_mut(K::LANES);
+        let mut q2 = q2.chunks_exact_mut(K::LANES);
+        let mut q3 = q3.chunks_exact_mut(K::LANES);
+        for (((out0, out1), out2), out3) in q0
+            .by_ref()
+            .zip(q1.by_ref())
+            .zip(q2.by_ref())
+            .zip(q3.by_ref())
+        {
+            let b = GF8Vec::load_bytes(kernel, out1);
+            let c = GF8Vec::load_bytes(kernel, out2);
+            let d = GF8Vec::load_bytes(kernel, out3);
+            (b + c).store_bytes(out0);
+            d.store_bytes(out1);
+            d.store_bytes(out2);
+            (d + d).store_bytes(out3);
+        }
+
+        let [q0, q1, q2, q3] = [
+            q0.into_remainder(),
+            q1.into_remainder(),
+            q2.into_remainder(),
+            q3.into_remainder(),
+        ];
+        for i in 0..q0.len() {
+            let d = q3[i];
+            q0[i] = q1[i] ^ q2[i];
+            q1[i] = d;
+            q2[i] = d;
+            q3[i] = 0;
+        }
+    }
+}
+
+struct DerivativeSixteen<'a> {
+    blocks: [&'a mut [u8]; 16],
+}
+
+impl WithKernel for DerivativeSixteen<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn call<K: Kernel>(self, kernel: K) {
+        let blocks = self.blocks;
+        let len = blocks[0].len();
+        assert!(
+            blocks.iter().all(|block| block.len() == len),
+            "block lengths differ"
+        );
+        let full = len / K::LANES * K::LANES;
+        for start in (0..full).step_by(K::LANES) {
+            let end = start + K::LANES;
+            let first = GF8Vec::load_bytes(kernel, &blocks[1][start..end]);
+            let zero = first + first;
+            let mut sources = [zero; 16];
+            sources[1] = first;
+            for source in 2..16 {
+                sources[source] = GF8Vec::load_bytes(kernel, &blocks[source][start..end]);
+            }
+            // Fixed destinations keep the source vectors in registers.
+            macro_rules! store {
+                ($($output:expr),* $(,)?) => {{$(
+                    let output = $output;
+                    let mut sum = zero;
+                    for bit in 0..4 {
+                        let mask = 1 << bit;
+                        if output & mask == 0 {
+                            sum += &sources[output | mask];
+                        }
+                    }
+                    sum.store_bytes(&mut blocks[output][start..end]);
+                )*}};
+            }
+            store!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        }
+        // Each byte offset is shared by all source and destination blocks.
+        #[allow(clippy::needless_range_loop)]
+        for offset in full..len {
+            for output in 0..16 {
+                let mut sum = 0;
+                for bit in 0..4 {
+                    let mask = 1 << bit;
+                    if output & mask == 0 {
+                        sum ^= blocks[output | mask][offset];
+                    }
+                }
+                blocks[output][offset] = sum;
+            }
+        }
+    }
+}
+
 struct AddInto<'a> {
     dst: &'a mut [u8],
     src: &'a [u8],
@@ -545,7 +665,7 @@ impl WithKernel for AddInto<'_> {
     }
 }
 
-struct MulAdd<'a> {
+struct MulAdd<'a, const ADD: bool> {
     dst: &'a mut [u8],
     src: &'a [u8],
     c: GF8,
@@ -553,7 +673,7 @@ struct MulAdd<'a> {
 
 // K::LANES cannot be used as a const generic argument to as_chunks.
 #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-impl WithKernel for MulAdd<'_> {
+impl<const ADD: bool> WithKernel for MulAdd<'_, ADD> {
     type Output = ();
 
     #[inline(always)]
@@ -563,11 +683,21 @@ impl WithKernel for MulAdd<'_> {
         let mut dst = dst.chunks_exact_mut(K::LANES);
         let mut src = src.chunks_exact(K::LANES);
         for (d, s) in dst.by_ref().zip(src.by_ref()) {
-            let sum = GF8Vec::load_bytes(kernel, d) + GF8Vec::load_bytes(kernel, s) * c;
+            let product = GF8Vec::load_bytes(kernel, s) * c;
+            let sum = if ADD {
+                GF8Vec::load_bytes(kernel, d) + product
+            } else {
+                product
+            };
             sum.store_bytes(d);
         }
         for (d, s) in dst.into_remainder().iter_mut().zip(src.remainder()) {
-            *d = (GF8::from(*d) + GF8::from(*s) * c).into();
+            let product = GF8::from(*s) * c;
+            *d = if ADD {
+                (GF8::from(*d) + product).into()
+            } else {
+                product.into()
+            };
         }
     }
 }
@@ -923,6 +1053,48 @@ mod tests {
                 }
             }
 
+            for len in (0..=2 * K::LANES + 1).chain([3 * K::LANES + 1]) {
+                let mut original: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len + 2]);
+                for quarter in &mut original {
+                    rng.fill_bytes(quarter);
+                }
+                let mut actual = original.clone();
+                let mut expected = original.clone();
+                for i in 1..=len {
+                    let d = original[3][i];
+                    expected[0][i] = original[1][i] ^ original[2][i];
+                    expected[1][i] = d;
+                    expected[2][i] = d;
+                    expected[3][i] = 0;
+                }
+                let [q0, q1, q2, q3] = &mut actual;
+                imp.derivative_four([
+                    &mut q0[1..=len],
+                    &mut q1[1..=len],
+                    &mut q2[1..=len],
+                    &mut q3[1..=len],
+                ]);
+                assert_eq!(actual, expected);
+            }
+
+            for len in (0..=2 * K::LANES + 1).chain([3 * K::LANES + 1]) {
+                let mut original: [Vec<u8>; 16] = std::array::from_fn(|_| vec![0; len + 2]);
+                for block in &mut original {
+                    rng.fill_bytes(block);
+                }
+                let mut actual = original.clone();
+                let mut expected = original.clone();
+                for output in 0..16 {
+                    for i in 1..=len {
+                        expected[output][i] = (0..4)
+                            .filter(|bit| output & (1 << bit) == 0)
+                            .fold(0, |sum, bit| sum ^ original[output | (1 << bit)][i]);
+                    }
+                }
+                imp.derivative_sixteen(actual.each_mut().map(|block| &mut block[1..=len]));
+                assert_eq!(actual, expected);
+            }
+
             for shard_len in [1, 3, K::LANES, K::LANES + 1, 2 * K::LANES + 3] {
                 let shard_count = 3;
                 let len = shard_len * shard_count;
@@ -1016,6 +1188,15 @@ mod tests {
                 OCELOT8.add_into(&mut expected[range.clone()], src);
                 assert_eq!(actual, expected);
                 for c in [0, 1, 0x53, 255] {
+                    let mut overwritten = actual.clone();
+                    overwritten[range.clone()].fill(0xa5);
+                    imp.mul_into(&mut overwritten[range.clone()], src, GF8(c));
+                    let mut expected_overwrite = overwritten.clone();
+                    for (dst, &src) in expected_overwrite[range.clone()].iter_mut().zip(src) {
+                        *dst = (GF8::from(src) * GF8(c)).into();
+                    }
+                    assert_eq!(overwritten, expected_overwrite);
+
                     imp.mul_add(&mut actual[range.clone()], src, GF8(c));
                     OCELOT8.mul_add(&mut expected[range.clone()], src, GF8(c));
                     assert_eq!(actual, expected);
