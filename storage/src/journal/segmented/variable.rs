@@ -80,7 +80,7 @@
 //! });
 //! ```
 
-use super::manager::{AppendBuffer, AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
@@ -91,7 +91,7 @@ use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
-    buffer::paged::{CacheRef, Replay as BlobReplay},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
 };
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -134,6 +134,7 @@ struct Inner<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
     /// Nonempty sections opened at initialization that have not been replayed from offset zero.
+    /// Public replay may repair them, and appends are blocked until their full replay succeeds.
     unrecovered: BTreeSet<u64>,
 
     /// Compression level (if enabled).
@@ -146,7 +147,7 @@ struct Inner<E: Storage + Metrics, V: Codec> {
 impl<E: Storage + Metrics, V: Codec> Inner<E, V> {
     /// The section's writer. A replayed section cannot be removed while the replay owns the
     /// journal.
-    fn writer(&mut self, section: u64) -> &mut AppendBuffer<E::Blob> {
+    fn writer(&mut self, section: u64) -> &mut PagedRecovery<E::Blob> {
         self.manager
             .get_mut(section)
             .expect("replayed section is present")
@@ -183,7 +184,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &AppendBuffer<E::Blob>,
+        blob: &PagedRecovery<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
         read_frame_at(blob, offset, cfg, compressed).await
@@ -684,7 +685,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         // The bytes already replayed are validated: they bound the truncation from below.
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
-        if matches!(self.journal.0.writer(section), AppendBuffer::Live(_)) {
+        if !self.journal.0.unrecovered.contains(&section) {
             return Err(source.into());
         }
         let size = current.reader.blob_size();
@@ -741,11 +742,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        self.journal
-            .0
-            .writer(section)
-            .truncate_pending(recoverable)
-            .await?;
+        self.journal.0.writer(section).truncate(recoverable).await?;
         let mut reader = self
             .journal
             .0
@@ -770,7 +767,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         let current = self.sections.front().expect("replayed section is present");
         let (section, offset, valid_offset) =
             (current.section, current.offset, current.valid_offset);
-        if matches!(self.journal.0.writer(section), AppendBuffer::Live(_)) {
+        if !self.journal.0.unrecovered.contains(&section) {
             return Err(Error::ItemOutOfRange(offset));
         }
         warn!(
@@ -787,7 +784,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         self.journal
             .0
             .writer(section)
-            .truncate_pending(valid_offset)
+            .truncate(valid_offset)
             .await?;
         self.repairing = false;
         Ok(())
@@ -955,7 +952,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             return Err(Error::ReplayFailed);
         }
         if let Some(start) = self.recovered_from {
-            self.journal.0.manager.publish_from(start);
             self.journal
                 .0
                 .unrecovered

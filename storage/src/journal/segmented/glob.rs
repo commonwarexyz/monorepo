@@ -441,12 +441,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         self.0.sections()
     }
 
-    /// Make repaired value sections durable.
-    pub(crate) async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
-        Ok(self)
-    }
-
     /// Remove an orphaned value section.
     pub(crate) async fn remove_section(mut self, section: u64) -> Result<Self, Error> {
         self.0.remove_section(section).await?;

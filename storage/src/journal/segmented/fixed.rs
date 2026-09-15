@@ -21,13 +21,13 @@
 //! (and their corresponding blobs) independently.
 
 use super::manager::{
-    AppendBuffer, AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
+    AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
-    buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
 };
 use commonware_utils::{Cached, NZUsize};
 use std::{
@@ -64,7 +64,8 @@ pub struct Config {
 struct Inner<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
 
-    /// Nonempty sections opened at initialization that have not been replayed from position zero.
+    /// Sections with an unvalidated retained suffix. Public replay may repair them, and appends
+    /// are blocked until their full replay succeeds.
     unrecovered: BTreeSet<u64>,
 
     /// Logical byte prefixes protected by durable validation markers.
@@ -113,7 +114,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
     /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
-    fn writer(&mut self, section: u64) -> &mut AppendBuffer<E::Blob> {
+    fn writer(&mut self, section: u64) -> &mut PagedRecovery<E::Blob> {
         self.manager
             .get_mut(section)
             .expect("replayed section is present")
@@ -304,7 +305,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             // The checkpoint preflight authorized this exact truncation. Make it durable before
             // the paired value journal can release any corresponding bytes.
             manager.truncate_pending(section, size).await?;
-            manager.sync(section).await?;
             return Ok(Self {
                 manager,
                 unrecovered: BTreeSet::new(),
@@ -654,12 +654,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
-    /// Publish all sections after paired recovery.
-    pub(crate) fn publish(mut self) -> Self {
-        self.0.manager.publish_all();
-        self
-    }
-
     /// Prove every checkpoint-covered index byte without mutating damage.
     pub(crate) async fn preflight_restore(
         context: E,
@@ -905,7 +899,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         // The bytes already replayed are validated: they bound the truncation from below.
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
-        if matches!(self.journal.0.writer(section), AppendBuffer::Live(_)) {
+        if !self.journal.0.unrecovered.contains(&section) {
             return Err(source.into());
         }
         let position = current.position;
@@ -966,11 +960,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        self.journal
-            .0
-            .writer(section)
-            .truncate_pending(target)
-            .await?;
+        self.journal.0.writer(section).truncate(target).await?;
         let mut reader = self
             .journal
             .0
@@ -1026,7 +1016,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                     let blob_size = current.reader.blob_size();
                     if valid_size < blob_size {
                         let section = current.section;
-                        if matches!(self.journal.0.writer(section), AppendBuffer::Live(_)) {
+                        if !self.journal.0.unrecovered.contains(&section) {
                             let position = current.position;
                             self.sections.pop_front();
                             return self.fail(Error::ItemOutOfRange(position));
@@ -1046,7 +1036,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             .journal
                             .0
                             .writer(section)
-                            .truncate_pending(valid_size)
+                            .truncate(valid_size)
                             .await
                             .map_err(Error::from)
                         {
@@ -1093,17 +1083,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     ///
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
-    pub fn finish(self) -> Result<Journal<E, A>, Error> {
-        let start = self.recovered_from;
-        let mut journal = self.finish_pending()?;
-        if let Some(start) = start {
-            journal.0.manager.publish_from(start);
-        }
-        Ok(journal)
-    }
-
-    /// Release the still-unpublished sections for paired initialization repair.
-    pub(crate) fn finish_pending(mut self) -> Result<Journal<E, A>, Error> {
+    pub fn finish(mut self) -> Result<Journal<E, A>, Error> {
         if self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
@@ -1207,65 +1187,6 @@ mod tests {
             partition: "segmented-fixed-aligned".into(),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
-        }
-    }
-
-    #[test_traced]
-    fn test_replay_rejects_corrupt_published_section() {
-        for incomplete in [false, true] {
-            deterministic::Runner::default().start(|context| async move {
-                let cfg = aligned_cfg(&context);
-                let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
-                    .await
-                    .unwrap();
-                for value in 0..8 {
-                    (journal, _) = journal.append(0, &value).await.unwrap();
-                }
-                _ = journal.sync_all().await.unwrap();
-
-                if incomplete {
-                    let (blob, size) = context
-                        .open(&cfg.partition, &0u64.to_be_bytes())
-                        .await
-                        .unwrap();
-                    let mut pending = commonware_runtime::buffer::paged::Recovery::open(
-                        blob,
-                        size,
-                        cfg.write_buffer.get(),
-                        cfg.page_cache.clone(),
-                    )
-                    .await
-                    .unwrap();
-                    pending.truncate(5).await.unwrap();
-                } else {
-                    corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 1, 16).await;
-                }
-
-                // Publish the damaged fixture to model corruption discovered after publication.
-                let journal = Journal::<_, u64>::init(context.child("replay"), cfg)
-                    .await
-                    .unwrap()
-                    .publish();
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(256), ReadOptions::default())
-                    .await
-                    .unwrap();
-                let error = loop {
-                    match replay.next().await.expect("corrupt section must fail") {
-                        Ok(_) => continue,
-                        Err(error) => break error,
-                    }
-                };
-                if incomplete {
-                    assert!(matches!(error, Error::ItemOutOfRange(0)), "{error:?}");
-                } else {
-                    assert!(
-                        matches!(error, Error::Runtime(RError::InvalidChecksum)),
-                        "{error:?}"
-                    );
-                }
-                assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
-            });
         }
     }
 
@@ -1799,7 +1720,7 @@ mod tests {
             seed(&context, &cfg, 0..=1).await;
 
             // Tear an interior page below the checkpoint boundary. The preflight reads only the
-            // terminal boundary page, so restore succeeds and must arm the proven floor.
+            // terminal boundary page, so restore succeeds without validating the interior.
             corrupt_page(&context, &cfg.partition, &1u64.to_be_bytes(), 2, 16).await;
             let size = 16 * u64::SIZE as u64;
             let journal = Journal::<_, u64>::preflight_restore(
@@ -1814,8 +1735,7 @@ mod tests {
             .await
             .expect("failed to finish preflight");
 
-            // Replay repair may not truncate checkpoint-proven bytes: the torn page sits below
-            // the restore floor, so recovery fails loud instead of mutating.
+            // The checkpoint covers the whole retained section, so replay cannot repair it.
             let mut replay = journal
                 .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
@@ -1829,8 +1749,7 @@ mod tests {
             }
             assert!(matches!(
                 outcome,
-                Some(Error::Corruption(ref message))
-                    if message.contains("below its 128-byte validation floor")
+                Some(Error::Runtime(RError::InvalidChecksum))
             ));
             drop(replay);
 

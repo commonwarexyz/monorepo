@@ -187,7 +187,6 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
     retained_size: Position<F>,
     metadata_prune_pos: Position<F>,
     effective_prune_pos: Position<F>,
-    recovered_nodes: Vec<D>,
     strategy: S,
 }
 
@@ -203,22 +202,19 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
         if *self.metadata_prune_pos > self.journal.bounds().start {
             (self.journal, _) = self.journal.prune(*self.metadata_prune_pos).await?;
         }
-        let repaired = !self.recovered_nodes.is_empty();
-        for node in self.recovered_nodes {
-            self.journal = self.journal.append(&node).await?;
-        }
-        if repaired {
-            self.journal = self.journal.sync().await?;
-        }
-        let journal = (*self.journal).finish(*self.mem.size()).await?;
-        Ok(Merkle {
+
+        // The journal append path owns rollover synchronization for reconstructed nodes.
+        let journal = (*self.journal).finish(*self.retained_size).await?;
+        Merkle {
             mem: Arc::new(self.mem),
             pruned_to_pos: self.effective_prune_pos,
             journal,
             metadata: self.metadata,
             journal_dirty: false,
             strategy: self.strategy,
-        })
+        }
+        .sync()
+        .await
     }
 }
 
@@ -366,7 +362,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
         mem.add_pinned_nodes(extra_pinned);
 
-        let mut recovered_nodes = Vec::new();
         if retained_size != journal_size && max_leaves.is_none_or(|cap| leaves < cap) {
             // An intact orphan leaf can reconstruct missing parents within the leaf cap.
             if let Ok(leaf) = journal.read(*retained_size).await {
@@ -375,15 +370,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                     .add_leaf_digest(leaf)
                     .merkleize(&mem, hasher);
                 mem.apply_batch(&batch)?;
-                for pos in *retained_size..*mem.size() {
-                    recovered_nodes.push(*mem.get_node_unchecked(Position::new(pos)));
-                }
-                let mut pinned = BTreeMap::new();
-                for pos in F::nodes_to_pin(prune_loc) {
-                    pinned.insert(pos, *mem.get_node_unchecked(pos));
-                }
-                mem.prune_all();
-                mem.add_pinned_nodes(pinned);
             }
         }
         Ok(Recovery {
@@ -393,7 +379,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             retained_size,
             metadata_prune_pos,
             effective_prune_pos,
-            recovered_nodes,
             strategy: cfg.strategy,
         })
     }

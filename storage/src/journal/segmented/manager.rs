@@ -6,11 +6,10 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, Metrics, ReadOptions,
-    Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
     buffer::{
         Write,
-        paged::{CacheRef, Recovery as PagedRecovery, Replay, Writer},
+        paged::{CacheRef, Recovery as PagedRecovery},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
@@ -103,12 +102,9 @@ pub trait SectionBuffer: Send + Sync {
     /// Shorten an unpublished section during initialization. A shorter length is durable when
     /// this returns.
     fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
-
-    /// Publish this section for appends.
-    fn publish(&mut self);
 }
 
-impl<B: Blob> SectionBuffer for AppendBuffer<B> {
+impl<B: Blob> SectionBuffer for PagedRecovery<B> {
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -126,11 +122,7 @@ impl<B: Blob> SectionBuffer for AppendBuffer<B> {
     }
 
     async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        self.truncate_pending(len).await
-    }
-
-    fn publish(&mut self) {
-        Self::publish(self);
+        self.truncate(len).await
     }
 }
 
@@ -159,8 +151,6 @@ impl<B: Blob> SectionBuffer for Write<B> {
         }
         Ok(())
     }
-
-    fn publish(&mut self) {}
 }
 
 /// Factory for creating section buffers from raw blobs.
@@ -176,7 +166,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
 }
 
-/// Factory for creating [`Writer`] buffers with page caching.
+/// Factory for creating cached sections whose repair permission belongs to the journal.
 #[derive(Clone)]
 pub struct AppendFactory {
     /// The size of the write buffer.
@@ -186,18 +176,16 @@ pub struct AppendFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for AppendFactory {
-    type Buffer = AppendBuffer<B>;
+    type Buffer = PagedRecovery<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(AppendBuffer::Pending(Some(
-            PagedRecovery::open(
-                blob,
-                size,
-                self.write_buffer.get(),
-                self.page_cache_ref.clone(),
-            )
-            .await?,
-        )))
+        PagedRecovery::open(
+            blob,
+            size,
+            self.write_buffer.get(),
+            self.page_cache_ref.clone(),
+        )
+        .await
     }
 }
 
@@ -215,204 +203,6 @@ impl<B: Blob> BufferFactory<B> for WriteFactory {
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
         Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
-    }
-}
-
-/// A section is either owned by initialization or permanently append-only.
-pub enum AppendBuffer<B: Blob> {
-    /// Initialization owns the retained end until replay finishes.
-    Pending(Option<PagedRecovery<B>>),
-    /// An initialized section.
-    Live(Writer<B>),
-}
-
-impl<B: Blob> AppendBuffer<B> {
-    /// Publish this section once. Only recovery can construct the pending variant.
-    pub fn publish(&mut self) {
-        if let Self::Pending(pending) = self {
-            *self = Self::Live(pending.take().expect("pending section").into());
-        }
-    }
-
-    /// Repair an unpublished section. A shorter length is durable when this returns. Initialized
-    /// sections cannot be shortened. Panics if the requested end would shorten a published section.
-    pub async fn truncate_pending(&mut self, end: u64) -> Result<(), RError> {
-        match self {
-            Self::Pending(p) => p.as_mut().expect("pending section").truncate(end).await,
-            Self::Live(w) if end >= w.size() => Ok(()),
-            Self::Live(_) => panic!("cannot truncate a published section"),
-        }
-    }
-
-    /// Return the section's logical length.
-    pub const fn size(&self) -> u64 {
-        match self {
-            Self::Pending(p) => p.as_ref().expect("pending section").size(),
-            Self::Live(w) => w.size(),
-        }
-    }
-
-    /// Make all section writes durable.
-    pub async fn sync(&mut self) -> Result<(), RError> {
-        match self {
-            Self::Pending(p) => p.as_mut().expect("pending section").sync().await,
-            Self::Live(w) => w.sync().await,
-        }
-    }
-
-    /// Begin syncing all accepted section writes.
-    pub async fn start_sync(&mut self) -> Handle<()> {
-        match self {
-            Self::Pending(p) => p.as_mut().expect("pending section").start_sync().await,
-            Self::Live(w) => w.start_sync().await,
-        }
-    }
-
-    /// Wait for previously started synchronization.
-    pub async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        match self {
-            Self::Pending(p) => p.as_mut().expect("pending section").wait_for_sync().await,
-            Self::Live(w) => w.wait_for_sync().await,
-        }
-    }
-
-    /// Read logical section bytes.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
-        match self {
-            Self::Pending(p) => {
-                p.as_ref()
-                    .expect("pending section")
-                    .read_at(offset, len)
-                    .await
-            }
-            Self::Live(w) => w.read_at(offset, len).await,
-        }
-    }
-
-    /// Read at most the requested number of bytes.
-    pub async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        buf: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), RError> {
-        match self {
-            Self::Pending(p) => {
-                p.as_ref()
-                    .expect("pending section")
-                    .read_up_to(offset, len, buf)
-                    .await
-            }
-            Self::Live(w) => w.read_up_to(offset, len, buf).await,
-        }
-    }
-
-    /// Read fixed-width items into the supplied buffer.
-    pub async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, RError> {
-        match self {
-            Self::Pending(p) => {
-                p.as_ref()
-                    .expect("pending section")
-                    .read_many_into(buf, offsets, item_size)
-                    .await
-            }
-            Self::Live(w) => w.read_many_into(buf, offsets, item_size).await,
-        }
-    }
-
-    /// Read from the cache and buffered tip if available.
-    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
-        match self {
-            Self::Pending(p) => p
-                .as_ref()
-                .expect("pending section")
-                .try_read_sync_into(buf, offset),
-            Self::Live(w) => w.try_read_sync_into(buf, offset),
-        }
-    }
-
-    /// Read section bytes sequentially.
-    pub async fn replay(
-        &mut self,
-        buffer: NonZeroUsize,
-        options: ReadOptions,
-    ) -> Result<Replay<B>, RError> {
-        match self {
-            Self::Pending(p) => {
-                p.as_mut()
-                    .expect("pending section")
-                    .replay(buffer, options)
-                    .await
-            }
-            Self::Live(w) => w.replay(buffer, options).await,
-        }
-    }
-
-    /// Validate the section prefix above a previously proven boundary.
-    pub async fn recoverable_prefix_len(
-        &self,
-        proven: u64,
-        buffer: NonZeroUsize,
-        options: ReadOptions,
-    ) -> Result<u64, RError> {
-        self.recoverable_prefix_len_at_most(proven, u64::MAX, buffer, options)
-            .await
-    }
-
-    /// Validate only the pages intersecting the selected prefix.
-    pub async fn recoverable_prefix_len_at_most(
-        &self,
-        proven: u64,
-        max_size: u64,
-        buffer: NonZeroUsize,
-        options: ReadOptions,
-    ) -> Result<u64, RError> {
-        match self {
-            Self::Pending(p) => {
-                p.as_ref()
-                    .expect("pending section")
-                    .recoverable_prefix_len_at_most(proven, max_size, buffer, options)
-                    .await
-            }
-            Self::Live(w) => {
-                w.recoverable_prefix_len_at_most(proven, max_size, buffer, options)
-                    .await
-            }
-        }
-    }
-
-    /// Append to a published section.
-    pub async fn append(&mut self, buf: &[u8]) -> Result<u64, RError> {
-        self.publish();
-        let Self::Live(w) = self else { unreachable!() };
-        w.append(buf).await
-    }
-
-    /// Append to a published section.
-    pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, RError> {
-        self.publish();
-        let Self::Live(w) = self else { unreachable!() };
-        w.append_owned(buf).await
-    }
-}
-
-impl<B: Blob> crate::journal::frame::FrameReader for AppendBuffer<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Ok(self.read_at(offset, len).await?)
-    }
-
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        buf: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Ok(self.read_up_to(offset, len, buf).await?)
     }
 }
 
@@ -502,20 +292,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             synced,
             pruned,
         })
-    }
-
-    /// Publish every recovered section without allowing a return to recovery ownership.
-    pub fn publish_all(&mut self) {
-        for blob in self.blobs.values_mut() {
-            blob.publish();
-        }
-    }
-
-    /// Publish recovered sections at or above `start` after their replay has completed.
-    pub fn publish_from(&mut self, start: u64) {
-        for (_, blob) in self.blobs.range_mut(start..) {
-            blob.publish();
-        }
     }
 
     /// Ensures that a section pruned during the current execution is not accessed.
@@ -824,7 +600,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Supervisor as _, WriteOptions, deterministic,
+        BufferPooler, ReadOptions, Runner as _, Spawner as _, Supervisor as _, WriteOptions,
+        buffer::paged::Writer, deterministic,
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
@@ -917,23 +694,6 @@ pub(super) mod tests {
         on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
-    #[test]
-    #[should_panic(expected = "cannot truncate a published section")]
-    fn test_published_paged_section_rejects_truncation() {
-        deterministic::Runner::default().start(|context| async move {
-            let (blob, size) = context.open("published", b"paged").await.unwrap();
-            let cache = CacheRef::from_pooler(
-                &context,
-                commonware_utils::NZU16!(64),
-                commonware_utils::NZUsize!(4),
-            );
-            let mut writer = Writer::new(blob, size, 1024, cache).await.unwrap();
-            writer.append(&[1; 8]).await.unwrap();
-            let mut buffer = AppendBuffer::Live(writer);
-            buffer.truncate_pending(4).await.unwrap();
-        });
-    }
-
     struct TestBuffer<B: Blob> {
         _blob: B,
         pending: PendingSyncs,
@@ -951,8 +711,6 @@ pub(super) mod tests {
     }
 
     impl<B: Blob> SectionBuffer for TestBuffer<B> {
-        fn publish(&mut self) {}
-
         fn size(&self) -> u64 {
             0
         }

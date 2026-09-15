@@ -1344,6 +1344,9 @@ mod tests {
             .await
             .unwrap();
             let journal = Box::new(journal)
+                .truncate(0)
+                .await
+                .unwrap()
                 .append(&create_operation::<mmr::Family>(1))
                 .await
                 .unwrap();

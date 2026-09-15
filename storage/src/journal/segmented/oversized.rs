@@ -261,7 +261,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Recovery<E, I, V>
     /// Publish both journals after paired recovery.
     fn from(recovery: Recovery<E, I, V>) -> Self {
         Self {
-            index: recovery.index.publish(),
+            index: recovery.index,
             values: recovery.values.into(),
             tracking: recovery.tracking,
         }
@@ -339,7 +339,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
                 // The index truncation is already durable. Release its unreferenced values only
                 // after that proof, preserving the index-first crash-recovery order.
                 let values = values.truncate(section, value_size).await?;
-                (index, values.sync(section).await?)
+                (index, values)
             }
         };
         Ok(Self {
@@ -360,7 +360,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
             result?;
         }
         Ok(Self {
-            index: replay.finish_pending()?,
+            index: replay.finish()?,
             values: self.values,
             tracking: self.tracking,
         }
@@ -664,7 +664,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 
         // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 
@@ -1259,7 +1258,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
             return Err(Error::ReplayFailed);
         }
         let mut journal = Recovery {
-            index: self.index.finish_pending()?,
+            index: self.index.finish()?,
             values,
             tracking: self.tracking,
         };
@@ -1440,7 +1439,7 @@ mod tests {
                 item.unwrap();
             }
             let recovery = Recovery {
-                index: replay.finish_pending().unwrap(),
+                index: replay.finish().unwrap(),
                 values,
                 tracking,
             };
@@ -2753,7 +2752,7 @@ mod tests {
             oversized = oversized.sync_all().await.expect("failed to sync");
             drop(oversized);
 
-            // The valid final page hides this interior hole from Writer::new. Restore owns no
+            // The valid final page hides this interior hole from paged tail recovery. Restore owns no
             // bytes in section 2 and must remove it without first repairing and syncing it.
             corrupt_page(
                 &context,
@@ -2778,9 +2777,8 @@ mod tests {
             .await
             .expect("checkpoint restore failed");
 
-            // Restoring an already exact checkpoint syncs its index and values once each. Any
-            // additional durability work came from repairing data that restore discards.
-            assert_eq!(pending.calls(), 2);
+            // The checkpoint is already exact, so neither side needs a truncation sync.
+            assert_eq!(pending.calls(), 0);
             oversized.destroy().await.expect("failed to destroy");
         });
     }
@@ -2905,7 +2903,21 @@ mod tests {
                     oversized.get(1, 1).await,
                     Err(Error::Runtime(RError::InvalidChecksum))
                 ));
-                drop(oversized);
+                let mut replay = oversized
+                    .replay(1, 0, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .unwrap();
+                let error = loop {
+                    match replay.next().await.expect("corrupt section must fail") {
+                        Ok(_) => continue,
+                        Err(error) => break error,
+                    }
+                };
+                assert!(
+                    matches!(error, Error::Runtime(RError::InvalidChecksum)),
+                    "{error:?}"
+                );
+                assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
 
                 let (blob, actual_size) = context
                     .open(&cfg.index_partition, &1u64.to_be_bytes())

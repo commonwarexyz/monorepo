@@ -1121,11 +1121,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         let mut valid_lengths = BTreeMap::new();
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
-            // Blobs wholly below the floor's blob are covered by a completed fsync, so
-            // in-model holes are impossible there. Later damage surfaces lazily at read, except
-            // in the blob `align` replays to rebuild offsets, where it fails init loudly.
-            // Above the floor, truncate to the last well-formed page (replay in `align` repairs
-            // a mid-frame cut like torn trailing junk).
+            // Completed barriers cover blobs before the floor. Frame inspection and terminal
+            // validation retain their separate checks of the data extent.
             if blob < floor_blob {
                 continue;
             }
@@ -1998,8 +1995,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             offsets_bounds.start
         };
 
-        // Rebuilt offsets are about to become durable. First make the data they point at durable
-        // too; on real filesystems, init may have adopted bytes that were readable but not synced.
+        // Make retained data durable before advancing the rebuilt offsets' watermark.
         Self::sync_data_range(pending, data_sync_start, data_size, items_per_blob).await?;
         let offsets = offsets.sync().await?;
         Ok((offsets, pruning_boundary..data_size))
@@ -2060,14 +2056,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         retained_data_end_bound: u64,
     ) -> Result<u64, Error> {
         let recovery_watermark = offsets.recovery_watermark();
-        if recovery_watermark > offsets_bounds.end {
-            // This condition should be unreachable (fixed-journal init rejects watermark > size),
-            // so if it were reachable it would indicate external corruption.
-            return Err(Error::Corruption(format!(
-                "offsets recovery watermark {recovery_watermark} exceeds offsets size {}",
-                offsets_bounds.end
-            )));
-        }
         if recovery_watermark < offsets_bounds.start {
             warn!(
                 recovery_watermark,
