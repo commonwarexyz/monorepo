@@ -25,7 +25,7 @@ commonware_macros::stability_scope!(ALPHA {
     // TODO: remove this once we have a full impl.
     #[allow(dead_code)]
     mod ocelot;
-    pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16};
+    pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16};
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -546,7 +546,10 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{Ocelot8, Ocelot16, PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
+        use crate::{
+            Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16, PhasedAsScheme, Scheme, Zoda,
+            reed_solomon::ReedSolomon,
+        };
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -624,12 +627,22 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
-            decode_rejects_mixed_commitments::<PhasedAsScheme<Ocelot8<Sha256>>>(
+            decode_rejects_mixed_commitments::<PhasedAsScheme<OcelotHinted8<Sha256>>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
             );
-            decode_rejects_mixed_commitments::<PhasedAsScheme<Ocelot16<Sha256>>>(
+            decode_rejects_mixed_commitments::<Ocelot8<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<PhasedAsScheme<OcelotHinted16<Sha256>>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<Ocelot16<Sha256>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
@@ -639,14 +652,16 @@ mod test {
                 &config,
                 b"alpha payload",
             );
-            decode_rejects_empty_checked_shards::<PhasedAsScheme<Ocelot8<Sha256>>>(
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<OcelotHinted8<Sha256>>>(
                 &config,
                 b"alpha payload",
             );
-            decode_rejects_empty_checked_shards::<PhasedAsScheme<Ocelot16<Sha256>>>(
+            decode_rejects_empty_checked_shards::<Ocelot8<Sha256>>(&config, b"alpha payload");
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<OcelotHinted16<Sha256>>>(
                 &config,
                 b"alpha payload",
             );
+            decode_rejects_empty_checked_shards::<Ocelot16<Sha256>>(&config, b"alpha payload");
         }
 
         #[test]
@@ -659,8 +674,10 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
-            roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, b"", &selected);
-            roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, b"", &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, b"", &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -674,8 +691,10 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
-            roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, &data, &selected);
-            roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
         }
 
         #[test]
@@ -691,7 +710,8 @@ mod test {
         fn minifuzz_roundtrip_ocelot() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }
@@ -700,9 +720,22 @@ mod test {
         fn minifuzz_roundtrip_ocelot16() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<PhasedAsScheme<Ocelot16<Sha256>>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
+        }
+
+        #[test]
+        fn roundtrip_ocelot16_above_gf8_order() {
+            let config = Config {
+                minimum_shards: NZU16!(257),
+                extra_shards: NZU16!(8),
+            };
+            let data: Vec<_> = (0..1027).map(|i| i as u8).collect();
+            for selected in [(0..257).collect::<Vec<_>>(), (1..258).collect()] {
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+            }
         }
 
         #[test_group("slow")]
@@ -720,7 +753,7 @@ mod test {
 
     mod phased_scheme {
         use super::*;
-        use crate::{Ocelot8, Ocelot16, PhasedScheme, Zoda};
+        use crate::{OcelotHinted8, OcelotHinted16, PhasedScheme, Zoda};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -863,12 +896,12 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
-            check_rejects_mixed_commitments::<Ocelot8<Sha256>>(
+            check_rejects_mixed_commitments::<OcelotHinted8<Sha256>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
             );
-            check_rejects_mixed_commitments::<Ocelot16<Sha256>>(
+            check_rejects_mixed_commitments::<OcelotHinted16<Sha256>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
@@ -884,8 +917,8 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
-            roundtrip::<Ocelot8<Sha256>>(&config, b"", &selected);
-            roundtrip::<Ocelot16<Sha256>>(&config, b"", &selected);
+            roundtrip::<OcelotHinted8<Sha256>>(&config, b"", &selected);
+            roundtrip::<OcelotHinted16<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -898,8 +931,8 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
-            roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
-            roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+            roundtrip::<OcelotHinted8<Sha256>>(&config, &data, &selected);
+            roundtrip::<OcelotHinted16<Sha256>>(&config, &data, &selected);
         }
 
         #[test_group("slow")]
@@ -918,7 +951,7 @@ mod test {
         fn minifuzz_roundtrip_ocelot() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                roundtrip::<OcelotHinted8<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }
@@ -927,7 +960,7 @@ mod test {
         fn minifuzz_roundtrip_ocelot16() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+                roundtrip::<OcelotHinted16<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }

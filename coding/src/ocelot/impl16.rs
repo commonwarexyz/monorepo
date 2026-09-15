@@ -12,8 +12,12 @@ use super::{
         gf16::{GF16, GF16Constant, GF16Vec},
     },
     kernel::{Kernel, WithKernel},
+    transform::Tables,
 };
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 const BLOCK_BYTES: usize = 128;
 const BLOCK_SYMBOLS: usize = BLOCK_BYTES / 2;
@@ -37,6 +41,13 @@ impl<K: Kernel> Impl for Impl16<K> {
     const BITS: usize = 16;
     const STRIPE_ALIGN: usize = BLOCK_BYTES;
     const NAMESPACE: &'static [u8] = b"_COMMONWARE_CODING_OCELOT16";
+
+    fn tables() -> Arc<Tables<GF16>> {
+        static TABLES: OnceLock<Arc<Tables<GF16>>> = OnceLock::new();
+        TABLES
+            .get_or_init(|| Arc::new(Tables::new::<Self>()))
+            .clone()
+    }
 
     fn basis() -> &'static [GF16] {
         &[
