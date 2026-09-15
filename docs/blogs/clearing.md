@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each settlement.*
+*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in native QMDB owners and apply only the changes at each settlement.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -146,7 +146,7 @@ $$
 
 Every payment credits its recipient's balance. A close creates payouts only for authorized withdrawals.
 
-Each row records the account's activity, including its last signed endpoint if it sent payments. Every validator derives the resulting balances and checks the epoch's gross debit $D_e$ and credit $C_e$:
+Each epoch records one row for every disclosed participant, including accounts whose net balance change is zero. The rows are sorted by account key and contain no duplicates. A sender's row includes its last signed payer state. Every validator derives the resulting balances and checks the epoch's gross debit $D_e$ and credit $C_e$:
 
 $$
 \boxed{D_e=C_e.}
@@ -174,43 +174,61 @@ When a payment names a new public key, the operator records a balance for it wit
 
 ## Keep the State, Send the Changes
 
-Every validator retains the complete account state in QMDB. At each close, the operator publishes one dealing for all of them: active account keys, senders' terminal signed endpoints, and cumulative payment entries. Recipients are identified by position in the account list. A CDN can cache this shared dealing for efficient distribution.
+Every validator retains the complete account state in QMDB. At each close, the operator publishes one dealing for all of them: active account keys, senders' terminal signed payer states, and cumulative payment entries. Recipients are identified by position in the account list. A CDN can cache this shared dealing for efficient distribution.
 
 Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 
-From these results, the validator builds the activity and withdrawal binary Merkle trees (BMTs) and computes the next QMDB state root. The activity tree includes accounts whose payments leave their balances unchanged, so those receipts remain challengeable. QMDB updates the balance tree incrementally, without rebuilding it over every live account.
+From these results, the validator computes the next QMDB state root and appends two flat logs. The activity MMR receives the epoch's compact, sorted, unique account rows, including zero-net participants so their receipts remain challengeable, followed by one commit containing the original source inputs needed to reconstruct requested proofs. The payout MMR receives every external payout output, currently the validator-derived output for each authorized withdrawal, followed by its own commit. Payer vectors remain BMTs under the users' signed payer states; flattening the public logs does not change those signatures or their openings.
 
-All three roots are results of validation. A 32-byte commitment binds them to the epoch, prior state, and withdrawal total. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof. They install the candidate state once the close is admitted.
+The certified activity interval $[A_e^0,A_e^1)$ identifies exactly the epoch's contiguous account-row positions; its source-metadata commit follows outside that range. The payout interval $[P_e^0,P_e^1)$ identifies exactly the candidate output positions; once those outputs finalize, their global indices are never reused. Its metadata-free commit follows them. An empty epoch certifies equal activity offsets; an epoch without outputs certifies equal payout offsets. QMDB updates positive balance records incrementally and removes an account when its balance reaches zero.
+
+All three roots are results of validation. A 32-byte commitment binds a ProposalId for the canonical dealing bytes, the successor QMDB root, activity-MMR root and count, candidate payout-MMR root and count, and exact certified row and output ranges to the epoch, their predecessor values, and the close's totals. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof. They promote the selected candidate state once the close is admitted.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested. The withdrawal panel shows the destination and amount a claim would prove.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the three shared protocol roots: the balance root and the cumulative activity-MMR and candidate payout-MMR roots and counts. The commitment binds them to the ProposalId, epoch, predecessor, ranges, and outflow totals. The abbreviated activity-log slice shows prior operations followed by this epoch's contiguous a, b, c, and d rows, then one source-metadata commit outside the certified row range. QMDB carries positive balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity row shows 11 sent, final batch sequence 2, no withdrawal, and a link to its signed payment BMT: one payment of 4 to b and one of 7 to d. This epoch creates no payouts and appends only the metadata-free payout-log commit. The payout panel shows the stable append location, destination, and amount opened against the current finalized root and count. A private local QMDB that protects the validator's signing decisions is not part of the certified commitment and is not shown.">
 ```
 
 ::: {.image-caption}
-Figure 3: The commitment links the three roots. Expanding $c$'s activity record shows its final payment totals for $b$ and $d$.
+Figure 3: The commitment links the three shared protocol roots and log counts to the ProposalId and certified close context. The cumulative activity-log slice brackets this epoch's compact account-row range; its single source-metadata commit follows outside the range. Expanding $c$'s row shows the payer-vector BMT that its signature binds. The validator's private signing-control QMDB is not another certified root.
 :::
 
-The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
+The settlement chain holds pooled custody, the certified state root, current finalized log heads, bounded pending log metadata, control and boundary state, and a map of unclaimed payout intervals. It does not store every account row, output, claimed index, or finalized epoch descriptor.
 
-The operator can also keep a QMDB replica to serve current and historical balance proofs directly. Preparing the dealing does not depend on that replica.
+Validators own the authenticated state and log construction. The operator only has to collect signed payer and boundary data and propose the dealing; serving payments and preparing a close do not require it to construct QMDB or either MMR. It may run best-effort replicas to serve balance, challenge, and payout openings directly.
+
+The storage target gives each validator three shared native owners: Current Ordered QMDB over MMB for live positive balances, plus keyless QMDB operation logs over MMR for activity and payouts. A fourth, private compact QMDB stores only bounded local control snapshots: the selected public-store checkpoint, an optional candidate, at most one immutable signing decision, and cleanup state. It uses metadata-only commits, is never included in the root bundle or certificate, is never imported from a peer, and is never rewound with the three shared stores. After a completed update or reopen, native pruning pins its latest control state within one 16-witness section, retaining at most 16 bounded snapshots. Reopen cleans up any older section left by an interrupted update.
+
+The protocol logs are flat--there is no tree per epoch--and proof construction can walk retained native operations on demand. Each activity epoch is exactly its contiguous account rows followed by one source-metadata commit. That metadata stores the close context, each row's terminal sequence and original outgoing entries, and the exact signed withdrawal batch. The account key and epoch come from the corresponding row and context; debit totals, payer-vector roots, withdrawal totals, and BMT openings are reconstructed when requested. It stores no duplicate BMT nodes, proof index, full-close body, root bundle, header, or payout head. Private payer receipts remain with the wallets that rely on them.
+
+Each payout epoch is exactly its output appends followed by a metadata-free commit. Account rows and payout outputs use stable append locations, while the commit gaps are excluded from their certified ranges. An opening proves the exact typed append operation at the committed operation count. Even an empty epoch writes both native commits: the certified descriptor authenticates its empty row and output ranges, and each commit authenticates the pruning floor. Registration fixes the finalized operation count $s_f$, and every signer uses $s_f-1$ as the floor for descendants of that registration. Local availability may delay physical deletion but cannot change the signed floor.
+
+The private control QMDB records one checkpoint naming the three shared roots, operation counts, and safe synchronization boundaries. Before a vote or acknowledgment can leave a validator, all three candidate stores are committed and synchronized, then a private metadata-only commit records the coherent candidate checkpoint and exact immutable signing decision. That commit's native prune and synchronization form the local publication barrier; no vote or acknowledgment leaves until they complete.
+
+After a mixed crash, the validator recovers the latest private control commit first and aligns all three shared stores to its selected common target. While the coherent candidate remains retained, an exact retry reissues the saved vote. Disposal durably selects the canonical parent in the private QMDB before rewinding and synchronizing the public stores; it preserves the signing decision and blocks every further vote for that epoch until canonical advancement. Catch-up imports only an authenticated public triplet from a coherent native replica; peer control state can never authorize local signing. The validator does not keep a full-close corpus merely to redo local state. Finalized activity locations and issued payout locations are never repurposed. Public-store deletion stays behind every protected proof and recovery boundary, and older protected roots are served from retained historical operations rather than by rewinding the live stores.
 
 ## Certify the Whole Close
 
-A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, retains its evidence, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
+A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, derives the same transitions, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
+
+The canonical dealing bytes also receive a separate $\mathsf{ProposalId}$. It hashes a distinct domain, the authenticated epoch context, and a length-framed encoding of the dealing. The certified transition binds that identifier, the exact predecessor snapshot, all three successor roots, both log counts and epoch ranges, and the outflow totals. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' cumulative logs.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four acknowledgment cards show the operator's signatures accepting the final endpoints of a, b, c, and d. The c card is highlighted. An Aggregate arrow leads to the single aggregate signature included in the dealing. Validators derive the final commitment. The green callout shows the state, activity, and withdrawal roots bound to the epoch, prior state, and zero withdrawal total by a 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four acknowledgment cards show the operator's signatures accepting the final payer states of a, b, c, and d. The c card is highlighted. An Aggregate arrow leads to the single aggregate signature included in the dealing. Validators derive the final commitment. The green callout shows the QMDB state root and the activity and payout MMR roots and counts, bound to the ProposalId, predecessor, epoch ranges, and outflow totals by a 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator also persists a private control-QMDB decision before acknowledging, but that local root is not part of the certified candidate and is not shown.">
 ```
 
 ::: {.image-caption}
-Figure 4: Each validator derives the three roots from the shared dealing. One aggregate signature and signer bitmap show that 67 of 100 validators signed the resulting commitment.
+Figure 4: Each validator derives the three candidate roots and log counts from the shared dealing. One aggregate signature and signer bitmap show that 67 of 100 validators signed the resulting commitment. This is the certified pending transition; FIFO finalization separately advances the finalized payout root and count. The private control QMDB gates each validator's acknowledgment but is not another candidate root.
 :::
 
-An honest signer retains the close and its predecessor state durably before publishing its vote. It keeps predecessor and successor proofs available while the close is pending and through its challenge deadline $\Delta_e$, and retains the last finalized state for recovery. A new validator replays the retained updates and checks the resulting state root.
+Once the accepted transition is present in all three durable shared stores and the validator's private control commit, validation-only inputs can be retired. Validators keep native rows, source commits, log nodes, and QMDB history for every FIFO, challenge, and recovery obligation that can still reach them. Once no live obligation can refer to a prefix, they may prune its rows and nodes while retaining the authenticated prefix hashes needed to continue each log. Pruning saves replica storage without changing the root or global positions; it does not make proofs shorter. A new validator synchronizes the three shared native stores, including activity commit metadata, from an authenticated boundary and checks the resulting roots and counts; private signer state is initialized locally, never accepted from a peer.
 
-The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified commitment is 101 bytes. Admission also supplies the three roots and withdrawal total, another 104 bytes.
+Proof availability can outlive a hot validator's retention window. Roots authenticate data without supplying it, so a user, operator, or proof service can run the same native QMDB replicas with longer retention and serve old balance, receipt, source, and payout openings. Native state synchronization transfers the proof-bearing records; no parallel Bajillion proof archive or full-close copy is required. Hot-validator pruning is not pinned by the oldest unclaimed output or by an offline optional replica, and consensus does not require every validator to retain lifetime history. If every longer-retention replica discards a needed prefix, its proof is unavailable, but that absence neither expires the entitlement nor proves that a request was never carried.
 
-The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge blocks that close and its pending descendants.
+A cold source proof authenticates the complete bounded source-metadata commit under the finalized activity head, paired with the payout head from the same settlement snapshot. It therefore transmits and hashes that whole metadata frame, and locating an old epoch may walk the retained metadata between known boundaries. This is an offchain provenance path for old receipts and requests, separate from the compact onchain challenge and claim proofs checked against admitted or current heads.
+
+The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator signed header and certificate are 101 bytes. The validator-derived root bundle is 176 bytes; adding the eight-byte withdrawal total makes its descriptor 184 bytes, or 285 bytes together before chain transaction framing. These values are separate from the operator's dealing.
+
+The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. Candidate log storage may already contain a pending descendant, but a successful challenge discards that logical suffix. Discarded outputs never advance the finalized payout root or create unclaimed claim intervals.
 
 ## The Unavoidable Challenge
 
@@ -224,7 +242,9 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A committee, TEE, or SNARK/STARK can verify the published inputs. Certifying those inputs cannot rule out an additional private receipt.
 
-The activity tree records each active account's terminal position. A missing payer counts as zero debit, so a proof of absence can challenge an omitted payment. Receipt holders can prove three kinds of contradiction:
+The certified activity interval records the epoch's terminal row for every disclosed account. A missing payer counts as zero debit, so a proof of absence can challenge an omitted payment. For a nonempty epoch, absence is proved by MMR membership for the adjacent account keys at adjacent positions, or by membership at the left or right edge. Equal certified start and end offsets prove that the epoch is empty. Strict key ordering and uniqueness make these cases exhaustive.
+
+Receipt holders can prove three kinds of contradiction:
 
 1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
 
@@ -232,7 +252,7 @@ The activity tree records each active account's terminal position. A missing pay
 
 3. **Acknowledgment fork.** The operator countersigns different bodies at the same payer sequence number.
 
-Because certification has checked the accounting and signed terminal positions, a receipt holder can prove a contradiction with signatures and Merkle openings in one onchain call, without an interactive dispute game. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
+Because certification has checked the accounting and signed terminal positions, a receipt holder can prove a contradiction with signatures, an activity-MMR opening, and any signed payer-vector BMT opening in one onchain call, without an interactive dispute game. Every receipt a user relies on needs an honest holder who retains the private receipt, obtains the public openings from a sufficiently retained native replica, and gets a challenge included by $\Delta_e$. No replica can reconstruct a private receipt nobody saved.
 
 Suppose $b$ has already served the API response, but the operator leaves $a$'s payment of 20 out of the close. The receipt and a public proof of the omission let $b$ prove operator fault without the operator's cooperation. That is what makes the receipt binding. An application could use this evidence to compensate $b$ from an onchain insurance fund, permanently exclude the operator, or support offchain resolution. The recipient can seek a remedy beyond simply deciding not to use that operator again (unlike other approaches that offer only best-effort preconfirmations).
 
@@ -246,17 +266,21 @@ $$
 \boxed{\Delta_e<t_{\mathrm{finalize}}<T_w.}
 $$
 
-An exact withdrawal releases its amount if the epoch's final balance covers it. An account close sweeps that balance. Once the carrying close finalizes, the user claims the certified payout with an opening in that close's withdrawal-output BMT. Each output can be claimed only once.
+An exact withdrawal releases its amount if the epoch's final balance covers it. An account close sweeps that balance. Every derived withdrawal output, including a zero-valued one, is appended to one payout MMR at a stable global index. The output binds its index, destination, and amount. It has no claim deadline and its index is never recycled. A zero-valued output must still be consumable, even when its reserve is zero, so it cannot keep an interval alive forever.
 
-Custody remains onchain throughout. Finalization reserves withdrawals, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
+Pending closes have candidate payout roots and counts, but their outputs are not yet claimable. When the carrying close reaches FIFO finality, the chain advances its distinct finalized payout root and count, reserves the exact outflow, and adds the newly finalized index interval to a direct map of unclaimed intervals. A challenged or invalidated suffix advances none of them.
+
+A claim supplies the output, an MMR opening against the current finalized payout root and count, and the start key $s$ of the current unclaimed interval $[s,t)$ containing its index $i$. The map stores only $t$ under $s$. The chain checks $s\le i<t$, then removes the interval and inserts the nonempty pieces $[s,i)$ and $[i+1,t)$. This split, the reserve reduction, and the payout happen atomically. A replay finds no interval containing $i$.
+
+The map has at most one range per outstanding output even under adversarial claim order, so claim state is $O(U)$ for $U$ unclaimed outputs in the worst case, not proportional to all claims ever made. It is not another authenticated claim tree. The full settlement state consists of the three principal tree roots and their counts, timing-window-bounded pending-close metadata, pooled and reserved custody, registration and fault controls, and these unclaimed intervals.
 
 ### Hard Fault
 
 If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Clean pending closes ahead of a disputed close may still finalize. Recovery then freezes the last finalized state root.
 
-The recovery rules keep finalized payouts independently claimable and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. Payments in a never-admitted or invalidated close do not debit that state.
+The recovery rules keep finalized payouts independently claimable, with no expiry, and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. Payments in a never-admitted or invalidated close do not debit that state or promote its candidate payout suffix.
 
-Recovery needs a correct, live settlement chain and available claim openings even when the operator disappears.
+Recovery needs a correct, live settlement chain and independently available balance and payout openings even when the operator disappears. Commitment roots alone cannot serve those witnesses; longer-retention native replicas do. A fault freezes the last surviving finalized payout root and count, against which later claims refresh their openings.
 
 ## Streamlined Epoch Transitions
 
@@ -292,7 +316,7 @@ Accounts with deposits or withdrawals must resolve their full admitted outcome b
 
 ## The Close Follows Accounts and Edges
 
-We benchmarked the Commonware Library's [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with each account sending one unit payment to one of 512 recipients. All 100 validators receive the same update.
+We benchmarked the native flat-log extension of the [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with 1,024 live accounts and 128 self-payment rows. The matrix varies prior history and a full exit independently: $H$ counts prior account rows and $W$ counts new withdrawal outputs. With $W=0$, the close has 128 activity rows; a full exit has 1,024 because every withdrawing account participates. The operator Dealing encoding modeled in Figures 7 and 11 is unchanged: ProposalId and the three resulting roots belong to the validator-derived close descriptor, not the operator's payload. Full confidence intervals, samples, encoded-byte tables, and reproduction inputs are in the [benchmark artifacts](https://github.com/commonwarexyz/monorepo/blob/1bd5f46162be55ed5858a63adf3e20d78814dc5f/clearing/src/bajillion/benches/results/2026-09-15-flat-mmrs/README.md).
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -300,71 +324,116 @@ We benchmarked the Commonware Library's [initial implementation](https://github.
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
-      <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
+      <th colspan="4" style="text-align:center;">History and new withdrawal outputs</th>
     </tr>
     <tr>
-      <th style="text-align:right;">1,024</th>
-      <th style="text-align:right;">10,000</th>
-      <th style="text-align:right;">100,000</th>
-      <th style="text-align:right;">1,000,000</th>
+      <th style="text-align:right;"><em>H</em> = 0<br><em>W</em> = 0</th>
+      <th style="text-align:right;"><em>H</em> = 1,024<br><em>W</em> = 0</th>
+      <th style="text-align:right;"><em>H</em> = 0<br><em>W</em> = 1,024</th>
+      <th style="text-align:right;"><em>H</em> = 1,024<br><em>W</em> = 1,024</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td>Validator dealing</td>
-      <td style="text-align:right;">105 KB<br><small>8.03 ms</small></td>
-      <td style="text-align:right;">1.03 MB<br><small>57.7 ms</small></td>
-      <td style="text-align:right;">10.3 MB<br><small>566 ms</small></td>
-      <td style="text-align:right;">103 MB<br><small>6.54 s</small></td>
+      <td>Operator Dealing</td>
+      <td style="text-align:right;">13,107 B</td>
+      <td style="text-align:right;">13,107 B</td>
+      <td style="text-align:right;">43,571 B</td>
+      <td style="text-align:right;">43,571 B</td>
     </tr>
     <tr>
-      <td>Commitment + certificate</td>
-      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
-      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
-      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
-      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td>Root-and-outflow descriptor</td>
+      <td style="text-align:right;">184 B</td>
+      <td style="text-align:right;">184 B</td>
+      <td style="text-align:right;">184 B</td>
+      <td style="text-align:right;">184 B</td>
+    </tr>
+    <tr>
+      <td>Signed commitment + certificate</td>
+      <td style="text-align:right;">101 B</td>
+      <td style="text-align:right;">101 B</td>
+      <td style="text-align:right;">101 B</td>
+      <td style="text-align:right;">101 B</td>
     </tr>
   </tbody>
   <tbody>
     <tr><th colspan="5" style="text-align:left;">Processing phases</th></tr>
     <tr>
-      <td style="text-align:left;">Operator: prepare and apply</td>
-      <td style="text-align:right;">5.61 ms</td>
-      <td style="text-align:right;">28.7 ms</td>
-      <td style="text-align:right;">333 ms</td>
-      <td style="text-align:right;">4.09 s</td>
+      <td style="text-align:left;">Prepare three native batches</td>
+      <td style="text-align:right;">48.5 µs</td>
+      <td style="text-align:right;">46.4 µs</td>
+      <td style="text-align:right;">725 µs</td>
+      <td style="text-align:right;">717 µs</td>
     </tr>
     <tr>
-      <td style="text-align:left;">Validator: decode</td>
-      <td style="text-align:right;">0.726 ms</td>
-      <td style="text-align:right;">6.73 ms</td>
-      <td style="text-align:right;">74.3 ms</td>
-      <td style="text-align:right;">907 ms</td>
+      <td style="text-align:left;">Decode Dealing</td>
+      <td style="text-align:right;">1.98 ms</td>
+      <td style="text-align:right;">1.99 ms</td>
+      <td style="text-align:right;">15.7 ms</td>
+      <td style="text-align:right;">15.7 ms</td>
     </tr>
     <tr>
-      <td style="text-align:left;">Validator: verify and sign</td>
-      <td style="text-align:right;">6.95 ms</td>
-      <td style="text-align:right;">48.9 ms</td>
-      <td style="text-align:right;">472 ms</td>
-      <td style="text-align:right;">5.36 s</td>
+      <td style="text-align:left;">Validate + prepare state/logs</td>
+      <td style="text-align:right;">1.56 ms</td>
+      <td style="text-align:right;">1.67 ms</td>
+      <td style="text-align:right;">3.39 ms</td>
+      <td style="text-align:right;">3.33 ms</td>
     </tr>
     <tr>
-      <td style="text-align:left;">Validator: apply balances</td>
-      <td style="text-align:right;">0.234 ms</td>
-      <td style="text-align:right;">2.07 ms</td>
-      <td style="text-align:right;">19.7 ms</td>
-      <td style="text-align:right;">275 ms</td>
+      <td style="text-align:left;">Apply state + logs</td>
+      <td style="text-align:right;">16.4 µs</td>
+      <td style="text-align:right;">22.1 µs</td>
+      <td style="text-align:right;">240 µs</td>
+      <td style="text-align:right;">269 µs</td>
+    </tr>
+    <tr>
+      <td style="text-align:left;">Commit three shared stores in memory</td>
+      <td style="text-align:right;">51.6 µs</td>
+      <td style="text-align:right;">73.9 µs</td>
+      <td style="text-align:right;">232 µs</td>
+      <td style="text-align:right;">261 µs</td>
+    </tr>
+    <tr>
+      <td style="text-align:left;">Decode through apply</td>
+      <td style="text-align:right;">3.54 ms</td>
+      <td style="text-align:right;">3.73 ms</td>
+      <td style="text-align:right;">19.4 ms</td>
+      <td style="text-align:right;">19.4 ms</td>
+    </tr>
+    <tr>
+      <td style="text-align:left;">Decode through memory commit</td>
+      <td style="text-align:right;">3.63 ms</td>
+      <td style="text-align:right;">3.79 ms</td>
+      <td style="text-align:right;">19.6 ms</td>
+      <td style="text-align:right;">19.6 ms</td>
     </tr>
   </tbody>
 </table>
 </div>
 ```
 
+```{=html}
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr><th style="text-align:left;">Real balance-update phase</th><th style="text-align:right;">1,024 active of 1,024 accounts</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Operator Dealing</td><td style="text-align:right;">105,267 B</td></tr>
+    <tr><td>Operator: prepare Dealing</td><td style="text-align:right;">678 µs</td></tr>
+    <tr><td>Validator: receive and apply</td><td style="text-align:right;">7.70 ms</td></tr>
+    <tr><td>Validator: sign vote</td><td style="text-align:right;">70.6 µs</td></tr>
+    <tr><td>Verify certificate</td><td style="text-align:right;">455 µs</td></tr>
+  </tbody>
+</table>
+</div>
+```
+
 ::: {.image-caption}
-Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude networking and durable commit, while the SSD timing below includes QMDB commit. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache, and the full dataset fits in RAM.
+Figure 6: Native transition matrix for the three shared stores and a separate nonzero-balance update profile. The matrix uses 1,024 live accounts, 128 self-payers, and either no withdrawals or a full 1,024-account exit. The second profile has 1,024 live accounts and senders, with 512 recipients. The descriptor and signed commitment are both submitted at chain intake; transport framing is excluded.
 :::
 
-With only 1,024 of a million live accounts paying the same 512 recipients, each validator processes a 105 KB update in 8.69 ms in memory, or 20.5 ms on SSD.
+Times are Criterion medians from ten samples on an Apple M5 Pro with 18 logical CPUs and 64 GiB of memory. The native matrix and receive-and-apply use 16 workers and deterministic in-memory storage. Preparing the three native batches starts after state mutations and outputs are derived; validation starts from a decoded Dealing. The complete pipeline rows overlap the individual phases and should not be added to them. Memory commit includes native journal processing, not durable SSD I/O. These timers stop after the three shared state/log stores; the terminal's subsequent private control-QMDB commit and prune, and therefore whole wire-to-acknowledgment durability, are not measured. Fixture construction, signing, rewind, votes, certificates, network transfer, and chain processing are outside the native matrix timers. In the second table, preparation assembles and encodes the Dealing, receive-and-apply decodes and validates it, signs a vote, and applies all three shared stores, while the last two rows sign an already prepared header and check an exact quorum certificate. The host was not isolated from ordinary background processes.
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
@@ -373,34 +442,43 @@ Repeated payments between the same pairs reuse these settlement records, spreadi
 ```
 
 ::: {.image-caption}
-Figure 7: Every account repeatedly pays one unit to its next neighbor. Counters grow, while more payments share the byte cost of one validator's update and the 100-validator committee's certificate.
+Figure 7: Operator Dealing model. Every account repeatedly pays one unit to its next neighbor. Counters grow, while more payments share the byte cost of one validator's update and the 100-validator committee's certificate. The validator-derived 184-byte root-and-outflow descriptor is separate from the unchanged Dealing; the plotted 101 bytes are its signed header and certificate.
 :::
 
-### Proof Sizes and Verification
+### Native Proof Sizes and Verification
 
-The tables below show encoded proof sizes, with verification times beneath them.
+Activity challenges now open the certified epoch range in the cumulative native log. The table samples complete encoded account lookups across independent historical-row ($H$) and current-row ($R$) dimensions. In these fixtures, $H>0$ occupies one prior close and $H=0$ has no prior close. Each close adds a Commit, so distributing the same $H$ across a different history can change the operation count, floor, topology, and proof size. An empty range needs no MMR opening. Presence includes the activity value; an interior exclusion includes the two adjacent guards. Signed receipts and payer-vector BMT openings are separate and unchanged.
 
 ```{=html}
 <div class="clearing-benchmark-table">
 <table>
   <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Challenge</th><th colspan="4" style="text-align:center;">Active accounts, all sending</th></tr>
-    <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Activity lookup</th><th colspan="3" style="text-align:center;">Historical rows (<em>H</em>)</th></tr>
+    <tr><th style="text-align:right;">0</th><th style="text-align:right;">1,024</th><th style="text-align:right;">65,536</th></tr>
   </thead>
   <tbody>
-    <tr><td>Debit mismatch</td><td style="text-align:right;">588 B<br><small>224 µs</small></td><td style="text-align:right;">716 B<br><small>215 µs</small></td><td style="text-align:right;">812 B<br><small>223 µs</small></td><td style="text-align:right;">908 B<br><small>213 µs</small></td></tr>
-    <tr><td>Entry mismatch</td><td style="text-align:right;">639 B<br><small>225 µs</small></td><td style="text-align:right;">767 B<br><small>216 µs</small></td><td style="text-align:right;">863 B<br><small>223 µs</small></td><td style="text-align:right;">959 B<br><small>214 µs</small></td></tr>
-    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B<br><small>220 µs</small></td><td style="text-align:right;">417 B<br><small>212 µs</small></td><td style="text-align:right;">417 B<br><small>219 µs</small></td><td style="text-align:right;">417 B<br><small>218 µs</small></td></tr>
+    <tr><td>Empty absence, <em>R</em> = 0</td><td style="text-align:right;">4 B<br><small>5.65 ns</small></td><td style="text-align:right;">4 B<br><small>5.66 ns</small></td><td style="text-align:right;">4 B<br><small>5.73 ns</small></td></tr>
+    <tr><td>Presence, <em>R</em> = 1</td><td style="text-align:right;">125 B<br><small>360 ns</small></td><td style="text-align:right;">158 B<br><small>415 ns</small></td><td style="text-align:right;">159 B<br><small>419 ns</small></td></tr>
+    <tr><td>Adjacent absence, <em>R</em> = 2</td><td style="text-align:right;">207 B<br><small>420 ns</small></td><td style="text-align:right;">240 B<br><small>507 ns</small></td><td style="text-align:right;">241 B<br><small>508 ns</small></td></tr>
+    <tr><td>Presence, <em>R</em> = 1,024</td><td style="text-align:right;">414 B<br><small>843 ns</small></td><td style="text-align:right;">446 B<br><small>899 ns</small></td><td style="text-align:right;">447 B<br><small>927 ns</small></td></tr>
+    <tr><td>Adjacent absence, <em>R</em> = 1,024</td><td style="text-align:right;">464 B<br><small>934 ns</small></td><td style="text-align:right;">528 B<br><small>987 ns</small></td><td style="text-align:right;">529 B<br><small>1.02 µs</small></td></tr>
+  </tbody>
+  <tbody>
+    <tr><th colspan="4" style="text-align:left;">Complete noninteractive challenges, <em>N</em> = 1,024 and <em>H</em> = 0</th></tr>
+    <tr><td>Debit mismatch</td><td colspan="3" style="text-align:right;">623 B<br><small>172 µs</small></td></tr>
+    <tr><td>Entry mismatch</td><td colspan="3" style="text-align:right;">674 B<br><small>203 µs</small></td></tr>
+    <tr><td>Acknowledgment fork</td><td colspan="3" style="text-align:right;">417 B<br><small>199 µs</small></td></tr>
+    <tr><td>Omitted payer</td><td colspan="3" style="text-align:right;">641 B</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 8: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing. For Figures 8 through 10, verification times are medians of ten samples on one CPU thread of the Figure 6 host, starting from decoded proofs.
+Figure 8: Actual native activity-log encodings and complete challenge encodings, with Criterion medians from 20 samples below each measured size. $H$ and $R$ exclude native Commit markers. Each lookup cell includes the variant and its value or guards and opening; the certified 48-byte log head and epoch range are separate. Compact-proof times verify already-decoded values. Challenge times decode and adjudicate the complete debit, entry, or fork challenge; omitted-payer adjudication was not timed. Edge exclusions use one guard and can be smaller. Sizes vary with position and MMR topology, so these samples are not upper bounds.
 :::
 
-A normal withdrawal opens a certified output in its close's BMT. Its proof grows with the number of withdrawal outputs $W$, independently of the live account database.
+A payout opens at a stable global index under the current finalized payout root and count. The proof must be refreshed as that root advances. Its MMR path follows cumulative log topology, not just the current close's output count $W$, and physical prefix pruning does not shorten it.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -408,35 +486,59 @@ A normal withdrawal opens a certified output in its close's BMT. Its proof grows
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
-      <th colspan="5" style="text-align:center;">Withdrawal outputs in the close (<em>W</em>)</th>
+      <th colspan="3" style="text-align:center;">Historical outputs (<em>H</em>)</th>
     </tr>
     <tr>
-      <th style="text-align:right;">1</th>
+      <th style="text-align:right;">0</th>
       <th style="text-align:right;">1,024</th>
-      <th style="text-align:right;">10,000</th>
-      <th style="text-align:right;">100,000</th>
-      <th style="text-align:right;">1,000,000</th>
+      <th style="text-align:right;">65,536</th>
     </tr>
   </thead>
   <tbody>
-    <tr>
-      <td>Withdrawal-output claim</td>
-      <td style="text-align:right;">39 B<br><small>0.314 µs</small></td>
-      <td style="text-align:right;">359 B<br><small>1.18 µs</small></td>
-      <td style="text-align:right;">487 B<br><small>1.52 µs</small></td>
-      <td style="text-align:right;">583 B<br><small>1.79 µs</small></td>
-      <td style="text-align:right;">679 B<br><small>2.05 µs</small></td>
-    </tr>
+    <tr><td>Commit proof, <em>W</em> = 0</td><td style="text-align:right;">46 B<br><small>187 ns</small></td><td style="text-align:right;">79 B<br><small>232 ns</small></td><td style="text-align:right;">80 B<br><small>293 ns</small></td></tr>
+    <tr><td>Current claim, <em>W</em> = 1</td><td style="text-align:right;">105 B<br><small>249 ns</small></td><td style="text-align:right;">138 B<br><small>321 ns</small></td><td style="text-align:right;">139 B<br><small>409 ns</small></td></tr>
+    <tr><td>Middle current claim, <em>W</em> = 512</td><td style="text-align:right;">362 B<br><small>742 ns</small></td><td style="text-align:right;">394 B<br><small>778 ns</small></td><td style="text-align:right;">395 B<br><small>994 ns</small></td></tr>
+    <tr><td>Middle current claim, <em>W</em> = 1,024</td><td style="text-align:right;">394 B<br><small>748 ns</small></td><td style="text-align:right;">426 B<br><small>1.07 µs</small></td><td style="text-align:right;">427 B<br><small>860 ns</small></td></tr>
+    <tr><td>Earliest historical claim, refreshed after <em>W</em> = 1,024</td><td style="text-align:right;">not applicable</td><td style="text-align:right;">426 B<br><small>799 ns</small></td><td style="text-align:right;">587 B<br><small>1.11 µs</small></td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 9: Withdrawal outputs with a 21-byte destination and maximum-depth BMT paths. Verification checks inclusion under a supplied root. Chain transaction framing is excluded.
+Figure 9: Actual native payout-log encodings, with 20-sample Criterion median verification time below each size. The verifier starts from the decoded proof. Nonempty artifacts are complete claims with a 30-byte output; $W=0$ is an opening plus the Commit operation, not a claim. $H$ and $W$ exclude Commit markers, and the 48-byte current finalized head is separate. Current rows use a middle output except where labeled. Position, floor, and MMR topology affect size; these samples are not upper bounds.
 :::
 
-QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root.
+Cold source provenance is intentionally larger than these compact onchain proofs because it authenticates the epoch's complete bounded source-metadata commit. The same $N=1{,}024$, $R=128$ signed workload gives:
+
+```{=html}
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Cold source artifact</th>
+      <th colspan="4" style="text-align:center;">History and new withdrawal outputs</th>
+    </tr>
+    <tr>
+      <th style="text-align:right;"><em>H</em> = 0<br><em>W</em> = 0</th>
+      <th style="text-align:right;"><em>H</em> = 1,024<br><em>W</em> = 0</th>
+      <th style="text-align:right;"><em>H</em> = 0<br><em>W</em> = 1,024</th>
+      <th style="text-align:right;"><em>H</em> = 1,024<br><em>W</em> = 1,024</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Source metadata</td><td style="text-align:right;">7,731 B</td><td style="text-align:right;">7,731 B</td><td style="text-align:right;">206,260 B</td><td style="text-align:right;">206,260 B</td></tr>
+    <tr><td>Complete SourceProof</td><td style="text-align:right;">7,809 B<br><small>4.03 ms</small></td><td style="text-align:right;">7,841 B<br><small>4.00 ms</small></td><td style="text-align:right;">206,339 B<br><small>35.8 ms</small></td><td style="text-align:right;">206,339 B<br><small>35.7 ms</small></td></tr>
+    <tr><td>Current payout claim</td><td style="text-align:right;">not applicable</td><td style="text-align:right;">not applicable</td><td style="text-align:right;">389 B</td><td style="text-align:right;">389 B</td></tr>
+    <tr><td>Verify source + account/claim</td><td style="text-align:right;">4.03 ms</td><td style="text-align:right;">4.01 ms</td><td style="text-align:right;">35.7 ms</td><td style="text-align:right;">35.7 ms</td></tr>
+  </tbody>
+</table>
+</div>
+```
+
+The SourceProof includes the full metadata and its native Commit opening; finalized log heads and transaction envelopes are separate. Here the full exit creates 1,024 activity rows and uses the signed workload's 16-byte destination. Figure 9's 394-byte comparison uses a 30-byte raw-output fixture. Both timing rows are Criterion medians from 20 samples. The time below each SourceProof authenticates its complete metadata from a constructed proof. The final row independently times that authentication plus a compact account lookup and, when $W=1{,}024$, the current payout claim. The overlapping estimates are not components to subtract.
+
+QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root. Current Ordered with MMB remains the balance design; the following measurements are from the initial implementation on an AWS c8a.4xlarge.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -455,7 +557,7 @@ QMDB proofs authenticate balances for forced withdrawal intake and recovery. A r
 ```
 
 ::: {.image-caption}
-Figure 10: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key, while recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
+Figure 10: Historical Current Ordered proof measurements after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key, while recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic.
@@ -468,7 +570,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ```
 
 ::: {.image-caption}
-Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic. Sizes exclude certificates, transport, and other messages.
+Figure 11: Modeled operator Dealing per validator, with total direct operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic. Encoder fixtures match the model across sparse, compact-length-boundary, and dense workloads. The separate certified descriptor, transport, and other messages are excluded.
 
 Each sender signs one batch of unit payments. Recipients per account is averaged over all live accounts. Below an average of one, the first senders pay the last recipients in key order. Otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::
@@ -479,4 +581,4 @@ Send a million payments without paying for a million onchain transactions.
 
 That makes small exchanges practical, like an agent buying a single API response. Recipients can deliver the goods now, knowing the operator has made a binding commitment to the payment. If the operator later omits or contradicts that payment, the signed receipt gives them the evidence to challenge the close.
 
-The settlement chain only keeps the change.
+The settlement chain keeps the current balance commitment, finalized issuance, and outstanding claims--not a lifetime record of every payment or claim.

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 930" role="img" aria-labelledby="title description">
-  <title id="title">The Trees Behind a Close</title>
-  <desc id="description">Each validator derives the balance, activity, and withdrawal roots from the dealing and its retained state. The commitment binds these roots to the epoch, prior state, and withdrawal total. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and its payment-tree root. That tree records one payment of 4 to b and one of 7 to d. Activity records support receipt challenges even when an account's balance does not change. No withdrawals were requested. The right panel shows the destination and amount a withdrawal would record. The lines show commitment relationships.</desc>
+  <title id="title">The Commitments Behind a Close</title>
+  <desc id="description">Each validator derives the three shared protocol roots: the QMDB balance root and the cumulative activity and candidate payout MMR roots and counts. The activity log shows prior operations followed by this epoch's contiguous a, b, c, and d account rows, then one source-metadata Commit outside the certified row range. The commitment binds these values to the ProposalId, epoch, predecessor, ranges, and outflow totals. QMDB carries positive balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity row shows 11 sent, final batch sequence 2, no withdrawal, and its signed payer-vector BMT root. That BMT records one payment of 4 to b and one of 7 to d. Activity rows support receipt challenges even when an account's balance does not change. This epoch creates no payouts and appends only the metadata-free payout-log Commit. The right panel shows the stable append location, destination, and amount opened against the current finalized payout root and count. A fourth private QMDB protects the validator's local signing decisions but is not part of the certified commitment and is not shown.</desc>
   <rect width="1320" height="930" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -20,17 +20,18 @@
     .rule { stroke: #dedede; stroke-width: 1; }
   </style>
 
-  <text class="title" x="30" y="40">The Trees Behind a Close</text>
-  <text class="note" x="30" y="69">Three roots derived by each validator</text>
+  <text class="title" x="30" y="40">The Commitments Behind a Close</text>
+  <text class="note" x="30" y="69">Three shared roots and log counts derived by each validator</text>
 
-  <rect class="selected" x="427" y="98" width="466" height="90" rx="5"/>
+  <rect class="selected" x="405" y="98" width="510" height="90" rx="5"/>
   <text class="heading center blue" x="660" y="133">Commitment</text>
-  <text class="note center" x="660" y="164">epoch · prior state · withdrawal total</text>
+  <text class="note center" x="660" y="158">ProposalId · epoch · predecessor</text>
+  <text class="note center" x="660" y="178">ranges · outflow totals</text>
   <path class="focus" d="M660 188 V219 M214 244 V219 H1106 V244 M660 219 V244"/>
 
   <rect class="panel" x="30" y="244" width="368" height="568" rx="5"/>
   <text class="heading center" x="214" y="284">Account Balances</text>
-  <text class="note center" x="214" y="313">QMDB · all live accounts</text>
+  <text class="note center" x="214" y="313">QMDB · positive balances</text>
   <rect class="record" x="122" y="346" width="184" height="42" rx="3"/>
   <text class="label center" x="214" y="373">State root</text>
   <path class="link" d="M214 388 V422"/>
@@ -53,27 +54,30 @@
 
   <rect class="panel" x="430" y="244" width="460" height="654" rx="5"/>
   <text class="heading center" x="660" y="284">Account Activity</text>
-  <text class="note center" x="660" y="313">BMT · accounts active this close</text>
+  <text class="note center" x="660" y="313">MMR · cumulative operation log</text>
   <rect class="record" x="568" y="346" width="184" height="42" rx="3"/>
-  <text class="label center" x="660" y="373">Activity root</text>
-  <path class="link" d="M660 388 L550 414 L502 447 M550 414 L602 447 M660 388 L770 414 L718 447 M770 414 L818 447"/>
-  <circle cx="550" cy="414" r="4" fill="#999"/>
-  <circle cx="770" cy="414" r="4" fill="#999"/>
-  <path class="focus" d="M660 388 L770 414 L718 447"/>
-  <rect class="record" x="472" y="447" width="60" height="42" rx="3"/>
-  <rect class="record" x="572" y="447" width="60" height="42" rx="3"/>
-  <rect class="selected" x="688" y="447" width="60" height="42" rx="3"/>
-  <rect class="record" x="788" y="447" width="60" height="42" rx="3"/>
-  <text class="mono center" x="502" y="475">a</text>
-  <text class="mono center" x="602" y="475">b</text>
-  <text class="mono center blue" x="718" y="475">c</text>
-  <text class="mono center" x="818" y="475">d</text>
-  <path class="focus" d="M718 489 V522"/>
+  <text class="label center" x="660" y="373">Root + count</text>
+  <path class="link" d="M660 388 V412 M517 412 H838 M517 412 V430 M611 412 V430 M665 412 V430 M719 412 V430 M770 412 V430 M838 412 V430"/>
+  <rect class="record" x="462" y="430" width="110" height="42" rx="3"/>
+  <rect class="record" x="590" y="430" width="42" height="42" rx="3"/>
+  <rect class="record" x="644" y="430" width="42" height="42" rx="3"/>
+  <rect class="selected" x="698" y="430" width="42" height="42" rx="3"/>
+  <rect class="record" x="752" y="430" width="36" height="42" rx="3"/>
+  <rect class="record" x="800" y="430" width="76" height="42" rx="3"/>
+  <text class="note center" x="517" y="457">prior ops</text>
+  <text class="mono center" x="611" y="458">a</text>
+  <text class="mono center" x="665" y="458">b</text>
+  <text class="mono center blue" x="719" y="458">c</text>
+  <text class="mono center" x="770" y="458">d</text>
+  <text class="note center" x="838" y="457">Commit</text>
+  <path class="focus" d="M590 480 V490 H788 V480"/>
+  <text class="note center blue" x="689" y="512">epoch e · [A0, A1)</text>
+  <path class="focus" d="M719 472 V478 H878 V552 H852"/>
   <rect class="selected" x="468" y="522" width="384" height="136" rx="3"/>
   <text class="label blue" x="490" y="552">c at the end of the epoch</text>
   <text class="label" x="490" y="584">sent 11 · last batch #2</text>
   <text class="note" x="490" y="614">withdrawal: none</text>
-  <text class="label center blue" x="660" y="643">Payment root</text>
+  <text class="label center blue" x="660" y="643">Signed BMT root</text>
   <path class="focus" d="M660 658 V709 M660 748 L565 787 M660 748 L755 787"/>
   <rect class="selected" x="553" y="709" width="214" height="39" rx="3"/>
   <text class="label center blue" x="660" y="735">c's payments</text>
@@ -86,18 +90,19 @@
   <text class="note center" x="660" y="877">Check receipts against the close</text>
 
   <rect class="panel" x="922" y="244" width="368" height="568" rx="5"/>
-  <text class="heading center" x="1106" y="284">Withdrawals</text>
-  <text class="note center" x="1106" y="313">BMT · one record per request</text>
-  <rect class="record" x="987" y="346" width="238" height="42" rx="3"/>
-  <text class="label center" x="1106" y="373">Withdrawal root</text>
+  <text class="heading center" x="1106" y="284">Payouts</text>
+  <text class="note center" x="1106" y="313">MMR · cumulative payout log</text>
+  <rect class="record" x="965" y="346" width="282" height="42" rx="3"/>
+  <text class="label center" x="1106" y="373">Candidate root + count</text>
   <path class="link" d="M1106 388 V409"/>
-  <text class="note center" x="1106" y="434">No withdrawals in this example</text>
+  <text class="note center" x="1106" y="434">Commit(None) only</text>
   <path class="rule" d="M946 465 H1266"/>
-  <text class="note center" x="1106" y="504">Each withdrawal records</text>
+  <text class="note center" x="1106" y="504">Each payout records</text>
   <rect class="record" x="999" y="526" width="214" height="100" rx="3"/>
-  <text class="label center" x="1106" y="566">destination</text>
-  <text class="label center" x="1106" y="602">amount</text>
-  <text class="label center" x="1106" y="710">Recorded in the close</text>
-  <text class="note center" x="1106" y="749">Claim with a proof</text>
-  <text class="note center" x="1106" y="775">after finalization</text>
+  <text class="label center" x="1106" y="554">append location</text>
+  <text class="label center" x="1106" y="582">destination</text>
+  <text class="label center" x="1106" y="610">amount</text>
+  <text class="label center" x="1106" y="710">Appended by validators</text>
+  <text class="note center" x="1106" y="749">Open against the current</text>
+  <text class="note center" x="1106" y="775">finalized root + count</text>
 </svg>
