@@ -9,8 +9,8 @@ use commonware_codec::{
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
-use std::future::Future;
-use zstd::{bulk::compress, decode_all};
+use std::{future::Future, io};
+use zstd::{bulk::compress, stream::read::Decoder};
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -115,8 +115,10 @@ pub(super) fn decode_item<V: Codec>(
     compressed: bool,
 ) -> Result<V, Error> {
     if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
+        let mut decoder =
+            Decoder::with_buffer(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
+        let mut decompressed = Vec::new();
+        io::copy(&mut decoder, &mut decompressed).map_err(|_| Error::DecompressionFailed)?;
         V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)

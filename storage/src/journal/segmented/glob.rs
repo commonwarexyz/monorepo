@@ -34,8 +34,8 @@ use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle};
-use std::{io::Cursor, num::NonZeroUsize};
-use zstd::{bulk::compress, decode_all};
+use std::{io, num::NonZeroUsize};
+use zstd::{bulk::compress, stream::read::Decoder};
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -147,8 +147,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
+            let mut decoder =
+                Decoder::with_buffer(compressed_data).map_err(|_| Error::DecompressionFailed)?;
+            let mut decompressed = Vec::new();
+            io::copy(&mut decoder, &mut decompressed).map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
             // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
