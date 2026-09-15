@@ -213,7 +213,7 @@ impl Hasher for Sha256 {
                     messages,
                     strategy,
                     simd::hash_x16,
-                    simd::supports_hash_x16(),
+                    simd::minimum_x16_batch_len(),
                     compression_blocks,
                 )
             } else {
@@ -221,7 +221,7 @@ impl Hasher for Sha256 {
                     messages,
                     strategy,
                     |_| None,
-                    false,
+                    None,
                     compression_blocks,
                 )
             }
@@ -439,17 +439,20 @@ mod tests {
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
-            let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| {
+            let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
                 (0..len)
                     .map(|i| (i as u8).wrapping_add(lane as u8))
                     .collect()
             });
             let refs = messages.each_ref().map(Vec::as_slice);
-            let expected = refs
-                .iter()
-                .map(|&message| Sha256::hash(&[message]))
-                .collect::<Vec<_>>();
-            assert_eq!(Sha256::hash_many(&refs, &Sequential), expected);
+            for count in [1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
+                let refs = &refs[..count];
+                let expected = refs
+                    .iter()
+                    .map(|&message| Sha256::hash(&[message]))
+                    .collect::<Vec<_>>();
+                assert_eq!(Sha256::hash_many(refs, &Sequential), expected);
+            }
         }
 
         let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
@@ -492,7 +495,12 @@ mod tests {
             .iter()
             .map(|&message| Sha256::hash(&[message]))
             .collect::<Vec<_>>();
-        assert_eq!(Sha256::hash_many(&messages, &Sequential), expected);
+        for count in 1..=messages.len() {
+            assert_eq!(
+                Sha256::hash_many(&messages[..count], &Sequential),
+                expected[..count],
+            );
+        }
 
         let message = &backing[1..130];
         let messages = [message; 16];

@@ -1590,7 +1590,7 @@ where
     H: Hasher,
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
-    /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
+    /// shards. Returns `Some(ReadyState)` on successful transition.
     fn try_transition(
         &mut self,
         commitment: Commitment<B, C, H>,
@@ -1603,24 +1603,21 @@ where
             return None;
         }
 
-        // Batch-validate all pending weak shards in parallel.
+        // The batch result order keeps verification failures bound to their senders.
         let pending = std::mem::take(&mut self.pending_shards);
-        let (new_checked, to_block) =
-            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
-                let checked = C::check(
-                    &commitment.config(),
-                    &commitment.root(),
-                    shard.index,
-                    &shard.data,
-                );
-                (peer, checked.ok())
-            });
-
-        for peer in to_block {
-            commonware_p2p::block!(blocker, peer, "invalid shard received");
-        }
-        for checked in new_checked {
-            self.common.checked_shards.push(checked);
+        let shards = pending
+            .values()
+            .map(|shard| (shard.index, &shard.data))
+            .collect::<Vec<_>>();
+        let checked =
+            C::check_many(&commitment.config(), &commitment.root(), &shards, strategy);
+        for ((peer, _), checked) in pending.into_iter().zip(checked) {
+            match checked {
+                Ok(checked) => self.common.checked_shards.push(checked),
+                Err(_) => {
+                    commonware_p2p::block!(blocker, peer, "invalid shard received");
+                }
+            }
         }
 
         // After validation, some may have failed; recheck threshold.
@@ -1914,7 +1911,7 @@ mod tests {
         num::{NonZeroU32, NonZeroUsize},
         sync::{
             Arc,
-            atomic::{AtomicIsize, Ordering},
+            atomic::{AtomicIsize, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -3820,23 +3817,67 @@ mod tests {
 
     #[test_traced]
     fn test_pending_shards_batch_validated_at_quorum() {
-        // Test that shards buffered in pending_shards are batch-validated once
-        // the minimum shard threshold is met, enabling reconstruction.
-        //
-        // With 10 peers: minimum_shards = (10-1)/3 + 1 = 4
-        // The leader (peer 0) sends peer 3 their own-index shard (verified
-        // immediately). Peers 1, 2, 4 send their own shards (buffered in
-        // pending_shards). Once the leader's shard + 3 pending shards >= 4,
-        // batch validation fires and reconstruction succeeds.
-        let fixture: Fixture<C> = Fixture {
-            num_primary_peers: 10,
+        static CHECK_BATCH_LEN: AtomicUsize = AtomicUsize::new(0);
+
+        #[derive(Clone, Debug)]
+        struct BatchChecking;
+
+        impl CodingScheme for BatchChecking {
+            type Commitment = <C as CodingScheme>::Commitment;
+            type Shard = <C as CodingScheme>::Shard;
+            type CheckedShard = <C as CodingScheme>::CheckedShard;
+            type Error = <C as CodingScheme>::Error;
+
+            fn encode(
+                config: &CodingConfig,
+                data: impl bytes::Buf,
+                strategy: &impl Strategy,
+            ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+                C::encode(config, data, strategy)
+            }
+
+            fn check(
+                config: &CodingConfig,
+                commitment: &Self::Commitment,
+                index: u16,
+                shard: &Self::Shard,
+            ) -> Result<Self::CheckedShard, Self::Error> {
+                C::check(config, commitment, index, shard)
+            }
+
+            fn check_many(
+                config: &CodingConfig,
+                commitment: &Self::Commitment,
+                shards: &[(u16, &Self::Shard)],
+                strategy: &impl Strategy,
+            ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
+                CHECK_BATCH_LEN.fetch_max(shards.len(), Ordering::Relaxed);
+                C::check_many(config, commitment, shards, strategy)
+            }
+
+            fn decode<'a>(
+                config: &CodingConfig,
+                commitment: &Self::Commitment,
+                shards: impl Iterator<Item = &'a Self::CheckedShard>,
+                strategy: &impl Strategy,
+            ) -> Result<Vec<u8>, Self::Error> {
+                C::decode(config, commitment, shards, strategy)
+            }
+        }
+
+        // One eagerly checked assigned shard and seven queued shards reach quorum.
+        // Observe check_many directly so encode/decode batching cannot satisfy the test.
+        CHECK_BATCH_LEN.store(0, Ordering::Relaxed);
+        let fixture: Fixture<BatchChecking> = Fixture {
+            num_primary_peers: 22,
             ..Default::default()
         };
 
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let coded_block =
+                    CodedBlock::<B, BatchChecking, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 let peer3_pk = peers[3].public_key.clone();
@@ -3849,9 +3890,8 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Send shards from peers 1, 2, 4 (their own indices).
-                // These are buffered in pending_shards for batch validation.
-                for &sender_idx in &[1, 2, 4] {
+                // Queue peer-indexed shards until the assigned shard completes quorum.
+                for &sender_idx in &[1, 2, 4, 5, 6, 7, 8] {
                     let shard = coded_block
                         .shard(peers[sender_idx].index.get() as u16)
                         .expect("missing shard");
@@ -3869,9 +3909,7 @@ mod tests {
                 let block = peers[3].mailbox.get(commitment).await;
                 assert!(block.is_none(), "block should not be reconstructed yet");
 
-                // Now the leader (peer 0) sends peer 3's own-index shard.
-                // This is verified immediately, and with the 3 pending shards
-                // we reach minimum_shards=4 -> batch validation + reconstruction.
+                // The leader supplies the eagerly verified assigned shard.
                 let peer3_index = peers[3].index.get() as u16;
                 let leader_shard = coded_block.shard(peer3_index).expect("missing shard");
                 let leader_shard_bytes = leader_shard.encode();
@@ -3888,7 +3926,9 @@ mod tests {
                     "no peers should be blocked for valid pending shards"
                 );
 
-                // Block should now be reconstructed (4 checked shards >= minimum_shards).
+                assert_eq!(CHECK_BATCH_LEN.load(Ordering::Relaxed), 7);
+
+                // Eight checked shards are sufficient to reconstruct the block.
                 let block = peers[3].mailbox.get(commitment).await;
                 assert!(
                     block.is_some(),

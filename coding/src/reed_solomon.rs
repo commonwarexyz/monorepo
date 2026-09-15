@@ -51,6 +51,35 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
+fn check_chunk<H: Hasher>(
+    total: u16,
+    commitment: &H::Digest,
+    index: u16,
+    shard: &Chunk<H::Digest>,
+    digest: impl FnOnce() -> H::Digest,
+) -> Result<CheckedChunk<H::Digest>, Error> {
+    if index >= total {
+        return Err(Error::InvalidIndex(index));
+    }
+    if shard.proof.leaf_count != u32::from(total) {
+        return Err(Error::InvalidProof);
+    }
+    if shard.index != index {
+        return Err(Error::InvalidIndex(shard.index));
+    }
+    let digest = digest();
+    shard
+        .proof
+        .verify_element_inclusion::<H>(&digest, u32::from(index), commitment)
+        .map_err(|_| Error::InvalidProof)?;
+    Ok(CheckedChunk::new(
+        *commitment,
+        shard.shard.clone(),
+        index,
+        digest,
+    ))
+}
+
 /// A piece of data from a Reed-Solomon encoded object.
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
@@ -73,34 +102,11 @@ impl<D: Digest> Chunk<D> {
             proof,
         }
     }
-
-    /// Verify a [`Chunk`] against the given root.
-    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
-        // Ensure the index matches
-        if index != self.index {
-            return None;
-        }
-
-        // Compute shard digest
-        let shard_digest = H::hash(&[&self.shard]);
-
-        // Verify proof
-        self.proof
-            .verify_element_inclusion::<H>(&shard_digest, self.index as u32, root)
-            .ok()?;
-
-        Some(CheckedChunk::new(
-            *root,
-            self.shard.clone(),
-            self.index,
-            shard_digest,
-        ))
-    }
 }
 
 /// A shard that has been checked against a commitment.
 ///
-/// This stores the shard digest computed during [`Chunk::verify`] and the
+/// This stores the shard digest computed during [`Scheme::check`] and the
 /// commitment root it was verified against. The root is checked at decode
 /// time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,9 +382,7 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes =
-        strategy
-            .map_collect_vec_with_multiplier(&shard_slices, shard_len, |shard| H::hash(&[shard]));
+    let shard_hashes = H::hash_many(&shard_slices, strategy);
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -407,8 +411,8 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     shard_len: usize,
     /// Commitment that the reconstructed codeword must reproduce.
     root: &'a H::Digest,
-    /// Parallelism strategy.
-    strategy: &'a S,
+    /// Caller strategy used to hash reconstructed shards.
+    hash_strategy: &'a S,
 }
 
 /// Striped Reed-Solomon: split every shard by byte range and run independent
@@ -593,19 +597,16 @@ mod striped {
     /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
     /// missing originals uses [`decode_reveal`]), confirm any provided recovery shards
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
-    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode<'a, H: Hasher, S: Strategy, P: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
+        stripe_strategy: &P,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            k,
-            m,
-            shard_len,
-            strategy,
-            ..
+            k, m, shard_len, ..
         } = ctx;
         assert!(ranges.len() > 1);
 
@@ -618,7 +619,7 @@ mod striped {
         let mut recovery_buf = vec![0u8; m * shard_len];
         let groups = stripe_columns(&mut recovery_buf, shard_len, &ranges);
         let stripes: Vec<_> = ranges.into_iter().zip(groups).collect();
-        strategy.try_map_collect_vec(stripes, |(range, out)| {
+        stripe_strategy.try_map_collect_vec(stripes, |(range, out)| {
             encode_recovery_into(k, m, range, &original_refs, out)
         })?;
         let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
@@ -638,19 +639,16 @@ mod striped {
     /// here and bound by the commitment root check like any other missing shard. No
     /// provided-recovery comparison is needed: every reconstructed shard is the unique RS
     /// output for the `k` inputs, and the root check alone binds it to the commitment.
-    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy, P: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
+        stripe_strategy: &P,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            k,
-            m,
-            shard_len,
-            strategy,
-            ..
+            k, m, shard_len, ..
         } = ctx;
         assert!(ranges.len() > 1);
 
@@ -688,7 +686,7 @@ mod striped {
                 )
             })
             .collect();
-        strategy.try_map_collect_vec(stripes, |(range, out)| {
+        stripe_strategy.try_map_collect_vec(stripes, |(range, out)| {
             recover_all_into(
                 k,
                 m,
@@ -733,12 +731,12 @@ fn verify_root<H: Hasher, S: Strategy>(
         k,
         shard_len,
         root,
-        strategy,
+        hash_strategy,
         ..
     } = ctx;
     let data = extract_data(originals, k, shard_len)?;
 
-    let missing_shards = shard_digests
+    let (missing_indices, missing_payloads): (Vec<_>, Vec<_>) = shard_digests
         .iter()
         .enumerate()
         .filter(|(_, digest)| digest.is_none())
@@ -752,12 +750,10 @@ fn verify_root<H: Hasher, S: Strategy>(
                 },
             )
         })
-        .collect::<Vec<_>>();
-
-    for (i, digest) in
-        strategy.map_collect_vec_with_multiplier(missing_shards, shard_len, |(i, shard)| {
-            (i, H::hash(&[shard]))
-        })
+        .unzip();
+    for (i, digest) in missing_indices
+        .into_iter()
+        .zip(H::hash_many(&missing_payloads, hash_strategy))
     {
         shard_digests[i] = Some(digest);
     }
@@ -911,7 +907,8 @@ mod sequential {
 
 /// Decode data from a set of [`CheckedChunk`]s.
 ///
-/// It is assumed that all chunks have already been verified against the given root using [`Chunk::verify`].
+/// It is assumed that all chunks have already been verified against the given root using
+/// [`Scheme::check`].
 ///
 /// # Parameters
 ///
@@ -1006,21 +1003,23 @@ fn decode<'a, H: Hasher, S: Strategy>(
             m,
             shard_len,
             root,
-            strategy: &manual,
+            hash_strategy: strategy,
         };
         // Recovery reads the missing originals and recoveries straight out of one decode;
         // with all originals present there is nothing to decode, so re-encode instead.
         if recovery_needed {
-            return striped::decode_reveal::<H, _>(
+            return striped::decode_reveal::<H, _, _>(
                 &ctx,
+                &manual,
                 ranges,
                 shard_digests,
                 provided_originals,
                 provided_recoveries,
             );
         }
-        return striped::decode::<H, _>(
+        return striped::decode::<H, _, _>(
             &ctx,
+            &manual,
             ranges,
             shard_digests,
             provided_originals,
@@ -1033,7 +1032,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         m,
         shard_len,
         root,
-        strategy,
+        hash_strategy: strategy,
     };
     sequential::decode::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
 }
@@ -1169,18 +1168,30 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         shard: &Self::Shard,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
-        if index >= total {
-            return Err(Error::InvalidIndex(index));
-        }
-        if shard.proof.leaf_count != u32::from(total) {
-            return Err(Error::InvalidProof);
-        }
-        if shard.index != index {
-            return Err(Error::InvalidIndex(shard.index));
-        }
-        shard
-            .verify::<H>(shard.index, commitment)
-            .ok_or(Error::InvalidProof)
+        check_chunk::<H>(total, commitment, index, shard, || H::hash(&[&shard.shard]))
+    }
+
+    fn check_many(
+        config: &Config,
+        commitment: &Self::Commitment,
+        shards: &[(u16, &Self::Shard)],
+        strategy: &impl Strategy,
+    ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
+        let Ok(total) = total_shards(config) else {
+            return shards
+                .iter()
+                .map(|&(index, shard)| Self::check(config, commitment, index, shard))
+                .collect();
+        };
+        let payloads = shards
+            .iter()
+            .map(|(_, shard)| shard.shard.as_ref())
+            .collect::<Vec<_>>();
+        let digests = H::hash_many(&payloads, strategy);
+        strategy.map_collect_vec(
+            shards.iter().copied().zip(digests),
+            |((index, shard), digest)| check_chunk::<H>(total, commitment, index, shard, || digest),
+        )
     }
 
     fn decode<'a>(
@@ -1209,13 +1220,70 @@ mod tests {
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
     use commonware_utils::{NZU16, NZUsize};
+    use std::cell::RefCell;
 
     type RS = ReedSolomon<Sha256>;
+    type InstrumentedRS = ReedSolomon<InstrumentedSha256>;
     const STRATEGY: Sequential = Sequential;
     const FUZZ_MAX_MIN_SHARDS: u16 = 8;
     const FUZZ_MAX_EXTRA_SHARDS: u16 = 8;
     const FUZZ_MAX_DATA_LEN: usize = 256;
     const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
+
+    std::thread_local! {
+        static HASH_MANY_CALLS: RefCell<Vec<Vec<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[derive(Default)]
+    struct InstrumentedSha256(Sha256);
+
+    impl Hasher for InstrumentedSha256 {
+        type Digest = <Sha256 as Hasher>::Digest;
+
+        fn hash(parts: &[&[u8]]) -> Self::Digest {
+            Sha256::hash(parts)
+        }
+
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+            Sha256::hash_pair(left, right)
+        }
+
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            _strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
+            HASH_MANY_CALLS.with(|calls| {
+                calls.borrow_mut().push(
+                    messages
+                        .iter()
+                        .map(|message| message.as_ref().to_vec())
+                        .collect(),
+                );
+            });
+            messages
+                .iter()
+                .map(|message| Sha256::hash(&[message.as_ref()]))
+                .collect()
+        }
+
+        fn update(&mut self, bytes: &[u8]) -> &mut Self {
+            self.0.update(bytes);
+            self
+        }
+
+        fn finalize(self) -> (Self, Self::Digest) {
+            let (hasher, digest) = self.0.finalize();
+            (Self(hasher), digest)
+        }
+    }
+
+    fn reset_hash_many_calls() {
+        HASH_MANY_CALLS.with(|calls| calls.borrow_mut().clear());
+    }
+
+    fn take_hash_many_calls() -> Vec<Vec<Vec<u8>>> {
+        HASH_MANY_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+    }
 
     fn checked(
         root: <Sha256 as Hasher>::Digest,
@@ -1250,6 +1318,164 @@ mod tests {
         (root, chunks)
     }
 
+    #[test]
+    fn test_check_many_batches_payloads_in_input_order() {
+        let config = Config {
+            minimum_shards: NZU16!(4),
+            extra_shards: NZU16!(4),
+        };
+        let (root, chunks) =
+            RS::encode(&config, b"ordered batch checking".as_slice(), &STRATEGY).unwrap();
+        let requested = [3u16, 0, 6, 2];
+        let shards = requested
+            .iter()
+            .map(|&index| (index, &chunks[usize::from(index)]))
+            .collect::<Vec<_>>();
+        let expected_payloads = requested
+            .iter()
+            .map(|&index| chunks[usize::from(index)].shard.to_vec())
+            .collect::<Vec<_>>();
+
+        reset_hash_many_calls();
+        let checked = InstrumentedRS::check_many(&config, &root, &shards, &STRATEGY)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(take_hash_many_calls(), vec![expected_payloads]);
+        assert_eq!(
+            checked.iter().map(|chunk| chunk.index).collect::<Vec<_>>(),
+            requested
+        );
+        for (checked, &index) in checked.iter().zip(&requested) {
+            let scalar =
+                InstrumentedRS::check(&config, &root, index, &chunks[usize::from(index)]).unwrap();
+            assert_eq!(checked, &scalar);
+        }
+    }
+
+    #[test]
+    fn test_instrumented_encode_matches_sha256_commitment_and_wire() {
+        let config = Config {
+            minimum_shards: NZU16!(5),
+            extra_shards: NZU16!(7),
+        };
+        let data = (0..4096).map(|i| i as u8).collect::<Vec<_>>();
+        let (expected_root, expected_chunks) =
+            RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+
+        reset_hash_many_calls();
+        let (actual_root, actual_chunks) =
+            InstrumentedRS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+
+        assert_eq!(actual_root, expected_root);
+        assert_eq!(actual_chunks, expected_chunks);
+        assert_eq!(
+            actual_chunks.iter().map(Encode::encode).collect::<Vec<_>>(),
+            expected_chunks
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>()
+        );
+        let calls = take_hash_many_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), config.total_shards() as usize);
+    }
+
+    #[test]
+    fn test_decode_reuses_checked_digests_and_rehashes_trimmed_surplus() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(3),
+        };
+        let data = (0..1024).map(|i| (i * 7) as u8).collect::<Vec<_>>();
+        let (root, chunks) = InstrumentedRS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+        let checked = InstrumentedRS::check_many(
+            &config,
+            &root,
+            &(0..6u16)
+                .map(|index| (index, &chunks[usize::from(index)]))
+                .collect::<Vec<_>>(),
+            &STRATEGY,
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let selected = [&checked[0], &checked[3], &checked[4], &checked[5]];
+
+        reset_hash_many_calls();
+        let decoded =
+            InstrumentedRS::decode(&config, &root, selected.into_iter(), &STRATEGY).unwrap();
+
+        assert_eq!(decoded, data);
+        assert_eq!(
+            take_hash_many_calls(),
+            vec![vec![
+                chunks[1].shard.to_vec(),
+                chunks[2].shard.to_vec(),
+                chunks[5].shard.to_vec(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn test_check_many_matches_scalar_errors() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(3),
+        };
+        let (root, chunks) =
+            RS::encode(&config, b"mixed check errors".as_slice(), &STRATEGY).unwrap();
+        let mut invalid_leaf_count = chunks[1].clone();
+        invalid_leaf_count.proof.leaf_count -= 1;
+        let mut invalid_chunk_index = chunks[2].clone();
+        invalid_chunk_index.index = 4;
+        let mut invalid_payload = chunks[3].clone();
+        let mut payload = invalid_payload.shard.to_vec();
+        payload[0] ^= 0xff;
+        invalid_payload.shard = payload.into();
+        let shards = [
+            (1, &invalid_leaf_count),
+            (0, &chunks[0]),
+            (6, &chunks[1]),
+            (2, &invalid_chunk_index),
+            (3, &invalid_payload),
+        ];
+
+        let scalar = shards
+            .iter()
+            .map(|&(index, shard)| {
+                format!("{:?}", InstrumentedRS::check(&config, &root, index, shard))
+            })
+            .collect::<Vec<_>>();
+        let batched = InstrumentedRS::check_many(&config, &root, &shards, &STRATEGY)
+            .into_iter()
+            .map(|result| format!("{result:?}"))
+            .collect::<Vec<_>>();
+        assert_eq!(batched, scalar);
+
+        let invalid_config = Config {
+            minimum_shards: NZU16!(u16::MAX),
+            extra_shards: NZU16!(1),
+        };
+        let scalar = shards
+            .iter()
+            .map(|&(index, shard)| {
+                format!(
+                    "{:?}",
+                    InstrumentedRS::check(&invalid_config, &root, index, shard)
+                )
+            })
+            .collect::<Vec<_>>();
+        reset_hash_many_calls();
+        let batched = InstrumentedRS::check_many(&invalid_config, &root, &shards, &STRATEGY)
+            .into_iter()
+            .map(|result| format!("{result:?}"))
+            .collect::<Vec<_>>();
+        assert_eq!(batched, scalar);
+        assert!(take_hash_many_calls().is_empty());
+    }
+
     fn selected_indices(
         u: &mut arbitrary::Unstructured<'_>,
         total: u16,
@@ -1273,9 +1499,13 @@ mod tests {
         chunks: &[Chunk<<Sha256 as Hasher>::Digest>],
         selected: &[u16],
     ) {
+        let config = Config {
+            minimum_shards: NZU16!(min),
+            extra_shards: NZU16!(total - min),
+        };
         let pieces = selected
             .iter()
-            .map(|&i| chunks[usize::from(i)].verify::<Sha256>(i, &root).unwrap())
+            .map(|&i| RS::check(&config, &root, i, &chunks[usize::from(i)]).unwrap())
             .collect::<Vec<_>>();
 
         let Ok(decoded) = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY) else {
@@ -1425,13 +1655,17 @@ mod tests {
         let data = b"Test invalid index";
         let total = 5u16;
         let min = 3u16;
+        let config = Config {
+            minimum_shards: NZU16!(min),
+            extra_shards: NZU16!(total - min),
+        };
 
         // Encode data
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Verify all proofs at invalid index
         for i in 0..total {
-            assert!(chunks[i as usize].verify::<Sha256>(i + 1, &root).is_none());
+            assert!(RS::check(&config, &root, i + 1, &chunks[i as usize]).is_err());
         }
     }
 
@@ -1832,6 +2066,10 @@ mod tests {
         let data = b"Original data that should be protected";
         let total = 7u16;
         let min = 4u16;
+        let config = Config {
+            minimum_shards: NZU16!(min),
+            extra_shards: NZU16!(total - min),
+        };
 
         // Encode data correctly to get valid chunks
         let (_correct_root, chunks) =
@@ -1842,12 +2080,7 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(
-                chunks[i as usize]
-                    .clone()
-                    .verify::<Sha256>(i, &malicious_root)
-                    .is_none()
-            );
+            assert!(RS::check(&config, &malicious_root, i, &chunks[i as usize]).is_err());
         }
 
         // Collect valid pieces (these are legitimate fragments checked against

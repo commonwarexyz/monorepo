@@ -56,7 +56,7 @@ const _: () = assert!(BMT_NODE_LEN == 64);
 /// Return whether AVX-512 software SHA-256 is available for 16 messages.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub(super) fn supports_hash_x16() -> bool {
+fn supports_hash_x16() -> bool {
     cfg_if::cfg_if! {
         if #[cfg(all(
             target_feature = "avx512f",
@@ -72,6 +72,29 @@ pub(super) fn supports_hash_x16() -> bool {
             false
         }
     }
+}
+
+/// Minimum active lanes for an available x16 kernel.
+///
+/// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
+/// message on the software fallback. These are initial tuning choices for the
+/// local batch, independent of the number of strategy workers.
+///
+/// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn minimum_x16_batch_len() -> Option<usize> {
+    if !supports_hash_x16() {
+        return None;
+    }
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "std")] {
+            let sha = std::arch::is_x86_feature_detected!("sha");
+        } else {
+            let sha = cfg!(target_feature = "sha");
+        }
+    }
+    Some(if sha { 7 } else { 2 })
 }
 
 /// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.

@@ -320,29 +320,37 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    fn hash_span<H, M, F>(messages: &[M], hash_x16: &F, x16_accelerated: bool) -> Vec<H::Digest>
+    fn hash_span<H, M, F>(
+        messages: &[M],
+        hash_x16: &F,
+        x16_minimum: Option<usize>,
+    ) -> Vec<H::Digest>
     where
         H: Hasher,
         M: AsRef<[u8]>,
         F: for<'a> Fn([&'a [u8]; HASH_BATCH_SIZE]) -> Option<[H::Digest; HASH_BATCH_SIZE]>,
     {
         let mut digests = Vec::with_capacity(messages.len());
-        if !x16_accelerated {
+        let Some(minimum) = x16_minimum else {
             hash_pairs_into::<H, _>(messages, &mut digests);
             return digests;
-        }
+        };
 
         for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            let (batches, remainder) = run.as_chunks::<HASH_BATCH_SIZE>();
-            for batch in batches {
-                let inputs = core::array::from_fn(|lane| batch[lane].as_ref());
-                if let Some(batch_digests) = hash_x16(inputs) {
-                    digests.extend(batch_digests);
-                } else {
-                    hash_pairs_into::<H, _>(batch, &mut digests);
+            for batch in run.chunks(HASH_BATCH_SIZE) {
+                if batch.len() >= minimum {
+                    // Spare lanes borrow the first input; only active lanes contribute output.
+                    let mut inputs = [batch[0].as_ref(); HASH_BATCH_SIZE];
+                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
+                        *input = message.as_ref();
+                    }
+                    if let Some(batch_digests) = hash_x16(inputs) {
+                        digests.extend_from_slice(&batch_digests[..batch.len()]);
+                        continue;
+                    }
                 }
+                hash_pairs_into::<H, _>(batch, &mut digests);
             }
-            hash_pairs_into::<H, _>(remainder, &mut digests);
         }
         digests
     }
@@ -352,7 +360,7 @@ commonware_macros::stability_scope!(BETA {
         messages: &[M],
         strategy: &S,
         hash_x16: F,
-        x16_accelerated: bool,
+        x16_minimum: Option<usize>,
         message_work: W,
     ) -> Vec<H::Digest>
     where
@@ -373,13 +381,13 @@ commonware_macros::stability_scope!(BETA {
         });
         strategy.run(
             work,
-            || hash_span::<H, _, _>(messages, &hash_x16, x16_accelerated),
+            || hash_span::<H, _, _>(messages, &hash_x16, x16_minimum),
             || {
                 let manual = strategy.manual();
                 let ranges = hash_ranges(messages, manual.parallelism(), &message_work);
                 manual
                     .map_collect_vec(ranges, |range| {
-                        hash_span::<H, _, _>(&messages[range], &hash_x16, x16_accelerated)
+                        hash_span::<H, _, _>(&messages[range], &hash_x16, x16_minimum)
                     })
                     .into_iter()
                     .flatten()
@@ -428,7 +436,7 @@ commonware_macros::stability_scope!(BETA {
             messages: &[M],
             strategy: &impl Strategy,
         ) -> Vec<Self::Digest> {
-            hash_many_with::<Self, _, _, _, _>(messages, strategy, |_| None, false, message_work)
+            hash_many_with::<Self, _, _, _, _>(messages, strategy, |_| None, None, message_work)
         }
 
         /// Append `bytes` to the hasher's running state.
@@ -807,6 +815,38 @@ mod tests {
         assert_eq!(PAIRED_HASHES.load(Ordering::Relaxed), 2);
         assert_eq!(X16_HASHES.load(Ordering::Relaxed), 0);
 
+        for (minimum, count) in [2, 7]
+            .into_iter()
+            .flat_map(|minimum| (0..=32).map(move |count| (minimum, count)))
+        {
+            let messages = (0..count)
+                .map(|lane| vec![lane as u8; 128])
+                .collect::<Vec<_>>();
+            reset_hash_counts();
+            let actual = hash_many_with::<CountingHasher, _, _, _, _>(
+                &messages,
+                &Sequential,
+                simulated_hash_x16,
+                Some(minimum),
+                message_work,
+            );
+            let expected = messages
+                .iter()
+                .map(|message| Sha256::hash(&[message]))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            let remainder = count % HASH_BATCH_SIZE;
+            let wide = count / HASH_BATCH_SIZE + usize::from(remainder >= minimum);
+            let narrow = if remainder < minimum { remainder } else { 0 };
+            assert_eq!(
+                X16_HASHES.load(Ordering::Relaxed),
+                wide,
+                "count={count}, minimum={minimum}",
+            );
+            assert_eq!(PAIRED_HASHES.load(Ordering::Relaxed), narrow / 2);
+            assert_eq!(SINGLE_HASHES.load(Ordering::Relaxed), narrow % 2);
+        }
+
         let messages = (0..18)
             .map(|index| vec![index as u8; 128])
             .collect::<Vec<_>>();
@@ -815,7 +855,7 @@ mod tests {
             &messages,
             &Sequential,
             simulated_hash_x16,
-            true,
+            Some(7),
             message_work,
         );
         let expected = messages
@@ -842,7 +882,7 @@ mod tests {
             &messages,
             &strategy,
             simulated_hash_x16,
-            true,
+            Some(7),
             message_work,
         );
         let expected = messages
@@ -864,7 +904,7 @@ mod tests {
                 &messages,
                 &Sequential,
                 simulated_hash_x16,
-                true,
+                Some(7),
                 message_work,
             );
             let expected = messages
@@ -874,7 +914,7 @@ mod tests {
             assert_eq!(actual, expected);
             assert_eq!(
                 X16_HASHES.load(Ordering::Relaxed),
-                1 + prefix / HASH_BATCH_SIZE,
+                1 + prefix / HASH_BATCH_SIZE + usize::from(prefix % HASH_BATCH_SIZE >= 7),
                 "prefix length {prefix}",
             );
         }

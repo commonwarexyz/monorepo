@@ -222,6 +222,7 @@ mod tests {
     fn test_fuzz_hash_many<H: Hasher>() {
         let mut saw_empty_batch = false;
         let mut saw_equal_lengths = false;
+        let mut saw_partial_batch = false;
         let mut saw_equal_full_blocks = false;
         let mut saw_equal_two_block_padding = false;
         let mut saw_unequal_lengths = false;
@@ -242,6 +243,7 @@ mod tests {
                 }
                 saw_empty_batch |= plan.messages.is_empty();
                 saw_equal_lengths |= equal_lengths && plan.messages.len() >= 16;
+                saw_partial_batch |= equal_lengths && (7..16).contains(&plan.messages.len());
                 saw_equal_full_blocks |=
                     equal_lengths && plan.messages.len() >= 16 && first_len >= 64;
                 saw_equal_two_block_padding |=
@@ -252,6 +254,7 @@ mod tests {
             });
         assert!(saw_empty_batch);
         assert!(saw_equal_lengths);
+        assert!(saw_partial_batch);
         assert!(saw_equal_full_blocks);
         assert!(saw_equal_two_block_padding);
         assert!(saw_unequal_lengths);
