@@ -58,6 +58,7 @@ use crate::{
         faulty::Storage as FaultyStorage,
         memory::{Snapshot as MemStorageSnapshot, Storage as MemStorage},
         metered::Storage as MeteredStorage,
+        open::Opens,
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -923,6 +924,13 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
+/// A blob handle whose open stays exclusive until every clone drops.
+pub type Blob = crate::storage::open::Blob<
+    crate::storage::metered::Blob<
+        crate::storage::audited::Blob<crate::storage::faulty::Blob<crate::storage::memory::Blob>>,
+    >,
+>;
+
 fn build_storage(
     inner: MemStorage,
     rng: Arc<Mutex<BoxDynRng>>,
@@ -948,6 +956,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    opens: Arc<Opens>,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
@@ -1018,6 +1027,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1095,6 +1105,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1123,6 +1134,17 @@ impl Context {
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
+    }
+
+    /// Return a copy of a blob's durable logical contents without opening it, or `None` when
+    /// the blob is missing.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.storage
+            .inner()
+            .inner()
+            .inner()
+            .durable(partition, name)
     }
 
     /// Access the storage fault configuration.
@@ -1291,6 +1313,7 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            opens: self.opens.clone(),
             network_buffer_pool: self.network_buffer_pool.clone(),
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
@@ -1609,7 +1632,7 @@ impl TryRng for Context {
 impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage as crate::Storage>::Blob;
+    type Blob = Blob;
 
     async fn open_versioned(
         &self,
@@ -1617,11 +1640,18 @@ impl crate::Storage for Context {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        let opened = self.opens.open(
+            partition,
+            name,
+            self.storage.open_versioned(partition, name, versions),
+        )?;
+        self.storage.inner().inner().admit(partition, name);
+        Ok(opened.finish())
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
+        self.opens
+            .remove(partition, name, self.storage.remove(partition, name))
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -1660,6 +1690,176 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
+
+    #[rstest::rstest]
+    #[case::open_named(true, true)]
+    #[case::open_partition(true, false)]
+    #[case::remove_named(false, true)]
+    #[case::remove_partition(false, false)]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_logical_open_namespace_handoff(#[case] open_first: bool, #[case] named: bool) {
+        Runner::default().start(|context| async move {
+            // Nonempty durable contents distinguish the unlinked incarnation from its replacement.
+            let (seed, _) = context.open("partition", b"blob").await.unwrap();
+            seed.write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(seed);
+
+            let name = named.then_some(b"blob".as_slice());
+            let worker_context = context.child("namespace");
+            let competing_context = context.child("competing");
+            let (entered, entering) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let (observed, observing) = std::sync::mpsc::channel();
+            let operation = move |context: Context, open| async move {
+                if open {
+                    Some(context.open("partition", b"blob").await.unwrap())
+                } else {
+                    context.remove("partition", name).await.unwrap();
+                    None
+                }
+            };
+
+            // Both operations run on scoped threads so the coordinator can release a held registry.
+            // The contender observes the registry only after the worker reaches its handoff.
+            let (worker, competing) = std::thread::scope(move |scope| {
+                let worker = scope.spawn(move || {
+                    crate::storage::open::tests::pause_namespace(entered, released);
+                    operation(worker_context, open_first)
+                        .now_or_never()
+                        .unwrap()
+                });
+                entering.recv().unwrap();
+                let competing = scope.spawn(move || {
+                    crate::storage::open::tests::watch_registry(observed);
+                    operation(competing_context, !open_first)
+                        .now_or_never()
+                        .unwrap()
+                });
+
+                // A held registry requires releasing its owner before joining the contender.
+                // At an unlocked handoff, the contender completes before the owner continues.
+                let locked = observing.recv().unwrap();
+                if locked {
+                    release.send(()).unwrap();
+                }
+                let competing = competing.join().unwrap();
+                if !locked {
+                    release.send(()).unwrap();
+                }
+                (worker.join().unwrap(), competing)
+            });
+
+            let (old, current) = if open_first {
+                let (old, len) = worker.unwrap();
+                assert_eq!(len, 5);
+                assert_eq!(
+                    old.read_at(0, 5, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce(),
+                    b"saved"
+                );
+                let (current, len) = context.open("partition", b"blob").await.unwrap();
+                assert_eq!(len, 0);
+                (Some(old), current)
+            } else {
+                let (current, len) = competing.unwrap();
+                assert_eq!(len, 0);
+                (None, current)
+            };
+
+            // An old handle's cleanup cannot release the replacement's logical open.
+            let clone = current.clone();
+            drop(old);
+            drop(current);
+            assert!(matches!(
+                context.open("partition", b"blob").await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            clone.write_at(0, b"new", WriteOptions::SYNC).await.unwrap();
+            drop(clone);
+            let (reopened, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(
+                reopened
+                    .read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"new"
+            );
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::retained(false)]
+    #[case::synced(true)]
+    fn test_logical_open_releases_retained_mutations(#[case] sync: bool) {
+        let cfg = Config::default().with_storage_fault_config(FaultConfig::default().write(
+            WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            },
+        ));
+        let (_, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            blob.write_at(0, b"stale", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.write_at(2, b"X", WriteOptions::SYNC).await.unwrap();
+            let clone = blob.clone();
+            drop(blob);
+            drop(clone);
+
+            // Retained write fragments keep their replay targets, but release every user lease.
+            let (reopened, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                reopened
+                    .read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"saXed"
+            );
+            let clone = reopened.clone();
+            drop(reopened);
+
+            // Duplicate opens contribute to the runtime audit.
+            let before = context.auditor().state();
+            assert!(matches!(
+                context.open("partition", b"blob").await,
+                Err(Error::BlobAlreadyOpen(_, _))
+            ));
+            assert_ne!(before, context.auditor().state());
+            if sync {
+                clone
+                    .write_at(0, b"fresh", WriteOptions::default())
+                    .await
+                    .unwrap();
+                clone.sync().await.unwrap();
+            }
+        });
+
+        // An admitted snapshot stays durable unless the new handle mutates it.
+        Runner::from(checkpoint).start(|context| async move {
+            let (blob, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                blob.read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                if sync { b"fresh" } else { b"saXed" }
+            );
+        });
+    }
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1843,6 +2043,32 @@ mod tests {
             ..Config::default()
         };
         deterministic::Runner::new(cfg);
+    }
+
+    /// Removing a blob frees its name while the removed handle lives.
+    #[test]
+    fn test_removed_blob_reopens_while_handle_alive() {
+        deterministic::Runner::default().start(|context| async move {
+            let (old, _) = context.open("partition", b"blob").await.unwrap();
+            old.write_at(0, b"old", WriteOptions::default())
+                .await
+                .unwrap();
+            context.remove("partition", None).await.unwrap();
+            let (current, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 0);
+            drop(old);
+            current
+                .write_at(0, b"new", WriteOptions::default())
+                .await
+                .unwrap();
+            current.sync().await.unwrap();
+            let read = current
+                .read_at(0, 3, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), b"new");
+        });
     }
 
     #[test]
