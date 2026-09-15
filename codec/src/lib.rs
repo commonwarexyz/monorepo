@@ -32,6 +32,14 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Derive macros
+//!
+//! Structs and tagged enums can derive [`Write`](derive@Write) and
+//! [`Read`](derive@Read). Choose [`FixedSize`](derive@FixedSize) for a constant
+//! encoded length or [`EncodeSize`](derive@EncodeSize) for a value-dependent
+//! length. [`Encode`](derive@Encode) is shorthand for `Write, EncodeSize`.
+//! The macro documentation includes compiling examples and configuration attributes.
+//!
 //! # Decode Inputs
 //!
 //! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
@@ -233,6 +241,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+// Derive expansions use this path both inside the library and in consumer targets.
+#[allow(unused_extern_crates)]
+extern crate self as commonware_codec;
+
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
@@ -251,7 +263,10 @@ commonware_macros::stability_scope!(BETA {
 
     // Re-export main types and traits
     pub use codec::*;
-    pub use commonware_codec_macros::FixedArray;
+    mod derive;
+    pub use derive::*;
+    #[doc(hidden)]
+    pub use bytes::BufMut as __BufMut;
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
@@ -259,6 +274,9 @@ commonware_macros::stability_scope!(BETA {
 });
 
 commonware_macros::stability_scope!(ALPHA {
+    #[cfg(test)]
+    mod derive_tests;
+
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 
