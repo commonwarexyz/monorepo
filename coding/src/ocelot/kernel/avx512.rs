@@ -11,11 +11,11 @@ use core::arch::x86_64::{
 /// The private field ensures this can only be constructed after checking the
 /// required CPU features with [`Self::new`].
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Avx512(());
+pub struct Avx512(());
 
 impl Avx512 {
     /// Constructs the kernel if the required CPU features are available.
-    pub(super) fn new() -> Option<Self> {
+    pub fn new() -> Option<Self> {
         available().then_some(Self(()))
     }
 
@@ -25,7 +25,7 @@ impl Avx512 {
     /// operations inline without crossing a target-feature boundary for every
     /// operation.
     #[target_feature(enable = "avx512f,gfni")]
-    pub(super) fn call<F: WithKernel>(self, f: F) -> F::Output {
+    pub fn call<F: WithKernel>(self, f: F) -> F::Output {
         f.call(self)
     }
 }
@@ -38,10 +38,10 @@ impl Default for Avx512 {
 
 impl Kernel for Avx512 {
     type Vector = __m512i;
+    type Constant = __m512i;
     const LANES: usize = 64;
     const PARTIAL_GRANULARITY: usize = 4;
     const FUSED_BUTTERFLY: bool = true;
-    type Constant = __m512i;
 
     #[inline]
     fn run<F: WithKernel>(self, f: F) -> F::Output {

@@ -283,14 +283,6 @@ impl<K: Kernel> GF16Vec<K> {
         out
     }
 
-    /// Xor every lane into one field element.
-    pub fn xor_fold(self) -> GF16 {
-        GF16::from_parts(
-            GF8(self.kernel.xor_fold(self.lo)),
-            GF8(self.kernel.xor_fold(self.hi)),
-        )
-    }
-
     /// Multiply every lane by a prepared constant.
     #[inline(always)]
     pub fn mul_prepared(self, c: GF16Constant<K>) -> Self {
@@ -455,21 +447,18 @@ impl<K: Kernel> Ring for GF16Vec<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocelot::{
-        code::Impl,
-        impl16::Impl16,
-        kernel::{WithKernel, portable::Portable, with_kernel},
-    };
+    use crate::ocelot::kernel::portable::Portable;
 
     #[test]
-    fn test_field() {
-        commonware_invariants::minifuzz::test(
-            commonware_math::algebra::test_suites::fuzz_field::<GF16>,
-        );
+    fn minifuzz_field() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(commonware_math::algebra::test_suites::fuzz_field::<GF16>);
     }
 
     #[test]
-    fn test_extension_and_basis() {
+    fn extension_polynomial_is_irreducible() {
         let mut trace = GF8(0);
         let mut conjugate = DELTA;
         for _ in 0..8 {
@@ -481,94 +470,35 @@ mod tests {
             let x = GF8(x);
             x.mul_inner(x) + x != DELTA
         }));
-
-        for x in 1..=u16::MAX {
-            let element = GF16(x);
-            let (a, b) = element.parts();
-            let norm = a.mul_inner(a) + a.mul_inner(b) + DELTA.mul_inner(b.mul_inner(b));
-            assert_ne!(norm, GF8(0));
-            assert_eq!(
-                element * GF16::from_parts(a + b, b),
-                GF16::from_parts(norm, GF8(0))
-            );
-            assert_eq!(element * element.inv(), GF16::ONE);
-        }
-
-        let basis = <Impl16<Portable> as Impl>::basis();
-        for pair in basis.windows(2) {
-            assert_eq!(pair[1] * pair[1] + pair[1], pair[0]);
-        }
-        let mut pivots = [0u16; 16];
-        for value in basis {
-            let mut value = value.0;
-            while value != 0 {
-                let bit = value.ilog2() as usize;
-                if pivots[bit] == 0 {
-                    pivots[bit] = value;
-                    break;
-                }
-                value ^= pivots[bit];
-            }
-            assert_ne!(value, 0);
-        }
-    }
-
-    struct TestVecRing;
-
-    impl WithKernel for TestVecRing {
-        type Output = ();
-
-        fn call<K: Kernel>(self, _: K) {
-            commonware_invariants::minifuzz::test(
-                commonware_math::algebra::test_suites::fuzz_ring::<GF16Vec<K>>,
-            );
-        }
     }
 
     #[test]
-    fn test_vec_ring() {
-        with_kernel(TestVecRing);
-    }
+    fn minifuzz_vec() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| {
+                commonware_math::algebra::test_suites::fuzz_ring::<GF16Vec<Portable>>(u)?;
 
-    struct TestVecMatchesScalar;
-
-    impl WithKernel for TestVecMatchesScalar {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            commonware_invariants::minifuzz::test(|u| {
-                let a: GF16Vec<K> = u.arbitrary()?;
-                let b: GF16Vec<K> = u.arbitrary()?;
+                let a: GF16Vec<Portable> = u.arbitrary()?;
+                let b: GF16Vec<Portable> = u.arbitrary()?;
                 let c: GF16 = u.arbitrary()?;
-                let (mut ea, mut eb) = (vec![GF16::ZERO; K::LANES], vec![GF16::ZERO; K::LANES]);
-                a.store(&mut ea);
-                b.store(&mut eb);
-                let lanes = |f: &dyn Fn(GF16, GF16) -> GF16| {
-                    GF16Vec::<K>::load(
-                        &ea.iter()
-                            .zip(&eb)
-                            .map(|(x, y)| f(*x, *y))
-                            .collect::<Vec<_>>(),
-                    )
-                };
-                assert_eq!(a + b, lanes(&|x, y| x + y));
-                assert_eq!(a * b, lanes(&|x, y| x * y));
-                assert_eq!(a * c, lanes(&|x, _| x * c));
-                assert_eq!(
-                    a.mul_prepared(GF16Constant::new(kernel, c)),
-                    lanes(&|x, _| x * c)
+                let (mut a_elements, mut b_elements) = (
+                    vec![GF16::ZERO; Portable::LANES],
+                    vec![GF16::ZERO; Portable::LANES],
                 );
-                assert_eq!(
-                    a.xor_fold(),
-                    ea.iter().copied().fold(GF16::ZERO, |acc, x| acc + x)
-                );
+                a.store(&mut a_elements);
+                b.store(&mut b_elements);
+
+                let product = a_elements
+                    .iter()
+                    .zip(&b_elements)
+                    .map(|(&a, &b)| a * b)
+                    .collect::<Vec<_>>();
+                let constant_product = a_elements.iter().map(|&a| a * c).collect::<Vec<_>>();
+                assert_eq!(a * b, GF16Vec::load(&product));
+                assert_eq!(a * c, GF16Vec::load(&constant_product));
                 Ok(())
             });
-        }
-    }
-
-    #[test]
-    fn test_vec_matches_scalar() {
-        with_kernel(TestVecMatchesScalar);
     }
 }

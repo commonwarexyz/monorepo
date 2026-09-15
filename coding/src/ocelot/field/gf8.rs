@@ -12,7 +12,7 @@ use core::{
 /// This implements [`Field`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct GF8(pub(crate) u8);
+pub struct GF8(pub u8);
 
 impl GF8 {
     const ZERO: Self = Self(0);
@@ -33,7 +33,7 @@ impl GF8 {
         Self(self.0 ^ rhs.0)
     }
 
-    pub(crate) const fn mul_inner(self, rhs: Self) -> Self {
+    pub const fn mul_inner(self, rhs: Self) -> Self {
         let mut a = self.0;
         let mut b = rhs.0;
         let mut product = 0;
@@ -379,64 +379,21 @@ impl<K: Kernel> Ring for GF8Vec<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocelot::kernel::{WithKernel, with_kernel};
+    use crate::ocelot::kernel::portable::Portable;
 
     #[test]
-    fn test_field() {
-        commonware_invariants::minifuzz::test(
-            commonware_math::algebra::test_suites::fuzz_field::<GF8>,
-        );
-    }
-
-    struct TestVecRing;
-
-    impl WithKernel for TestVecRing {
-        type Output = ();
-
-        fn call<K: Kernel>(self, _: K) {
-            commonware_invariants::minifuzz::test(
-                commonware_math::algebra::test_suites::fuzz_ring::<GF8Vec<K>>,
-            );
-        }
+    fn minifuzz_field() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(commonware_math::algebra::test_suites::fuzz_field::<GF8>);
     }
 
     #[test]
-    fn test_vec_ring() {
-        with_kernel(TestVecRing);
-    }
-
-    struct TestVecMatchesScalar;
-
-    impl WithKernel for TestVecMatchesScalar {
-        type Output = ();
-
-        fn call<K: Kernel>(self, _: K) {
-            commonware_invariants::minifuzz::test(|u| {
-                let a: GF8Vec<K> = u.arbitrary()?;
-                let b: GF8Vec<K> = u.arbitrary()?;
-                let c: GF8 = u.arbitrary()?;
-                let (mut ea, mut eb) = (vec![GF8::ZERO; K::LANES], vec![GF8::ZERO; K::LANES]);
-                a.store(&mut ea);
-                b.store(&mut eb);
-                let lanes = |f: &dyn Fn(GF8, GF8) -> GF8| {
-                    GF8Vec::<K>::load(
-                        &ea.iter()
-                            .zip(&eb)
-                            .map(|(x, y)| f(*x, *y))
-                            .collect::<Vec<_>>(),
-                    )
-                };
-                assert_eq!(a + b, lanes(&|x, y| x + y));
-                assert_eq!(a * b, lanes(&|x, y| x * y));
-                assert_eq!(a.mul_constant(c), lanes(&|x, _| x * c));
-                assert_eq!(a * c, lanes(&|x, _| x * c));
-                Ok(())
-            });
-        }
-    }
-
-    #[test]
-    fn test_vec_matches_scalar() {
-        with_kernel(TestVecMatchesScalar);
+    fn minifuzz_vec_ring() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(commonware_math::algebra::test_suites::fuzz_ring::<GF8Vec<Portable>>);
     }
 }

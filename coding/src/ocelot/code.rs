@@ -62,7 +62,7 @@ const ENCODE_WORK_BYTES: usize = 512 * 1024;
 /// Target total size of the decoder's transform buffer per worker.
 const DECODE_WORK_BYTES: usize = 512 * 1024;
 
-pub(super) fn stripe_bytes<I: Impl>() -> usize {
+pub fn stripe_bytes<I: Impl>() -> usize {
     const {
         assert!(I::ALIGN > 0);
         assert!(I::STRIPE_ALIGN > 0);
@@ -142,10 +142,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// Globally unique transcript namespace for this field and code variant.
     const NAMESPACE: &'static [u8];
 
-    /// Return field tables shared by instances of this implementation.
-    ///
-    /// The default builds fresh tables and is intended for tests and custom
-    /// implementations. Production implementations should cache the result.
+    /// Return the field tables used by this implementation.
     fn tables() -> Arc<Tables<Self::Element>>
     where
         Self: Sized,
@@ -164,6 +161,23 @@ pub trait Impl: Copy + Send + Sync + 'static {
     ///
     /// This must support both individual shards and concatenations of shards.
     fn add_into(self, dst: &mut [u8], src: &[u8]);
+
+    /// `dst -= src`, elementwise.
+    ///
+    /// This has the same layout requirements as [`Self::add_into`].
+    fn sub_into(self, dst: &mut [u8], src: &[u8]);
+
+    /// `dst += c * src`, elementwise, for one shard.
+    fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element);
+
+    /// `dst = c * src`, elementwise, for one shard.
+    fn mul_into(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+        dst.fill(0);
+        self.mul_add(dst, src, c);
+    }
+
+    /// `dst -= c * src`, elementwise, for one shard.
+    fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
 
     /// Differentiate four consecutive shard groups in place.
     ///
@@ -209,55 +223,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
         }
     }
 
-    /// `dst -= src`, elementwise.
-    ///
-    /// This has the same layout requirements as [`Self::add_into`].
-    fn sub_into(self, dst: &mut [u8], src: &[u8]);
-
-    /// `dst += c * src`, elementwise, for one shard.
-    fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element);
-
-    /// `dst = c * src`, elementwise, for one shard.
-    fn mul_into(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
-        dst.fill(0);
-        self.mul_add(dst, src, c);
-    }
-
-    /// `dst -= c * src`, elementwise, for one shard.
-    fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
-
-    /// Compute the contribution of `range` to the randomized checksums of `shard`.
-    ///
-    /// `coefficients` is uniformly sampled random input. Implementations should
-    /// use it directly to select the checksum map; it does not need to be
-    /// hashed or passed through another randomness extractor. There is one byte
-    /// of randomness per input code symbol for each output code symbol, so its
-    /// length is
-    /// `(shard.len() / Self::ALIGN) * (out.len() / Self::ALIGN)`.
-    ///
-    /// For fixed `coefficients`, the map from `shard` to `out` must be linear
-    /// and must commute with this implementation's encoder: encoding checksums
-    /// of the original shards must produce the checksums of the encoded shards.
-    /// The random maps must detect any nonzero shard difference, except with
-    /// probability 2^-8 per output code symbol. Output symbols use the code
-    /// field's shard byte layout.
-    ///
-    /// `shard` and `coefficients` are the complete buffers. Overwrite `out`
-    /// with the projection onto symbols in
-    /// `range.start / Self::ALIGN..range.end / Self::ALIGN`. These logical
-    /// symbol positions need not occupy consecutive bytes. Adding
-    /// contributions from a disjoint partition with
-    /// [`Self::add_into`] must yield the full-shard checksum. An empty range
-    /// must write zero.
-    ///
-    /// `shard`, `out`, and both endpoints of `range` must be aligned to
-    /// [`Self::ALIGN`], with `range.start <= range.end <= shard.len()`.
-    fn checksum_range(self, shard: &[u8], coefficients: &[u8], range: Range<usize>, out: &mut [u8]);
-
     /// The forward butterfly: `x += c * y`, then `y += x`.
-    ///
-    /// The default performs two passes over memory. Implementations can
-    /// override it with a single fused pass.
     fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
         if c != Self::Element::zero() {
             self.mul_add(x, y, c);
@@ -267,8 +233,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
 
     /// The inverse butterfly: `y -= x`, then `x -= c * y`.
     ///
-    /// This undoes [`Self::fft_butterfly`] with the same `c`. As with that
-    /// method, implementations can override it with a single fused pass.
+    /// This undoes [`Self::fft_butterfly`] with the same `c`.
     fn ifft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
         self.sub_into(y, x);
         if c != Self::Element::zero() {
@@ -337,6 +302,33 @@ pub trait Impl: Copy + Send + Sync + 'static {
             self.ifft_butterfly(x1, x3, c2);
         }
     }
+    /// Compute the contribution of `range` to the randomized checksums of `shard`.
+    ///
+    /// `coefficients` is uniformly sampled random input. Implementations should
+    /// use it directly to select the checksum map; it does not need to be
+    /// hashed or passed through another randomness extractor. There is one byte
+    /// of randomness per input code symbol for each output code symbol, so its
+    /// length is
+    /// `(shard.len() / Self::ALIGN) * (out.len() / Self::ALIGN)`.
+    ///
+    /// For fixed `coefficients`, the map from `shard` to `out` must be linear
+    /// and must commute with this implementation's encoder: encoding checksums
+    /// of the original shards must produce the checksums of the encoded shards.
+    /// The random maps must detect any nonzero shard difference, except with
+    /// probability 2^-8 per output code symbol. Output symbols use the code
+    /// field's shard byte layout.
+    ///
+    /// `shard` and `coefficients` are the complete buffers. Overwrite `out`
+    /// with the projection onto symbols in
+    /// `range.start / Self::ALIGN..range.end / Self::ALIGN`. These logical
+    /// symbol positions need not occupy consecutive bytes. Adding
+    /// contributions from a disjoint partition with
+    /// [`Self::add_into`] must yield the full-shard checksum. An empty range
+    /// must write zero.
+    ///
+    /// `shard`, `out`, and both endpoints of `range` must be aligned to
+    /// [`Self::ALIGN`], with `range.start <= range.end <= shard.len()`.
+    fn checksum_range(self, shard: &[u8], coefficients: &[u8], range: Range<usize>, out: &mut [u8]);
 }
 
 /// Produces recovery shards using the arithmetic of some [`Impl`].
@@ -379,7 +371,7 @@ impl<I: Impl> Encoder<I> {
     }
 
     /// Fill caller-owned recovery shards using `strategy`.
-    pub(super) fn encode_into<T: AsMut<[u8]>>(
+    pub fn encode_into<T: AsMut<[u8]>>(
         &self,
         original: &[&[u8]],
         output: &mut [T],
@@ -837,14 +829,670 @@ fn derivative<I: Impl>(imp: I, data: &mut [u8], len: usize) {
     derivative(imp, b, len);
 }
 
-#[cfg(any(test, feature = "arbitrary"))]
+#[cfg(test)]
 pub mod test_suites {
     //! Property tests for implementations of Ocelot's shard arithmetic.
+    //!
+    //! Check each trait operation against scalar arithmetic on the portable kernel,
+    //! then compare dispatched implementations with that reference. Encoding and
+    //! decoding properties only need the portable implementations.
 
     use super::{Decoder, Encoder, Error, Impl};
     use arbitrary::Unstructured;
     use commonware_math::algebra::{Additive, Field, Ring};
     use commonware_parallel::Sequential;
+    use std::ops::Range;
+
+    /// One independently fuzzed part of the [`Impl`] contract.
+    #[derive(Clone, Copy, Debug)]
+    pub enum ImplPlan {
+        Add,
+        Sub,
+        MulAdd,
+        MulInto,
+        MulSub,
+        DerivativeFour,
+        DerivativeSixteen,
+        Butterfly,
+        ButterflyTwoLayers,
+        Checksum,
+    }
+
+    impl ImplPlan {
+        pub const ALL: [Self; 10] = [
+            Self::Add,
+            Self::Sub,
+            Self::MulAdd,
+            Self::MulInto,
+            Self::MulSub,
+            Self::DerivativeFour,
+            Self::DerivativeSixteen,
+            Self::Butterfly,
+            Self::ButterflyTwoLayers,
+            Self::Checksum,
+        ];
+
+        pub const DEFAULTS: [Self; 5] = [
+            Self::MulInto,
+            Self::DerivativeFour,
+            Self::DerivativeSixteen,
+            Self::Butterfly,
+            Self::ButterflyTwoLayers,
+        ];
+    }
+
+    /// An adapter that deliberately inherits every default [`Impl`] method.
+    #[derive(Clone, Copy)]
+    pub struct DefaultImpl<I>(pub I);
+
+    impl<I: Impl> Impl for DefaultImpl<I> {
+        type Element = I::Element;
+
+        const BITS: usize = I::BITS;
+        const STRIPE_ALIGN: usize = I::STRIPE_ALIGN;
+        const NAMESPACE: &'static [u8] = I::NAMESPACE;
+
+        fn basis() -> &'static [Self::Element] {
+            I::basis()
+        }
+
+        fn add_into(self, dst: &mut [u8], src: &[u8]) {
+            self.0.add_into(dst, src);
+        }
+
+        fn sub_into(self, dst: &mut [u8], src: &[u8]) {
+            self.0.sub_into(dst, src);
+        }
+
+        fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+            self.0.mul_add(dst, src, c);
+        }
+
+        fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+            self.0.mul_sub(dst, src, c);
+        }
+
+        fn checksum_range(
+            self,
+            shard: &[u8],
+            coefficients: &[u8],
+            range: Range<usize>,
+            out: &mut [u8],
+        ) {
+            self.0.checksum_range(shard, coefficients, range, out);
+        }
+    }
+
+    fn fuzz_len<I: Impl>(
+        u: &mut Unstructured<'_>,
+        vector_bytes: usize,
+    ) -> arbitrary::Result<usize> {
+        assert!(vector_bytes.is_multiple_of(I::ALIGN));
+        let vector = vector_bytes / I::ALIGN;
+        let stripe = I::STRIPE_ALIGN / I::ALIGN;
+        let candidates = [
+            0,
+            1,
+            vector.saturating_sub(1),
+            vector,
+            vector + 1,
+            2 * vector + 1,
+            stripe.saturating_sub(1),
+            stripe,
+            stripe + 1,
+            2 * stripe + 1,
+        ];
+        let index = u.int_in_range(0..=candidates.len())?;
+        let symbols = if index == candidates.len() {
+            u.int_in_range(0..=2 * vector.max(stripe) + 1)?
+        } else {
+            candidates[index]
+        };
+        Ok(symbols * I::ALIGN)
+    }
+
+    fn fuzz_element<I: Impl>(
+        u: &mut Unstructured<'_>,
+        elements: impl Fn(&[u8]) -> Vec<I::Element>,
+    ) -> arbitrary::Result<I::Element> {
+        let class = u.int_in_range(0..=2)?;
+        let mut bytes = vec![0; I::ALIGN];
+        if class != 0 {
+            u.fill_buffer(&mut bytes)?;
+            if class == 1 {
+                bytes[1..].fill(0);
+            }
+        }
+        Ok(elements(&bytes)[0])
+    }
+
+    fn fuzz_backing(
+        u: &mut Unstructured<'_>,
+        len: usize,
+    ) -> arbitrary::Result<(Vec<u8>, Range<usize>)> {
+        let offset = u.int_in_range(0..=7)?;
+        let mut bytes = vec![0; offset + len + 7];
+        u.fill_buffer(&mut bytes)?;
+        Ok((bytes, offset..offset + len))
+    }
+
+    fn checksum_reference<I: Impl>(
+        shard: &[u8],
+        coefficients: &[u8],
+        range: Range<usize>,
+        output_symbols: usize,
+        elements: impl Fn(&[u8]) -> Vec<I::Element>,
+        layout: impl Fn(&[I::Element]) -> Vec<u8>,
+        coefficient: impl Fn(u8) -> I::Element,
+    ) -> Vec<u8> {
+        let input_symbols = shard.len() / I::ALIGN;
+        let values = elements(shard);
+        let range = range.start / I::ALIGN..range.end / I::ALIGN;
+        let output = (0..output_symbols)
+            .map(|output| {
+                let row = &coefficients[output * input_symbols..][..input_symbols];
+                range.clone().fold(I::Element::zero(), |sum, i| {
+                    sum + &(values[i] * &coefficient(row[i]))
+                })
+            })
+            .collect::<Vec<_>>();
+        layout(&output)
+    }
+
+    fn fuzz_arithmetic<I: Impl>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        plan: ImplPlan,
+        vector_bytes: usize,
+        elements: impl Copy + Fn(&[u8]) -> Vec<I::Element>,
+        layout: impl Copy + Fn(&[I::Element]) -> Vec<u8>,
+    ) -> arbitrary::Result<()> {
+        let len = fuzz_len::<I>(u, vector_bytes)?;
+        let (dst, dst_range) = fuzz_backing(u, len)?;
+        let (src, src_range) = fuzz_backing(u, len)?;
+        let dst_elements = elements(&dst[dst_range.clone()]);
+        let src_elements = elements(&src[src_range.clone()]);
+        let c = fuzz_element::<I>(u, elements)?;
+
+        let check = |actual: Vec<u8>, expected_elements: Vec<I::Element>, operation: &str| {
+            let mut expected = dst.clone();
+            expected[dst_range.clone()].copy_from_slice(&layout(&expected_elements));
+            assert_eq!(actual, expected, "{operation}");
+        };
+
+        let products = src_elements.iter().map(|&src| src * &c).collect::<Vec<_>>();
+        match plan {
+            ImplPlan::Add => {
+                let mut actual = dst.clone();
+                imp.add_into(&mut actual[dst_range.clone()], &src[src_range]);
+                check(
+                    actual,
+                    dst_elements
+                        .iter()
+                        .zip(&src_elements)
+                        .map(|(&dst, src)| dst + src)
+                        .collect(),
+                    "add_into",
+                );
+            }
+            ImplPlan::Sub => {
+                let mut actual = dst.clone();
+                imp.sub_into(&mut actual[dst_range.clone()], &src[src_range]);
+                check(
+                    actual,
+                    dst_elements
+                        .iter()
+                        .zip(&src_elements)
+                        .map(|(&dst, src)| dst - src)
+                        .collect(),
+                    "sub_into",
+                );
+            }
+            ImplPlan::MulAdd => {
+                let mut actual = dst.clone();
+                imp.mul_add(&mut actual[dst_range.clone()], &src[src_range], c);
+                check(
+                    actual,
+                    dst_elements
+                        .iter()
+                        .zip(&products)
+                        .map(|(&dst, product)| dst + product)
+                        .collect(),
+                    "mul_add",
+                );
+            }
+            ImplPlan::MulInto => {
+                let mut actual = dst.clone();
+                imp.mul_into(&mut actual[dst_range.clone()], &src[src_range], c);
+                check(actual, products, "mul_into");
+            }
+            ImplPlan::MulSub => {
+                let mut actual = dst.clone();
+                imp.mul_sub(&mut actual[dst_range.clone()], &src[src_range], c);
+                check(
+                    actual,
+                    dst_elements
+                        .iter()
+                        .zip(&products)
+                        .map(|(&dst, product)| dst - product)
+                        .collect(),
+                    "mul_sub",
+                );
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn fuzz_derivatives<I: Impl>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        plan: ImplPlan,
+        vector_bytes: usize,
+    ) -> arbitrary::Result<()> {
+        let len = fuzz_len::<I>(u, vector_bytes)?;
+        let blocks = match plan {
+            ImplPlan::DerivativeFour => 4,
+            ImplPlan::DerivativeSixteen => 16,
+            _ => unreachable!(),
+        };
+        let mut actual = (0..blocks).map(|_| vec![0; len]).collect::<Vec<_>>();
+        for block in &mut actual {
+            u.fill_buffer(block)?;
+        }
+        let original = actual.clone();
+        if matches!(plan, ImplPlan::DerivativeFour) {
+            let [a, b, c, d] = actual.as_mut_slice() else {
+                unreachable!()
+            };
+            imp.derivative_four([
+                a.as_mut_slice(),
+                b.as_mut_slice(),
+                c.as_mut_slice(),
+                d.as_mut_slice(),
+            ]);
+            for i in 0..len {
+                assert_eq!(actual[0][i], original[1][i] ^ original[2][i]);
+                assert_eq!(actual[1][i], original[3][i]);
+                assert_eq!(actual[2][i], original[3][i]);
+                assert_eq!(actual[3][i], 0);
+            }
+        } else {
+            let blocks: &mut [Vec<u8>; 16] = actual.as_mut_slice().try_into().unwrap();
+            imp.derivative_sixteen(blocks.each_mut().map(Vec::as_mut_slice));
+            for output in 0..16 {
+                for i in 0..len {
+                    let expected = (0..4)
+                        .filter(|bit| output & (1 << bit) == 0)
+                        .fold(0, |sum, bit| sum ^ original[output | (1 << bit)][i]);
+                    assert_eq!(actual[output][i], expected);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn fuzz_butterflies<I: Impl>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        plan: ImplPlan,
+        vector_bytes: usize,
+        elements: impl Copy + Fn(&[u8]) -> Vec<I::Element>,
+        layout: impl Copy + Fn(&[I::Element]) -> Vec<u8>,
+    ) -> arbitrary::Result<()> {
+        if matches!(plan, ImplPlan::Butterfly) {
+            let len = fuzz_len::<I>(u, vector_bytes)?;
+            let (mut x, x_range) = fuzz_backing(u, len)?;
+            let (mut y, y_range) = fuzz_backing(u, len)?;
+            let original_x = x.clone();
+            let original_y = y.clone();
+            let mut expected_x = elements(&x[x_range.clone()]);
+            let mut expected_y = elements(&y[y_range.clone()]);
+            let c = fuzz_element::<I>(u, elements)?;
+            for (x, y) in expected_x.iter_mut().zip(&mut expected_y) {
+                *x += &(*y * &c);
+                *y += x;
+            }
+            imp.fft_butterfly(&mut x[x_range.clone()], &mut y[y_range.clone()], c);
+            assert_eq!(&x[x_range.clone()], layout(&expected_x).as_slice());
+            assert_eq!(&y[y_range.clone()], layout(&expected_y).as_slice());
+            imp.ifft_butterfly(&mut x[x_range], &mut y[y_range], c);
+            assert_eq!(x, original_x);
+            assert_eq!(y, original_y);
+            return Ok(());
+        }
+        assert!(matches!(plan, ImplPlan::ButterflyTwoLayers));
+        let shard_len = fuzz_len::<I>(u, vector_bytes)?.max(I::ALIGN);
+        let shard_count = u.int_in_range(1..=3)?;
+        let len = shard_len * shard_count;
+        let mut quarters: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len]);
+        for quarter in &mut quarters {
+            u.fill_buffer(quarter)?;
+        }
+        let original = quarters.clone();
+        let mut coefficients = [I::Element::zero(); 3];
+        for coefficient in &mut coefficients {
+            *coefficient = fuzz_element::<I>(u, elements)?;
+        }
+        for shard in 0..shard_count {
+            let range = shard * shard_len..(shard + 1) * shard_len;
+            let mut values: [Vec<I::Element>; 4] =
+                std::array::from_fn(|quarter| elements(&quarters[quarter][range.clone()]));
+            for i in 0..values[0].len() {
+                let mut lanes = [values[0][i], values[1][i], values[2][i], values[3][i]];
+                let apply = |lanes: &mut [I::Element; 4], x: usize, y: usize, c: I::Element| {
+                    let mut a = lanes[x];
+                    let mut b = lanes[y];
+                    a += &(b * &c);
+                    b += &a;
+                    lanes[x] = a;
+                    lanes[y] = b;
+                };
+                apply(&mut lanes, 0, 2, coefficients[2]);
+                apply(&mut lanes, 1, 3, coefficients[2]);
+                apply(&mut lanes, 0, 1, coefficients[0]);
+                apply(&mut lanes, 2, 3, coefficients[1]);
+                for (values, value) in values.iter_mut().zip(lanes) {
+                    values[i] = value;
+                }
+            }
+            for (quarter, values) in quarters.iter_mut().zip(values) {
+                quarter[range.clone()].copy_from_slice(&layout(&values));
+            }
+        }
+        let expected = quarters.clone();
+        quarters = original.clone();
+        imp.fft_butterfly_two_layers(
+            quarters.each_mut().map(Vec::as_mut_slice),
+            shard_len,
+            coefficients,
+        );
+        assert_eq!(quarters, expected);
+        imp.ifft_butterfly_two_layers(
+            quarters.each_mut().map(Vec::as_mut_slice),
+            shard_len,
+            coefficients,
+        );
+        assert_eq!(quarters, original);
+        Ok(())
+    }
+
+    fn fuzz_checksum<I: Impl>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        vector_bytes: usize,
+        elements: impl Copy + Fn(&[u8]) -> Vec<I::Element>,
+        layout: impl Copy + Fn(&[I::Element]) -> Vec<u8>,
+        coefficient: impl Copy + Fn(u8) -> I::Element,
+    ) -> arbitrary::Result<()> {
+        let len = fuzz_len::<I>(u, vector_bytes)?.max(I::ALIGN);
+        let mut shard = vec![0; len];
+        u.fill_buffer(&mut shard)?;
+        let input_symbols = len / I::ALIGN;
+        let vector_symbols = vector_bytes / I::ALIGN;
+        let stripe_symbols = I::STRIPE_ALIGN / I::ALIGN;
+        let output_candidates = [1, 3, vector_symbols + 1, stripe_symbols + 3];
+        let output_symbols = output_candidates[u.int_in_range(0..=3)?];
+        let mut coefficients = vec![0; input_symbols * output_symbols];
+        u.fill_buffer(&mut coefficients)?;
+        let start = u.int_in_range(0..=input_symbols - 1)?;
+        let end = u.int_in_range(start + 1..=input_symbols)?;
+        let range = start * I::ALIGN..end * I::ALIGN;
+        let mut actual = vec![0; output_symbols * I::ALIGN];
+        imp.checksum_range(&shard, &coefficients, range.clone(), &mut actual);
+        assert_eq!(
+            actual,
+            checksum_reference::<I>(
+                &shard,
+                &coefficients,
+                range.clone(),
+                output_symbols,
+                elements,
+                layout,
+                coefficient,
+            )
+        );
+
+        let mut empty = vec![0xff; actual.len()];
+        imp.checksum_range(&shard, &coefficients, range.start..range.start, &mut empty);
+        assert_eq!(empty, vec![0; actual.len()]);
+
+        let mut full = vec![0; actual.len()];
+        imp.checksum_range(&shard, &coefficients, 0..len, &mut full);
+        let mut partitioned = vec![0; actual.len()];
+        for part in [0..range.start, range.clone(), range.end..len] {
+            let mut contribution = vec![0; actual.len()];
+            imp.checksum_range(&shard, &coefficients, part, &mut contribution);
+            imp.add_into(&mut partitioned, &contribution);
+        }
+        assert_eq!(partitioned, full);
+
+        let mut original = vec![vec![0; len]; 3];
+        for shard in &mut original {
+            u.fill_buffer(shard)?;
+        }
+        let original_refs = original.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let recovery = Encoder::new(imp).encode(&original_refs, 2, &Sequential);
+        let checksums = original
+            .iter()
+            .map(|shard| {
+                let mut out = vec![0; output_symbols * I::ALIGN];
+                imp.checksum_range(shard, &coefficients, 0..len, &mut out);
+                out
+            })
+            .collect::<Vec<_>>();
+        let checksum_refs = checksums.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let encoded_checksums = Encoder::new(imp).encode(&checksum_refs, 2, &Sequential);
+        for (shard, expected) in recovery.iter().zip(encoded_checksums) {
+            let mut actual = vec![0; output_symbols * I::ALIGN];
+            imp.checksum_range(shard, &coefficients, 0..len, &mut actual);
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
+    /// Check the shard-arithmetic contract against scalar field operations.
+    pub fn fuzz_impl<I: Impl>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        plan: ImplPlan,
+        vector_bytes: usize,
+        elements: impl Copy + Fn(&[u8]) -> Vec<I::Element>,
+        layout: impl Copy + Fn(&[I::Element]) -> Vec<u8>,
+        coefficient: impl Copy + Fn(u8) -> I::Element,
+    ) -> arbitrary::Result<()> {
+        match plan {
+            ImplPlan::Add
+            | ImplPlan::Sub
+            | ImplPlan::MulAdd
+            | ImplPlan::MulInto
+            | ImplPlan::MulSub => fuzz_arithmetic(u, imp, plan, vector_bytes, elements, layout),
+            ImplPlan::DerivativeFour | ImplPlan::DerivativeSixteen => {
+                fuzz_derivatives(u, imp, plan, vector_bytes)
+            }
+            ImplPlan::Butterfly | ImplPlan::ButterflyTwoLayers => {
+                fuzz_butterflies(u, imp, plan, vector_bytes, elements, layout)
+            }
+            ImplPlan::Checksum => {
+                fuzz_checksum(u, imp, vector_bytes, elements, layout, coefficient)
+            }
+        }
+    }
+
+    /// Check an implementation's specialized methods against a reference implementation.
+    pub fn fuzz_impl_matches_reference<I, R>(
+        u: &mut Unstructured<'_>,
+        imp: I,
+        reference: R,
+        plan: ImplPlan,
+        vector_bytes: usize,
+        elements: impl Copy + Fn(&[u8]) -> Vec<I::Element>,
+    ) -> arbitrary::Result<()>
+    where
+        I: Impl,
+        R: Impl<Element = I::Element>,
+    {
+        assert_eq!(I::ALIGN, R::ALIGN);
+        assert_eq!(I::STRIPE_ALIGN, R::STRIPE_ALIGN);
+        match plan {
+            ImplPlan::Add
+            | ImplPlan::Sub
+            | ImplPlan::MulAdd
+            | ImplPlan::MulInto
+            | ImplPlan::MulSub => {
+                let len = fuzz_len::<I>(u, vector_bytes)?;
+                let (dst, dst_range) = fuzz_backing(u, len)?;
+                let (src, src_range) = fuzz_backing(u, len)?;
+                let c = fuzz_element::<I>(u, elements)?;
+                let compare_mul =
+                    |operation: fn(I, &mut [u8], &[u8], I::Element),
+                     reference_operation: fn(R, &mut [u8], &[u8], I::Element)| {
+                        let mut actual = dst.clone();
+                        let mut expected = dst.clone();
+                        operation(
+                            imp,
+                            &mut actual[dst_range.clone()],
+                            &src[src_range.clone()],
+                            c,
+                        );
+                        reference_operation(
+                            reference,
+                            &mut expected[dst_range.clone()],
+                            &src[src_range.clone()],
+                            c,
+                        );
+                        assert_eq!(actual, expected);
+                    };
+                match plan {
+                    ImplPlan::Add | ImplPlan::Sub => {
+                        let mut actual = dst.clone();
+                        let mut expected = dst.clone();
+                        if matches!(plan, ImplPlan::Add) {
+                            imp.add_into(&mut actual[dst_range.clone()], &src[src_range.clone()]);
+                            reference.add_into(&mut expected[dst_range.clone()], &src[src_range]);
+                        } else {
+                            imp.sub_into(&mut actual[dst_range.clone()], &src[src_range.clone()]);
+                            reference.sub_into(&mut expected[dst_range], &src[src_range]);
+                        }
+                        assert_eq!(actual, expected);
+                    }
+                    ImplPlan::MulAdd => compare_mul(I::mul_add, R::mul_add),
+                    ImplPlan::MulInto => compare_mul(I::mul_into, R::mul_into),
+                    ImplPlan::MulSub => compare_mul(I::mul_sub, R::mul_sub),
+                    _ => unreachable!(),
+                }
+            }
+            ImplPlan::DerivativeFour | ImplPlan::DerivativeSixteen => {
+                let len = fuzz_len::<I>(u, vector_bytes)?;
+                let mut actual: [Vec<u8>; 16] = std::array::from_fn(|_| vec![0; len]);
+                for block in &mut actual {
+                    u.fill_buffer(block)?;
+                }
+                let mut expected = actual.clone();
+                if matches!(plan, ImplPlan::DerivativeFour) {
+                    let [a, b, c, d, ..] = &mut actual;
+                    imp.derivative_four([
+                        a.as_mut_slice(),
+                        b.as_mut_slice(),
+                        c.as_mut_slice(),
+                        d.as_mut_slice(),
+                    ]);
+                    let [a, b, c, d, ..] = &mut expected;
+                    reference.derivative_four([
+                        a.as_mut_slice(),
+                        b.as_mut_slice(),
+                        c.as_mut_slice(),
+                        d.as_mut_slice(),
+                    ]);
+                } else {
+                    imp.derivative_sixteen(actual.each_mut().map(Vec::as_mut_slice));
+                    reference.derivative_sixteen(expected.each_mut().map(Vec::as_mut_slice));
+                }
+                assert_eq!(actual, expected);
+            }
+            ImplPlan::Butterfly => {
+                let len = fuzz_len::<I>(u, vector_bytes)?;
+                let (mut actual_x, x_range) = fuzz_backing(u, len)?;
+                let (mut actual_y, y_range) = fuzz_backing(u, len)?;
+                let mut expected_x = actual_x.clone();
+                let mut expected_y = actual_y.clone();
+                let c = fuzz_element::<I>(u, elements)?;
+                imp.fft_butterfly(
+                    &mut actual_x[x_range.clone()],
+                    &mut actual_y[y_range.clone()],
+                    c,
+                );
+                reference.fft_butterfly(
+                    &mut expected_x[x_range.clone()],
+                    &mut expected_y[y_range.clone()],
+                    c,
+                );
+                assert_eq!(actual_x, expected_x);
+                assert_eq!(actual_y, expected_y);
+                imp.ifft_butterfly(
+                    &mut actual_x[x_range.clone()],
+                    &mut actual_y[y_range.clone()],
+                    c,
+                );
+                reference.ifft_butterfly(&mut expected_x[x_range], &mut expected_y[y_range], c);
+                assert_eq!(actual_x, expected_x);
+                assert_eq!(actual_y, expected_y);
+            }
+            ImplPlan::ButterflyTwoLayers => {
+                let shard_len = fuzz_len::<I>(u, vector_bytes)?.max(I::ALIGN);
+                let len = shard_len * u.int_in_range(1..=3)?;
+                let mut actual: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len]);
+                for quarter in &mut actual {
+                    u.fill_buffer(quarter)?;
+                }
+                let mut expected = actual.clone();
+                let mut coefficients = [I::Element::zero(); 3];
+                for coefficient in &mut coefficients {
+                    *coefficient = fuzz_element::<I>(u, elements)?;
+                }
+                imp.fft_butterfly_two_layers(
+                    actual.each_mut().map(Vec::as_mut_slice),
+                    shard_len,
+                    coefficients,
+                );
+                reference.fft_butterfly_two_layers(
+                    expected.each_mut().map(Vec::as_mut_slice),
+                    shard_len,
+                    coefficients,
+                );
+                assert_eq!(actual, expected);
+                imp.ifft_butterfly_two_layers(
+                    actual.each_mut().map(Vec::as_mut_slice),
+                    shard_len,
+                    coefficients,
+                );
+                reference.ifft_butterfly_two_layers(
+                    expected.each_mut().map(Vec::as_mut_slice),
+                    shard_len,
+                    coefficients,
+                );
+                assert_eq!(actual, expected);
+            }
+            ImplPlan::Checksum => {
+                let len = fuzz_len::<I>(u, vector_bytes)?.max(I::ALIGN);
+                let mut shard = vec![0; len];
+                u.fill_buffer(&mut shard)?;
+                let input_symbols = len / I::ALIGN;
+                let output_symbols = u.int_in_range(1..=vector_bytes / I::ALIGN + 3)?;
+                let mut coefficients = vec![0; input_symbols * output_symbols];
+                u.fill_buffer(&mut coefficients)?;
+                let start = u.int_in_range(0..=input_symbols - 1)?;
+                let end = u.int_in_range(start + 1..=input_symbols)?;
+                let range = start * I::ALIGN..end * I::ALIGN;
+                let mut actual = vec![0; output_symbols * I::ALIGN];
+                let mut expected = vec![0; actual.len()];
+                imp.checksum_range(&shard, &coefficients, range.clone(), &mut actual);
+                reference.checksum_range(&shard, &coefficients, range, &mut expected);
+                assert_eq!(actual, expected);
+            }
+        }
+        Ok(())
+    }
 
     fn point<I: Impl>(i: usize) -> I::Element {
         I::basis()
@@ -1098,31 +1746,33 @@ mod tests {
         derivative_reference(imp, b, len);
     }
 
-    fn compare_derivative<I: Impl>(imp: I, lengths: &[usize]) {
-        for count in [1, 2, 4, 8, 16, 32] {
-            for &len in lengths {
-                let mut actual = vec![0; count * len];
-                for (i, byte) in actual.iter_mut().enumerate() {
-                    *byte = (i.wrapping_mul(157) ^ i.rotate_left(3) ^ 0xa5) as u8;
-                }
-                let mut expected = actual.clone();
-                derivative(imp, &mut actual, len);
-                derivative_reference(imp, &mut expected, len);
-                assert_eq!(actual, expected, "count={count} len={len}");
-            }
-        }
-    }
-
     #[test]
-    fn fused_derivative_leaf_matches_recursive_schedule() {
-        compare_derivative(
-            Impl8::new(Portable),
-            &[1, 3, 63, 64, 65, 129, 511, 512, 513],
-        );
-        compare_derivative(
-            Impl16::new(Portable),
-            &[2, 6, 126, 128, 130, 258, 510, 512, 514],
-        );
+    fn minifuzz_derivative() {
+        let imp = Impl8::new(Portable);
+        // Exercise both fused leaves, the 512-byte cutoff, and recursion explicitly.
+        for (count, len) in [
+            (1, 1),
+            (2, 3),
+            (4, 65),
+            (8, 129),
+            (16, 511),
+            (16, 512),
+            (16, 513),
+            (32, 513),
+        ] {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| {
+                    let mut actual = vec![0; count * len];
+                    u.fill_buffer(&mut actual)?;
+                    let mut expected = actual.clone();
+                    derivative(imp, &mut actual, len);
+                    derivative_reference(imp, &mut expected, len);
+                    assert_eq!(actual, expected);
+                    Ok(())
+                });
+        }
     }
 
     #[test]
@@ -1241,7 +1891,6 @@ mod tests {
             }
         }
 
-        compare_derivative(CountingImpl, &[512, 514]);
         let original = [[1; 16], [2; 16], [3; 16]];
         let original_refs: Vec<_> = original.iter().map(<[u8; 16]>::as_slice).collect();
         let recovery = Encoder::new(OCELOT8).encode(&original_refs, 4, &Sequential);
