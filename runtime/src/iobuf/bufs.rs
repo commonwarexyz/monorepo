@@ -791,25 +791,19 @@ impl IoBufsMut {
     }
 
     #[inline]
-    fn for_each_chunk_mut(&mut self, mut f: impl FnMut(&mut IoBufMut)) {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => f(buf),
-            IoBufsMutInner::Pair(pair) => {
-                for buf in pair.iter_mut() {
-                    f(buf);
-                }
-            }
-            IoBufsMutInner::Triple(triple) => {
-                for buf in triple.iter_mut() {
-                    f(buf);
-                }
-            }
-            IoBufsMutInner::Chunked(bufs) => {
-                for buf in bufs.iter_mut() {
-                    f(buf);
-                }
-            }
-        }
+    fn chunks_mut(&mut self) -> impl Iterator<Item = &mut IoBufMut> {
+        let (first, second): (&mut [IoBufMut], &mut [IoBufMut]) = match &mut self.inner {
+            IoBufsMutInner::Single(buf) => (std::slice::from_mut(buf), &mut []),
+            IoBufsMutInner::Pair(bufs) => (bufs, &mut []),
+            IoBufsMutInner::Triple(bufs) => (bufs, &mut []),
+            IoBufsMutInner::Chunked(bufs) => bufs.as_mut_slices(),
+        };
+        first.iter_mut().chain(second.iter_mut())
+    }
+
+    #[inline]
+    fn for_each_chunk_mut(&mut self, f: impl FnMut(&mut IoBufMut)) {
+        self.chunks_mut().for_each(f);
     }
 
     /// Returns a reference to the single contiguous buffer, if present.
@@ -1168,6 +1162,36 @@ impl bytes::Buf for IoBufsMut {
 
 // SAFETY: Delegates to IoBufMut which implements BufMut safely.
 unsafe impl BufMut for IoBufsMut {
+    // The bulk-write defaults rescan the filled destination prefix per chunk.
+    #[inline]
+    fn put<T: bytes::Buf>(&mut self, mut src: T) {
+        if !src.has_remaining() {
+            return;
+        }
+        let available = self.remaining_mut();
+        if src.remaining() > available {
+            panic_advance(src.remaining(), available);
+        }
+
+        for buf in self.chunks_mut() {
+            while buf.remaining_mut() != 0 {
+                let chunk = src.chunk();
+                let count = chunk.len().min(buf.remaining_mut());
+                assert!(
+                    count != 0,
+                    "source chunk must not be empty while bytes remain"
+                );
+                buf.put_slice(&chunk[..count]);
+                src.advance(count);
+                if !src.has_remaining() {
+                    return;
+                }
+            }
+        }
+        // A safe Buf implementation may underreport its remaining bytes.
+        assert!(!src.has_remaining(), "source exceeds writable capacity");
+    }
+
     #[inline]
     fn put_slice(&mut self, mut src: &[u8]) {
         if src.is_empty() {
@@ -1179,14 +1203,7 @@ unsafe impl BufMut for IoBufsMut {
             panic_advance(src.len(), available);
         }
 
-        let (first, second): (&mut [IoBufMut], &mut [IoBufMut]) = match &mut self.inner {
-            IoBufsMutInner::Single(buf) => (std::slice::from_mut(buf), &mut []),
-            IoBufsMutInner::Pair(bufs) => (bufs, &mut []),
-            IoBufsMutInner::Triple(bufs) => (bufs, &mut []),
-            IoBufsMutInner::Chunked(bufs) => bufs.as_mut_slices(),
-        };
-
-        for buf in first.iter_mut().chain(second.iter_mut()) {
+        for buf in self.chunks_mut() {
             let count = src.len().min(buf.remaining_mut());
             if count != 0 {
                 buf.put_slice(&src[..count]);
@@ -1196,6 +1213,30 @@ unsafe impl BufMut for IoBufsMut {
                 }
             }
         }
+        debug_assert!(src.is_empty());
+    }
+
+    #[inline]
+    fn put_bytes(&mut self, val: u8, mut cnt: usize) {
+        if cnt == 0 {
+            return;
+        }
+        let available = self.remaining_mut();
+        if cnt > available {
+            panic_advance(cnt, available);
+        }
+
+        for buf in self.chunks_mut() {
+            let count = cnt.min(buf.remaining_mut());
+            if count != 0 {
+                buf.put_bytes(val, count);
+                cnt -= count;
+                if cnt == 0 {
+                    return;
+                }
+            }
+        }
+        debug_assert_eq!(cnt, 0);
     }
 
     #[inline]
@@ -2584,45 +2625,128 @@ mod tests {
         state
     }
 
-    #[test]
-    fn test_iobufsmut_put_slice_matches_chunked_put() {
+    struct DefaultPut<'a>(&'a mut IoBufsMut);
+
+    // SAFETY: All required methods delegate to IoBufsMut without changing its state.
+    unsafe impl BufMut for DefaultPut<'_> {
+        fn remaining_mut(&self) -> usize {
+            self.0.remaining_mut()
+        }
+
+        unsafe fn advance_mut(&mut self, cnt: usize) {
+            // SAFETY: The caller guarantees that cnt initialized bytes can be advanced.
+            unsafe { self.0.advance_mut(cnt) };
+        }
+
+        fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+            self.0.chunk_mut()
+        }
+    }
+
+    fn check_bulk_write(
+        write: impl Fn(&mut IoBufsMut, &[u8]),
+        write_default: impl Fn(&mut DefaultPut<'_>, &[u8]),
+    ) {
         for count in 0..=8 {
             let available = writable_chunks(count).remaining_mut();
             for len in 0..=available {
                 let mut actual = writable_chunks(count);
                 let mut expected = writable_chunks(count);
-                let input: Vec<_> = (0..len as u8).collect();
-                actual.put_slice(&input);
-                expected.put(input.as_slice());
-                assert_eq!(
-                    mutable_chunk_state(&mut actual),
-                    mutable_chunk_state(&mut expected)
-                );
-                assert_eq!(actual.remaining_mut(), available - len);
-                assert_eq!(actual.is_empty(), actual.remaining() == 0);
-                assert_eq!(actual.has_remaining(), actual.remaining() != 0);
+                let input: Vec<_> = (0..available as u8).collect();
+                // Check each intermediate state as well as a second write to the same buffers.
+                for input in [&input[..len], &input[len..]] {
+                    write(&mut actual, input);
+                    write_default(&mut DefaultPut(&mut expected), input);
+                    assert_eq!(
+                        mutable_chunk_state(&mut actual),
+                        mutable_chunk_state(&mut expected)
+                    );
+                    assert_eq!(actual.remaining_mut(), expected.remaining_mut());
+                }
+                assert_eq!(actual.remaining_mut(), 0);
             }
 
             let mut bufs = writable_chunks(count);
             let before = mutable_chunk_state(&mut bufs);
             let oversized = vec![0; available + 1];
-            assert!(catch_unwind(AssertUnwindSafe(|| bufs.put_slice(&oversized))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| write(&mut bufs, &oversized))).is_err());
             assert_eq!(mutable_chunk_state(&mut bufs), before);
             assert_eq!(bufs.remaining_mut(), available);
         }
     }
 
     #[test]
-    fn test_iobufsmut_bufmut_put_slice() {
-        // Test writing across multiple buffers
-        let buf1 = IoBufMut::with_capacity(5);
-        let buf2 = IoBufMut::with_capacity(6);
-        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+    fn test_iobufsmut_put_slice_matches_default_put() {
+        check_bulk_write(
+            |bufs, input| bufs.put_slice(input),
+            |bufs, input| bufs.put(input),
+        );
+    }
 
-        // Write data
-        bufs.put_slice(b"hello");
-        bufs.put_slice(b" world");
-        assert_eq!(bufs.coalesce(), b"hello world");
+    #[test]
+    fn test_iobufsmut_put_bytes_matches_default_put_bytes() {
+        check_bulk_write(
+            |bufs, input| bufs.put_bytes(0xAB, input.len()),
+            |bufs, input| bufs.put_bytes(0xAB, input.len()),
+        );
+    }
+
+    #[test]
+    fn test_iobufsmut_put_matches_default_put() {
+        for chunk_size in 1..=5 {
+            let source = |input: &[u8]| {
+                IoBufs::from(
+                    input
+                        .chunks(chunk_size)
+                        .map(IoBuf::copy_from_slice)
+                        .collect::<Vec<_>>(),
+                )
+            };
+            check_bulk_write(
+                |bufs, input| {
+                    let mut src = source(input);
+                    bufs.put(&mut src);
+                    assert_eq!(src.remaining(), 0);
+                },
+                |bufs, input| bufs.put(source(input)),
+            );
+            for count in 0..=8 {
+                let mut bufs = writable_chunks(count);
+                let input = vec![0xAB; bufs.remaining_mut() + 1];
+                let mut src = source(&input);
+                assert!(catch_unwind(AssertUnwindSafe(|| bufs.put(&mut src))).is_err());
+                assert_eq!(src.coalesce().as_ref(), input);
+            }
+        }
+    }
+
+    #[test]
+    fn test_iobufsmut_put_rejects_malformed_source() {
+        struct MalformedSource(&'static [u8]);
+
+        impl bytes::Buf for MalformedSource {
+            fn remaining(&self) -> usize {
+                1
+            }
+
+            fn chunk(&self) -> &[u8] {
+                self.0
+            }
+
+            fn advance(&mut self, _cnt: usize) {}
+        }
+
+        for chunk in [&[][..], &[0xAB; 64][..]] {
+            for count in 1..=8 {
+                let mut bufs = writable_chunks(count);
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| bufs.put(MalformedSource(chunk)))).is_err()
+                );
+                for buf in bufs.chunks_mut() {
+                    assert!(buf.len() <= buf.capacity());
+                }
+            }
+        }
     }
 
     #[test]
