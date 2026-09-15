@@ -309,8 +309,7 @@ configs sizes the replay read buffer, and contexts passed to `any::init` and to
 the Any and Current `Db::init` constructors must implement `Spawner`. The
 snapshot-build cache holds at most one entry per live key, so `init_cache_size`
 on the Any, Current, and Store configs can be sized to the live key count
-([#4521]). That setting is now `init_cache_bytes`, a memory budget in bytes for a
-denser set-associative cache ([#4773]).
+([#4521]).
 
 Batch applicability is checked against a `Commitment` (size plus root) rather
 than size alone, so a descendant of an equal-size sibling batch is rejected with
@@ -684,7 +683,6 @@ violations are rejected before any AWS resource is created ([#4593]).
 [#4658]: https://github.com/commonwarexyz/monorepo/pull/4658
 [#4666]: https://github.com/commonwarexyz/monorepo/pull/4666
 [#4670]: https://github.com/commonwarexyz/monorepo/pull/4670
-[#4773]: https://github.com/commonwarexyz/monorepo/pull/4773
 
 ## v2026.7.1
 

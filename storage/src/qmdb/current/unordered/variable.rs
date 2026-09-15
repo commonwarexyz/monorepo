@@ -190,7 +190,7 @@ mod test {
                 },
                 grafted_metadata_partition: base.grafted_metadata_partition.clone(),
                 translator: TwoCap,
-                init_cache_bytes: base.init_cache_bytes,
+                init_cache: base.init_cache,
                 init_buffer: base.init_buffer,
                 init_concurrency: (),
             };

@@ -2192,7 +2192,7 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 journal_config: fixed_journal_config(context, suffix),
                 translator: TwoCap,
-                init_cache_bytes: Some(NZUsize!(64 << 10)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             }
@@ -2206,7 +2206,7 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 journal_config: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
-                init_cache_bytes: Some(NZUsize!(64 << 10)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             }
@@ -2221,7 +2221,7 @@ mod tests {
                 journal_config: fixed_journal_config(context, suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
-                init_cache_bytes: Some(NZUsize!(64 << 10)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             }
@@ -2236,7 +2236,7 @@ mod tests {
                 journal_config: variable_journal_config(context, suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
-                init_cache_bytes: Some(NZUsize!(64 << 10)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             }

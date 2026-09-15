@@ -264,7 +264,7 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_bytes` budgets (in bytes) a
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
 /// `(location -> key)` cache that lets collision resolution resolve candidates from memory
 /// instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
@@ -272,7 +272,7 @@ pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
-    cache_bytes: Option<NonZeroUsize>,
+    cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
 where
@@ -291,8 +291,7 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache =
-        cache_bytes.and_then(LocationCache::<<C::Item as Operation<F>>::Key>::with_budget);
+    let mut cache = cache_size.map(LocationCache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -570,15 +569,14 @@ async fn build_snapshot_worker<F, C, R>(
     mut index: R,
     activity: Range<u64>,
     active: Arc<Atomic>,
-    cache_bytes: Option<NonZeroUsize>,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<(R, usize), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache =
-        cache_bytes.and_then(LocationCache::<<C::Item as Operation<F>>::Key>::with_budget);
+    let mut cache = cache_size.map(LocationCache::<<C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
@@ -620,7 +618,7 @@ async fn build_snapshot_serial<F, C, I>(
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
-    cache_bytes: Option<NonZeroUsize>,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
@@ -636,7 +634,7 @@ where
         reader,
         snapshot,
         init_buffer,
-        cache_bytes,
+        cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
             if let Some(loc) = old_loc {
@@ -659,7 +657,7 @@ async fn build_snapshot_parallel<F, E, C, I>(
     log: &Arc<C>,
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_bytes: Option<NonZeroUsize>,
+    cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
@@ -698,7 +696,7 @@ where
             &**log,
             snapshot,
             init_buffer,
-            cache_bytes,
+            cache_size,
         )
         .await;
     }
@@ -710,7 +708,7 @@ where
     // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
     // partition and routing (`partition / range_size`) stays in `[0, workers)`.
     let workers = count.div_ceil(range_size);
-    let per_worker_cache = cache_bytes.and_then(|n| NonZeroUsize::new(n.get() / workers));
+    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
 
     // All workers share one atomic bitmap to track the activity bits.
@@ -881,8 +879,8 @@ pub trait SnapshotBuild<F: Family>:
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
-    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_bytes` budgets each
-    /// build's `(location -> key)` cache in bytes (`None` disables it).
+    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
+    /// build's `(location -> key)` cache in entries (`None` disables it).
     fn build_snapshot<E, C>(
         &mut self,
         _context: E,
@@ -890,15 +888,14 @@ pub trait SnapshotBuild<F: Family>:
         log: &Arc<C>,
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
-        cache_bytes: Option<NonZeroUsize>,
+        cache_size: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         async move {
-            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_bytes)
-                .await
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
     }
 }
@@ -938,7 +935,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_bytes: Option<NonZeroUsize>,
+        cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
@@ -951,7 +948,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
-            cache_bytes,
+            cache_size,
         )
         .await
     }
@@ -969,7 +966,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_bytes: Option<NonZeroUsize>,
+        cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
@@ -982,7 +979,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
-            cache_bytes,
+            cache_size,
         )
         .await
     }

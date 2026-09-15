@@ -166,7 +166,7 @@ fn any_fixed_config(
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
         translator: OneCap,
-        init_cache_bytes: Some(NZUsize!(64 << 10)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -181,7 +181,7 @@ fn any_variable_config(
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
-        init_cache_bytes: Some(NZUsize!(64 << 10)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -197,7 +197,7 @@ fn current_fixed_config(
         journal_config: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
-        init_cache_bytes: Some(NZUsize!(64 << 10)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -213,7 +213,7 @@ fn current_variable_config(
         journal_config: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
-        init_cache_bytes: Some(NZUsize!(64 << 10)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
