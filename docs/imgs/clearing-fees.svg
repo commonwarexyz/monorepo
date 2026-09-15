@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 870" role="img" aria-labelledby="title description">
   <title id="title">Collecting a fee in one signed batch</title>
-  <desc id="description">In an independent fresh-epoch example, payer a signs one batch that pays 20 to b, 7 to c, and 2 to the operator's designated fee account, for a total debit of 29. The fee of 2 is an example operator quote, not a protocol constant. The operator checks that the ordinary fee increment satisfies its policy, then countersigns the same endpoint once. One acknowledgment binds the entire batch. Validators net all three entries as ordinary payments, with no fee-specific protocol machinery.</desc>
+  <desc id="description">In an independent fresh-epoch example, payer a signs one batch that pays 20 to b, 7 to c, and 2 to the operator's designated fee account, for a total debit of 29. The fee of 2 is an example operator quote, not a protocol constant. The operator checks that the ordinary fee increment satisfies its policy, then countersigns the same payer state once. One acknowledgment binds the entire batch. Validators net all three entries as ordinary payments, with no fee-specific protocol machinery.</desc>
   <rect width="1080" height="870" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -47,7 +47,7 @@
   <circle class="number" cx="126" cy="241" r="18"/>
   <text class="number-text" x="126" y="248">1</text>
   <text class="heading" x="162" y="248">Payer a signs one batch</text>
-  <text class="note" x="162" y="281">The fee is already inside the authorized endpoint.</text>
+  <text class="note" x="162" y="281">The payer authorizes the fee with both payments.</text>
   <rect class="selected" x="140" y="304" width="800" height="84" rx="5"/>
   <text class="eyebrow blue" x="162" y="335">ONE SIGNATURE</text>
   <text class="label" x="162" y="367">a · debit 29</text>
@@ -71,7 +71,7 @@
   <path class="thin-flow" d="M622 567 H681"/>
   <rect class="selected" x="700" y="538" width="250" height="58" rx="5"/>
   <text class="label center blue" x="825" y="562">COUNTERSIGN ONCE</text>
-  <text class="note center" x="825" y="587">same endpoint</text>
+  <text class="note center" x="825" y="587">same payer state</text>
 
   <path class="flow" d="M540 632 V672"/>
 
