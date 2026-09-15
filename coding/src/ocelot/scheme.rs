@@ -2,8 +2,10 @@
 
 use super::code::{Decoder, Encoder, Impl, stripe_bytes};
 use crate::{CodecConfig, Config};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{
+    Buf, BufsMut, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{
     Digest, Hasher,
     transcript::{Summary, Transcript, Version},
@@ -300,7 +302,7 @@ fn shard_len<I: Impl>(data_bytes: usize, original: usize) -> Result<usize, Error
 fn encode_codeword<I: Impl, H: Hasher>(
     imp: I,
     config: &Config,
-    mut data: impl Buf,
+    mut data: impl bytes::Buf,
     strategy: &impl Strategy,
 ) -> Result<Encoding<H::Digest>, Error> {
     let (original_count, recovery_count, total) = topology::<I>(config)?;
@@ -659,7 +661,7 @@ impl<I: Impl, H: Hasher> OcelotX<I, H> {
     pub fn encode(
         &self,
         config: &Config,
-        data: impl Buf,
+        data: impl bytes::Buf,
         strategy: &impl Strategy,
     ) -> Result<(H::Digest, Vec<Shard<H::Digest>>), Error> {
         let encoding = encode_codeword::<I, H>(self.imp, config, data, strategy)?;
@@ -920,7 +922,7 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
         &self,
         namespace: &[u8],
         config: &Config,
-        data: impl Buf,
+        data: impl bytes::Buf,
         strategy: &impl Strategy,
     ) -> Result<(Summary, Vec<StrongShard<H::Digest>>), Error> {
         let encoding = encode_codeword::<I, H>(self.imp, config, data, strategy)?;
