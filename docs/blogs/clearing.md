@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-20T00:00:00Z"
+modified-time: "2026-09-15T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,33 +11,25 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
+*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state in QMDB and apply only the changes at each settlement.*
+
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
 \$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years.
 
-If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (more on this later).
+If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (see [The Unavoidable Challenge](#the-unavoidable-challenge)).
 
-**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity becomes a \~100-byte certified commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
+**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that most chains can process. Binding receipts arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery onchain without its cooperation. And the protocol requires only signatures and Merkle openings.
 
-For a given set of accounts, one payment or a bajillion costs the same to settle.
+One payment or a bajillion, each account settles once.
 
 ## Payments as Fast as Browsing the Web
 
-A Bajillion epoch starts from an authenticated account vector and an onchain anchor $\mathcal A_e$. Deposits and user-signed withdrawals are fixed before online payments begin. Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20.
+If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-$a$'s persistent state $X_a$ is a balance $B_a$, cumulative debit $D_a$, operator-promised credit $C_a$, a receipt count, and an activity flag. To send $x>0$ from $a$ to $b$, the payer signs the exact next debit, and the operator accepts by advancing the recipient's receive shard $\kappa$ from its current tip $(G,J)$ (which may or may not have been registered with the operator at the start of the epoch):
+With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment operator returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing the receipt gives it evidence to hold the operator accountable if settlement omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
 
-$$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
-\qquad
-R=\mathsf{Sign}_{\mathsf{op}}\bigl(\mathcal A_e,\;\kappa,\;x,\;\mathsf{TxId}(S),\;(G+x,\,J+1)\bigr).
-$$
-
-After authenticating $S$ and checking spendability, the operator atomically commits the debit, shard advance, close reservation, replay record, and receipt body. It then signs and returns $R$.
-
-The matching pair $(S,R)$ is the accepted payment and the preconfirmation. The payer verifies and retains it, then forwards it to the recipient (if not forwarded by the operator already). A rejection before the commit changes nothing. If the response is lost, retrying the same request returns the same pair without a second debit.
-
-Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
+Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator verifies and records $a$'s signed request $S$, then countersigns it as $R$. Before forwarding the receipt to $b$, $a$ verifies and retains it.
 
 ```{=html}
 <style>
@@ -56,6 +48,15 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
   .clearing-benchmark-table table {
     min-width: 760px;
   }
+  .clearing-calculator {
+    border: 1px solid #d6d6d6;
+    border-radius: 3px;
+    margin: 28px 0 6px;
+    padding: 20px;
+  }
+  @media (max-width: 640px) {
+    .clearing-calculator { padding: 14px; }
+  }
 </style>
 <noscript>
   <style>
@@ -66,31 +67,54 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
       margin: 28px 0 6px;
       padding-left: 12px;
     }
+    .clearing-calculator {
+      border: 0;
+      border-left: 2px solid #2424d4;
+      border-radius: 0;
+      color: gray;
+      padding: 0 0 0 12px;
+    }
   </style>
 </noscript>
-<div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and receive shard kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop. A dashed line shows the operator could instead relay the same pair to b directly, one hop sooner.">
-  <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop, and the operator could equally deliver the pair to b one hop sooner.</noscript>
+<div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated payment timeline with payer a, the operator, and recipient b. Payer a sends S paying b 20. The operator locally verifies, commits a's balance from 100 to 80 and the a-to-b entry from (0,0) to (20,1), then countersigns R. The receipt, R plus an entry opening, returns to a in two message delays. The payer verifies and retains it before forwarding it to b in a third delay. An optional dotted operator push delivers the same receipt directly to b in two delays.">
+  <noscript>The operator verifies, commits, and countersigns locally. Its receipt returns to payer a in two message delays. The payer verifies and retains it before forwarding it to b in a third delay. The operator may also push the same receipt directly to b, arriving in two delays.</noscript>
 </div>
 <script type="module" src="clearing.loops.js"></script>
 ```
 
 ::: {.image-caption}
-Figure 1: The payer sends one request and receives one signed response. The operator verifies, commits, and signs locally, adding no network round trip. The commit moves $a$ from 100 to 80 and advances $b$'s receive shard $\kappa_0$ from $(0,0)$ to $(20,1)$ before $R$ exists. Once $R$ returns, $a$ sends the same matching $(S,R)$ directly to $b$ as transferable evidence, and the operator, holding the same pair, could deliver it to $b$ one hop sooner.
+Figure 1: The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
 :::
+
+Payments are grouped into epochs. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+
+The payer tracks a balance $B_a$ and an epoch's total debit $D_a$, initially zero. It keeps a vector $V_a$ ordered by recipient, with one entry $(G,J)$ recording the cumulative amount and payment count for each. Before the example payment, $B_a=100$, $D_a=0$, and $V_a$ is empty.
+
+To send $x>0$, $a$ advances $b$'s entry and signs the updated epoch-local sequence number $n_a$, cumulative debit, and vector's Merkle root. The operator countersigns this endpoint:
+
+$$
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1))\bigr),
+\qquad
+R=\mathsf{CounterSign}_{\mathsf{op}}(S).
+$$
+
+For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
+
+The wallet keeps one unacknowledged request in flight, retries it unchanged after response loss, and durably saves the verified acknowledgment and openings before signing the next endpoint. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
 ## Optimizing for Hot Accounts
 
-A single incoming counter would serialize every payment to a popular recipient. Instead, the operator shards each recipient's incoming payments across a configurable number of receive shards, identified by $(\mathcal A_e,b,\kappa)$. A payment of $x$ assigned to shard $\kappa$ advances only that shard's running credit and receipt count:
+Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Existing accounts can spend receipt-backed incoming credit within the epoch, before settlement. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
 
 $$
-(G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
+(G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
 \qquad
-(G_{\kappa'},J_{\kappa'})\text{ unchanged for every }\kappa'\ne\kappa.
+\text{every other entry of every other vector unchanged.}
 $$
 
-Payments assigned to different shards never contend on recipient state, so a hot account's incoming path scales approximately linearly across parallel workers. When the epoch ends, one terminal signed pair represents each shard, no matter how many payments advanced it (and the sum of all shards is the recipient's credit).
+However many payments an edge carries, the epoch ends with one cumulative entry for it.
 
-Consider accounts $(a,b,c,d)$ that open with balances $(100,40,25,35)$ and the epoch accepts
+Suppose accounts $(a,b,c,d)$ start with balances $(100,40,25,35)$ and make these payments:
 
 $$
 a\xrightarrow{20}b,\quad b\xrightarrow{12}c,\quad
@@ -98,165 +122,155 @@ c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
 c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
 $$
 
-Suppose the operator assigns each of $b$'s three incoming payments to its own shard. Their tips end at $(20,1)$, $(4,1)$, and $(6,1)$.
+$b$'s three incoming payments end as the entries $(20,1)$ in $a$'s vector, $(4,1)$ in $c$'s, and $(6,1)$ in $d$'s.
 
-A hot recipient can end an epoch with many shards, but proving one tip does not require shipping the rest. Sort the terminal records by shard identifier and commit them as a Merkle tree under $\mathsf{CreditRoot}_e(b)$. The root binds the exact shard count, ordered records, total credit, and total receipt count: here $(h_b,G_b,J_b)=(3,30,3)$.
+$$
+\begin{bmatrix}
+\underset{a\to b}{(20,1)} &
+\underset{c\to b}{(4,1)} &
+\underset{d\to b}{(6,1)}
+\end{bmatrix}
+$$
 
-## One Row per Changed Account
+## One Row per Active Account
 
-Netting each account's debits and credits gives exact closing balances $(85,58,26,31)$, and gross payment debit equals gross payment credit at 54 (i.e. the changes net to zero). That is all settlement has to publish: not the six payments, but the four accounts they changed, one row each.
+When an epoch ends, the operator builds a **close**, the settlement package that nets its payments into new account balances. Each payer's last vector of the epoch is its terminal vector. The operator and validators derive incoming credits from these vectors: $b$ receives $20+4+6=30$ across three payments. Each entry is authenticated by its payer's signed vector root.
 
-Write the opening and closing states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. If the chain-sealed boundary assigns deposit $f_a$ and withdrawal $w_a$, the exact balance relation is
+Netting each of the four accounts' debits and credits gives exact successor balances: $a$ ends at $100-20+5=85$, $b$ at $40-12+20+4+6=58$, $c$ at $25-7-4+12=26$, and $d$ at $35-5-6+7=31$. Gross debit equals gross credit at $20+12+7+5+4+6=54$, and the balances still sum to 200. The six payments change four account rows, one per account.
+
+For each account, the opening and closing balances are $B_a^0$ and $B_a^1$, with debit and credit deltas $d_a$ and $c_a$. Deposits $f_a$ and withdrawals $w_a$ complete the balance equation:
 
 $$
 \boxed{B_a^1+d_a+w_a=B_a^0+c_a+f_a.}
 $$
 
-Each row binds both account states, the terminal outgoing pair $\mathsf{Out}_a$ when the account sent, its $\mathsf{CreditRoot}$, and a running total $\mathsf{prefix}_a$ over the sorted rows so far, where $\chi$ flags a withdrawal record and $h$ counts shard heads:
+Every payment credits its recipient's balance. A close creates payouts only for authorized withdrawals.
 
-$$
-\begin{aligned}
-\mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;h_{a'}\bigr),\\[0.3em]
-\mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{CreditRoot}_e(a),\;\mathsf{prefix}_a\bigr).
-\end{aligned}
-$$
-
-Each prefix must extend the preceding prefix exactly, so the terminal row alone carries the epoch's totals. The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes:
-
-$$
-\mathbf A_e=(\mathsf{Row}_a,\;\mathsf{Row}_b,\;\mathsf{Row}_c,\;\mathsf{Row}_d),
-\qquad a<b<c<d.
-$$
-
-## Proving Exact Change
-
-Commit $\mathbf A_e$ under $\mathsf{ChangeRoot}_e$, a Merkle root that binds the exact row count and every row in order:
-
-$$
-\mathbf A_e
-\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{ChangeRoot}_e.
-$$
-
-A $\mathsf{StateRoot}$ commits every field in the complete account-state vector $X$. Suppose the registry holds eight accounts, our four changed ones scattered among four untouched:
-
-$$
-X^0=\bigl(X_a^0,\;X_b^0,\;\cdot,\;X_c^0,\;\cdot,\;\cdot,\;X_d^0,\;\cdot\bigr)
-\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{StateRoot}_e.
-$$
-
-Recomputing that root from scratch would touch all eight accounts, and a real registry holds a million. The paired sparse witness instead collapses each untouched subtree into one digest $\Phi_i$, its Merkle root, no matter how many accounts it covers. The witness then reconstructs both roots in one pass: every changed account supplies its opening and closing leaf while the shared frontier $\Phi_e=(\Phi_1,\Phi_2,\Phi_3)$ fills everything else:
-
-$$
-\begin{aligned}
-\mathsf{StateRoot}_e&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^0,\;X_b^0,\;\Phi_1,\;X_c^0,\;\Phi_2,\;X_d^0,\;\Phi_3\bigr),\\[0.3em]
-\mathsf{StateRoot}_{e+1}&\xleftarrow{\ \mathsf{Merkle}\ }\bigl(X_a^1,\;X_b^1,\;\Phi_1,\;X_c^1,\;\Phi_2,\;X_d^1,\;\Phi_3\bigr).
-\end{aligned}
-$$
-
-::: {.image-caption}
-Figure 2: One witness recomputes both roots from the same material. Each changed account supplies its paired leaves, $X^0$ on the opening side and $X^1$ on the closing side, while each untouched subtree contributes one shared digest ($\Phi_2$ covers two accounts at once). Identical frontiers on both sides prove every omitted account unchanged.
-:::
-
-Successful verification proves every omitted position unchanged and every row position changed to exactly its committed close. An account changes if and only if it has a row. The settlement chain retains only a hash composed of its three ordered roots:
-
-$$
-\mathsf{Commitment}_e
-=H\!\left(
-\mathsf{StateRoot}_e
-\parallel \mathsf{ChangeRoot}_e
-\parallel \mathsf{StateRoot}_{e+1}
-\right).
-$$
-
-The totals are the terminal row's prefix: gross debit $D_e$, credit $C_e$, deposits $F_e$, and withdrawals $W_e$, with the row, record, and shard counts alongside. The three roots, shard vectors, changed rows, and paired witness stay offchain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
-
-## Validate Everything Up Front
-
-Before the chain queues a close for finalization, someone must check all of it. A validator committee verifies the complete public close, every row, every prefix, and the exact state transition, and signs the commitment only when all of it holds. Exhaustive validation keeps malformed or inexact closes out of the finalization queue and reduces any remaining private-receipt dispute to one tagged, non-interactive submission.
-
-Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary, each withdrawal must cover at least its sealed record, and the totals must respect the close caps and conserve payments:
+Each row records the account's activity, including its last signed endpoint if it sent payments. Every validator derives the resulting balances and checks the epoch's gross debit $D_e$ and credit $C_e$:
 
 $$
 \boxed{D_e=C_e.}
 $$
 
-Writing $L_e=\sum_a B_a^0$ and $L_{e+1}=\sum_a B_a^1$, summing the per-account balance equation cancels payments but not boundary flows:
+Here $D_e=C_e=54$. Summing account balances into $L_e$ and $L_{e+1}$ cancels payments, leaving only deposits $F_e$ and withdrawals $W_e$:
 
 $$
 \boxed{L_{e+1}=L_e+F_e-W_e.}
 $$
 
-The public corpus is partitioned into deterministic, exhaustive account intervals. Every certificate signer signs the same commitment. Each evidence piece is assigned to a quorum of validators who check and retain it. Quorum intersection guarantees that an honest signer checked and retains each piece, though that signer may differ by piece. With $n$ validators, $f$ tolerated faults, and quorum $q$, every piece $j$'s holders share more than $f$ validators with the certificate's signers:
+Without deposits or withdrawals, $L_{e+1}=L_e=200$.
 
-$$
-\begin{aligned}
-n&=100,\qquad f=33,\qquad q=2f+1=67,\\[0.3em]
-|\mathsf{signers}\;\cap\;\mathsf{holders}_j|&\;\ge\;2q-n=34>f.
-\end{aligned}
-$$
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
+```
+
+::: {.image-caption}
+Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
+:::
+
+QMDB Current Ordered with MMB stores each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record. Payment totals and counts belong to the epoch's evidence.
+
+When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before authorizing a sweep.
+
+## Keep the State, Send the Changes
+
+Every validator retains the complete account state in QMDB. At each close, the operator publishes one dealing for all of them: active account keys, senders' terminal signed endpoints, and cumulative payment entries. Recipients are identified by position in the account list. A CDN can cache this shared dealing for efficient distribution.
+
+Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
+
+From these results, the validator builds the activity and withdrawal binary Merkle trees (BMTs) and computes the next QMDB state root. The activity tree includes accounts whose payments leave their balances unchanged, so those receipts remain challengeable. QMDB updates the balance tree incrementally, without rebuilding it over every live account.
+
+All three roots are results of validation. A 32-byte commitment binds them to the epoch, prior state, and withdrawal total. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof. They install the candidate state once the close is admitted.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested. The withdrawal panel shows the destination and amount a claim would prove.">
+```
+
+::: {.image-caption}
+Figure 3: The commitment links the three roots. Expanding $c$'s activity record shows its final payment totals for $b$ and $d$.
+:::
+
+The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
+
+The operator can also keep a QMDB replica to serve current and historical balance proofs directly. Preparing the dealing does not depend on that replica.
+
+## Certify the Whole Close
+
+A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, retains its evidence, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four acknowledgment cards show the operator's signatures accepting the final endpoints of a, b, c, and d. The c card is highlighted. An Aggregate arrow leads to the single aggregate signature included in the dealing. Validators derive the final commitment. The green callout shows the state, activity, and withdrawal roots bound to the epoch, prior state, and zero withdrawal total by a 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate.">
+```
+
+::: {.image-caption}
+Figure 4: Each validator derives the three roots from the shared dealing. One aggregate signature and signer bitmap show that 67 of 100 validators signed the resulting commitment.
+:::
+
+An honest signer retains the close and its predecessor state durably before publishing its vote. It keeps predecessor and successor proofs available while the close is pending and through its challenge deadline $\Delta_e$, and retains the last finalized state for recovery. A new validator replays the retained updates and checks the resulting state root.
+
+The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified commitment is 101 bytes. Admission also supplies the three roots and withdrawal total, another 104 bytes.
+
+The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge blocks that close and its pending descendants.
 
 ## The Unavoidable Challenge
 
-Validation establishes that the bound corpus satisfies the public relation. However, it cannot establish that the corpus contains every receipt the operator signed and delivered privately.
+A certificate establishes that the disclosed close is internally valid. The operator could still have signed a promise it left out.
 
-Fix a public corpus $\mathcal D_e$ and accepting certificate, proof, or attestation $\zeta$. Compare two executions: in $\Xi_0$ the operator signs exactly the receipts represented by $\mathcal D_e$, while in $\Xi_1$ it produces the same $(\mathcal D_e,\zeta)$ and privately delivers one more valid receipt $R^+$. The close verifier has the same view in both:
+Consider two executions with the same public close $\mathcal D_e$ and certificate, proof, or attestation $\zeta$. In $\Xi_0$, the operator signs only the acknowledgments represented by the close. In $\Xi_1$, it also delivers a valid private acknowledgment $R^+$. The verifier sees the same evidence in both:
 
 $$
 \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
 $$
 
-If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature. Through the inclusive deadline $t\le\Delta_e$, any holder or watchtower may submit one of four bounded contradictions:
+If it accepts $\Xi_0$, it must accept $\Xi_1$. A committee, TEE, or SNARK/STARK can verify the published inputs. Certifying those inputs cannot rule out an additional private receipt.
 
-1. **Payer debit contradiction.** A matching acknowledged pair carries a debit above the public debit marker, or the same debit with a different send or receipt body. A bare payer request is insufficient. The receipt proves operator acknowledgement.
+The activity tree records each active account's terminal position. A missing payer counts as zero debit, so a proof of absence can challenge an omitted payment. Receipt holders can prove three kinds of contradiction:
 
-2. **Higher receive-shard tip.** Authenticate the public tip $(G^\star,J^\star)$ for one shard, using $(0,0)$ for authenticated absence, and present a matching retained receipt at $(G^+,J^+)$. Either strict increase, $G^+>G^\star$ or $J^+>J^\star$, is a contradiction.
+1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
 
-3. **Inconsistent receipt range.** For lower and upper pairs in one anchor, recipient, and shard, where each receipt is linked to its own valid send, adjacent receipts must increase credit by exactly the upper payment, and an index gap must leave at least one base unit for each omitted positive payment. A violation is a contradiction.
+2. **Entry mismatch.** A retained entry promises more value or more payments to a recipient than the close records.
 
-4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a shard or acknowledge the same payer transaction differently. Different signature bytes over one identical receipt body are not a fork.
+3. **Acknowledgment fork.** The operator countersigns different bodies at the same payer sequence number.
 
-Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call.
+Because certification has checked the accounting and signed terminal positions, a receipt holder can prove a contradiction with signatures and Merkle openings in one onchain call, without an interactive dispute game. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
 
-A successful receipt challenge blocks the challenged slot and every pending descendant from finalizing. Earlier pending slots keep their ordinary challenge windows and may still finalize in order.
+Suppose $b$ has already served the API response, but the operator leaves $a$'s payment of 20 out of the close. The receipt and a public proof of the omission let $b$ prove operator fault without the operator's cooperation. That is what makes the receipt binding. An application could use this evidence to compensate $b$ from an onchain insurance fund, permanently exclude the operator, or support offchain resolution. The recipient can seek a remedy beyond simply deciding not to use that operator again (unlike other approaches that offer only best-effort preconfirmations).
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but stopping it is not enough: users must still be able to get their funds out. So every account holds a unilateral exit, a signed withdrawal queued directly onchain.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain, even during an active epoch. The next registration must include it.
+
+Once a withdrawal request is queued onchain or included in an admitted close, its carrying close must finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
 
 $$
-Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;x,\;\gamma,\;\tau\bigr).
+\boxed{\Delta_e<t_{\mathrm{finalize}}<T_w.}
 $$
 
-$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, a destination $v$, an amount $x$, a full-close flag $\gamma$, and an absolute deadline $\tau$. The operator neither submits nor approves it, and its cooperation decides only whether the withdrawal settles through a clean close or through terminal unwind. Since $v$ may be any destination the asset adapter accepts, paying an unregistered recipient is just a withdrawal to its address.
+An exact withdrawal releases its amount if the epoch's final balance covers it. An account close sweeps that balance. Once the carrying close finalizes, the user claims the certified payout with an opening in that close's withdrawal-output BMT. Each output can be claimed only once.
 
-Queueing proves the withdrawal affordable at every pending root, and each later queued close re-proves it, so whichever root survives can pay it. Deposits need no deadline at all: an unconsumed deposit simply returns in the terminal payout.
+Custody remains onchain throughout. Finalization reserves withdrawals, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
 
-What makes the exit credible is that custody never leaves the chain. With finalized liability $L_z$, pending slots $z+1,\ldots,\ell$ carrying boundary flows $(F_i,W_i)$, and deposits not yet included in a pending close $F_\star$:
+### Hard Fault
 
-$$
-\boxed{
-E=L_z+\sum_{i=z+1}^{\ell}F_i+F_\star
-=L_\ell+\sum_{i=z+1}^{\ell}W_i+F_\star.
-}
-$$
+If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Clean pending closes ahead of a disputed close may still finalize. Recovery then freezes the last finalized state root.
 
-Withdrawals stay inside custody until their own slot finalizes at the queue front, so a speculative descendant can never spend assets out from under an ancestor. The operator can stop serving payments, but it cannot take funds or send them without authorization.
+The recovery rules keep finalized payouts independently claimable and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. Payments in a never-admitted or invalidated close do not debit that state.
 
-If $Q$ is still unreleased at $t\ge\tau$, the first time-aware onchain call to observe the deadline permanently freezes new work. The pending slots then resolve from the front, each finalizing once its challenge window closes or falling to a challenge, and terminal unwind opens against the last root standing. Queued withdrawals pay to their signed destinations, and every account uses one Merkle proof against that root to claim its remaining balance and any unconsumed deposit.
+Recovery needs a correct, live settlement chain and available claim openings even when the operator disappears.
 
 ## Streamlined Epoch Transitions
 
-Closing an epoch is asynchronous: spending continues in epoch $e+1$ while epoch $e$'s close is still being built, certified, and queued onchain. Otherwise every epoch boundary would be a throughput cliff.
+A payment reaches finality through an admitted close, after the challenge deadline fixed at epoch registration. Shorter epochs with earlier deadlines can reduce that wait, but require more frequent preparation and certification.
 
-What makes this safe is an asymmetry. When an account rolls over, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. Debits ended at the rollover, so the predecessor credit still in flight can only add to that head later, never subtract. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight, the exact predecessor close is
+Once epoch $e$'s close is admitted, the operator can register $e+1$ against its $\mathsf{StateRoot}$ and start payments before $e$ finalizes. Registration fixes deposits and signed withdrawal authorizations before the first payment is acknowledged.
+
+For accounts without deposits or withdrawals, new payments can overlap credit imports. The preserved head $\widetilde B_a$ is the starting balance minus accepted predecessor debits plus credits already imported. The remaining predecessor credit is $\rho_a$:
 
 $$
 \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
 $$
 
-The preserved head is a floor, and a floor is safe to spend against: the operator pre-authorizes successor payments on $\widetilde B_a$ before $B_a^1$ is even computed. Reconciliation later adds $\rho_a$ to the live value. It never assigns $B_a^1$ over it, which would erase successor debits already accepted.
+The preserved head is safe to spend against. Importing credit adds $\rho_a$ to the live balance, preserving any successor debits already accepted.
 
 In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
 
@@ -265,115 +279,81 @@ $$
 $$
 
 ```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated owner-preserved rollover for account a. An accepted epoch-e pair leaves one preserved head of 80 and rotates that head into epoch e plus 1. Two connected rails branch from the same 80. The exact predecessor close reaches 85. The live successor rail spends 20 to reach 60, reconciles to 65, and spends 15 to reach 50. One vertical marker identifies the same missing predecessor credit of 5 in both calculations. The 85 close terminates on its own rail and never overwrites the live head.">
-  <noscript>An accepted epoch-e pair leaves one preserved head of 80. The exact-close rail computes 80 plus 5 as 85. The live rail computes 80 minus 20 plus the same 5 minus 15 as 50. Reconciliation adds the shared missing credit without installing 85 over the live head.</noscript>
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
+  <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 3: Both rails branch from the same preserved 80. The upper rail computes the exact epoch-$e$ close, $80+\rho_a=85$. The lower rail keeps the epoch-$e+1$ head live, $80-20+\rho_a-15=50$. The single vertical $\rho_a=5$ marker is the same predecessor credit in both calculations. The two values serve different roles: 85 is the canonical predecessor close, while 50 is the current live head. Reconciliation adds $\rho_a$ to the live value and preserves every successor debit.
+Figure 5: Both calculations include the same predecessor credit. Importing it adds to the live balance, preserving payments already accepted in the successor epoch.
 :::
 
-The live balance is not monotone, since successor payments spend it down. The one-sidedness is all on the predecessor's side: completion can add missing credit but can never discover another accepted debit. Boundary operations and shard moves obey the same rule: the live head is only ever adjusted, never overwritten.
+Accounts with deposits or withdrawals must resolve their full admitted outcome before spending in the successor epoch.
 
-Rollover changes only live serving state, without changing the evidence required for finalization. The close still produces the canonical rows, state root, and public corpus, and a challenge against the predecessor invalidates its pending descendants.
+## The Close Follows Accounts and Edges
 
-## The Close Never Grows (with Payments)
-
-Every profile below runs one fixture: a registry of $N=1{,}000{,}000$ accounts, a 100-validator committee, the evidence divided into 256 slices and dealt among validators, and an eight-thread worker pool (M5 Pro). Every changed account sends, and the same 512 credited accounts receive, spaced evenly among the senders.
-
-The matrix independently varies $A$, the number of changed accounts, and $h$, the number of receive shards on each credited account. No payment count appears because none is needed: rows and shard tips carry fixed-width cumulative totals, so every size in the table is the same for any $T$.
+We benchmarked the Commonware Library's [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with each account sending one unit payment to one of 512 recipients. All 100 validators receive the same update.
 
 ```{=html}
 <div class="clearing-benchmark-table">
 <table>
   <thead>
     <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
-      <th colspan="2" style="text-align:center;"><em>A</em> = 1,024</th>
-      <th colspan="2" style="text-align:center;"><em>A</em> = 1,000,000</th>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
+      <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
     </tr>
     <tr>
-      <th style="text-align:right;"><em>h</em> = 1</th>
-      <th style="text-align:right;"><em>h</em> = 512</th>
-      <th style="text-align:right;"><em>h</em> = 1</th>
-      <th style="text-align:right;"><em>h</em> = 512</th>
+      <th style="text-align:right;">1,024</th>
+      <th style="text-align:right;">10,000</th>
+      <th style="text-align:right;">100,000</th>
+      <th style="text-align:right;">1,000,000</th>
     </tr>
   </thead>
   <tbody>
-    <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
     <tr>
-      <td style="padding-left:20px;">evidence</td>
-      <td style="text-align:right;">2.27 MB</td>
-      <td style="text-align:right;">105 MB</td>
-      <td style="text-align:right;">629 MB</td>
-      <td style="text-align:right;">732 MB</td>
+      <td>Validator dealing</td>
+      <td style="text-align:right;">105 KB<br><small>8.03 ms</small></td>
+      <td style="text-align:right;">1.03 MB<br><small>57.7 ms</small></td>
+      <td style="text-align:right;">10.3 MB<br><small>566 ms</small></td>
+      <td style="text-align:right;">103 MB<br><small>6.54 s</small></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">0.783 ms</td>
-      <td style="text-align:right;">1.08 ms</td>
-      <td style="text-align:right;">244 ms</td>
-      <td style="text-align:right;">250 ms</td>
+      <td>Commitment + certificate</td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr><th colspan="5" style="text-align:left;">Processing phases</th></tr>
+    <tr>
+      <td style="text-align:left;">Operator: prepare and apply</td>
+      <td style="text-align:right;">5.61 ms</td>
+      <td style="text-align:right;">28.7 ms</td>
+      <td style="text-align:right;">333 ms</td>
+      <td style="text-align:right;">4.09 s</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">0.373 ms</td>
-      <td style="text-align:right;">3.37 ms</td>
-      <td style="text-align:right;">49.6 ms</td>
-      <td style="text-align:right;">58.7 ms</td>
-    </tr>
-    <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
-    <tr>
-      <td style="padding-left:20px;">dealing</td>
-      <td style="text-align:right;">1.53 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">71.0 MB <span style="color:#666;">(-32%)</span></td>
-      <td style="text-align:right;">423 MB <span style="color:#666;">(-33%)</span></td>
-      <td style="text-align:right;">492 MB <span style="color:#666;">(-33%)</span></td>
+      <td style="text-align:left;">Validator: decode</td>
+      <td style="text-align:right;">0.726 ms</td>
+      <td style="text-align:right;">6.73 ms</td>
+      <td style="text-align:right;">74.3 ms</td>
+      <td style="text-align:right;">907 ms</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">2.78 ms</td>
-      <td style="text-align:right;">246 ms</td>
-      <td style="text-align:right;">1.33 s</td>
-      <td style="text-align:right;">1.51 s</td>
-    </tr>
-    <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
-    <tr>
-      <td style="padding-left:20px;">commitment</td>
-      <td style="text-align:right;"><strong>32 B</strong></td>
-      <td style="text-align:right;"><strong>32 B</strong></td>
-      <td style="text-align:right;"><strong>32 B</strong></td>
-      <td style="text-align:right;"><strong>32 B</strong></td>
+      <td style="text-align:left;">Validator: verify and sign</td>
+      <td style="text-align:right;">6.95 ms</td>
+      <td style="text-align:right;">48.9 ms</td>
+      <td style="text-align:right;">472 ms</td>
+      <td style="text-align:right;">5.36 s</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">certified commitment</td>
-      <td style="text-align:right;"><strong>101 B</strong></td>
-      <td style="text-align:right;"><strong>101 B</strong></td>
-      <td style="text-align:right;"><strong>101 B</strong></td>
-      <td style="text-align:right;"><strong>101 B</strong></td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">check certified commitment</td>
-      <td style="text-align:right;"><strong>0.481 ms</strong></td>
-      <td style="text-align:right;"><strong>0.483 ms</strong></td>
-      <td style="text-align:right;"><strong>0.487 ms</strong></td>
-      <td style="text-align:right;"><strong>0.487 ms</strong></td>
-    </tr>
-    <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
-    <tr>
-      <td style="padding-left:20px;">challenge</td>
-      <td style="text-align:right;"><strong>1.73 KB</strong></td>
-      <td style="text-align:right;"><strong>2.02 KB</strong></td>
-      <td style="text-align:right;"><strong>2.05 KB</strong></td>
-      <td style="text-align:right;"><strong>2.34 KB</strong></td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">check challenge</td>
-      <td style="text-align:right;"><strong>0.454 ms</strong></td>
-      <td style="text-align:right;"><strong>0.447 ms</strong></td>
-      <td style="text-align:right;"><strong>0.481 ms</strong></td>
-      <td style="text-align:right;"><strong>0.471 ms</strong></td>
+      <td style="text-align:left;">Validator: apply balances</td>
+      <td style="text-align:right;">0.234 ms</td>
+      <td style="text-align:right;">2.07 ms</td>
+      <td style="text-align:right;">19.7 ms</td>
+      <td style="text-align:right;">275 ms</td>
     </tr>
   </tbody>
 </table>
@@ -381,45 +361,122 @@ The matrix independently varies $A$, the number of changed accounts, and $h$, th
 ```
 
 ::: {.image-caption}
-Figure 4: The operator prepares the roots, then deals the evidence into validator-specific pieces. Each validator seals its dealing by checking and retaining those pieces before signing the commitment. A receipt holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
+Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude networking and durable commit, while the SSD timing below includes QMDB commit. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache, and the full dataset fits in RAM.
 :::
 
+With only 1,024 of a million live accounts paying the same 512 recipients, each validator processes a 105 KB update in 8.69 ms in memory, or 20.5 ms on SSD.
+
+Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
+
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three interaction plots show benchmark latency for preparing the roots, dealing the evidence into pieces, and sealing the largest of the 100 validator dealings. Blue is 1,024 changed accounts and green is one million. Each series has measured points at one and 512 receive shards per credited account. Connecting lines are visual guides, not interpolated measurements. Each panel uses its own millisecond scale.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots show modeled bytes per payment as one million to one billion unit payments pass between fixed pairs. The left shows one validator's keyed update for four account counts, including growing cumulative counters. The right shows the 101-byte commitment and certificate.">
 ```
 
 ::: {.image-caption}
-Figure 5: These are four measured profiles, not an interpolation. Each panel has its own millisecond scale. Blue holds $A=1{,}024$ and green holds $A=1{,}000{,}000$ while the horizontal axis changes the receive shards on each credited account from $h=1$ to $h=512$.
+Figure 7: Every account repeatedly pays one unit to its next neighbor. Counters grow, while more payments share the byte cost of one validator's update and the 100-validator committee's certificate.
 :::
 
-Increasing $A$ makes the state transition dense. Increasing $h$ concentrates more authenticated shard leaves and signatures behind each credited row.
+### Proof Sizes and Verification
 
-Even the largest validator dealing is 32–33% smaller than the full evidence because it contains only that validator's pieces. At $A=1{,}024$ and $h=1$, it is 1.53 MB despite a registry of one million accounts. Distribution follows the changed rows and the shared frontier, not the registry, so it is sublinear in registered accounts as well as in payments.
-
-The offchain evidence is constant for a profile, so accepted payments only divide it. Ten million payments spread the sparse profile's 2.27 MB to about 0.23 offchain bytes per payment; a billion spread it to 0.0023 offchain bytes per payment. The certified commitment includes the 32-byte commitment, signer bitmap, and aggregate signature, for 101 bytes total; it likewise shrinks as $1/T$.
-
-This fixture queues no withdrawals and no full closes, whose re-check and row openings would otherwise add to it. The challenge measurements use one proven higher-tip challenge: its payload grows only with the two lookup depths, and its check verifies two signatures and two openings.
+The tables below show encoded proof sizes, with verification times beneath them.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows offchain evidence bytes per payment for the four A-by-h profiles; the right shows the 101-byte certified commitment. Every line falls as 1/T.">
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Challenge</th><th colspan="4" style="text-align:center;">Active accounts, all sending</th></tr>
+    <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Debit mismatch</td><td style="text-align:right;">588 B<br><small>224 µs</small></td><td style="text-align:right;">716 B<br><small>215 µs</small></td><td style="text-align:right;">812 B<br><small>223 µs</small></td><td style="text-align:right;">908 B<br><small>213 µs</small></td></tr>
+    <tr><td>Entry mismatch</td><td style="text-align:right;">639 B<br><small>225 µs</small></td><td style="text-align:right;">767 B<br><small>216 µs</small></td><td style="text-align:right;">863 B<br><small>223 µs</small></td><td style="text-align:right;">959 B<br><small>214 µs</small></td></tr>
+    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B<br><small>220 µs</small></td><td style="text-align:right;">417 B<br><small>212 µs</small></td><td style="text-align:right;">417 B<br><small>219 µs</small></td><td style="text-align:right;">417 B<br><small>218 µs</small></td></tr>
+  </tbody>
+</table>
+</div>
 ```
 
 ::: {.image-caption}
-Figure 6: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The offchain evidence (left) depends on $A$ and $h$: shards move the million-account evidence by only $1.2\times$ but the sparse evidence by $46\times$. The certified commitment (right) stays 101 bytes across profiles.
+Figure 8: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing. For Figures 8 through 10, verification times are medians of ten samples on one CPU thread of the Figure 6 host, starting from decoded proofs.
+:::
+
+A normal withdrawal opens a certified output in its close's BMT. Its proof grows with the number of withdrawal outputs $W$, independently of the live account database.
+
+```{=html}
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
+      <th colspan="5" style="text-align:center;">Withdrawal outputs in the close (<em>W</em>)</th>
+    </tr>
+    <tr>
+      <th style="text-align:right;">1</th>
+      <th style="text-align:right;">1,024</th>
+      <th style="text-align:right;">10,000</th>
+      <th style="text-align:right;">100,000</th>
+      <th style="text-align:right;">1,000,000</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Withdrawal-output claim</td>
+      <td style="text-align:right;">39 B<br><small>0.314 µs</small></td>
+      <td style="text-align:right;">359 B<br><small>1.18 µs</small></td>
+      <td style="text-align:right;">487 B<br><small>1.52 µs</small></td>
+      <td style="text-align:right;">583 B<br><small>1.79 µs</small></td>
+      <td style="text-align:right;">679 B<br><small>2.05 µs</small></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+```
+
+::: {.image-caption}
+Figure 9: Withdrawal outputs with a 21-byte destination and maximum-depth BMT paths. Verification checks inclusion under a supplied root. Chain transaction framing is excluded.
+:::
+
+QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root.
+
+```{=html}
+<div class="clearing-benchmark-table">
+<table>
+  <thead>
+    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">QMDB proof payload</th><th colspan="4" style="text-align:center;">Live accounts</th></tr>
+    <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Account present</td><td style="text-align:right;">497 B<br><small>1.53 µs</small></td><td style="text-align:right;">593 B<br><small>1.83 µs</small></td><td style="text-align:right;">691 B<br><small>2.14 µs</small></td><td style="text-align:right;">819 B<br><small>2.58 µs</small></td></tr>
+    <tr><td>Account absent</td><td style="text-align:right;">530 B<br><small>1.53 µs</small></td><td style="text-align:right;">626 B<br><small>1.83 µs</small></td><td style="text-align:right;">724 B<br><small>2.14 µs</small></td><td style="text-align:right;">852 B<br><small>2.59 µs</small></td></tr>
+    <tr><td>Recovery balance opening</td><td style="text-align:right;">528 B<br><small>1.53 µs</small></td><td style="text-align:right;">624 B<br><small>1.83 µs</small></td><td style="text-align:right;">722 B<br><small>2.15 µs</small></td><td style="text-align:right;">850 B<br><small>2.56 µs</small></td></tr>
+  </tbody>
+</table>
+</div>
+```
+
+::: {.image-caption}
+Figure 10: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key, while recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
+:::
+
+Adjust the workload and committee size below to estimate the operator's traffic.
+
+```{=html}
+<div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive calculator for keyed validator dealings. Sliders set live accounts, average recipients per account, and validators. Results show one modeled update per validator, its composition, total operator egress, and a dotted reference for the encoded account records.">
+  <noscript>Each validator retains the complete account state and receives one compact update per close. Total operator egress is the update size multiplied by the validator count. Enable JavaScript to change the workload.</noscript>
+</div>
+<script type="module" src="clearing.calculator.js"></script>
+```
+
+::: {.image-caption}
+Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic. Sizes exclude certificates, transport, and other messages.
+
+Each sender signs one batch of unit payments. Recipients per account is averaged over all live accounts. Below an average of one, the first senders pay the last recipients in key order. Otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::
 
 ## A Bajillion Payments, One Settlement
 
-The operator's work scales with payments: it verifies, durably commits, and signs every one of the $T$ payments it accepts. The public close has no per-payment term. It carries one row per changed account ($A$), one terminal pair per receive shard ($H$), and one frontier digest per untouched subtree ($|\Phi_e|$):
+Send a million payments without paying for a million onchain transactions.
 
-$$
-\text{payments }T
-\quad\longrightarrow\quad
-\text{rows }A+\text{shards }H+\text{frontier digests }|\Phi_e|.
-$$
+That makes small exchanges practical, like an agent buying a single API response. Recipients can deliver the goods now, knowing the operator has made a binding commitment to the payment. If the operator later omits or contradicts that payment, the signed receipt gives them the evidence to challenge the close.
 
-For repeated activity over a fixed set of accounts and shards, $(A+H+|\Phi_e|)/T\to 0$. Account-level clearing compresses repetition, not change: every changed account still pays for its row and every shard for its terminal pair, but additional payments between them add nothing. No traffic pattern adds a per-payment term to the close either, because acceptance reserves room per account and per shard, never per payment.
-
-And this is as good as the trust model allows. A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending. A close cannot quietly drop a payment: it must agree with every receipt a holder retains, or a single retained pair proves the fault. Settlement cannot make less than the changed state available to users who recover from public data alone, and this close adds only the terminal pairs and the frontier needed to reconstruct the registry around those changes.
-
-When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.
+The settlement chain only keeps the change.
