@@ -1,5 +1,5 @@
 use crate::Secret;
-use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use rand_core::CryptoRng;
 
 /// A shared secret derived from X25519 key exchange.
@@ -18,30 +18,18 @@ impl SharedSecret {
 
 /// An ephemeral X25519 public key used during handshake.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Write, Read)]
 pub struct EphemeralPublicKey {
+    #[codec(
+        encode_with = { buf.put_slice(value.as_bytes()); },
+        read_with = |buf, _cfg| Ok(<[u8; 32]>::read(buf)?.into())
+    )]
     inner: x25519_dalek::PublicKey,
-}
-
-impl Write for EphemeralPublicKey {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_slice(self.inner.as_bytes());
-    }
 }
 
 impl FixedSize for EphemeralPublicKey {
     // There's not a good constant anywhere in the x25519_dalek crate for this.
     const SIZE: usize = 32;
-}
-
-impl Read for EphemeralPublicKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let bytes: [u8; 32] = ReadExt::read(buf)?;
-        Ok(Self {
-            inner: bytes.into(),
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]

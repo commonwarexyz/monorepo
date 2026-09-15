@@ -235,44 +235,14 @@ where
 mod tests {
     use super::*;
     use crate::types::Height;
-    use bytes::BufMut;
-    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_codec::{EncodeSize, Read, Write};
     use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
     struct TestBlock {
         digest: Sha256Digest,
         parent: Sha256Digest,
         height: Height,
-    }
-
-    impl Write for TestBlock {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.digest.write(buf);
-            self.parent.write(buf);
-            self.height.write(buf);
-        }
-    }
-
-    impl EncodeSize for TestBlock {
-        fn encode_size(&self) -> usize {
-            self.digest.encode_size() + self.parent.encode_size() + self.height.encode_size()
-        }
-    }
-
-    impl Read for TestBlock {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-            let digest = Sha256Digest::read(buf)?;
-            let parent = Sha256Digest::read(buf)?;
-            let height = Height::read(buf)?;
-            Ok(Self {
-                digest,
-                parent,
-                height,
-            })
-        }
     }
 
     impl Digestible for TestBlock {

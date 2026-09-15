@@ -1,7 +1,7 @@
 //! Non-empty [`Range`] type that guarantees at least one element.
 
 use bytes::BufMut;
-use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error as CodecError, Read, Write};
 use core::{fmt, ops::Range};
 
 /// Error returned when attempting to create a non-empty range from an empty range.
@@ -10,8 +10,20 @@ use core::{fmt, ops::Range};
 pub struct EmptyRange;
 
 /// A non-empty [`Range`] (`start..end`) where `start < end` is guaranteed.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct NonEmptyRange<Idx>(Range<Idx>);
+#[derive(Clone, PartialEq, Eq, Hash, Read)]
+#[read_cfg(Idx::Cfg)]
+#[codec(read_bounds(Idx: Read + PartialOrd))]
+pub struct NonEmptyRange<Idx>(
+    #[codec(read_with = {
+        let start = Idx::read_cfg(buf, cfg)?;
+        let end = Idx::read_cfg(buf, cfg)?;
+        if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {
+            return Err(CodecError::Invalid("NonEmptyRange", "start must be < end"));
+        }
+        Ok(start..end)
+    })]
+    Range<Idx>,
+);
 
 impl<Idx: fmt::Debug> fmt::Debug for NonEmptyRange<Idx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -89,20 +101,6 @@ impl<Idx: EncodeSize> EncodeSize for NonEmptyRange<Idx> {
     #[inline]
     fn encode_inline_size(&self) -> usize {
         self.0.start.encode_inline_size() + self.0.end.encode_inline_size()
-    }
-}
-
-impl<Idx: Read + PartialOrd> Read for NonEmptyRange<Idx> {
-    type Cfg = Idx::Cfg;
-
-    #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let start = Idx::read_cfg(buf, cfg)?;
-        let end = Idx::read_cfg(buf, cfg)?;
-        if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {
-            return Err(CodecError::Invalid("NonEmptyRange", "start must be < end"));
-        }
-        Ok(Self(start..end))
     }
 }
 

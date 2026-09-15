@@ -1,16 +1,18 @@
 //! Mock implementations for testing.
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest};
-use commonware_runtime::BufMut;
 
 /// A simple test message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 pub struct TestMessage {
     // The commitment of the message.
+    #[codec(cfg = &(*cfg, ()))]
     pub commitment: Vec<u8>,
 
     /// The content of the message.
+    #[codec(cfg = &(*cfg, ()))]
     pub content: Vec<u8>,
 }
 
@@ -32,31 +34,5 @@ impl Digestible for TestMessage {
     type Digest = Digest;
     fn digest(&self) -> Digest {
         Sha256::hash(&[&self.content])
-    }
-}
-
-impl Write for TestMessage {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.commitment.write(buf);
-        self.content.write(buf);
-    }
-}
-
-impl EncodeSize for TestMessage {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.content.encode_size()
-    }
-}
-
-impl Read for TestMessage {
-    type Cfg = RangeCfg<usize>;
-
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        let commitment = Vec::<u8>::read_range(buf, *range)?;
-        let content = Vec::<u8>::read_range(buf, *range)?;
-        Ok(Self {
-            commitment,
-            content,
-        })
     }
 }

@@ -19,7 +19,7 @@
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
@@ -65,8 +65,9 @@ impl<P: PublicKey> Directory<P> for Unit {
 }
 
 /// Address directory for transports that dial by [`Address`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Addresses<P: PublicKey>(Map<P, Address>);
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
+pub struct Addresses<P: PublicKey>(#[codec(cfg = &(*cfg, (), ()))] Map<P, Address>);
 
 impl<P: PublicKey> Addresses<P> {
     /// Returns the address recorded for `peer`, if any.
@@ -89,30 +90,6 @@ impl<P: PublicKey> From<Map<P, Address>> for Addresses<P> {
 impl<P: PublicKey> FromIterator<(P, Address)> for Addresses<P> {
     fn from_iter<I: IntoIterator<Item = (P, Address)>>(iter: I) -> Self {
         Self(Map::from_iter_dedup(iter))
-    }
-}
-
-impl<P: PublicKey> Write for Addresses<P> {
-    fn write(&self, writer: &mut impl bytes::BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<P: PublicKey> EncodeSize for Addresses<P> {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
-    }
-}
-
-impl<P: PublicKey> Read for Addresses<P> {
-    /// Number of address entries accepted by the decoder.
-    ///
-    /// An [`EpochInfo`](crate::dkg::types::EpochInfo) derives an exact bound
-    /// from the union of its dealers, players, and next players.
-    type Cfg = RangeCfg<usize>;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(Map::read_cfg(buf, &(*cfg, (), ()))?))
     }
 }
 

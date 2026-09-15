@@ -5,11 +5,8 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use commonware_codec::{Buf, CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{
-    BufMut,
-    telemetry::metrics::{Counter, MetricsExt as _},
-};
+use commonware_codec::{CodecShared, EncodeSize, Read, Write};
+use commonware_runtime::telemetry::metrics::{Counter, MetricsExt as _};
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
 use futures::{TryFutureExt as _, try_join};
 use std::collections::BTreeMap;
@@ -23,9 +20,10 @@ const ORDINAL_PREFIX: u8 = 1;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Write, Read, EncodeSize)]
 enum Record {
     Freezer(Checkpoint),
-    Ordinal(Option<BitMap>),
+    Ordinal(#[codec(cfg = &(usize::MAX as u64))] Option<BitMap>),
 }
 
 impl Record {
@@ -42,45 +40,6 @@ impl Record {
         match self {
             Self::Ordinal(indices) => indices,
             _ => panic!("incorrect record"),
-        }
-    }
-}
-
-impl Write for Record {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Freezer(checkpoint) => {
-                buf.put_u8(0);
-                checkpoint.write(buf);
-            }
-            Self::Ordinal(indices) => {
-                buf.put_u8(1);
-                indices.write(buf);
-            }
-        }
-    }
-}
-
-impl Read for Record {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),
-            1 => Ok(Self::Ordinal(Option::<BitMap>::read_cfg(
-                buf,
-                &(usize::MAX as u64),
-            )?)),
-            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl EncodeSize for Record {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Freezer(_) => Checkpoint::SIZE,
-            Self::Ordinal(indices) => indices.encode_size(),
         }
     }
 }

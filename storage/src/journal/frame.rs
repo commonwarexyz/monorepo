@@ -436,13 +436,9 @@ mod tests {
 
     /// An item whose claimed encoded size exceeds the u32 frame limit. The size check
     /// happens before any bytes are written, so `write` is unreachable.
+    #[derive(EncodeSize)]
+    #[encode_size(u32::MAX as usize + 1)]
     struct Oversized;
-
-    impl EncodeSize for Oversized {
-        fn encode_size(&self) -> usize {
-            u32::MAX as usize + 1
-        }
-    }
 
     impl Write for Oversized {
         fn write(&self, _: &mut impl BufMut) {

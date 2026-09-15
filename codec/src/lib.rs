@@ -32,6 +32,14 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Derive macros
+//!
+//! Structs and tagged enums can derive [`Write`](derive@Write) and
+//! [`Read`](derive@Read). Choose [`FixedSize`](derive@FixedSize) for a constant
+//! encoded length or [`EncodeSize`](derive@EncodeSize) for a value-dependent
+//! length. [`Encode`](derive@Encode) is shorthand for `Write, EncodeSize`.
+//! The macro documentation includes compiling examples and configuration attributes.
+//!
 //! # Decode Inputs
 //!
 //! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
@@ -101,40 +109,13 @@
 //! ## Example 1. Fixed-Size Type
 //!
 //! ```
-//! use bytes::BufMut;
-//! use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
+//! use commonware_codec::{DecodeExt, Encode, FixedSize, Read, Write};
 //!
 //! // Define a custom struct
-//! #[derive(Debug, Clone, PartialEq)]
+//! #[derive(Debug, Clone, PartialEq, Write, Read, FixedSize)]
 //! struct Point {
 //!     x: u32, // FixedSize
 //!     y: u32, // FixedSize
-//! }
-//!
-//! // 1. Implement Write: How to serialize the struct
-//! impl Write for Point {
-//!     fn write(&self, buf: &mut impl BufMut) {
-//!         // u32 implements Write
-//!         self.x.write(buf);
-//!         self.y.write(buf);
-//!     }
-//! }
-//!
-//! // 2. Implement FixedSize (provides EncodeSize automatically)
-//! impl FixedSize for Point {
-//!     // u32 implements FixedSize
-//!     const SIZE: usize = u32::SIZE + u32::SIZE;
-//! }
-//!
-//! // 3. Implement Read: How to deserialize the struct (uses default Cfg = ())
-//! impl Read for Point {
-//!     type Cfg = ();
-//!     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-//!         // Use ReadExt::read for ergonomic reading when Cfg is ()
-//!         let x = u32::read(buf)?;
-//!         let y = u32::read(buf)?;
-//!         Ok(Self { x, y })
-//!     }
 //! }
 //!
 //! // Point now automatically implements Encode, Decode, Codec
@@ -152,12 +133,7 @@
 //! ## Example 2. Variable-Size Type
 //!
 //! ```
-//! use bytes::BufMut;
-//! use commonware_codec::{Buf,
-//!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
-//!     ReadRangeExt, Write, RangeCfg
-//! };
-//! use core::ops::RangeInclusive; // Example RangeCfg
+//! use commonware_codec::{Decode, Encode, Read};
 //!
 //! // Define a simple configuration for reading Item
 //! // Here, it just specifies the maximum allowed metadata length.
@@ -167,51 +143,15 @@
 //! }
 //!
 //! // Define a custom struct
-//! #[derive(Debug, Clone, PartialEq)]
+//! #[derive(Debug, Clone, PartialEq, Encode, Read)]
+//! #[read_cfg(ItemConfig)]
 //! struct Item {
+//!     #[codec(cfg = &())]
 //!     id: u64,           // FixedSize
+//!     #[codec(cfg = &())]
 //!     name: Option<u32>, // EncodeSize (depends on Option)
+//!     #[codec(cfg = &((0..=cfg.max_metadata_len).into(), ()))]
 //!     metadata: Vec<u8>, // EncodeSize (variable)
-//! }
-//!
-//! // 1. Implement Write
-//! impl Write for Item {
-//!     fn write(&self, buf: &mut impl BufMut) {
-//!         self.id.write(buf);       // u64 implements Write
-//!         self.name.write(buf);     // Option<u32> implements Write
-//!         self.metadata.write(buf); // Vec<u8> implements Write
-//!     }
-//! }
-//!
-//! // 2. Implement EncodeSize
-//! impl EncodeSize for Item {
-//!     fn encode_size(&self) -> usize {
-//!         // Sum the sizes of the parts
-//!         self.id.encode_size()         // u64 implements EncodeSize (via FixedSize)
-//!         + self.name.encode_size()     // Option<u32> implements EncodeSize
-//!         + self.metadata.encode_size() // Vec<u8> implements EncodeSize
-//!     }
-//! }
-//!
-//! // 3. Implement Read
-//! impl Read for Item {
-//!     type Cfg = ItemConfig;
-//!     fn read_cfg(buf: &mut impl Buf, cfg: &ItemConfig) -> Result<Self, Error> {
-//!         // u64 requires Cfg = (), uses ReadExt::read
-//!         let id = <u64>::read(buf)?;
-//!
-//!         // Option<u32> requires Cfg = (), uses ReadExt::read
-//!         let name = <Option<u32>>::read(buf)?;
-//!
-//!         // For Vec<u8>, the required config is (RangeCfg, InnerConfig)
-//!         // InnerConfig for u8 is (), so we need (RangeCfg, ())
-//!         // We use ReadRangeExt::read_range which handles the () for us.
-//!         // The RangeCfg limits the vector length using our ItemConfig.
-//!         let metadata_range = 0..=cfg.max_metadata_len; // Create the RangeCfg
-//!         let metadata = <Vec<u8>>::read_range(buf, metadata_range)?;
-//!
-//!         Ok(Self { id, name, metadata })
-//!     }
 //! }
 //!
 //! // Now you can use Encode and Decode:
@@ -233,6 +173,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+// Derive expansions use this path both inside the library and in consumer targets.
+#[allow(unused_extern_crates)]
+extern crate self as commonware_codec;
+
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
@@ -251,7 +195,10 @@ commonware_macros::stability_scope!(BETA {
 
     // Re-export main types and traits
     pub use codec::*;
-    pub use commonware_codec_macros::FixedArray;
+    mod derive;
+    pub use derive::*;
+    #[doc(hidden)]
+    pub use bytes::BufMut as __BufMut;
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
@@ -259,6 +206,9 @@ commonware_macros::stability_scope!(BETA {
 });
 
 commonware_macros::stability_scope!(ALPHA {
+    #[cfg(test)]
+    mod derive_tests;
+
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 

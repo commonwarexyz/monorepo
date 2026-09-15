@@ -78,10 +78,10 @@ mod tests {
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     };
-    use bytes::{BufMut, Bytes};
+    use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
+    use commonware_codec::{DecodeExt as _, Encode, FixedSize, Read, Write};
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -7903,8 +7903,14 @@ mod tests {
     }
 
     /// Counts full block clones through a zero-byte mock context.
-    #[derive(Debug, Default)]
-    struct CloneCounter(Arc<AtomicUsize>);
+    #[derive(Debug, Default, Read, Write)]
+    struct CloneCounter(
+        #[codec(
+            encode_with = {},
+            read_with = { Ok(Arc::new(AtomicUsize::new(0))) }
+        )]
+        Arc<AtomicUsize>,
+    );
 
     impl Clone for CloneCounter {
         fn clone(&self) -> Self {
@@ -7915,18 +7921,6 @@ mod tests {
 
     impl FixedSize for CloneCounter {
         const SIZE: usize = 0;
-    }
-
-    impl Write for CloneCounter {
-        fn write(&self, _: &mut impl BufMut) {}
-    }
-
-    impl Read for CloneCounter {
-        type Cfg = ();
-
-        fn read_cfg(_: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-            Ok(Self::default())
-        }
     }
 
     #[test_traced("WARN")]

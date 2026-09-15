@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use commonware_codec::{
     Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
     Read, ReadExt, Write,
@@ -81,9 +81,10 @@ const fn lg_len_for_players(num_players: u32) -> u8 {
 /// [`Setup`] can be reused across any number of DKG/Reshare rounds, and is
 /// intended to be shared by all participants (it is publicly derivable and
 /// contains no secrets).
+#[derive(Write, EncodeSize)]
 pub struct Setup {
-    inner: circuit::Setup<G1>,
     max_players: NonZeroU32,
+    inner: circuit::Setup<G1>,
 }
 
 impl Setup {
@@ -118,19 +119,6 @@ impl Setup {
     }
 }
 
-impl Write for Setup {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.max_players.get().write(buf);
-        self.inner.write(buf);
-    }
-}
-
-impl EncodeSize for Setup {
-    fn encode_size(&self) -> usize {
-        self.max_players.get().encode_size() + self.inner.encode_size()
-    }
-}
-
 impl Read for Setup {
     /// The exact `max_players` this setup was created for. Decoding fails if
     /// the encoded value does not match.
@@ -153,8 +141,19 @@ impl Read for Setup {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read)]
 pub struct PrivateKey {
+    #[codec(
+        encode_with = {
+            value.expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
+        },
+        encode_size = F::SIZE,
+        read_with = {
+            let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+            let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
+            Ok(Secret::new(x))
+        }
+    )]
     inner: Secret<F>,
 }
 
@@ -299,25 +298,6 @@ impl PrivateKey {
     }
 }
 
-impl Write for PrivateKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inner
-            .expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
-    }
-}
-
-impl Read for PrivateKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
-        Ok(Self {
-            inner: Secret::new(x),
-        })
-    }
-}
-
 impl FixedSize for PrivateKey {
     const SIZE: usize = F::SIZE;
 }
@@ -325,28 +305,9 @@ impl FixedSize for PrivateKey {
 /// A Schnorr signature over the Bandersnatch curve.
 ///
 /// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray, FixedSize, Write, Read)]
 pub struct Signature {
     raw: [u8; G::SIZE + F::SIZE],
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = G::SIZE + F::SIZE;
 }
 
 impl crate::Signature for Signature {}
@@ -383,9 +344,10 @@ impl Display for Signature {
 /// A public key on the Bandersnatch curve, used for signatures and VRF outputs.
 ///
 /// This can be created using [`PrivateKey::public`].
-#[derive(Clone, FixedArray)]
+#[derive(Clone, FixedArray, Write)]
 pub struct PublicKey {
     raw: [u8; G::SIZE],
+    #[codec(encode_with = {})]
     point: G,
 }
 
@@ -425,12 +387,6 @@ impl crate::Verifier for PublicKey {
 }
 
 impl crate::PublicKey for PublicKey {}
-
-impl Write for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
 
 impl Read for PublicKey {
     type Cfg = ();
@@ -503,81 +459,25 @@ impl Display for PublicKey {
 
 /// Proves that the VRF was correctly evaluated for each receiver and that the
 /// resulting outputs are bound to the accompanying [`VrfCommitments`].
-#[derive(Clone)]
+#[derive(Clone, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 struct Proof {
+    #[codec(cfg = &(1usize << lg_len_for_players(cfg.get()), ((), ScalarReadCfg::AllowZero)))]
     circuit_proof: circuit::Proof<Scalar, G1>,
+    #[codec(cfg = &(commonware_codec::RangeCfg::new(0..=cfg.get() as usize), ((), ScalarReadCfg::AllowZero)))]
     pedersen_to_plain: Vec<pedersen_to_plain::Proof<Scalar, G1>>,
-}
-
-impl Write for Proof {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.circuit_proof.write(buf);
-        self.pedersen_to_plain.write(buf);
-    }
-}
-
-impl EncodeSize for Proof {
-    fn encode_size(&self) -> usize {
-        self.circuit_proof.encode_size() + self.pedersen_to_plain.encode_size()
-    }
-}
-
-impl Read for Proof {
-    /// `max_players` bounds both the number of `pedersen_to_plain` proofs (one
-    /// per receiver, which is checked when validating logs for inclusion in
-    /// [`super::observe`] or [`super::play`]) and, via [`lg_len_for_players`],
-    /// the number of IPA rounds admissible in the inner circuit proof.
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
-        let max_proof_len = 1usize << lg_len_for_players(max_players.get());
-        let circuit_proof = circuit::Proof::<Scalar, G1>::read_cfg(
-            buf,
-            &(max_proof_len, ((), ScalarReadCfg::AllowZero)),
-        )?;
-        let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
-        let pedersen_to_plain = Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(
-            buf,
-            &(range, ((), ScalarReadCfg::AllowZero)),
-        )?;
-        Ok(Self {
-            circuit_proof,
-            pedersen_to_plain,
-        })
-    }
-}
-
-impl Write for VrfCommitments {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.commitments.write(buf);
-    }
-}
-
-impl EncodeSize for VrfCommitments {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.commitments.encode_size()
-    }
-}
-
-impl Read for VrfCommitments {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
-        let proof = Proof::read_cfg(buf, max_players)?;
-        let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
-        let commitments = Read::read_cfg(buf, &(range, (), ()))?;
-        Ok(Self { proof, commitments })
-    }
 }
 
 /// Commitments to the output of [`PrivateKey::vrf_recv`] for several receivers.
 ///
 /// These commitments bind the output value for each receiver, without revealing
 /// what it is.
-#[derive(Clone)]
+#[derive(Clone, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub struct VrfCommitments {
+    #[codec(cfg = cfg)]
     proof: Proof,
+    #[codec(cfg = &(commonware_codec::RangeCfg::new(0..=cfg.get() as usize), (), ()))]
     commitments: Map<PublicKey, G1>,
 }
 

@@ -5,7 +5,7 @@ use crate::{
     merkle::{Graftable, Location, storage::Storage},
     qmdb::Error,
 };
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, util::at_least};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
@@ -16,12 +16,17 @@ use tracing::debug;
 /// `C` stores the bitmap chunk. Arrays provide fixed-size storage, while [Bytes] supports a
 /// chunk size supplied when decoding. Both representations encode the chunk without a length
 /// prefix.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
+#[codec(write_bounds(C: AsRef<[u8]>), encode_size_bounds(C: AsRef<[u8]>))]
 pub struct Proof<F: Graftable, D: Digest, C> {
     /// The location of the operation in the database.
     pub loc: Location<F>,
 
     /// The status bitmap chunk containing the operation's activity bit.
+    #[codec(
+        encode_with = { buf.put_slice(value.as_ref()); },
+        encode_size = value.as_ref().len()
+    )]
     pub chunk: C,
 
     /// The range proof authenticating the operation and its activity status.
@@ -80,20 +85,6 @@ impl<F: Graftable, D: Digest, C: AsRef<[u8]>> Proof<F, D, C> {
             chunk.len(),
             root,
         )
-    }
-}
-
-impl<F: Graftable, D: Digest, C: AsRef<[u8]>> Write for Proof<F, D, C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.loc.write(buf);
-        buf.put_slice(self.chunk.as_ref());
-        self.range_proof.write(buf);
-    }
-}
-
-impl<F: Graftable, D: Digest, C: AsRef<[u8]>> EncodeSize for Proof<F, D, C> {
-    fn encode_size(&self) -> usize {
-        self.loc.encode_size() + self.chunk.as_ref().len() + self.range_proof.encode_size()
     }
 }
 

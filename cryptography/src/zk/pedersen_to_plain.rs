@@ -97,8 +97,7 @@
 //! ```
 
 use crate::transcript::Transcript;
-use bytes::BufMut;
-use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
     synthetic::Synthetic,
@@ -109,39 +108,13 @@ use rand_core::CryptoRng;
 ///
 /// The blinding generator must not have a known discrete-log relationship
 /// relative to the value generator.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg(G::Cfg)]
 pub struct Setup<G> {
     /// The generator used in both the plain and Pedersen commitments.
     pub value_generator: G,
     /// The generator used only for the Pedersen blinding term.
     pub blinding_generator: G,
-}
-
-impl<G: Write> Write for Setup<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.value_generator.write(buf);
-        self.blinding_generator.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Setup<G> {
-    fn encode_size(&self) -> usize {
-        self.value_generator.encode_size() + self.blinding_generator.encode_size()
-    }
-}
-
-impl<G: Read> Read for Setup<G>
-where
-    G::Cfg: Clone,
-{
-    type Cfg = G::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            value_generator: G::read_cfg(buf, cfg)?,
-            blinding_generator: G::read_cfg(buf, cfg)?,
-        })
-    }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
@@ -176,37 +149,11 @@ impl<F> Witness<F> {
 }
 
 /// The public statement for the protocol.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg(G::Cfg)]
 pub struct Claim<G> {
     pub plain: G,
     pub pedersen: G,
-}
-
-impl<G: Write> Write for Claim<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.plain.write(buf);
-        self.pedersen.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Claim<G> {
-    fn encode_size(&self) -> usize {
-        self.plain.encode_size() + self.pedersen.encode_size()
-    }
-}
-
-impl<G: Read> Read for Claim<G>
-where
-    G::Cfg: Clone,
-{
-    type Cfg = G::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            plain: G::read_cfg(buf, cfg)?,
-            pedersen: G::read_cfg(buf, cfg)?,
-        })
-    }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
@@ -223,49 +170,18 @@ where
 }
 
 /// A proof that the plain and Pedersen commitments share the same committed value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg((G::Cfg, F::Cfg))]
 pub struct Proof<F, G> {
+    #[codec(cfg = &cfg.0)]
     plain_mask: G,
+    #[codec(cfg = &cfg.0)]
     pedersen_mask: G,
+    #[codec(cfg = &cfg.1)]
     value_response: F,
+    #[codec(cfg = &cfg.1)]
     blinding_response: F,
 }
-
-impl<F: Write, G: Write> Write for Proof<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.plain_mask.write(buf);
-        self.pedersen_mask.write(buf);
-        self.value_response.write(buf);
-        self.blinding_response.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
-    fn encode_size(&self) -> usize {
-        self.plain_mask.encode_size()
-            + self.pedersen_mask.encode_size()
-            + self.value_response.encode_size()
-            + self.blinding_response.encode_size()
-    }
-}
-
-impl<F: Read, G: Read> Read for Proof<F, G>
-where
-    G::Cfg: Clone,
-    F::Cfg: Clone,
-{
-    type Cfg = (G::Cfg, F::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            plain_mask: G::read_cfg(buf, g_cfg)?,
-            pedersen_mask: G::read_cfg(buf, g_cfg)?,
-            value_response: F::read_cfg(buf, f_cfg)?,
-            blinding_response: F::read_cfg(buf, f_cfg)?,
-        })
-    }
-}
-
 #[cfg(any(test, feature = "arbitrary"))]
 impl<F, G> arbitrary::Arbitrary<'_> for Proof<F, G>
 where

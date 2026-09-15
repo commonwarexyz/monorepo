@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -41,7 +41,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     Context as StorageContext,
@@ -94,47 +94,13 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
 }
 
 /// A block carrying key-value mutations with embedded consensus context.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub(crate) struct Block {
     pub(super) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(super) parent: sha256::Digest,
     pub(super) height: Height,
     pub(super) state_root: sha256::Digest,
     pub(super) range: NonEmptyRange<Location>,
-}
-
-impl Write for Block {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.state_root.write(buf);
-        self.range.write(buf);
-    }
-}
-
-impl EncodeSize for Block {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.state_root.encode_size()
-            + self.range.encode_size()
-    }
-}
-
-impl Read for Block {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            state_root: sha256::Digest::read(buf)?,
-            range: NonEmptyRange::read(buf)?,
-        })
-    }
 }
 
 impl Digestible for Block {

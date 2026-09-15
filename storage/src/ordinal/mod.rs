@@ -145,7 +145,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
@@ -2118,15 +2118,9 @@ mod tests {
     }
 
     /// A dummy value that will fail parsing if the value is 0.
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq, Write, FixedSize)]
     pub struct DummyValue {
         pub value: u64,
-    }
-
-    impl Write for DummyValue {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.value.write(buf);
-        }
     }
 
     impl Read for DummyValue {
@@ -2142,10 +2136,6 @@ mod tests {
             }
             Ok(Self { value })
         }
-    }
-
-    impl FixedSize for DummyValue {
-        const SIZE: usize = u64::SIZE;
     }
 
     #[test_traced]

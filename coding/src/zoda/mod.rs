@@ -115,8 +115,7 @@
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
 
 use crate::{Config, PhasedScheme, ValidatingScheme};
-use bytes::BufMut;
-use commonware_codec::{Buf, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     transcript::{Summary, Transcript, Version},
@@ -192,12 +191,18 @@ mod topology;
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(crate::CodecConfig)]
 pub struct StrongShard<D: Digest> {
+    #[codec(cfg = &RangeCfg::from(..=cfg.maximum_shard_size))]
     data_bytes: usize,
+    #[codec(cfg = &())]
     root: D,
+    #[codec(cfg = &(cfg.maximum_shard_size / F::SIZE))]
     inclusion_proof: Proof<D>,
+    #[codec(cfg = &(cfg.maximum_shard_size / F::SIZE, ()))]
     rows: Matrix<F>,
+    #[codec(cfg = &(cfg.maximum_shard_size / F::SIZE, ()))]
     checksum: Arc<Matrix<F>>,
 }
 
@@ -212,42 +217,6 @@ impl<D: Digest> PartialEq for StrongShard<D> {
 }
 
 impl<D: Digest> Eq for StrongShard<D> {}
-
-impl<D: Digest> EncodeSize for StrongShard<D> {
-    fn encode_size(&self) -> usize {
-        self.data_bytes.encode_size()
-            + self.root.encode_size()
-            + self.inclusion_proof.encode_size()
-            + self.rows.encode_size()
-            + self.checksum.encode_size()
-    }
-}
-
-impl<D: Digest> Write for StrongShard<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.data_bytes.write(buf);
-        self.root.write(buf);
-        self.inclusion_proof.write(buf);
-        self.rows.write(buf);
-        self.checksum.write(buf);
-    }
-}
-
-impl<D: Digest> Read for StrongShard<D> {
-    type Cfg = crate::CodecConfig;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let data_bytes = usize::read_cfg(buf, &RangeCfg::from(..=cfg.maximum_shard_size))?;
-        let max_els = cfg.maximum_shard_size / F::SIZE;
-        Ok(Self {
-            data_bytes,
-            root: ReadExt::read(buf)?,
-            inclusion_proof: Read::read_cfg(buf, &max_els)?,
-            rows: Read::read_cfg(buf, &(max_els, ()))?,
-            checksum: Arc::new(Read::read_cfg(buf, &(max_els, ()))?),
-        })
-    }
-}
 
 #[cfg(feature = "arbitrary")]
 impl<D: Digest> arbitrary::Arbitrary<'_> for StrongShard<D>
@@ -265,9 +234,13 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(crate::CodecConfig)]
 pub struct WeakShard<D: Digest> {
+    // Bound the proof by the worst case where every row is one data element and the sample spans all rows.
+    #[codec(cfg = &F::bits_to_elements(cfg.maximum_shard_size.saturating_mul(8)).max(1))]
     inclusion_proof: Proof<D>,
+    #[codec(cfg = &(F::bits_to_elements(cfg.maximum_shard_size.saturating_mul(8)).max(1), ()))]
     shard: Matrix<F>,
 }
 
@@ -278,33 +251,6 @@ impl<D: Digest> PartialEq for WeakShard<D> {
 }
 
 impl<D: Digest> Eq for WeakShard<D> {}
-
-impl<D: Digest> EncodeSize for WeakShard<D> {
-    fn encode_size(&self) -> usize {
-        self.inclusion_proof.encode_size() + self.shard.encode_size()
-    }
-}
-
-impl<D: Digest> Write for WeakShard<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inclusion_proof.write(buf);
-        self.shard.write(buf);
-    }
-}
-
-impl<D: Digest> Read for WeakShard<D> {
-    type Cfg = crate::CodecConfig;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let max_data_bits = cfg.maximum_shard_size.saturating_mul(8);
-        let max_data_els = F::bits_to_elements(max_data_bits).max(1);
-        Ok(Self {
-            // Worst case: every row is one data element, and the sample size is all rows.
-            inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
-            shard: Read::read_cfg(buf, &(max_data_els, ()))?,
-        })
-    }
-}
 
 #[cfg(feature = "arbitrary")]
 impl<D: Digest> arbitrary::Arbitrary<'_> for WeakShard<D>

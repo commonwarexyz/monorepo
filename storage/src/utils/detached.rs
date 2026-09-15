@@ -1,8 +1,7 @@
 //! Test support for detached strategy jobs.
 
-use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{FixedSize, Read, Write};
 use commonware_parallel::{Rayon, Strategy as _};
-use commonware_runtime::BufMut;
 use commonware_utils::sync::Mutex;
 use std::{
     sync::{Arc, mpsc},
@@ -39,8 +38,12 @@ pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<(
 }
 
 /// An item that preserves `T`'s encoding and reports whether its tracked instance unwound.
+#[derive(Write, Read)]
+#[read_cfg(T::Cfg)]
 pub(crate) struct DropMonitor<T> {
     inner: T,
+    #[codec(encode_with = {})]
+    #[codec(read_with = { Ok(None) })]
     clean_drop: Option<mpsc::Sender<bool>>,
 }
 
@@ -68,20 +71,6 @@ impl<T> DropMonitor<T> {
 
 impl<T: FixedSize> FixedSize for DropMonitor<T> {
     const SIZE: usize = T::SIZE;
-}
-
-impl<T: Write> Write for DropMonitor<T> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inner.write(buf);
-    }
-}
-
-impl<T: Read> Read for DropMonitor<T> {
-    type Cfg = T::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        T::read_cfg(buf, cfg).map(Self::untracked)
-    }
 }
 
 impl<T> Drop for DropMonitor<T> {

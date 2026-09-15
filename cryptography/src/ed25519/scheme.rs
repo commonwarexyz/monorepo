@@ -7,8 +7,7 @@ use alloc::{
     borrow::{Cow, ToOwned},
     vec::Vec,
 };
-use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -29,8 +28,15 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read)]
 pub struct PrivateKey {
+    #[codec(
+        encode_with = { value.expose(|key| key.as_bytes().write(buf)); },
+        read_with = {
+            let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+            Ok(Secret::new(ed_core::SigningKey::from(*raw)))
+        }
+    )]
     key: Secret<ed_core::SigningKey>,
 }
 
@@ -67,24 +73,6 @@ impl Random for PrivateKey {
         Self {
             key: Secret::new(key),
         }
-    }
-}
-
-impl Write for PrivateKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.expose(|key| key.as_bytes().write(buf));
-    }
-}
-
-impl Read for PrivateKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = ed_core::SigningKey::from(*raw);
-        Ok(Self {
-            key: Secret::new(key),
-        })
     }
 }
 
@@ -125,8 +113,21 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray, Write, Read)]
 pub struct PublicKey {
+    #[codec(
+        encode_with = { buf.put_slice(value.as_bytes()); },
+        read_with = {
+            let raw = <[u8; Self::SIZE]>::read(buf)?;
+            let result = VerificationKey::try_from(raw);
+            #[cfg(feature = "std")]
+            let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+            #[cfg(not(feature = "std"))]
+            let key = result
+                .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+            Ok(key)
+        }
+    )]
     key: ed_core::VerificationKey,
 }
 
@@ -157,28 +158,6 @@ impl PublicKey {
         self.key
             .verify(&ed_core::Signature::from(sig.raw), &payload)
             .is_ok()
-    }
-}
-
-impl Write for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.as_bytes().write(buf);
-    }
-}
-
-impl Read for PublicKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = VerificationKey::try_from(raw);
-        #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-
-        Ok(Self { key })
     }
 }
 
@@ -239,31 +218,12 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray, Write, Read, FixedSize)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
 
 impl crate::Signature for Signature {}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = SIGNATURE_LENGTH;
-}
 
 impl Span for Signature {}
 

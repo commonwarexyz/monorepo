@@ -1,31 +1,16 @@
 use crate::{Array, Span};
-use bytes::BufMut;
-use commonware_codec::{Buf, FixedArray, FixedSize, Read, Write};
+use commonware_codec::{FixedArray, FixedSize, Read, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
 
 /// An `Array` implementation for the unit type `()`.
-#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(
+    Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray, Write, Read, FixedSize,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Unit;
-
-impl Write for Unit {
-    fn write(&self, _: &mut impl BufMut) {}
-}
-
-impl FixedSize for Unit {
-    const SIZE: usize = 0;
-}
-
-impl Read for Unit {
-    type Cfg = ();
-
-    fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        Ok(Self)
-    }
-}
 
 impl Debug for Unit {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

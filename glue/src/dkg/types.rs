@@ -1,7 +1,6 @@
 //! Shared types for the DKG module.
 
 use crate::dkg::network::Directory;
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
@@ -43,7 +42,7 @@ pub enum SchemeInfo<V: Variant, P: PublicKey> {
 }
 
 /// Result of a completed DKG/reshare epoch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum EpochOutcome {
     /// The epoch produced a new public output.
@@ -52,42 +51,18 @@ pub enum EpochOutcome {
     Failure,
 }
 
-impl Write for EpochOutcome {
-    fn write(&self, writer: &mut impl BufMut) {
-        let tag = match self {
-            Self::Success => 0u8,
-            Self::Failure => 1u8,
-        };
-        tag.write(writer);
-    }
-}
-
-impl EncodeSize for EpochOutcome {
-    fn encode_size(&self) -> usize {
-        1
-    }
-}
-
-impl Read for EpochOutcome {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Success),
-            1 => Ok(Self::Failure),
-            n => Err(CodecError::InvalidEnum(n)),
-        }
-    }
-}
-
 /// Participants for a DKG/reshare epoch.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub struct Participants<P: PublicKey> {
     /// Peers that distribute dealings in this epoch.
+    #[codec(cfg = &(RangeCfg::new(0..=cfg.get() as usize), ()))]
     pub dealers: Set<P>,
     /// Peers that receive shares in this epoch.
+    #[codec(cfg = &(RangeCfg::new(0..=cfg.get() as usize), ()))]
     pub players: Set<P>,
     /// Players of the next epoch, tracked early for connectivity.
+    #[codec(cfg = &(RangeCfg::new(0..=cfg.get() as usize), ()))]
     pub next_players: Set<P>,
 }
 
@@ -215,34 +190,6 @@ const fn dealer_log_slots(blocks_per_epoch: NonZeroU64) -> u64 {
         return 0;
     }
     blocks.saturating_sub(blocks / 2 + 1)
-}
-
-impl<P: PublicKey> Write for Participants<P> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.dealers.write(writer);
-        self.players.write(writer);
-        self.next_players.write(writer);
-    }
-}
-
-impl<P: PublicKey> EncodeSize for Participants<P> {
-    fn encode_size(&self) -> usize {
-        self.dealers.encode_size() + self.players.encode_size() + self.next_players.encode_size()
-    }
-}
-
-impl<P: PublicKey> Read for Participants<P> {
-    /// Maximum number of participants accepted in any single set.
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(reader: &mut impl Buf, max: &Self::Cfg) -> Result<Self, CodecError> {
-        let cfg = (RangeCfg::new(0..=max.get() as usize), ());
-        Ok(Self {
-            dealers: Set::read_cfg(reader, &cfg)?,
-            players: Set::read_cfg(reader, &cfg)?,
-            next_players: Set::read_cfg(reader, &cfg)?,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -490,7 +437,7 @@ where
 /// [`probe`](crate::dkg::probe) artifact, or persisted
 /// [`state_sync`](crate::dkg::state_sync) material) can activate the epoch's
 /// peers without access to application state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
 pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// Whether or not the reshare ceremony in this epoch was successful.
     pub outcome: EpochOutcome,
@@ -515,28 +462,6 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
             players: self.players.clone(),
             next_players: self.next_players.clone(),
         }
-    }
-}
-
-impl<V: Variant, P: PublicKey, D: Directory<P>> Write for EpochInfo<V, P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.outcome.write(buf);
-        self.epoch.write(buf);
-        self.output.write(buf);
-        self.players.write(buf);
-        self.next_players.write(buf);
-        self.directory.write(buf);
-    }
-}
-
-impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D> {
-    fn encode_size(&self) -> usize {
-        self.outcome.encode_size()
-            + self.epoch.encode_size()
-            + self.output.encode_size()
-            + self.players.encode_size()
-            + self.next_players.encode_size()
-            + self.directory.encode_size()
     }
 }
 
@@ -611,12 +536,15 @@ where
 /// finalized dealer logs. The final block of an epoch instead carries the
 /// canonical [`EpochInfo`] for the following epoch.
 #[allow(clippy::large_enum_variant)]
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds())]
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// A finalized signed dealer log for inclusion mid-epoch.
-    DealerLog(SignedDealerLog<V, C>),
+    DealerLog(#[codec(cfg = &cfg.0)] SignedDealerLog<V, C>),
     /// The canonical public epoch artifact for the next epoch, carried by the
     /// final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey, D>),
+    EpochInfo(#[codec(cfg = &cfg)] EpochInfo<V, C::PublicKey, D>),
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
@@ -640,44 +568,6 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V,
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::DealerLog(log) => {
-                0u8.write(writer);
-                log.write(writer);
-            }
-            Self::EpochInfo(info) => {
-                1u8.write(writer);
-                info.write(writer);
-            }
-        }
-    }
-}
-
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::DealerLog(log) => log.encode_size(),
-            Self::EpochInfo(info) => info.encode_size(),
-        }
-    }
-}
-
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
-    /// Maximum entries accepted in each participant set and maximum supported
-    /// sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
-            1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
-            n => Err(CodecError::InvalidEnum(n)),
-        }
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
     for Payload<V, C, D>
@@ -695,56 +585,13 @@ where
 }
 
 /// Wire message type for DKG protocol communication.
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub enum Message<V: Variant, P: PublicKey> {
     /// A dealer message containing public and private components for a player.
-    Dealer(DealerPubMsg<V>, DealerPrivMsg),
+    Dealer(DealerPubMsg<V>, #[codec(cfg = &())] DealerPrivMsg),
     /// A player acknowledgment sent back to a dealer.
-    Ack(PlayerAck<P>),
-}
-
-impl<V: Variant, P: PublicKey> Write for Message<V, P> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Dealer(pub_msg, priv_msg) => {
-                0u8.write(writer);
-                pub_msg.write(writer);
-                priv_msg.write(writer);
-            }
-            Self::Ack(ack) => {
-                1u8.write(writer);
-                ack.write(writer);
-            }
-        }
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
-            Self::Ack(ack) => ack.encode_size(),
-        }
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for Message<V, P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let tag = u8::read(reader)?;
-        match tag {
-            0 => {
-                let pub_msg = DealerPubMsg::read_cfg(reader, cfg)?;
-                let priv_msg = DealerPrivMsg::read(reader)?;
-                Ok(Self::Dealer(pub_msg, priv_msg))
-            }
-            1 => {
-                let ack = PlayerAck::read(reader)?;
-                Ok(Self::Ack(ack))
-            }
-            n => Err(CodecError::InvalidEnum(n)),
-        }
-    }
+    Ack(#[codec(cfg = &())] PlayerAck<P>),
 }
 
 #[cfg(feature = "arbitrary")]

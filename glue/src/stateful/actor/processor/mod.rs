@@ -1559,7 +1559,7 @@ mod tests {
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
-    use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_codec::{Encode, EncodeSize, Read, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
         marshal::ancestry::{Ancestry, BlockProvider},
@@ -1650,50 +1650,13 @@ mod tests {
         assert_eq!(boundary.disposition(&progress), Disposition::Reject,);
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
     struct Block {
         context: TestContext,
         parent: Digest,
         height: Height,
         state_root: Digest,
         range: NonEmptyRange<Location>,
-    }
-
-    impl Write for Block {
-        fn write(&self, buf: &mut impl commonware_runtime::BufMut) {
-            self.context.write(buf);
-            self.parent.write(buf);
-            self.height.write(buf);
-            self.state_root.write(buf);
-            self.range.write(buf);
-        }
-    }
-
-    impl EncodeSize for Block {
-        fn encode_size(&self) -> usize {
-            self.context.encode_size()
-                + self.parent.encode_size()
-                + self.height.encode_size()
-                + self.state_root.encode_size()
-                + self.range.encode_size()
-        }
-    }
-
-    impl Read for Block {
-        type Cfg = ();
-
-        fn read_cfg(
-            buf: &mut impl commonware_codec::Buf,
-            _: &Self::Cfg,
-        ) -> Result<Self, CodecError> {
-            Ok(Self {
-                context: TestContext::read(buf)?,
-                parent: Digest::read(buf)?,
-                height: Height::read(buf)?,
-                state_root: Digest::read(buf)?,
-                range: commonware_utils::range::NonEmptyRange::read(buf)?,
-            })
-        }
     }
 
     impl Digestible for Block {

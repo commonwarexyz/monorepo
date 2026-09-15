@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input, Proposed,
     db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     convert::Infallible,
@@ -180,9 +180,14 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub(crate) struct TestBlock {
     context: SimplexContext<Sha256Digest, ed25519::PublicKey>,
+    #[codec(
+        encode_with = { value.get().write(buf); },
+        encode_size = 8,
+        read_with = { Ok(Height::new(u64::read_cfg(buf, &())?)) }
+    )]
     height: Height,
     digest: Sha256Digest,
 }
@@ -214,36 +219,6 @@ impl TestBlock {
             height,
             digest: Sha256Digest::from([digest_byte; 32]),
         }
-    }
-}
-
-impl Write for TestBlock {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        buf.put_u64(self.height.get());
-        buf.put_slice(self.digest.as_ref());
-    }
-}
-
-impl EncodeSize for TestBlock {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size() + 8 + 32
-    }
-}
-
-impl Read for TestBlock {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let context = SimplexContext::read(buf)?;
-        let height = Height::new(buf.get_u64());
-        let mut digest = [0u8; 32];
-        buf.copy_to_slice(&mut digest);
-        Ok(Self {
-            context,
-            height,
-            digest: Sha256Digest::from(digest),
-        })
     }
 }
 

@@ -25,7 +25,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Decode as _, EncodeSize, Read, Write};
+use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -34,44 +34,17 @@ use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// An applied state persisted by the witness journal.
-#[derive(Clone)]
+#[derive(Clone, Write, EncodeSize, Read)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
+    #[codec(cfg = &(..).into())]
     pub(crate) op_bytes: Bytes,
     /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
     /// [`Family::nodes_to_pin`].
+    #[codec(cfg = &((..=MAX_PINNED_NODES).into(), ()))]
     pub(crate) pinned_nodes: Vec<D>,
-}
-
-impl<F: Family, D: Digest> EncodeSize for Witness<F, D> {
-    fn encode_size(&self) -> usize {
-        self.op_bytes.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
-    }
-}
-
-impl<F: Family, D: Digest> Write for Witness<F, D> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.op_bytes.write(buf);
-        self.size.write(buf);
-        self.pinned_nodes.write(buf);
-    }
-}
-
-impl<F: Family, D: Digest> Read for Witness<F, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Bytes::read_cfg(buf, &(..).into())?;
-        let size = Location::<F>::read_cfg(buf, &())?;
-        let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
-        Ok(Self {
-            op_bytes,
-            size,
-            pinned_nodes,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]

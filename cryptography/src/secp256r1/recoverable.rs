@@ -6,10 +6,8 @@ cfg_if::cfg_if! {
     }
 }
 use super::common::{
-    CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
-    impl_private_key_wrapper, impl_public_key_wrapper,
+    CURVE_NAME, PrivateKeyInner, PublicKeyInner, impl_private_key_wrapper, impl_public_key_wrapper,
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{Array, Span, union_unique};
@@ -25,7 +23,7 @@ const BASE_SIGNATURE_LENGTH: usize = 64; // R || S
 const SIGNATURE_LENGTH: usize = 1 + BASE_SIGNATURE_LENGTH; // RecoveryId || R || S
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Write, Read, FixedSize)]
 pub struct PrivateKey(PrivateKeyInner);
 
 impl_private_key_wrapper!(PrivateKey);
@@ -71,7 +69,7 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray, Write, Read, FixedSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -96,10 +94,12 @@ impl PublicKey {
 }
 
 /// Secp256r1 Signature with recovery ID.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, PartialEq, FixedArray, Write)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
+    #[codec(encode_with = {})]
     recovery_id: RecoveryId,
+    #[codec(encode_with = {})]
     signature: p256::ecdsa::Signature,
 }
 
@@ -135,12 +135,6 @@ impl crate::Recoverable for Signature {
 
     fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey> {
         self.recover_signer_inner(Some(namespace), msg)
-    }
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
     }
 }
 
@@ -242,7 +236,10 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Recoverable, Signer as _, Verifier as _, secp256r1::common::tests::*};
+    use crate::{
+        Recoverable, Signer as _, Verifier as _,
+        secp256r1::common::{PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, tests::*},
+    };
     use commonware_codec::{Copying, DecodeExt, Encode};
     use ecdsa::RecoveryId;
     use p256::elliptic_curve::scalar::IsHigh;

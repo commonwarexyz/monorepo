@@ -5,8 +5,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum cardinality before converting to a bitmap container.
@@ -16,9 +15,14 @@ pub const MAX_CARDINALITY: usize = 4096;
 ///
 /// This is efficient for containers with cardinality <= 4096, as it uses
 /// less memory than a full bitmap (which requires 8KB regardless of density).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct Array {
     /// Sorted values stored in the container.
+    #[codec(read_with = {
+        let values = Vec::<u16>::read_cfg(buf, &(RangeCfg::new(..=MAX_CARDINALITY), ()))?;
+        validate_values(&values)?;
+        Ok(values)
+    })]
     values: Vec<u16>,
 }
 
@@ -480,29 +484,6 @@ impl Array {
             }
         }
         false
-    }
-}
-
-impl Write for Array {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.values.as_slice().write(buf);
-    }
-}
-
-impl EncodeSize for Array {
-    fn encode_size(&self) -> usize {
-        self.values.as_slice().encode_size()
-    }
-}
-
-impl Read for Array {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let values = Vec::<u16>::read_cfg(buf, &(RangeCfg::new(..=MAX_CARDINALITY), ()))?;
-
-        validate_values(&values)?;
-        Ok(Self::from(values))
     }
 }
 
