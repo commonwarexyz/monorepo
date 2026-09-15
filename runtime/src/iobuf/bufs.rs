@@ -1169,6 +1169,36 @@ impl bytes::Buf for IoBufsMut {
 // SAFETY: Delegates to IoBufMut which implements BufMut safely.
 unsafe impl BufMut for IoBufsMut {
     #[inline]
+    fn put_slice(&mut self, mut src: &[u8]) {
+        if src.is_empty() {
+            return;
+        }
+
+        let available = self.remaining_mut();
+        if src.len() > available {
+            panic_advance(src.len(), available);
+        }
+
+        let (first, second): (&mut [IoBufMut], &mut [IoBufMut]) = match &mut self.inner {
+            IoBufsMutInner::Single(buf) => (std::slice::from_mut(buf), &mut []),
+            IoBufsMutInner::Pair(bufs) => (bufs, &mut []),
+            IoBufsMutInner::Triple(bufs) => (bufs, &mut []),
+            IoBufsMutInner::Chunked(bufs) => bufs.as_mut_slices(),
+        };
+
+        for buf in first.iter_mut().chain(second.iter_mut()) {
+            let count = src.len().min(buf.remaining_mut());
+            if count != 0 {
+                buf.put_slice(&src[..count]);
+                src = &src[count..];
+                if src.is_empty() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[inline]
     fn remaining_mut(&self) -> usize {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.remaining_mut(),
@@ -1656,7 +1686,10 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -2519,6 +2552,64 @@ mod tests {
         let mut coalesced = bufs.coalesce();
         coalesced.as_mut()[..5].copy_from_slice(b"hello");
         assert_eq!(&coalesced.as_ref()[..5], b"hello");
+    }
+
+    fn writable_chunks(count: usize) -> IoBufsMut {
+        let mut chunks = VecDeque::with_capacity(count);
+        for index in 0..count {
+            let mut chunk = IoBufMut::with_capacity(4);
+            let initialized = match index % 3 {
+                0 => 0,
+                1 => 4,
+                _ => 2,
+            };
+            chunk.put_bytes(0xEE, initialized);
+            chunks.push_back(chunk);
+        }
+        if count >= 4 {
+            let first = chunks.pop_front().unwrap();
+            chunks.push_back(first);
+            assert!(!chunks.as_slices().1.is_empty());
+            IoBufsMut {
+                inner: IoBufsMutInner::Chunked(chunks),
+            }
+        } else {
+            IoBufsMut::from_chunks_iter(chunks)
+        }
+    }
+
+    fn mutable_chunk_state(bufs: &mut IoBufsMut) -> Vec<(Vec<u8>, usize)> {
+        let mut state = Vec::new();
+        bufs.for_each_chunk_mut(|chunk| state.push((chunk.as_ref().to_vec(), chunk.capacity())));
+        state
+    }
+
+    #[test]
+    fn test_iobufsmut_put_slice_matches_chunked_put() {
+        for count in 0..=8 {
+            let available = writable_chunks(count).remaining_mut();
+            for len in 0..=available {
+                let mut actual = writable_chunks(count);
+                let mut expected = writable_chunks(count);
+                let input: Vec<_> = (0..len as u8).collect();
+                actual.put_slice(&input);
+                expected.put(input.as_slice());
+                assert_eq!(
+                    mutable_chunk_state(&mut actual),
+                    mutable_chunk_state(&mut expected)
+                );
+                assert_eq!(actual.remaining_mut(), available - len);
+                assert_eq!(actual.is_empty(), actual.remaining() == 0);
+                assert_eq!(actual.has_remaining(), actual.remaining() != 0);
+            }
+
+            let mut bufs = writable_chunks(count);
+            let before = mutable_chunk_state(&mut bufs);
+            let oversized = vec![0; available + 1];
+            assert!(catch_unwind(AssertUnwindSafe(|| bufs.put_slice(&oversized))).is_err());
+            assert_eq!(mutable_chunk_state(&mut bufs), before);
+            assert_eq!(bufs.remaining_mut(), available);
+        }
     }
 
     #[test]
