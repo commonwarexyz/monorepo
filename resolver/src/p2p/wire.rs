@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -26,43 +26,21 @@ where
 }
 
 /// Represents the contents of a message sent between peers.
-#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
+#[codec(invalid_tag = { Error::Invalid("Payload", "Invalid payload type") })]
 pub enum Payload<Key: Span> {
     // Request is a request for a response.
     Request(Key),
 
     // Response is a response to a request.
-    Response(Bytes),
+    // The P2P connection bounds the input buffer, so an unbounded codec
+    // configuration cannot cause Bytes to allocate beyond the message.
+    Response(#[codec(cfg = &(..).into())] Bytes),
 
     // A response that indicates an unspecified error.
     //
     // This allows the requester to handle the error more quickly than timing out.
     Error,
-}
-
-impl<Key: Span> Read for Payload<Key> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let payload_type = u8::read(buf)?;
-        match payload_type {
-            0 => {
-                let key = Key::read(buf)?;
-                Ok(Self::Request(key))
-            }
-            1 => {
-                // The maximum length of a message is already bounded by the P2P connection.
-                // Since the Bytes type will not allocate more memory than the buffer size,
-                // we can safely read the bytes with no limit. If an attacker encodes the length of
-                // the bytes with a value greater than the buffer size, the read will fail without
-                // allocating more memory.
-                let data = Bytes::read_cfg(buf, &(..).into())?;
-                Ok(Self::Response(data))
-            }
-            2 => Ok(Self::Error),
-            _ => Err(Error::Invalid("Payload", "Invalid payload type")),
-        }
-    }
 }
 
 #[cfg(feature = "arbitrary")]

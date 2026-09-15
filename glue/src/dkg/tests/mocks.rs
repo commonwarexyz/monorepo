@@ -268,7 +268,7 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
     context: C,
@@ -276,7 +276,8 @@ pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
     height: Height,
     #[codec(
         encode_with = { UInt(*value).write(buf); },
-        encode_size = UInt(*value).encode_size()
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::<u64>::read(buf)?.into()) }
     )]
     timestamp: u64,
     #[codec(
@@ -286,11 +287,18 @@ pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
                 payload.write(buf);
             }
         },
-        encode_size = value.is_some().encode_size() + value.as_ref().map_or(0, EncodedPayload::encode_size)
+        encode_size = value.is_some().encode_size() + value.as_ref().map_or(0, EncodedPayload::encode_size),
+        read_with = {
+            if bool::read(buf)? {
+                Ok(Some(EncodedPayload::read(buf)?))
+            } else {
+                Ok(None)
+            }
+        }
     )]
     payload: Option<EncodedPayload>,
     digest: D,
-    #[codec(encode_with = {}, encode_size = 0)]
+    #[codec(encode_with = {}, encode_size = 0, read_with = { Ok(PhantomData) })]
     _directory: PhantomData<Dir>,
 }
 
@@ -429,26 +437,6 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
             digest,
             _directory: PhantomData,
         }
-    }
-}
-
-impl<D: Digest, C: Read<Cfg = ()>, Dir> Read for MockBlock<D, C, Dir> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: C::read(reader)?,
-            parent: D::read(reader)?,
-            height: Height::read(reader)?,
-            timestamp: UInt::read(reader)?.into(),
-            payload: if bool::read(reader)? {
-                Some(EncodedPayload::read(reader)?)
-            } else {
-                None
-            },
-            digest: D::read(reader)?,
-            _directory: PhantomData,
-        })
     }
 }
 

@@ -6,7 +6,7 @@ use crate::{
     types::{Epoch, Height},
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, Write};
 use commonware_cryptography::{
     Digest,
     certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
@@ -287,32 +287,21 @@ where
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
-#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Write, Read, EncodeSize)]
+#[codec(
+    read_cfg = <S::Certificate as Read>::Cfg,
+    invalid_tag = { CodecError::Invalid("consensus::aggregation::Activity", "Invalid type") }
+)]
+#[codec(read_bounds())]
 pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
-    Ack(Ack<S, D>),
+    Ack(#[codec(cfg = &())] Ack<S, D>),
 
     /// Certified an [Item].
     Certified(Certificate<S, D>),
 
     /// Moved the tip to a new height.
-    Tip(Height),
-}
-
-impl<S: Scheme, D: Digest> Read for Activity<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Ack(Ack::read(reader)?)),
-            1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
-            2 => Ok(Self::Tip(Height::read(reader)?)),
-            _ => Err(CodecError::Invalid(
-                "consensus::aggregation::Activity",
-                "Invalid type",
-            )),
-        }
-    }
+    Tip(#[codec(cfg = &())] Height),
 }
 
 #[cfg(feature = "arbitrary")]

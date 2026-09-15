@@ -536,13 +536,15 @@ where
 /// finalized dealer logs. The final block of an epoch instead carries the
 /// canonical [`EpochInfo`] for the following epoch.
 #[allow(clippy::large_enum_variant)]
-#[derive(Write, EncodeSize)]
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds())]
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// A finalized signed dealer log for inclusion mid-epoch.
-    DealerLog(SignedDealerLog<V, C>),
+    DealerLog(#[codec(cfg = &cfg.0)] SignedDealerLog<V, C>),
     /// The canonical public epoch artifact for the next epoch, carried by the
     /// final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey, D>),
+    EpochInfo(#[codec(cfg = &cfg)] EpochInfo<V, C::PublicKey, D>),
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
@@ -565,20 +567,6 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V,
 }
 
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
-
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
-    /// Maximum entries accepted in each participant set and maximum supported
-    /// sharing mode version.
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
-            1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
-            n => Err(CodecError::InvalidEnum(n)),
-        }
-    }
-}
 
 #[cfg(feature = "arbitrary")]
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>

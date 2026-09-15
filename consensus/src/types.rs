@@ -38,7 +38,7 @@
 //! to prevent accidental type misuse.
 
 use crate::{Epochable, Viewable};
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -53,10 +53,16 @@ use core::{
 ///
 /// An epoch increments when the validator set changes, providing a reconfiguration boundary.
 /// All consensus operations within an epoch use the same validator set.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Epoch(
-    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     u64,
 );
 
@@ -122,15 +128,6 @@ impl Display for Epoch {
     }
 }
 
-impl Read for Epoch {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        let value: u64 = UInt::read(buf)?.into();
-        Ok(Self(value))
-    }
-}
-
 impl From<Epoch> for U64 {
     fn from(epoch: Epoch) -> Self {
         Self::from(epoch.get())
@@ -140,10 +137,16 @@ impl From<Epoch> for U64 {
 /// Represents a sequential position in a chain or sequence.
 ///
 /// Height is a monotonically increasing counter. Height zero is the genesis block.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Height(
-    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     u64,
 );
 
@@ -218,15 +221,6 @@ impl Display for Height {
     }
 }
 
-impl Read for Height {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        let value: u64 = UInt::read(buf)?.into();
-        Ok(Self(value))
-    }
-}
-
 impl From<Height> for U64 {
     fn from(height: Height) -> Self {
         Self::from(height.get())
@@ -237,10 +231,16 @@ impl From<Height> for U64 {
 ///
 /// Views represent individual consensus rounds within an epoch. Each view corresponds to
 /// one attempt to reach consensus on a proposal.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct View(
-    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     u64,
 );
 
@@ -434,15 +434,6 @@ impl TracedExt for Height {
 impl TracedExt for View {
     fn traced(self) -> i64 {
         self.0.traced()
-    }
-}
-
-impl Read for View {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        let value: u64 = UInt::read(buf)?.into();
-        Ok(Self(value))
     }
 }
 

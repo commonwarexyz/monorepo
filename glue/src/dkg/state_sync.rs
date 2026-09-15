@@ -7,9 +7,7 @@
 //! beyond the synced epoch.
 
 use crate::dkg::{network::Directory, types::EpochInfo};
-use commonware_codec::{
-    Buf, Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write,
-};
+use commonware_codec::{Decode as _, Encode as _, EncodeSize, Read, Write};
 use commonware_consensus::{
     Epochable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -58,7 +56,9 @@ pub struct Config {
 ///
 /// The probe fixes the floor and the epoch info atomically, so the info
 /// always describes the epoch containing the floor.
-#[derive(Write, EncodeSize)]
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg((EpochInfoCodecConfig, <S::Certificate as Read>::Cfg))]
+#[codec(read_bounds())]
 pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
@@ -70,9 +70,11 @@ where
     ///
     /// Carries the epoch's transport directory, so a state-synced node can
     /// activate the epoch's peers without any application state.
+    #[codec(cfg = &cfg.0)]
     pub info: EpochInfo<V, S::PublicKey, Dir>,
 
     /// Finalized floor selected for application state sync.
+    #[codec(cfg = &cfg.1)]
     pub floor: Finalization<S, D>,
 }
 
@@ -126,26 +128,6 @@ where
     V: Variant,
     Dir: Directory<S::PublicKey>,
 {
-}
-
-impl<S, D, V, Dir> Read for StateSync<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
-
-    fn read_cfg(
-        reader: &mut impl Buf,
-        (epoch_info, certificate): &Self::Cfg,
-    ) -> Result<Self, CodecError> {
-        Ok(Self {
-            info: EpochInfo::read_cfg(reader, epoch_info)?,
-            floor: Finalization::read_cfg(reader, certificate)?,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]

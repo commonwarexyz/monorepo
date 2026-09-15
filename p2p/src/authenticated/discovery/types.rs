@@ -1,8 +1,5 @@
 use crate::{Ingress, authenticated::data::Data};
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg,
-    varint::UInt,
-};
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write, config::RangeCfg, varint::UInt};
 use commonware_cryptography::{PublicKey, Signer};
 use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
@@ -88,13 +85,15 @@ where
 /// BitVec is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
-#[derive(Clone, Debug, PartialEq, EncodeSize, Write)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write, Read)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[read_cfg(u64)]
 pub struct BitVec {
     /// The index that the bit vector applies to.
     #[codec(
         encode_with = { UInt(*value).write(buf); },
-        encode_size = UInt(*value).encode_size()
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
     )]
     pub index: u64,
 
@@ -102,21 +101,11 @@ pub struct BitVec {
     pub bits: BitMap,
 }
 
-impl Read for BitVec {
-    type Cfg = u64;
-
-    fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, CodecError> {
-        let index = UInt::read(buf)?.into();
-        let bits = BitMap::read_cfg(buf, max_bits)?;
-        Ok(Self { index, bits })
-    }
-}
-
 /// A signed message from a peer attesting to its own ingress address and public key at a given time.
 ///
 /// This is used to share the peer's ingress address and public key with other peers in a verified
 /// manner.
-#[derive(Clone, Debug, EncodeSize, Write)]
+#[derive(Clone, Debug, EncodeSize, Write, Read)]
 pub struct Info<C: PublicKey> {
     /// The ingress address of the peer (how to dial them).
     pub ingress: Ingress,
@@ -124,7 +113,8 @@ pub struct Info<C: PublicKey> {
     /// The timestamp (epoch milliseconds) at which the ingress was signed over.
     #[codec(
         encode_with = { UInt(*value).write(buf); },
-        encode_size = UInt(*value).encode_size()
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
     )]
     pub timestamp: u64,
 
@@ -170,23 +160,6 @@ impl<C: PublicKey> Info<C> {
             public_key: signer.public_key(),
             signature,
         }
-    }
-}
-
-impl<C: PublicKey> Read for Info<C> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let ingress = Ingress::read(buf)?;
-        let timestamp = UInt::read(buf)?.into();
-        let public_key = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
-        Ok(Self {
-            ingress,
-            timestamp,
-            public_key,
-            signature,
-        })
     }
 }
 
@@ -283,7 +256,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 mod tests {
     use super::*;
     use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::{Decode, DecodeExt, Error as CodecError};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};

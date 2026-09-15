@@ -611,7 +611,9 @@ impl<D: Digest> Viewable for Subject<'_, D> {
 }
 
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
-#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Write, Read, EncodeSize)]
+#[codec(invalid_tag = { Error::Invalid("consensus::simplex::Vote", "Invalid type") })]
+#[codec(read_bounds())]
 pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -619,29 +621,6 @@ pub enum Vote<S: Scheme, D: Digest> {
     Nullify(Nullify<S>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
-}
-
-impl<S: Scheme, D: Digest> Read for Vote<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::read(reader)?;
-                Ok(Self::Notarize(v))
-            }
-            1 => {
-                let v = Nullify::read(reader)?;
-                Ok(Self::Nullify(v))
-            }
-            2 => {
-                let v = Finalize::read(reader)?;
-                Ok(Self::Finalize(v))
-            }
-            _ => Err(Error::Invalid("consensus::simplex::Vote", "Invalid type")),
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Epochable for Vote<S, D> {
@@ -691,7 +670,12 @@ where
 }
 
 /// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
-#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Write, Read, EncodeSize)]
+#[codec(
+    read_cfg = <S::Certificate as Read>::Cfg,
+    invalid_tag = { Error::Invalid("consensus::simplex::Certificate", "Invalid type") }
+)]
+#[codec(read_bounds())]
 pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
@@ -748,32 +732,6 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Self::Notarization(v))
-            }
-            1 => {
-                let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Self::Nullification(v))
-            }
-            2 => {
-                let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Self::Finalization(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Certificate",
-                "Invalid type",
-            )),
-        }
-    }
-}
-
 impl<S: Scheme, D: Digest> Epochable for Certificate<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
@@ -821,65 +779,27 @@ where
 }
 
 /// Artifact represents all consensus artifacts (votes and certificates) for storage.
-#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Write, Read, EncodeSize)]
+#[codec(
+    read_cfg = <S::Certificate as Read>::Cfg,
+    invalid_tag = { Error::Invalid("consensus::simplex::Artifact", "Invalid type") }
+)]
+#[codec(read_bounds())]
 pub enum Artifact<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
-    Notarize(Notarize<S, D>),
+    Notarize(#[codec(cfg = &())] Notarize<S, D>),
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
     /// A notarization was locally certified.
-    Certification(Round, bool),
+    Certification(#[codec(cfg = &())] Round, #[codec(cfg = &())] bool),
     /// A validator's nullify vote used to skip the current view.
-    Nullify(Nullify<S>),
+    Nullify(#[codec(cfg = &())] Nullify<S>),
     /// A recovered certificate for a nullification.
     Nullification(Nullification<S>),
     /// A validator's finalize vote over a proposal.
-    Finalize(Finalize<S, D>),
+    Finalize(#[codec(cfg = &())] Finalize<S, D>),
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
-}
-
-impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::read(reader)?;
-                Ok(Self::Notarize(v))
-            }
-            1 => {
-                let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Self::Notarization(v))
-            }
-            2 => {
-                let r = Round::read(reader)?;
-                let b = bool::read(reader)?;
-                Ok(Self::Certification(r, b))
-            }
-            3 => {
-                let v = Nullify::read(reader)?;
-                Ok(Self::Nullify(v))
-            }
-            4 => {
-                let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Self::Nullification(v))
-            }
-            5 => {
-                let v = Finalize::read(reader)?;
-                Ok(Self::Finalize(v))
-            }
-            6 => {
-                let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Self::Finalization(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Artifact",
-                "Invalid type",
-            )),
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
@@ -1925,28 +1845,33 @@ where
 ///
 /// Use [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter and
 /// verify activities based on [`Scheme::is_attributable`].
-#[derive(Clone, Debug, Write, EncodeSize)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
+#[codec(
+    read_cfg = <S::Certificate as Read>::Cfg,
+    invalid_tag = { Error::Invalid("consensus::simplex::Activity", "Invalid type") }
+)]
+#[codec(read_bounds())]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
-    Notarize(Notarize<S, D>),
+    Notarize(#[codec(cfg = &())] Notarize<S, D>),
     /// A recovered certificate for a notarization (scheme-specific).
     Notarization(Notarization<S, D>),
     /// A notarization was locally certified.
     Certification(Notarization<S, D>),
     /// A validator's nullify vote used to skip the current view.
-    Nullify(Nullify<S>),
+    Nullify(#[codec(cfg = &())] Nullify<S>),
     /// A recovered certificate for a nullification (scheme-specific).
     Nullification(Nullification<S>),
     /// A validator's finalize vote over a proposal.
-    Finalize(Finalize<S, D>),
+    Finalize(#[codec(cfg = &())] Finalize<S, D>),
     /// A recovered certificate for a finalization (scheme-specific).
     Finalization(Finalization<S, D>),
     /// Evidence of a validator sending conflicting notarizes (Byzantine behavior).
-    ConflictingNotarize(ConflictingNotarize<S, D>),
+    ConflictingNotarize(#[codec(cfg = &())] ConflictingNotarize<S, D>),
     /// Evidence of a validator sending conflicting finalizes (Byzantine behavior).
-    ConflictingFinalize(ConflictingFinalize<S, D>),
+    ConflictingFinalize(#[codec(cfg = &())] ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
-    NullifyFinalize(NullifyFinalize<S, D>),
+    NullifyFinalize(#[codec(cfg = &())] NullifyFinalize<S, D>),
 }
 
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
@@ -2053,60 +1978,6 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Self::ConflictingNotarize(c) => c.verify(rng, scheme, strategy),
             Self::ConflictingFinalize(c) => c.verify(rng, scheme, strategy),
             Self::NullifyFinalize(c) => c.verify(rng, scheme, strategy),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Activity<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let v = Notarize::<S, D>::read(reader)?;
-                Ok(Self::Notarize(v))
-            }
-            1 => {
-                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Self::Notarization(v))
-            }
-            2 => {
-                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Self::Certification(v))
-            }
-            3 => {
-                let v = Nullify::<S>::read(reader)?;
-                Ok(Self::Nullify(v))
-            }
-            4 => {
-                let v = Nullification::<S>::read_cfg(reader, cfg)?;
-                Ok(Self::Nullification(v))
-            }
-            5 => {
-                let v = Finalize::<S, D>::read(reader)?;
-                Ok(Self::Finalize(v))
-            }
-            6 => {
-                let v = Finalization::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Self::Finalization(v))
-            }
-            7 => {
-                let v = ConflictingNotarize::<S, D>::read(reader)?;
-                Ok(Self::ConflictingNotarize(v))
-            }
-            8 => {
-                let v = ConflictingFinalize::<S, D>::read(reader)?;
-                Ok(Self::ConflictingFinalize(v))
-            }
-            9 => {
-                let v = NullifyFinalize::<S, D>::read(reader)?;
-                Ok(Self::NullifyFinalize(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Activity",
-                "Invalid type",
-            )),
         }
     }
 }

@@ -18,7 +18,7 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -132,11 +132,17 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
-#[derive(Clone, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds())]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
+    #[codec(cfg = &())]
     context: Context<sha256::Digest, ed25519::PublicKey>,
+    #[codec(cfg = &())]
     parent: sha256::Digest,
+    #[codec(cfg = &())]
     height: Height,
+    #[codec(cfg = &cfg)]
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
 }
 
@@ -160,18 +166,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
             Some(Payload::EpochInfo(info)) => Some(info),
             _ => None,
         }
-    }
-}
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
-    type Cfg = (NonZeroU32, ModeVersion);
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
-        })
     }
 }
 

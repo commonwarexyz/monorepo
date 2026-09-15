@@ -132,9 +132,7 @@ mod wire;
 mod test {
     use super::{Config, Mailbox, Probe, wire};
     use commonware_actor::Feedback;
-    use commonware_codec::{
-        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
-    };
+    use commonware_codec::{Encode, EncodeSize, Read, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{
@@ -194,10 +192,14 @@ mod test {
     type Scheme = MockScheme<ed25519::PublicKey>;
     type Variant = Standard<Block>;
 
-    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
     struct Block {
         context: SimplexContext<Sha256Digest, ed25519::PublicKey>,
-        #[codec(encode_with = { value.get().write(buf); }, encode_size = 8)]
+        #[codec(
+            encode_with = { value.get().write(buf); },
+            encode_size = 8,
+            read_with = { Ok(Height::new(u64::read_cfg(buf, &())?)) }
+        )]
         height: Height,
         digest: Sha256Digest,
     }
@@ -213,22 +215,6 @@ mod test {
                 height: Height::new(height),
                 digest: Sha256Digest::from([digest_byte; 32]),
             }
-        }
-    }
-
-    impl Read for Block {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-            let context = SimplexContext::read(buf)?;
-            let height = Height::new(buf.get_u64());
-            let mut digest = [0u8; 32];
-            buf.copy_to_slice(&mut digest);
-            Ok(Self {
-                context,
-                height,
-                digest: Sha256Digest::from(digest),
-            })
         }
     }
 

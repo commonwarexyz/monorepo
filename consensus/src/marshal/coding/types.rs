@@ -17,11 +17,15 @@ use std::{
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
-#[derive(Write, EncodeSize)]
+#[derive(Write, Read, EncodeSize)]
+#[codec(read_cfg = commonware_coding::CodecConfig)]
+#[codec(read_bounds())]
 pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
+    #[codec(cfg = &())]
     pub(crate) commitment: Commitment<B, C, H>,
     /// The index of this shard within the commitment.
+    #[codec(cfg = &())]
     pub(crate) index: u16,
     /// An individual shard within the commitment.
     pub(crate) inner: C::Shard,
@@ -67,25 +71,6 @@ impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
-    }
-}
-
-impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
-    type Cfg = commonware_coding::CodecConfig;
-
-    fn read_cfg(
-        buf: &mut impl commonware_codec::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let commitment = Commitment::<B, C, H>::read(buf)?;
-        let index = u16::read(buf)?;
-        let inner = C::Shard::read_cfg(buf, cfg)?;
-
-        Ok(Self {
-            commitment,
-            index,
-            inner,
-        })
     }
 }
 
