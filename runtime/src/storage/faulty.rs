@@ -199,8 +199,8 @@ struct Oracle {
 
 /// An issued mutation or durability cut whose crash outcome remains unresolved.
 enum PendingMutation<B> {
-    /// A write fragment whose `selection_offset` maps it into one issued write's shared byte
-    /// selection.
+    /// A write fragment with copied bytes independent of caller-owned resources. Its
+    /// `selection_offset` maps it into one issued write's shared byte selection.
     Write {
         generation: Arc<FileGeneration>,
         blob: B,
@@ -280,6 +280,12 @@ impl FileGeneration {
 
 /// Tracks the generation shared by existing handles and unresolved mutations for each file.
 type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
+
+fn copy_payload(bufs: &IoBufs) -> IoBufs {
+    let mut bytes = Vec::with_capacity(bufs.remaining());
+    bufs.for_each_chunk(|chunk| bytes.extend_from_slice(chunk));
+    bytes.into()
+}
 
 fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) {
     pending
@@ -476,6 +482,20 @@ impl<S: crate::Storage> Storage<S> {
 }
 
 impl Storage<crate::storage::memory::Storage> {
+    /// Retires predecessor crash evidence excluded from an admitted durable snapshot.
+    ///
+    /// The caller must hold the logical namespace transaction through successful admission and
+    /// this retirement so removal cannot replace the admitted file's generation.
+    pub(crate) fn admit(&self, partition: &str, name: &[u8]) {
+        let generation = self
+            .generations
+            .lock()
+            .get(&(partition.to_owned(), name.to_vec()))
+            .and_then(Weak::upgrade)
+            .expect("an admitted blob retains its file generation");
+        clear_pending(&self.pending, &generation);
+    }
+
     /// Replay selected crash outcomes in issue order.
     pub(crate) fn crash(&self) -> Result<(), Error> {
         let pending = std::mem::take(&mut *self.pending.lock());
@@ -602,13 +622,14 @@ impl<B: crate::Blob> Blob<B> {
     fn record_pending(
         &self,
         offset: u64,
-        bufs: IoBufs,
+        bufs: &IoBufs,
         retention: (PartialWriteMode, Probability),
     ) {
         if bufs.is_empty() {
             return;
         }
         let retention = Arc::new(PendingWriteRetention::new(retention, bufs.remaining()));
+        let bufs = copy_payload(bufs);
         self.pending.lock().push(PendingMutation::Write {
             generation: self.generation.clone(),
             blob: self.inner.clone(),
@@ -628,7 +649,7 @@ impl<B: crate::Blob> Blob<B> {
     }
 
     /// Retire covered write debt and replay the durable range after any earlier resize debt.
-    fn record_durable_range(&self, offset: u64, durable: IoBufs) {
+    fn record_durable_range(&self, offset: u64, durable: &IoBufs) {
         let len = durable.remaining() as u64;
         if len == 0 {
             return;
@@ -720,7 +741,7 @@ impl<B: crate::Blob> Blob<B> {
                 generation: self.generation.clone(),
                 blob: self.inner.clone(),
                 offset,
-                bufs: durable,
+                bufs: copy_payload(durable),
                 retention,
                 selection_offset: 0,
             });
@@ -799,7 +820,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
                     self.inner
                         .write_at(run_offset, run, options | WriteOptions::SYNC)
                         .await?;
-                    self.record_durable_range(run_offset, durable);
+                    self.record_durable_range(run_offset, &durable);
                     self.size.fetch_max(
                         run_offset.saturating_add((end - start) as u64),
                         Ordering::Relaxed,
@@ -817,7 +838,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             self.size
                 .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
             if let Some((bufs, retention)) = pending {
-                self.record_pending(offset, bufs, retention);
+                self.record_pending(offset, &bufs, retention);
             }
             return Err(injected_io_error().into());
         }
@@ -831,9 +852,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         if let Some(durable) = durable {
-            self.record_durable_range(offset, durable);
+            self.record_durable_range(offset, &durable);
         } else if let Some((bufs, retention)) = pending {
-            self.record_pending(offset, bufs, retention);
+            self.record_pending(offset, &bufs, retention);
         }
         Ok(())
     }
@@ -896,11 +917,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner, Spawner, Storage as _,
         mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
+    use bytes::Bytes;
     use commonware_utils::ScriptedRng;
     use futures::task::noop_waker;
     use rand::{SeedableRng, rngs::StdRng};
@@ -1066,6 +1088,69 @@ mod tests {
                 config,
             }
         }
+    }
+
+    #[rstest]
+    #[case::unsynced(false)]
+    #[case::durable_after_resize(true)]
+    fn test_pending_write_releases_payload_owner(
+        #[case] durable: bool,
+        #[values(false, true)] chunked: bool,
+    ) {
+        crate::deterministic::Runner::default().start(|_| async move {
+            let h = Harness::with_rng(
+                Box::new(ScriptedRng::new([u64::MAX, 0])),
+                Config::default()
+                    .write(WriteConfig {
+                        failure_rate: probability!(0.0),
+                        retention_rate: probability!(1.0),
+                        mode: PartialWriteMode::Prefix,
+                    })
+                    .resize(ResizeConfig {
+                        failure_rate: probability!(0.5),
+                        partial_rate: probability!(0.0),
+                    }),
+            );
+            let (blob, _) = h.storage.open("partition", b"payload").await.unwrap();
+            blob.write_at(0, b"base", WriteOptions::SYNC).await.unwrap();
+            if durable {
+                blob.resize(3).await.unwrap();
+            }
+
+            let owner: Arc<[u8]> = Arc::from(b"payload".as_slice());
+            let lifetime = Arc::downgrade(&owner);
+            let bytes = Bytes::from_owner(owner);
+            let bufs: IoBufs = if chunked {
+                vec![IoBuf::from(bytes.slice(..3)), IoBuf::from(bytes.slice(3..))].into()
+            } else {
+                bytes.clone().into()
+            };
+            drop(bytes);
+            assert_eq!(lifetime.strong_count(), 1);
+            let options = if durable {
+                WriteOptions::SYNC
+            } else {
+                WriteOptions::default()
+            };
+            blob.write_at(0, bufs, options).await.unwrap();
+
+            // Completed I/O releases the submitted owner even while crash evidence remains.
+            assert_eq!(lifetime.strong_count(), 0);
+            assert!(
+                h.storage
+                    .pending
+                    .lock()
+                    .iter()
+                    .any(|mutation| matches!(mutation, PendingMutation::Write { .. }))
+            );
+            assert_eq!(
+                blob.read_at(0, 7, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"payload"
+            );
+        });
     }
 
     #[rstest]

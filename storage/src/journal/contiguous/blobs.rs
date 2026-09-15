@@ -853,7 +853,7 @@ impl<E: Context> Writable<E> {
         if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
             return Ok(());
         }
-        self.partition.open(blob).await?.sync().await?;
+        self.drain_tail_predecessor_sync().await?;
         Ok(())
     }
 }

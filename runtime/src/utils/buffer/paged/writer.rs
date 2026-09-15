@@ -3872,6 +3872,7 @@ mod tests {
             assert_eq!(checksum.len1, 3);
             assert_eq!(checksum.len2, 6);
 
+            drop(blob);
             let (blob, blob_size) = context
                 .open("test_partition", b"torn_extension_footer")
                 .await
@@ -5414,6 +5415,7 @@ mod tests {
             .unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let (blob, blob_size) = context
                 .open("test_partition", b"shrink_torn")
                 .await
@@ -5586,6 +5588,7 @@ mod tests {
             assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
             drop(append);
 
+            drop(blob);
             let (blob, size) = context
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
