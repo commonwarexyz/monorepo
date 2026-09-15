@@ -149,10 +149,10 @@ impl<B: Blob> Recovery<B> {
     /// capacity `capacity`. Repairs the blob if necessary so it only contains checksum-validated
     /// data.
     ///
-    /// The blob's tail-page contents must be durable (freshly opened after a crash, or synced
-    /// since the last partial-page rewrite): the discovered checksum slot seeds the writer's
-    /// durable-slot tracking, so wrapping a blob whose tail rewrite is still volatile would
-    /// let a later unsynced flush overwrite the only durable slot.
+    /// Before appending, the tail-page contents must be durable: either open after a crash or
+    /// call [Self::sync]. Until then, recovery may read or truncate the blob. The discovered
+    /// checksum slot seeds durable-slot tracking, so appending over a still-volatile tail can
+    /// overwrite the only durable slot.
     pub async fn open(
         blob: B,
         original_blob_size: u64,
@@ -313,12 +313,6 @@ impl<B: Blob> Recovery<B> {
             self.sync_state
                 .resize(&self.blob, new_physical_size)
                 .await?;
-        }
-
-        // Only full pages are cached. Reusing an earlier page as a tail invalidates its cached
-        // contents. Shortening the current partial page leaves cached pages intact.
-        if full_pages < self.current_page {
-            self.id = self.cache_ref.next_id();
         }
 
         if partial_bytes > 0 {
@@ -3439,7 +3433,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let mut reopened = Recovery::open(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(reopened.size(), b"replayed".len() as u64);
@@ -4939,7 +4933,8 @@ mod tests {
 
     #[test]
     fn test_recovery_preserves_cached_prefix_on_publication() {
-        for shrink in [false, true] {
+        let page = PAGE_SIZE.get() as u64;
+        for end in [None, Some(page * 2 + 10), Some(page + 10)] {
             deterministic::Runner::default().start(|context| async move {
                 let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
                 let (blob, size) = context.open("recovery-cache", b"blob").await.unwrap();
@@ -4950,8 +4945,8 @@ mod tests {
                 recovery.append(&vec![0xA5; page * 2 + 20]).await.unwrap();
                 recovery.sync().await.unwrap();
                 recovery.read_at(0, page).await.unwrap();
-                if shrink {
-                    recovery.truncate((page * 2 + 10) as u64).await.unwrap();
+                if let Some(end) = end {
+                    recovery.truncate(end).await.unwrap();
                 }
                 let writer: Writer<_> = recovery.into();
                 let mut cached = vec![0; page];
@@ -4962,7 +4957,117 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_truncate_invalidates_cache() {
+    fn test_recovery_truncate_direct_append_replaces_cached_pages() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let (blob, size) = context.open("recovery-cache", b"direct").await.unwrap();
+            let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let mut model: Vec<u8> = (0..5 * page + 20).map(|i| (i % 251) as u8).collect();
+            recovery.append(&model).await.unwrap();
+            recovery.sync().await.unwrap();
+            cache.clear();
+            recovery.read_at(page as u64, page).await.unwrap();
+            recovery.read_at((2 * page) as u64, page).await.unwrap();
+            recovery.truncate((page + 10) as u64).await.unwrap();
+            model.truncate(page + 10);
+            let replacement = vec![0xCC; 3 * page + 7];
+            recovery
+                .append_owned(replacement.clone().into())
+                .await
+                .unwrap();
+            model.extend_from_slice(&replacement);
+            assert_eq!(
+                recovery
+                    .read_at((2 * page) as u64, page)
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                &model[2 * page..3 * page]
+            );
+            assert_eq!(
+                recovery
+                    .read_at(0, model.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                model
+            );
+            recovery.sync().await.unwrap();
+
+            let mut writer: Writer<_> = recovery.into();
+            let snapshot = writer.snapshot().await.unwrap();
+            writer.append(&vec![0xDD; page - 17]).await.unwrap();
+            writer.sync().await.unwrap();
+            assert_eq!(
+                snapshot
+                    .read_at(0, model.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                model
+            );
+            model.extend_from_slice(&vec![0xDD; page - 17]);
+            assert_eq!(
+                writer
+                    .read_at(0, model.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                model
+            );
+        });
+    }
+
+    #[test]
+    fn test_cancelled_recovery_read_cannot_repopulate_after_truncate() {
+        let cfg =
+            deterministic::Config::default().with_timeout(Some(std::time::Duration::from_secs(5)));
+        deterministic::Runner::new(cfg).start(|context| async move {
+            let page = PAGE_SIZE.get() as usize;
+            let physical = page + CHECKSUM_SIZE as usize;
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let (inner, size) = context.open("recovery-cache", b"cancelled").await.unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let blob =
+                DelayedReadBlob::new(inner, physical as u64, physical, started_tx, release_rx);
+            let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            recovery.append(&vec![0xAA; 3 * page + 20]).await.unwrap();
+            recovery.sync().await.unwrap();
+            cache.clear();
+            {
+                let mut read = Box::pin(recovery.read_at(page as u64, page));
+                commonware_macros::select! {
+                    _ = started_rx => {},
+                    _ = read.as_mut() => panic!("read completed before release"),
+                }
+            }
+            recovery.truncate((page + 10) as u64).await.unwrap();
+            recovery.append(&vec![0xBB; page - 10]).await.unwrap();
+            recovery.sync().await.unwrap();
+            recovery.read_at(0, page).await.unwrap();
+            let _ = release_tx.send(());
+            let actual = recovery
+                .read_at(page as u64, page)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(&actual.as_ref()[..10], &[0xAA; 10]);
+            assert_eq!(&actual.as_ref()[10..], vec![0xBB; page - 10]);
+        });
+    }
+
+    #[test]
+    fn test_recovery_truncate_replaces_cached_tail() {
         deterministic::Runner::default().start(|context| async move {
             let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let (blob, size) = context.open("recovery-cache", b"truncate").await.unwrap();
@@ -4977,13 +5082,9 @@ mod tests {
             assert!(recovery.try_read_sync_into(&mut cached, 0));
             assert_eq!(cached, vec![0xAA; page * 2]);
 
-            let old_id = recovery.cache_id();
             recovery.truncate((page + 16) as u64).await.unwrap();
-            assert_ne!(recovery.cache_id(), old_id);
-            let new_id = recovery.cache_id();
             recovery.read_at(0, page).await.unwrap();
             recovery.truncate((page + 8) as u64).await.unwrap();
-            assert_eq!(recovery.cache_id(), new_id);
             assert!(recovery.try_read_sync_into(&mut cached[..page], 0));
 
             recovery.append(&vec![0xBB; page - 8]).await.unwrap();
@@ -5702,10 +5803,15 @@ mod tests {
             append.sync().await.unwrap();
 
             // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
+            // Only the resize needs a full sync, which the truncation issues itself.
             append.truncate(PAGE_SIZE.get() as u64).await.unwrap();
-            append.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
 
-            // Only the resize needs a full sync, no additional writes are emitted by the shrink.
+            // Nothing is left pending, so a later sync adds no barrier.
+            append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 2);
