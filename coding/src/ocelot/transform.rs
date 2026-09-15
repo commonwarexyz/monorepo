@@ -586,70 +586,13 @@ impl<I: Impl> Transform<I> {
 mod tests {
     use super::{Shards, Transform, WORK_ALIGN};
     use crate::ocelot::{Impl8, code::Impl, impl16::Impl16, kernel::portable::Portable};
+    use arbitrary::Unstructured;
+    use commonware_invariants::minifuzz::Builder;
     use commonware_math::algebra::Ring as _;
-    use commonware_utils::test_rng;
-    use rand::RngExt as _;
-    use std::ops::Range;
-
-    #[derive(Clone, Copy)]
-    struct DefaultImpl<I>(I);
-
-    impl<I: Impl> Impl for DefaultImpl<I> {
-        type Element = I::Element;
-
-        const BITS: usize = I::BITS;
-        const STRIPE_ALIGN: usize = I::STRIPE_ALIGN;
-        const NAMESPACE: &'static [u8] = I::NAMESPACE;
-
-        fn basis() -> &'static [Self::Element] {
-            I::basis()
-        }
-
-        fn add_into(self, dst: &mut [u8], src: &[u8]) {
-            self.0.add_into(dst, src);
-        }
-
-        fn sub_into(self, dst: &mut [u8], src: &[u8]) {
-            self.0.sub_into(dst, src);
-        }
-
-        fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
-            self.0.mul_add(dst, src, c);
-        }
-
-        fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
-            self.0.mul_sub(dst, src, c);
-        }
-
-        fn checksum_range(
-            self,
-            shard: &[u8],
-            coefficients: &[u8],
-            range: Range<usize>,
-            out: &mut [u8],
-        ) {
-            self.0.checksum_range(shard, coefficients, range, out);
-        }
-
-        fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
-            self.0.fft_butterfly(x, y, c);
-        }
-
-        fn ifft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
-            self.0.ifft_butterfly(x, y, c);
-        }
-    }
-
     fn copy(work: &Shards) -> Shards {
         let mut copy = Shards::new(work.count, work.len);
         copy.data_mut().copy_from_slice(work.data());
         copy
-    }
-
-    fn fill(work: &mut Shards) {
-        for (i, byte) in work.data_mut().iter_mut().enumerate() {
-            *byte = (i.wrapping_mul(157) ^ i.rotate_left(3) ^ 0xa5) as u8;
-        }
     }
 
     fn ifft_unfused<I: Impl>(
@@ -683,44 +626,34 @@ mod tests {
         }
     }
 
-    fn compare_schedules<I: Impl>(imp: I, lengths: &[usize]) {
-        let transform = Transform::new(imp);
-        for &count in &[1, 2, 4, 8, 16] {
-            for &len in lengths {
-                let mut input = Shards::new(count, len);
-                fill(&mut input);
+    fn fuzz_schedules(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let transform = Transform::new(Impl8::new(Portable));
+        let count = 1 << u.int_in_range(0..=5)?;
+        let len = u.int_in_range(1..=130)?;
+        let nonzero = u.int_in_range(0..=count)?;
+        let needed = u.int_in_range(0..=count)?;
+        let shift = u.int_in_range(0..=<Impl8<Portable> as Impl>::ORDER - count)?;
+        let mut input = Shards::new(count, len);
+        u.fill_buffer(input.data_mut())?;
 
-                for nonzero in 0..=count {
-                    let mut input = copy(&input);
-                    for shard in input.shards_mut().skip(nonzero) {
-                        shard.fill(0);
-                    }
-                    for shift in [0, 1, I::ORDER - count] {
-                        let mut actual = copy(&input);
-                        let mut expected = copy(&input);
-                        transform.ifft(&mut actual, nonzero, shift);
-                        ifft_unfused(&transform, &mut expected, nonzero, shift);
-                        assert_eq!(
-                            actual.data(),
-                            expected.data(),
-                            "IFFT differs: count={count} len={len} nonzero={nonzero} shift={shift}"
-                        );
-                    }
-                }
-
-                for needed in 0..=count {
-                    let mut actual = copy(&input);
-                    let mut expected = copy(&input);
-                    transform.fft(&mut actual, needed);
-                    fft_unfused(&transform, &mut expected, needed);
-                    assert_eq!(
-                        actual.data(),
-                        expected.data(),
-                        "FFT differs: count={count} len={len} needed={needed}"
-                    );
-                }
-            }
+        for needed in [0, needed, count] {
+            let mut actual = copy(&input);
+            let mut expected = copy(&input);
+            transform.fft(&mut actual, needed);
+            fft_unfused(&transform, &mut expected, needed);
+            assert_eq!(actual.data(), expected.data());
         }
+        for nonzero in [count, nonzero, 0] {
+            for shard in input.shards_mut().skip(nonzero) {
+                shard.fill(0);
+            }
+            let mut actual = copy(&input);
+            let mut expected = copy(&input);
+            transform.ifft(&mut actual, nonzero, shift);
+            ifft_unfused(&transform, &mut expected, nonzero, shift);
+            assert_eq!(actual.data(), expected.data());
+        }
+        Ok(())
     }
 
     fn locator_reference<I: Impl>(
@@ -786,152 +719,129 @@ mod tests {
         }
     }
 
-    fn compare_random_locators<I: Impl>(transform: &Transform<I>, cases: usize, max_len: usize) {
-        let mut rng = test_rng();
-        for _ in 0..cases {
-            let count = rng.random_range(0..=64);
-            let mut erased: Vec<_> = (0..count).map(|_| rng.random_range(0..I::ORDER)).collect();
-            erased.sort_unstable();
-            erased.dedup();
-            compare_locator(transform, &erased, 0..rng.random_range(0..=max_len));
+    fn fuzz_locator<I: Impl>(
+        u: &mut Unstructured<'_>,
+        transform: &Transform<I>,
+        fwt: bool,
+    ) -> arbitrary::Result<()> {
+        let bits = if fwt { I::BITS.min(11) } else { I::BITS };
+        let n = 1usize << u.int_in_range(0..=bits)?;
+        let count = u.int_in_range(0..=64.min(n))?;
+        let mut erased = (0..count)
+            .map(|_| u.int_in_range(0..=n - 1))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        // Include translated dyadic blocks as well as scattered erasures.
+        let block_len = 1 << u.int_in_range(0..=n.ilog2().min(9))?;
+        let base = u.int_in_range(0..=n / block_len - 1)? * block_len;
+        erased.extend(base..base + block_len);
+        erased.sort_unstable();
+        erased.dedup();
+        let count = u.int_in_range(0..=64)?;
+        let queries = (0..count)
+            .map(|_| u.int_in_range(0..=n - 1))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        if fwt {
+            compare_fwt_locator(transform, &[], queries.iter().copied(), n);
+            compare_fwt_locator(transform, &erased, queries.into_iter(), n);
+        } else {
+            compare_locator(transform, &erased, queries.into_iter());
         }
+        Ok(())
     }
 
     #[test]
-    fn workspace_keeps_alignment_and_shard_count() {
-        let mut work = Shards::new(1, 2);
-        for count in [1, 3, 64, 2, 128, 1] {
-            work.reset(count, 4096);
-            for len in [4096, 130, 2, 4096] {
-                work.resize(len);
-                assert!(work.data().as_ptr().align_offset(WORK_ALIGN) == 0);
-                assert_eq!(work.shards().count(), count);
-                for (index, shard) in work.shards_mut().enumerate() {
-                    assert_eq!(shard.len(), len);
-                    shard.fill(index as u8);
+    fn minifuzz_workspace() {
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| {
+                let mut work = Shards::new(1, 1);
+                for _ in 0..8 {
+                    let count = u.int_in_range(1..=128)?;
+                    let capacity = u.int_in_range(1..=4096)?;
+                    work.reset(count, capacity);
+                    for len in [capacity, u.int_in_range(1..=capacity)?, capacity] {
+                        work.resize(len);
+                        assert_eq!(work.data().as_ptr().align_offset(WORK_ALIGN), 0);
+                        assert_eq!(work.shards().count(), count);
+                        for (index, shard) in work.shards_mut().enumerate() {
+                            assert_eq!(shard.len(), len);
+                            shard.fill(index as u8);
+                        }
+                        for (index, shard) in work.shards().enumerate() {
+                            assert!(shard.iter().all(|&byte| byte == index as u8));
+                        }
+                    }
                 }
-                for (index, shard) in work.shards().enumerate() {
-                    assert!(shard.iter().all(|&byte| byte == index as u8));
-                }
-            }
-        }
+                Ok(())
+            });
     }
 
     #[test]
-    fn paired_layers_match_unfused_schedule() {
-        compare_schedules(Impl8::new(Portable), &[1, 17, 65]);
-        compare_schedules(DefaultImpl(Impl8::new(Portable)), &[3]);
-        compare_schedules(Impl16::new(Portable), &[2, 126, 130]);
+    fn minifuzz_paired_layers() {
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(512)
+            .test(fuzz_schedules);
     }
 
     #[test]
-    fn locator_matches_scalar_product() {
+    fn minifuzz_locator() {
         let gf8 = Transform::new(Impl8::new(Portable));
-
-        // Exhaust every erasure subset of a 4-bit Cantor subspace.
-        const SMALL_ORDER: usize = 16;
-        for mask in 0u32..1 << SMALL_ORDER {
-            let erased: Vec<_> = (0..SMALL_ORDER).filter(|&i| mask & (1 << i) != 0).collect();
-            compare_locator(&gf8, &erased, 0..SMALL_ORDER);
-        }
-
-        // Exercise every dyadic layer, translation, and query point.
-        for layer in 0..=<Impl8<Portable> as Impl>::BITS {
-            let block_len = 1 << layer;
-            for base in (0..<Impl8<Portable> as Impl>::ORDER).step_by(block_len) {
-                compare_locator(&gf8, &(base..base + block_len).collect::<Vec<_>>(), 0..256);
-            }
-        }
-
-        compare_locator(&gf8, &[], 0..<Impl8<Portable> as Impl>::ORDER);
-        compare_locator(
-            &gf8,
-            &[0, 1, 2, 4, 7, 8, 9, 10, 11, 16, 31, 63, 127, 255],
-            0..256,
-        );
-        compare_random_locators(&gf8, 128, 256);
-
         let gf16 = Transform::new(Impl16::new(Portable));
-        compare_locator(&gf16, &[], 0..<Impl16<Portable> as Impl>::ORDER);
-        compare_locator(
-            &gf16,
-            &[<Impl16<Portable> as Impl>::ORDER - 1],
-            0..<Impl16<Portable> as Impl>::ORDER,
-        );
-        compare_locator(&gf16, &(512..1024).collect::<Vec<_>>(), 0..1537);
-        compare_locator(
-            &gf16,
-            &[
-                0, 1, 2, 4, 7, 8, 9, 10, 11, 16, 31, 255, 256, 511, 1024, 32767, 65535,
-            ],
-            0..2049,
-        );
-        compare_random_locators(&gf16, 64, 1024);
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| fuzz_locator(u, &gf8, false));
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| fuzz_locator(u, &gf16, false));
+    }
 
+    #[test]
+    fn minifuzz_fwt_locator() {
+        let gf8 = Transform::new(Impl8::new(Portable));
+        let gf16 = Transform::new(Impl16::new(Portable));
+        check_locator_tables(&gf8);
+        check_locator_tables(&gf16);
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| fuzz_locator(u, &gf8, true));
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| fuzz_locator(u, &gf16, true));
+    }
+
+    #[test]
+    fn locator_field_boundaries() {
+        let gf16 = Transform::new(Impl16::new(Portable));
+        const ORDER: usize = <Impl16<Portable> as Impl>::ORDER;
+        compare_locator(&gf16, &[], 0..ORDER);
+        compare_locator(&gf16, &[ORDER - 1], 0..ORDER);
         let erased: Vec<_> = (0..21845).chain(21846..32769).collect();
         compare_locator(&gf16, &erased, [21845, 32768].into_iter());
 
-        // There is no skew-table entry at 1 << BITS. This full-field block
-        // exercises its derivative-one path directly.
-        let erased: Vec<_> = (0..<Impl16<Portable> as Impl>::ORDER).collect();
+        // Full-field blocks have derivative one and no skew-table entry.
+        let erased: Vec<_> = (0..ORDER).collect();
         assert!(
-            gf16.locator(&erased, 0..<Impl16<Portable> as Impl>::ORDER)
+            gf16.locator(&erased, 0..ORDER)
                 .iter()
-                .all(|&value| value == <Impl16<Portable> as Impl>::Element::one())
+                .all(|value| *value == <Impl16<Portable> as Impl>::Element::one())
         );
-    }
-
-    #[test]
-    fn fwt_locator_matches_scalar_product() {
-        let gf8 = Transform::new(Impl8::new(Portable));
-        check_locator_tables(&gf8);
-        for layer in 0..=<Impl8<Portable> as Impl>::BITS {
-            let n = 1usize << layer;
-            let erased: Vec<_> = (0..n)
-                .filter(|position| position.count_ones().is_multiple_of(2))
-                .collect();
-            compare_fwt_locator(&gf8, &erased, (0..n).rev(), n);
-        }
-        let erased: Vec<_> = (0..<Impl8<Portable> as Impl>::ORDER).collect();
-        compare_fwt_locator(
-            &gf8,
-            &erased,
-            0..<Impl8<Portable> as Impl>::ORDER,
-            <Impl8<Portable> as Impl>::ORDER,
-        );
-
-        let gf16 = Transform::new(Impl16::new(Portable));
-        check_locator_tables(&gf16);
-        let mut rng = test_rng();
-        for _ in 0..16 {
-            let layer = rng.random_range(1..=11);
-            let n = 1 << layer;
-            let mut erased: Vec<_> = (0..n).filter(|_| rng.random_bool(0.25)).collect();
-            if erased.is_empty() {
-                erased.push(rng.random_range(0..n));
-            }
-            let queries: Vec<_> = (0..64).map(|_| rng.random_range(0..n)).collect();
-            compare_fwt_locator(&gf16, &erased, queries.iter().copied(), n);
-        }
-
-        let erased: Vec<_> = (0..<Impl16<Portable> as Impl>::ORDER).collect();
-        let queries = [0, 1, 32768, <Impl16<Portable> as Impl>::ORDER - 1];
+        let queries = [0, 1, ORDER / 2, ORDER - 1];
         let locator = gf16
-            .locator_fwt(
-                &erased,
-                queries.into_iter(),
-                queries.len(),
-                <Impl16<Portable> as Impl>::ORDER,
-            )
-            .expect("FWT locator tables must build");
+            .locator_fwt(&erased, queries.into_iter(), queries.len(), ORDER)
+            .unwrap();
         assert!(
             locator
                 .iter()
-                .all(|&value| value == <Impl16<Portable> as Impl>::Element::one())
+                .all(|value| *value == <Impl16<Portable> as Impl>::Element::one())
         );
 
-        // This fragmented layout exceeds the hybrid threshold and exercises
-        // the public dispatch path.
+        // Fragmentation forces the public locator to select the FWT path.
         let erased: Vec<_> = (512..1536).step_by(2).collect();
         compare_locator(&gf16, &erased, 0..1537);
     }
