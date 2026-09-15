@@ -27,7 +27,7 @@ use std::vec::Vec;
 ///
 /// More specifically, this configures how evaluation points of a polynomial
 /// are assigned to participant identities.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Write, FixedSize)]
 #[repr(u8)]
 pub enum Mode {
     NonZeroCounter = 0,
@@ -215,16 +215,6 @@ impl Mode {
     }
 }
 
-impl FixedSize for Mode {
-    const SIZE: usize = 1;
-}
-
-impl Write for Mode {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_u8(CodecMode::from(*self).into());
-    }
-}
-
 /// Determines which modes can be parsed.
 ///
 /// As modes have been added over time, this versioning mechanism helps with
@@ -297,12 +287,17 @@ impl Read for Mode {
 /// Represents the public output of a polynomial secret sharing.
 ///
 /// This does not contain any secret information.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub struct Sharing<V: Variant> {
     mode: Mode,
+    #[codec(
+        encode_with = { value.get().write(buf); },
+        encode_size = value.get().encode_size()
+    )]
     total: NonZeroU32,
     poly: Arc<Poly<V::Public>>,
     #[cfg(feature = "std")]
+    #[codec(encode_with = {}, encode_size = 0)]
     evals: Arc<Vec<OnceLock<V::Public>>>,
 }
 
@@ -413,20 +408,6 @@ impl<V: Variant> Sharing<V> {
     /// In other words, the public key associated with the shared secret.
     pub fn public(&self) -> &V::Public {
         self.poly.constant()
-    }
-}
-
-impl<V: Variant> EncodeSize for Sharing<V> {
-    fn encode_size(&self) -> usize {
-        self.mode.encode_size() + self.total.get().encode_size() + self.poly.encode_size()
-    }
-}
-
-impl<V: Variant> Write for Sharing<V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.mode.write(buf);
-        self.total.get().write(buf);
-        self.poly.write(buf);
     }
 }
 

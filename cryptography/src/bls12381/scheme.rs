@@ -35,7 +35,6 @@ use super::primitives::{
 use crate::{BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::BufMut;
 use commonware_codec::{
     Buf, Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read,
     ReadExt, Write,
@@ -55,9 +54,11 @@ use zeroize::Zeroizing;
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write)]
 pub struct PrivateKey {
+    #[codec(encode_with = { value.expose(|raw| raw.write(buf)); }, encode_size = Self::SIZE)]
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
+    #[codec(encode_with = {}, encode_size = 0)]
     key: Private,
 }
 
@@ -68,12 +69,6 @@ impl PartialEq for PrivateKey {
 }
 
 impl Eq for PrivateKey {}
-
-impl Write for PrivateKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|raw| raw.write(buf));
-    }
-}
 
 impl Read for PrivateKey {
     type Cfg = ();
@@ -152,9 +147,10 @@ impl crate::Verifier for PublicKey {
 }
 
 /// BLS12-381 public key.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, PartialEq, FixedArray, Write)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
+    #[codec(encode_with = {}, encode_size = 0)]
     key: <MinPk as Variant>::Public,
 }
 
@@ -167,12 +163,6 @@ impl From<PrivateKey> for PublicKey {
 impl AsRef<<MinPk as Variant>::Public> for PublicKey {
     fn as_ref(&self) -> &<MinPk as Variant>::Public {
         &self.key
-    }
-}
-
-impl Write for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
     }
 }
 
@@ -258,9 +248,10 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 }
 
 /// BLS12-381 signature.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, PartialEq, FixedArray, Write)]
 pub struct Signature {
     raw: [u8; <MinPk as Variant>::Signature::SIZE],
+    #[codec(encode_with = {}, encode_size = 0)]
     signature: <MinPk as Variant>::Signature,
 }
 
@@ -269,12 +260,6 @@ impl crate::Signature for Signature {}
 impl AsRef<<MinPk as Variant>::Signature> for Signature {
     fn as_ref(&self) -> &<MinPk as Variant>::Signature {
         &self.signature
-    }
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
     }
 }
 

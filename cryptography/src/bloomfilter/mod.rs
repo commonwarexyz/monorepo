@@ -4,11 +4,8 @@
 mod conformance;
 
 use crate::{Hasher, sha256::Sha256};
-use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, FixedSize,
-    codec::{Read, Write},
-    error::Error as CodecError,
+    Buf, EncodeSize, FixedSize, Write, codec::Read, error::Error as CodecError,
 };
 use commonware_utils::bitmap::BitMap;
 use core::{
@@ -56,10 +53,15 @@ const LN2_INV: (u64, u64) = (29145, 20201);
 /// - **Performance**: Hash function performance varies with the size of items inserted
 ///   and queried. [Sha256] is faster for smaller items (up to ~2KB), while
 ///   [Blake3](crate::blake3::Blake3) is faster for larger items (4KB+).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub struct BloomFilter<H: Hasher = Sha256> {
+    #[codec(
+        encode_with = { value.get().write(buf); },
+        encode_size = value.get().encode_size()
+    )]
     hashers: NonZeroU8,
     bits: BitMap,
+    #[codec(encode_with = {}, encode_size = 0)]
     _marker: PhantomData<H>,
 }
 
@@ -263,13 +265,6 @@ impl<H: Hasher> BloomFilter<H> {
     }
 }
 
-impl<H: Hasher> Write for BloomFilter<H> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.hashers.get().write(buf);
-        self.bits.write(buf);
-    }
-}
-
 impl<H: Hasher> Read for BloomFilter<H> {
     // The number of hashers and the number of bits that the bitmap must have.
     type Cfg = (NonZeroU8, NonZeroU64);
@@ -303,12 +298,6 @@ impl<H: Hasher> Read for BloomFilter<H> {
             bits,
             _marker: PhantomData,
         })
-    }
-}
-
-impl<H: Hasher> EncodeSize for BloomFilter<H> {
-    fn encode_size(&self) -> usize {
-        self.hashers.get().encode_size() + self.bits.encode_size()
     }
 }
 

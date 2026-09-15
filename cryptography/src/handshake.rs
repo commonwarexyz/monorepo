@@ -38,7 +38,7 @@ use crate::{
     PublicKey, Signature, Signer, Verifier,
     transcript::{Summary, Transcript, Version},
 };
-use commonware_codec::{Buf, Encode, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Encode, FixedSize, Read, Write};
 use core::ops::Range;
 use rand_core::CryptoRng;
 
@@ -67,34 +67,11 @@ const TRANSCRIPT_VERSION: Version = Version::V0;
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Write, Read, FixedSize)]
 pub struct Syn<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
     sig: S,
-}
-
-impl<S: Signature> FixedSize for Syn<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
-}
-
-impl<S: Signature + Write> Write for Syn<S> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.time_ms.write(buf);
-        self.epk.write(buf);
-        self.sig.write(buf);
-    }
-}
-
-impl<S: Signature + Read> Read for Syn<S> {
-    type Cfg = S::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            time_ms: ReadExt::read(buf)?,
-            epk: ReadExt::read(buf)?,
-            sig: Read::read_cfg(buf, cfg)?,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -114,37 +91,12 @@ where
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Write, Read, FixedSize)]
 pub struct SynAck<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
     sig: S,
     confirmation: Summary,
-}
-
-impl<S: Signature> FixedSize for SynAck<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
-}
-
-impl<S: Signature + Write> Write for SynAck<S> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.time_ms.write(buf);
-        self.epk.write(buf);
-        self.sig.write(buf);
-        self.confirmation.write(buf);
-    }
-}
-
-impl<S: Signature + Read> Read for SynAck<S> {
-    type Cfg = S::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            time_ms: ReadExt::read(buf)?,
-            epk: ReadExt::read(buf)?,
-            sig: Read::read_cfg(buf, cfg)?,
-            confirmation: ReadExt::read(buf)?,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -166,28 +118,9 @@ where
 /// Contains dialer's confirmation tag to complete the handshake.
 #[cfg_attr(test, derive(PartialEq))]
 #[cfg_attr(feature = "arbitrary", derive(Debug, arbitrary::Arbitrary))]
+#[derive(Write, Read, FixedSize)]
 pub struct Ack {
     confirmation: Summary,
-}
-
-impl FixedSize for Ack {
-    const SIZE: usize = Summary::SIZE;
-}
-
-impl Write for Ack {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.confirmation.write(buf);
-    }
-}
-
-impl Read for Ack {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            confirmation: ReadExt::read(buf)?,
-        })
-    }
 }
 
 /// State maintained by the dialer during handshake.

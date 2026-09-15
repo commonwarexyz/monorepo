@@ -70,10 +70,9 @@ pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use commonware_codec::{
-    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write,
-    types::lazy::Lazy,
+    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, Read, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -84,7 +83,7 @@ use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
 
 /// A participant's attestation for a certificate.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
 pub struct Attestation<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: Participant,
@@ -104,30 +103,6 @@ impl<S: Scheme> Hash for Attestation<S> {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
-    }
-}
-
-impl<S: Scheme> Write for Attestation<S> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signer.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<S: Scheme> EncodeSize for Attestation<S> {
-    fn encode_size(&self) -> usize {
-        self.signer.encode_size() + self.signature.encode_size()
-    }
-}
-
-impl<S: Scheme> Read for Attestation<S> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let signer = Participant::read(reader)?;
-        let signature = ReadExt::read(reader)?;
-
-        Ok(Self { signer, signature })
     }
 }
 
@@ -536,7 +511,7 @@ pub trait Provider: Clone + Send + Sync + 'static {
 /// Bitmap wrapper that tracks which participants signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, EncodeSize)]
 pub struct Signers {
     bitmap: BitMap<1>,
 }
@@ -608,18 +583,6 @@ where
     fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
         let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
         Self::new(total, signers)
-    }
-}
-
-impl Write for Signers {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.bitmap.write(writer);
-    }
-}
-
-impl EncodeSize for Signers {
-    fn encode_size(&self) -> usize {
-        self.bitmap.encode_size()
     }
 }
 

@@ -133,8 +133,7 @@
 
 use super::ipa;
 use crate::transcript::Transcript;
-use bytes::BufMut;
-use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,
@@ -149,11 +148,13 @@ use std::{
 /// A sparse matrix indexed by `(row, column)`.
 ///
 /// Missing entries are treated as 0.
+#[derive(Write, EncodeSize)]
 pub struct SparseMatrix<F> {
     width: usize,
     height: usize,
     weights: BTreeMap<(usize, usize), F>,
     /// This exists so that we can return a reference when indexing.
+    #[codec(encode_with = {}, encode_size = 0)]
     zero: F,
 }
 
@@ -235,46 +236,17 @@ impl<F: Ring> Mul<&[F]> for &SparseMatrix<F> {
     }
 }
 
-impl<F: Write> Write for SparseMatrix<F> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.width.write(buf);
-        self.height.write(buf);
-        self.weights.write(buf);
-    }
-}
-
-impl<F: EncodeSize> EncodeSize for SparseMatrix<F> {
-    fn encode_size(&self) -> usize {
-        self.width.encode_size() + self.height.encode_size() + self.weights.encode_size()
-    }
-}
-
 /// A circuit describing the constraints the prover must satisfy.
+#[derive(Write, EncodeSize)]
 pub struct Circuit<F> {
     committed_vars: usize,
     internal_vars: usize,
     weights: SparseMatrix<F>,
 }
 
-impl<F: Write> Write for Circuit<F> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.committed_vars.write(buf);
-        self.internal_vars.write(buf);
-        self.weights.write(buf);
-    }
-}
-
 impl<F: Encode> Circuit<F> {
     fn commit(&self, transcript: &mut Transcript) {
         transcript.commit(self.encode());
-    }
-}
-
-impl<F: EncodeSize> EncodeSize for Circuit<F> {
-    fn encode_size(&self) -> usize {
-        self.committed_vars.encode_size()
-            + self.internal_vars.encode_size()
-            + self.weights.encode_size()
     }
 }
 
@@ -849,10 +821,14 @@ pub fn zkc_to_circuit_and_witness<F: Field + Random>(
 ///
 /// This wraps the underlying IPA setup and adds two Pedersen generators used
 /// for commitments to committed values and blindings.
-#[derive(PartialEq)]
+#[derive(PartialEq, Write, EncodeSize, Read)]
+#[read_cfg((usize, G::Cfg))]
 pub struct Setup<G> {
+    #[codec(cfg = &(cfg.0, cfg.1.clone()))]
     ipa: ipa::Setup<G>,
+    #[codec(cfg = &cfg.1)]
     value_generator: G,
+    #[codec(cfg = &cfg.1)]
     blinding_generator: G,
 }
 
@@ -1046,36 +1022,6 @@ impl<G> Setup<G> {
     }
 }
 
-impl<G: Write> Write for Setup<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.ipa.write(buf);
-        self.value_generator.write(buf);
-        self.blinding_generator.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Setup<G> {
-    fn encode_size(&self) -> usize {
-        self.ipa.encode_size()
-            + self.value_generator.encode_size()
-            + self.blinding_generator.encode_size()
-    }
-}
-
-impl<G: Read> Read for Setup<G>
-where
-    G::Cfg: Clone,
-{
-    type Cfg = (usize, G::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
-        let ipa = ipa::Setup::read_cfg(buf, &(*max_len, cfg.clone()))?;
-        let value_generator = G::read_cfg(buf, cfg)?;
-        let blinding_generator = G::read_cfg(buf, cfg)?;
-        Ok(Self::new(ipa, value_generator, blinding_generator))
-    }
-}
-
 /// A prover-side assignment for a circuit proof.
 ///
 /// This contains the committed values, their Pedersen blindings, and the
@@ -1159,20 +1105,9 @@ impl<F> Witness<F> {
 ///
 /// The claim does not contain the [`Circuit`] itself, so that the verifier is
 /// in control of what properties they want the committed values to satisfy.
+#[derive(Write, EncodeSize)]
 pub struct Claim<G> {
     pub commitments: Vec<G>,
-}
-
-impl<G: Write> Write for Claim<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.commitments.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Claim<G> {
-    fn encode_size(&self) -> usize {
-        self.commitments.encode_size()
-    }
 }
 
 /// A proof demonstrating knowledge of a [`Witness`] satisfying a [`Claim`] relative
@@ -1180,85 +1115,28 @@ impl<G: EncodeSize> EncodeSize for Claim<G> {
 ///
 /// See [`prove`] and [`verify`].
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, Write, EncodeSize, Read)]
+#[read_cfg((usize, (G::Cfg, F::Cfg)))]
 pub struct Proof<F, G> {
+    #[codec(cfg = &cfg.1.0)]
     m_big: G,
+    #[codec(cfg = &cfg.1.0)]
     o_big: G,
+    #[codec(cfg = &cfg.1.0)]
     m_big_tilde: G,
+    #[codec(cfg = &cfg.1.0)]
+    #[codec(encode_size = value.iter().map(EncodeSize::encode_size).sum::<usize>())]
     t_big: [G; 5],
+    #[codec(cfg = &cfg.1.1)]
     s_tilde: F,
+    #[codec(cfg = &cfg.1.1)]
     t_x: F,
+    #[codec(cfg = &cfg.1.1)]
     t_tilde_x: F,
+    #[codec(cfg = &cfg.1.0)]
     p_big: G,
+    #[codec(cfg = cfg)]
     ipa_proof: ipa::Proof<F, G>,
-}
-
-impl<F: Write, G: Write> Write for Proof<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.m_big.write(buf);
-        self.o_big.write(buf);
-        self.m_big_tilde.write(buf);
-        for t in &self.t_big {
-            t.write(buf);
-        }
-        self.s_tilde.write(buf);
-        self.t_x.write(buf);
-        self.t_tilde_x.write(buf);
-        self.p_big.write(buf);
-        self.ipa_proof.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
-    fn encode_size(&self) -> usize {
-        self.m_big.encode_size()
-            + self.o_big.encode_size()
-            + self.m_big_tilde.encode_size()
-            + self.t_big.iter().map(|t| t.encode_size()).sum::<usize>()
-            + self.s_tilde.encode_size()
-            + self.t_x.encode_size()
-            + self.t_tilde_x.encode_size()
-            + self.p_big.encode_size()
-            + self.ipa_proof.encode_size()
-    }
-}
-
-impl<F: Read, G: Read> Read for Proof<F, G>
-where
-    F::Cfg: Clone,
-    G::Cfg: Clone,
-{
-    /// `(max_len, (g_cfg, f_cfg))` where `max_len` bounds the IPA round count.
-    type Cfg = (usize, (G::Cfg, F::Cfg));
-
-    fn read_cfg(buf: &mut impl Buf, cfg @ (_, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
-        let m_big = G::read_cfg(buf, g_cfg)?;
-        let o_big = G::read_cfg(buf, g_cfg)?;
-        let m_big_tilde = G::read_cfg(buf, g_cfg)?;
-        let t_big = [
-            G::read_cfg(buf, g_cfg)?,
-            G::read_cfg(buf, g_cfg)?,
-            G::read_cfg(buf, g_cfg)?,
-            G::read_cfg(buf, g_cfg)?,
-            G::read_cfg(buf, g_cfg)?,
-        ];
-        let s_tilde = F::read_cfg(buf, f_cfg)?;
-        let t_x = F::read_cfg(buf, f_cfg)?;
-        let t_tilde_x = F::read_cfg(buf, f_cfg)?;
-        let p_big = G::read_cfg(buf, g_cfg)?;
-        let ipa_proof = ipa::Proof::read_cfg(buf, cfg)?;
-        Ok(Self {
-            m_big,
-            o_big,
-            m_big_tilde,
-            t_big,
-            s_tilde,
-            t_x,
-            t_tilde_x,
-            p_big,
-            ipa_proof,
-        })
-    }
 }
 
 /// Prove that a given [`Witness`] satisfies a [`Circuit`] and matches a [`Claim`].
@@ -2131,6 +2009,12 @@ mod test {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+
+    #[test]
+    fn test_proof_dynamic_size_bounds() {
+        fn assert_encode_size<T: commonware_codec::EncodeSize>() {}
+        assert_encode_size::<super::Proof<Vec<u8>, Vec<u8>>>();
+    }
 
     #[test]
     fn test_sparse_matrix_encoding_binds_dimensions() {

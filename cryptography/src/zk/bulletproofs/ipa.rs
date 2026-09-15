@@ -133,7 +133,7 @@
 
 use crate::transcript::{Summary, Transcript};
 use bytes::BufMut;
-use commonware_codec::{Buf, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error, RangeCfg, Read, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,
@@ -280,47 +280,21 @@ impl<G> Setup<G> {
 ///
 /// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, y^i H_i>`,
 /// and that our product `c` is equal to `<a_i, b_i>`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg((G::Cfg, F::Cfg))]
 pub struct Claim<F, G> {
+    #[codec(cfg = &cfg.0)]
     pub commitment: G,
+    #[codec(cfg = &cfg.1)]
     pub product: F,
+    #[codec(cfg = &cfg.1)]
     pub y: F,
     /// The claimed vector length, stored as `log2(len)`.
     ///
     /// Inner product arguments require power-of-two vector lengths, so storing
     /// the logarithm is enough to recover the full claimed length.
+    #[codec(cfg = &())]
     pub log_len: u8,
-}
-
-impl<F: Write, G: Write> Write for Claim<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.commitment.write(buf);
-        self.product.write(buf);
-        self.y.write(buf);
-        self.log_len.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-            + self.product.encode_size()
-            + self.y.encode_size()
-            + self.log_len.encode_size()
-    }
-}
-
-impl<F: Read, G: Read> Read for Claim<F, G> {
-    type Cfg = (G::Cfg, F::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            commitment: G::read_cfg(buf, g_cfg)?,
-            product: F::read_cfg(buf, f_cfg)?,
-            y: F::read_cfg(buf, f_cfg)?,
-            log_len: u8::read(buf)?,
-        })
-    }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
@@ -409,54 +383,26 @@ impl<F: Field> Witness<F> {
 }
 
 /// A proof for the inner product argument.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg((usize, (<G as Read>::Cfg, <F as Read>::Cfg)))]
 pub struct Proof<F, G> {
+    #[codec(
+        cfg = &(RangeCfg::new(..=if cfg.0 == 0 {
+            0
+        } else {
+            cfg.0.ilog2() as usize
+        }), ((cfg.1).0.clone(), (cfg.1).0.clone()))
+    )]
     l_r_coms: Vec<(G, G)>,
     /// Summary of the transcript after the public statement and all proof messages.
     ///
     /// This binds even zero-round exchanges to the transcript.
+    #[codec(cfg = &())]
     transcript_summary: Summary,
+    #[codec(cfg = &(cfg.1).1)]
     a_final: F,
+    #[codec(cfg = &(cfg.1).1)]
     b_final: F,
-}
-
-impl<F: Write, G: Write> Write for Proof<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.l_r_coms.write(buf);
-        self.transcript_summary.write(buf);
-        self.a_final.write(buf);
-        self.b_final.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
-    fn encode_size(&self) -> usize {
-        self.l_r_coms.encode_size()
-            + self.transcript_summary.encode_size()
-            + self.a_final.encode_size()
-            + self.b_final.encode_size()
-    }
-}
-
-impl<F: Read, G: Read> Read for Proof<F, G> {
-    type Cfg = (usize, (G::Cfg, F::Cfg));
-
-    fn read_cfg(buf: &mut impl Buf, (max_len, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
-        let max_rounds = if *max_len == 0 {
-            0
-        } else {
-            max_len.ilog2() as usize
-        };
-        Ok(Self {
-            l_r_coms: Vec::<(G, G)>::read_cfg(
-                buf,
-                &(RangeCfg::new(..=max_rounds), (g_cfg.clone(), g_cfg.clone())),
-            )?,
-            transcript_summary: Summary::read(buf)?,
-            a_final: F::read_cfg(buf, f_cfg)?,
-            b_final: F::read_cfg(buf, f_cfg)?,
-        })
-    }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]

@@ -28,8 +28,10 @@ use core::{
 /// exceed `r`, but that is harmless: every use feeds the bits into a group
 /// scalar multiplication, which is well-defined modulo `r`, so any alias of the
 /// same residue yields the same result.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Write)]
 pub struct F {
+    // The canonical integer uses little-endian limbs on the wire.
+    #[codec(encode_with = { for limb in value { buf.put_u64_le(*limb); } })]
     limbs: [u64; 4],
 }
 
@@ -208,15 +210,6 @@ impl Field for F {
 
 impl FixedSize for F {
     const SIZE: usize = 32;
-}
-
-impl Write for F {
-    fn write(&self, buf: &mut impl BufMut) {
-        // Little-endian canonical integer, one limb at a time.
-        for limb in self.limbs {
-            buf.put_u64_le(limb);
-        }
-    }
 }
 
 impl Read for F {

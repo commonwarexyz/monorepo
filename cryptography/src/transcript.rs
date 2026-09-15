@@ -512,19 +512,14 @@ impl Summary {
 /// This is the primary way to compare two transcripts for equality.
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FixedArray)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FixedArray, Write)]
 pub struct Summary {
+    #[codec(encode_with = { buf.put_slice(value.as_bytes()); })]
     hash: blake3::Hash,
 }
 
 impl FixedSize for Summary {
     const SIZE: usize = blake3::OUT_LEN;
-}
-
-impl Write for Summary {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.hash.as_bytes().write(buf)
-    }
 }
 
 impl Read for Summary {

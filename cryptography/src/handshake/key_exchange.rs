@@ -18,14 +18,10 @@ impl SharedSecret {
 
 /// An ephemeral X25519 public key used during handshake.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Write)]
 pub struct EphemeralPublicKey {
+    #[codec(encode_with = { buf.put_slice(value.as_bytes()); })]
     inner: x25519_dalek::PublicKey,
-}
-
-impl Write for EphemeralPublicKey {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_slice(self.inner.as_bytes());
-    }
 }
 
 impl FixedSize for EphemeralPublicKey {

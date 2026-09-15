@@ -502,8 +502,12 @@ impl GT {
 }
 
 /// The private key type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write)]
 pub struct Private {
+    #[codec(
+        encode_with = { value.expose(|scalar| scalar.write(buf)); },
+        encode_size = Self::SIZE
+    )]
     scalar: Secret<Scalar>,
 }
 
@@ -527,12 +531,6 @@ impl Private {
     /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
     pub fn expose_unwrap(self) -> Scalar {
         self.scalar.expose_unwrap()
-    }
-}
-
-impl Write for Private {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.expose(|scalar| scalar.write(buf));
     }
 }
 
@@ -978,7 +976,7 @@ impl FieldNTT for Scalar {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: Participant,
@@ -998,29 +996,6 @@ impl Share {
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private
             .expose(|private| V::Public::generator() * private)
-    }
-}
-
-impl Write for Share {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
-    }
-}
-
-impl Read for Share {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = Participant::read(buf)?;
-        let private = Private::read(buf)?;
-        Ok(Self { index, private })
-    }
-}
-
-impl EncodeSize for Share {
-    fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 

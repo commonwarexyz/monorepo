@@ -7,7 +7,6 @@ use alloc::{
     borrow::{Cow, ToOwned},
     vec::Vec,
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -29,8 +28,9 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write)]
 pub struct PrivateKey {
+    #[codec(encode_with = { value.expose(|key| key.as_bytes().write(buf)); })]
     key: Secret<ed_core::SigningKey>,
 }
 
@@ -67,12 +67,6 @@ impl Random for PrivateKey {
         Self {
             key: Secret::new(key),
         }
-    }
-}
-
-impl Write for PrivateKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.expose(|key| key.as_bytes().write(buf));
     }
 }
 
@@ -125,8 +119,9 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray, Write)]
 pub struct PublicKey {
+    #[codec(encode_with = { buf.put_slice(value.as_bytes()); })]
     key: ed_core::VerificationKey,
 }
 
@@ -157,12 +152,6 @@ impl PublicKey {
         self.key
             .verify(&ed_core::Signature::from(sig.raw), &payload)
             .is_ok()
-    }
-}
-
-impl Write for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.as_bytes().write(buf);
     }
 }
 
@@ -239,31 +228,12 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray, Write, Read, FixedSize)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
 
 impl crate::Signature for Signature {}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = SIGNATURE_LENGTH;
-}
 
 impl Span for Signature {}
 
