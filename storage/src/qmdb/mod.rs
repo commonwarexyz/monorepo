@@ -85,6 +85,7 @@ pub mod any;
 pub mod batch_chain;
 pub(crate) mod bitmap;
 pub(crate) mod compact;
+pub mod compaction;
 #[cfg(test)]
 mod conformance;
 pub mod current;

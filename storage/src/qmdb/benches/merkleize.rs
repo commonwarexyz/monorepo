@@ -8,12 +8,14 @@
 //! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
+//! - [`bench_merkleize_deletes`]: timing a batch deleting all but one key. Only merkleization
+//!   is timed; constructing the deletion batch is not.
 
 use crate::common::{
     CHUNK_SIZE, Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, write_random_updates,
 };
 use commonware_bench::{Benchmark, Metric, Workload};
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -412,6 +414,30 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        black_box(merkleized.root());
+        total += start.elapsed();
+    }
+    db.destroy().await.unwrap();
+    total
+}
+
+#[boxed]
+async fn run_delete_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    db: C,
+    num_keys: u64,
+    iters: u64,
+) -> Duration {
+    let db = seed_db(db, num_keys).await;
+    let keys: Vec<_> = (0..num_keys - 1)
+        .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+        .collect();
+    let mut total = Duration::ZERO;
+    for _ in 0..iters {
+        let batch = keys
+            .iter()
+            .fold(db.new_batch(), |batch, &key| batch.write(key, None));
+        let start = Instant::now();
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
@@ -852,8 +878,33 @@ fn bench_merkleize_churned(c: &mut Criterion) {
     }
 }
 
+/// Catch compaction throughput regressions from fetching candidates one at a time after bulk deletes.
+fn bench_merkleize_deletes(c: &mut Criterion) {
+    let runner = tokio::Runner::new(Config::default());
+    for num_keys in [1001, 10_001] {
+        for variant in [Variant::AnyFixed, Variant::CurrentFixed32] {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} keys={num_keys} deletes={} survivors=1",
+                    module_path!(),
+                    variant.name(),
+                    num_keys - 1,
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_variant!(ctx, variant, LARGE_PAGE_CACHE_SIZE, |db, _page_cache| {
+                            run_delete_bench(db, num_keys, iters).await
+                        })
+                    });
+                },
+            );
+        }
+    }
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_merkleize, bench_merkleize_churned
+    targets = bench_merkleize, bench_merkleize_churned, bench_merkleize_deletes
 }
