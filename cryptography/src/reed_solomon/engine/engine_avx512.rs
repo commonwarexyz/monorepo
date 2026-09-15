@@ -204,6 +204,47 @@ impl Avx512 {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
+        // Skew uses `GF_MODULUS` for a zero coefficient, while multiplication tables use it
+        // for the duplicated identity exponent.
+        if log_m01 != GF_MODULUS && log_m23 != GF_MODULUS && log_m02 != GF_MODULUS {
+            let lut01 = LutGfni::from(&self.multiply[log_m01 as usize]);
+            let lut23 = LutGfni::from(&self.multiply[log_m23 as usize]);
+            let lut02 = LutGfni::from(&self.multiply[log_m02 as usize]);
+
+            for (((s0_chunk, s1_chunk), s2_chunk), s3_chunk) in zip(
+                zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
+                s3.iter_mut(),
+            ) {
+                // SAFETY: The caller enables AVX-512 and GFNI; all four disjoint chunks are exactly 64 bytes.
+                unsafe {
+                    let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s2_ptr = s2_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s3_ptr = s3_chunk.as_mut_ptr().cast::<__m512i>();
+                    let mut s0 = _mm512_loadu_si512(s0_ptr);
+                    let mut s1 = _mm512_loadu_si512(s1_ptr);
+                    let mut s2 = _mm512_loadu_si512(s2_ptr);
+                    let mut s3 = _mm512_loadu_si512(s3_ptr);
+
+                    s0 = Self::muladd_512(s0, s2, lut02);
+                    s2 = _mm512_xor_si512(s2, s0);
+                    s1 = Self::muladd_512(s1, s3, lut02);
+                    s3 = _mm512_xor_si512(s3, s1);
+
+                    s0 = Self::muladd_512(s0, s1, lut01);
+                    s1 = _mm512_xor_si512(s1, s0);
+                    s2 = Self::muladd_512(s2, s3, lut23);
+                    s3 = _mm512_xor_si512(s3, s2);
+
+                    _mm512_storeu_si512(s0_ptr, s0);
+                    _mm512_storeu_si512(s1_ptr, s1);
+                    _mm512_storeu_si512(s2_ptr, s2);
+                    _mm512_storeu_si512(s3_ptr, s3);
+                }
+            }
+            return;
+        }
+
         // FIRST LAYER
 
         if log_m02 == GF_MODULUS {
@@ -340,6 +381,47 @@ impl Avx512 {
         log_m02: GfElement,
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
+
+        // Skew uses `GF_MODULUS` for a zero coefficient, while multiplication tables use it
+        // for the duplicated identity exponent.
+        if log_m01 != GF_MODULUS && log_m23 != GF_MODULUS && log_m02 != GF_MODULUS {
+            let lut01 = LutGfni::from(&self.multiply[log_m01 as usize]);
+            let lut23 = LutGfni::from(&self.multiply[log_m23 as usize]);
+            let lut02 = LutGfni::from(&self.multiply[log_m02 as usize]);
+
+            for (((s0_chunk, s1_chunk), s2_chunk), s3_chunk) in zip(
+                zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
+                s3.iter_mut(),
+            ) {
+                // SAFETY: The caller enables AVX-512 and GFNI; all four disjoint chunks are exactly 64 bytes.
+                unsafe {
+                    let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s2_ptr = s2_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s3_ptr = s3_chunk.as_mut_ptr().cast::<__m512i>();
+                    let mut s0 = _mm512_loadu_si512(s0_ptr);
+                    let mut s1 = _mm512_loadu_si512(s1_ptr);
+                    let mut s2 = _mm512_loadu_si512(s2_ptr);
+                    let mut s3 = _mm512_loadu_si512(s3_ptr);
+
+                    s1 = _mm512_xor_si512(s1, s0);
+                    s0 = Self::muladd_512(s0, s1, lut01);
+                    s3 = _mm512_xor_si512(s3, s2);
+                    s2 = Self::muladd_512(s2, s3, lut23);
+
+                    s2 = _mm512_xor_si512(s2, s0);
+                    s0 = Self::muladd_512(s0, s2, lut02);
+                    s3 = _mm512_xor_si512(s3, s1);
+                    s1 = Self::muladd_512(s1, s3, lut02);
+
+                    _mm512_storeu_si512(s0_ptr, s0);
+                    _mm512_storeu_si512(s1_ptr, s1);
+                    _mm512_storeu_si512(s2_ptr, s2);
+                    _mm512_storeu_si512(s3_ptr, s3);
+                }
+            }
+            return;
+        }
 
         // FIRST LAYER
 
