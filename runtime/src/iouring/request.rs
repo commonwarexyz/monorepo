@@ -14,7 +14,7 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Held};
+use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
@@ -274,22 +274,40 @@ impl Request {
                     },
                 )
             }
-            Self::WriteAt(r) => (
-                RequestOutput::WriteAt(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: Some(r.cache),
-                    _write: Some(r.write),
-                },
-            ),
-            Self::Sync(r) => (
-                RequestOutput::Sync(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: None,
-                    _write: None,
-                },
-            ),
+            Self::WriteAt(r) => {
+                // Only plain writes stay in `Writing`. Settle here so a caller that stopped
+                // waiting still leaves the open's debt correct.
+                let result = r.file.wrote(
+                    r.state != WriteAtState::Writing,
+                    matches!(r.state, WriteAtState::WritingSync | WriteAtState::Syncing),
+                    result,
+                );
+                (
+                    RequestOutput::WriteAt(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _cache: Some(r.cache),
+                        _write: Some(r.write),
+                    },
+                )
+            }
+            Self::Sync(r) => {
+                let result = match result {
+                    Ok(()) => r.file.tracker.end_sync(r.seen),
+                    Err(error) => {
+                        r.file.sync_failed(&error);
+                        Err(error)
+                    }
+                };
+                (
+                    RequestOutput::Sync(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _cache: None,
+                        _write: None,
+                    },
+                )
+            }
             Self::Connect(r) => (
                 RequestOutput::Connect(result),
                 RetiredResources::Connect {
@@ -345,10 +363,10 @@ pub enum RetiredResources {
         /// Original byte owners, including consumed chunks.
         _write: WriteBuffers,
     },
-    /// File, directory hold, and any positioned I/O buffer/cache owners.
+    /// Storage open, directory hold, and any positioned I/O buffer/cache owners.
     File {
-        /// File owner carrying its original storage directory hold.
-        _file: Arc<Held>,
+        /// Storage open carrying its file, directory hold, and durability debt.
+        _file: Arc<Shared>,
         /// Shared capability state retained by positioned I/O.
         _cache: Option<Cache>,
         /// Original write owners, absent for reads and standalone sync.
@@ -530,8 +548,8 @@ impl RecvRequest {
 
 /// Logical positioned file read request and its in-loop state.
 pub struct ReadAtRequest {
-    /// File used by the current read SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current read SQE uses.
+    pub file: Arc<Shared>,
     /// Starting file offset for the logical read.
     pub offset: u64,
     /// Bytes already read into `buf`.
@@ -667,8 +685,8 @@ fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
 
 /// Logical positioned file write request and its in-loop state.
 pub struct WriteAtRequest {
-    /// File used by the current write SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current write SQE uses.
+    pub file: Arc<Shared>,
     /// File offset for the next write SQE.
     pub offset: u64,
     /// Write cursor and buffers that still need to be written.
@@ -758,11 +776,19 @@ impl WriteAtRequest {
 
 /// Logical fsync request and its in-loop state.
 pub struct SyncRequest {
-    /// File descriptor to sync.
-    pub file: Arc<Held>,
+    /// Open whose file the fsync SQE uses.
+    pub file: Arc<Shared>,
+    /// Completed mutations that preceded this barrier's submission.
+    seen: u64,
 }
 
 impl SyncRequest {
+    /// Record the mutation frontier this sync can cover before ring submission.
+    pub fn new(file: Arc<Shared>) -> Self {
+        let seen = file.tracker.begin_sync();
+        Self { file, seen }
+    }
+
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         build_datasync_sqe(&self.file)
@@ -865,7 +891,7 @@ mod tests {
     }
 
     /// Retain a descriptor and directory hold for simulated storage requests.
-    fn make_file_fd() -> Arc<Held> {
+    fn make_shared_file() -> Arc<Shared> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         let file = File::from(OwnedFd::from(left));
 
@@ -878,7 +904,7 @@ mod tests {
             )
             .unwrap()
         });
-        Held::new(file, hold.clone())
+        Shared::detached(file, hold.clone())
     }
 
     /// Create a five-byte send with no deadline.
@@ -1221,9 +1247,7 @@ mod tests {
                     true,
                 ),
                 (
-                    Request::Sync(SyncRequest {
-                        file: make_file_fd(),
-                    }),
+                    Request::Sync(SyncRequest::new(make_shared_file())),
                     opcode::Fsync::CODE,
                     None,
                     true,
@@ -1582,16 +1606,12 @@ mod tests {
 
     #[test]
     fn test_active_sync_paths() {
-        let mut request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let mut request = Request::Sync(SyncRequest::new(make_shared_file()));
         assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
         // A sync exposes the kernel error code, including unsolicited ECANCELED.
         for code in [libc::ECANCELED, libc::EIO] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_shared_file()));
             let RequestOutput::Sync(Err(Error::Io(error))) = complete(request, ACTIVE, -code)
             else {
                 panic!("expected sync I/O error");
@@ -1600,13 +1620,116 @@ mod tests {
         }
 
         for result in [0, 1] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_shared_file()));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::Sync(Ok(()))
             ));
+        }
+    }
+
+    #[test]
+    fn test_sync_completion_credits_only_its_successful_barrier() {
+        for success in [false, true] {
+            for later_write in [false, true] {
+                let file = make_shared_file();
+                file.tracker.write();
+                file.tracker.complete();
+                let request = Request::Sync(SyncRequest::new(file.clone()));
+                if later_write {
+                    file.tracker.write();
+                    file.tracker.complete();
+                }
+                let result = if success { Ok(()) } else { Err(Error::Timeout) };
+                let (_, retired) = request.complete(result);
+                drop(retired);
+                assert_eq!(file.tracker.is_dirty(), !success || later_write);
+            }
+        }
+    }
+
+    #[test]
+    fn test_overlapping_durability_failure() {
+        for state in [
+            None,
+            Some(WriteAtState::WritingSync),
+            Some(WriteAtState::Syncing),
+        ] {
+            for failure_first in [false, true] {
+                let file = make_shared_file();
+                file.tracker.write();
+                file.tracker.complete();
+                let mut failed = Request::Sync(SyncRequest::new(file.clone()));
+                let mut successful = state.as_ref().map_or_else(
+                    || Request::Sync(SyncRequest::new(file.clone())),
+                    |state| {
+                        Request::WriteAt(WriteAtRequest {
+                            file: file.clone(),
+                            offset: 0,
+                            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                            state: if *state == WriteAtState::Syncing {
+                                WriteAtState::WritingBeforeSync
+                            } else {
+                                WriteAtState::WritingSync
+                            },
+                            cache: Cache::Enabled,
+                        })
+                    },
+                );
+                if state == Some(WriteAtState::Syncing) {
+                    assert!(successful.on_cqe(ACTIVE, 5).is_none());
+                }
+
+                // Requests are already admitted. Completion accounting runs even when the
+                // observer discards its output, and precedes releasing any retained owner.
+                let finish_failure = || {
+                    let result = failed.on_cqe(ACTIVE, -libc::EIO).unwrap();
+                    let (output, retired) = failed.complete(result);
+                    assert!(matches!(output, RequestOutput::Sync(Err(Error::Io(_)))));
+                    assert!(matches!(
+                        file.tracker.failure(),
+                        Some(Error::BlobSyncFailed(_, _, error))
+                            if error.raw_os_error() == Some(libc::EIO)
+                    ));
+                    drop(retired);
+                };
+                let finish_success = || {
+                    let result = successful
+                        .on_cqe(
+                            ACTIVE,
+                            if state == Some(WriteAtState::WritingSync) {
+                                5
+                            } else {
+                                0
+                            },
+                        )
+                        .unwrap();
+                    let (output, retired) = successful.complete(result);
+                    let result = match output {
+                        RequestOutput::Sync(result) | RequestOutput::WriteAt(result) => result,
+                        _ => unreachable!(),
+                    };
+                    if failure_first {
+                        assert!(
+                            matches!(&result, Err(Error::BlobSyncFailed(_, _, error))
+                                if error.raw_os_error() == Some(libc::EIO)),
+                            "acknowledged after a retained failure: {result:?}"
+                        );
+                        assert!(file.tracker.is_dirty());
+                    } else {
+                        result.unwrap();
+                        assert_eq!(file.tracker.is_dirty(), state.is_some());
+                    }
+                    drop(retired);
+                };
+                if failure_first {
+                    finish_failure();
+                    finish_success();
+                } else {
+                    finish_success();
+                    finish_failure();
+                }
+            }
         }
     }
 
@@ -1646,9 +1769,7 @@ mod tests {
         ));
         drop(retired);
 
-        let request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let request = Request::Sync(SyncRequest::new(make_shared_file()));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Sync(Err(Error::Timeout))));
         drop(retired);

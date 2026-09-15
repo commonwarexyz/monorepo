@@ -777,12 +777,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     {
         self.checkpoint = self.checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
-        for writer in self.pending.values_mut() {
-            writer.wait_for_sync().await?;
-        }
-        self.pending.clear();
         Partition::<E>::remove_all(&self.context, &self.cfg.partition).await?;
         Partition::<E>::remove_all(&self.context, &format!("{}-blobs", self.cfg.partition)).await?;
+        self.pending.clear();
         self.partition = Partition::new(
             self.context.child("blobs"),
             format!("{}-blobs", self.cfg.partition),
@@ -2086,8 +2083,9 @@ mod tests {
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, StorageEvent,
+            WriteFaultContext, WriteFaults, drive_pending_syncs, fail_pending_syncs,
+            release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -2114,6 +2112,190 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    fn assert_dirty_blob_unlinked_before_drop(
+        recordings: &Recordings,
+        partition: &str,
+        blob: u64,
+        removed_name: Option<&[u8]>,
+    ) {
+        let name = blob.to_be_bytes();
+        let events = recordings.storage_events();
+        let (opened, incarnation) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                StorageEvent::Opened {
+                    incarnation,
+                    partition: opened_partition,
+                    name: opened_name,
+                } if opened_partition == partition && opened_name == name.as_slice() => {
+                    Some((index, *incarnation))
+                }
+                _ => None,
+            })
+            .expect("target blob was opened");
+        let wrote = events
+            .iter()
+            .enumerate()
+            .skip(opened + 1)
+            .find_map(|(index, event)| match event {
+                StorageEvent::Wrote {
+                    incarnation: wrote_incarnation,
+                    options,
+                } if *wrote_incarnation == incarnation && !options.contains(WriteOptions::SYNC) => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .expect("target blob received a completed plain write");
+        let removed = events
+            .iter()
+            .enumerate()
+            .skip(wrote + 1)
+            .find_map(|(index, event)| match event {
+                StorageEvent::Removed {
+                    partition: removed_partition,
+                    name,
+                } if removed_partition == partition && name.as_deref() == removed_name => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .expect("target blob or partition was removed");
+        let dropped = events
+            .iter()
+            .enumerate()
+            .skip(wrote + 1)
+            .find_map(|(index, event)| match event {
+                StorageEvent::Dropped {
+                    incarnation: dropped_incarnation,
+                } if *dropped_incarnation == incarnation => Some(index),
+                _ => None,
+            })
+            .expect("target blob incarnation was dropped");
+
+        assert!(
+            events[wrote + 1..removed].iter().all(|event| match event {
+                StorageEvent::Synced {
+                    incarnation: observed,
+                }
+                | StorageEvent::StartedSync {
+                    incarnation: observed,
+                } => *observed != incarnation,
+                StorageEvent::Wrote {
+                    incarnation: observed,
+                    options,
+                } => *observed != incarnation || !options.contains(WriteOptions::SYNC),
+                _ => true,
+            }),
+            "target blob was synchronized before removal: {events:?}",
+        );
+        assert!(
+            removed < dropped,
+            "target blob owner was dropped before successful removal: {events:?}",
+        );
+    }
+
+    fn recovery_lifetime_cfg(pooler: &impl BufferPooler, partition: &str) -> Config {
+        Config {
+            partition: partition.into(),
+            items_per_blob: NZU64!(8),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
+            write_buffer: NZUsize!(32),
+            replay_buffer: NZUsize!(32),
+        }
+    }
+
+    async fn append_rebuilt_offsets<E: crate::Context>(
+        mut recovery: Box<Recovery<E, u64>>,
+    ) -> Box<Recovery<E, u64>> {
+        let size = recovery.size();
+        recovery = recovery.truncate(size).await.unwrap();
+        for position in 0..24 {
+            recovery = recovery.append(&(position * 9)).await.unwrap();
+        }
+        recovery
+    }
+
+    #[test]
+    fn test_recovery_truncate_unlinks_dirty_offset_writers_before_drop() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = recovery_lifetime_cfg(&context, "truncate-dirty-offsets");
+            let checkpoint = Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                .await
+                .unwrap();
+            let recovery =
+                Recovery::<_, u64>::open(context.child("recovery"), cfg.clone(), checkpoint, None)
+                    .await
+                    .unwrap();
+            let recovery = append_rebuilt_offsets(Box::new(recovery)).await;
+            let recovery = recovery.truncate(2).await.unwrap();
+
+            let partition = blob_partition(&cfg);
+            for blob in [1u64, 2] {
+                let name = blob.to_be_bytes();
+                assert_dirty_blob_unlinked_before_drop(&recordings, &partition, blob, Some(&name));
+            }
+            assert_eq!(recovery.size(), 2);
+            assert_eq!(recovery.item(0).await.unwrap(), 0);
+            assert_eq!(recovery.item(1).await.unwrap(), 9);
+            assert!(matches!(
+                recovery.item(2).await,
+                Err(Error::ItemOutOfRange(2))
+            ));
+
+            let recovery = recovery.sync().await.unwrap();
+            drop(recovery);
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            assert_eq!(journal.read(1).await.unwrap(), 9);
+            assert!(matches!(
+                journal.read(2).await,
+                Err(Error::ItemOutOfRange(2))
+            ));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_recovery_reset_unlinks_dirty_offset_writers_before_drop() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = recovery_lifetime_cfg(&context, "reset-dirty-offsets");
+            let checkpoint = Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                .await
+                .unwrap();
+            let recovery =
+                Recovery::<_, u64>::open(context.child("recovery"), cfg.clone(), checkpoint, None)
+                    .await
+                    .unwrap();
+            let recovery = append_rebuilt_offsets(Box::new(recovery)).await;
+            let recovery = recovery.clear_to_size(40).await.unwrap();
+
+            let partition = blob_partition(&cfg);
+            for blob in [1u64, 2] {
+                assert_dirty_blob_unlinked_before_drop(&recordings, &partition, blob, None);
+            }
+            assert_eq!(recovery.pruning_boundary(), 40);
+            assert_eq!(recovery.size(), 40);
+
+            let recovery = recovery.append(&360).await.unwrap();
+            assert_eq!(recovery.item(40).await.unwrap(), 360);
+            let recovery = recovery.sync().await.unwrap();
+            drop(recovery);
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 40..41);
+            assert_eq!(journal.read(40).await.unwrap(), 360);
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test]
