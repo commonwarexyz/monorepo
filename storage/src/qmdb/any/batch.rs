@@ -2013,7 +2013,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in results.iter().zip(&locations) {
+        for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2022,7 +2022,7 @@ where
                 emit(key, staged_base_old_loc(sloc), mutation);
             }
 
-            let key = op.key().expect("updates should have a key");
+            let key = op.into_key().expect("updates should have a key");
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
             // location. Without this guard, a stale snapshot collision (the pre-parent DB
@@ -2030,7 +2030,7 @@ where
             // wrong sort position, changing the operation order relative to the committed-state
             // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
             // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
+            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -2039,13 +2039,13 @@ where
                 Some(old_loc)
             };
 
-            let Some(mutation) = mutations.remove(key) else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
 
-            emit(key.clone(), base_old_loc, mutation);
+            emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
             emit(key, staged_base_old_loc(sloc), mutation);
@@ -2158,12 +2158,7 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in m
-            .read_ops(&locations, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(&locations)
-        {
+        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
             let update::Ordered {
                 key,
                 value,
@@ -2249,7 +2244,7 @@ where
 
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
-        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
+        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
