@@ -6,6 +6,21 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
+/// Read a fixed-width value directly from the current chunk when it fits.
+#[inline]
+pub(crate) fn read_fixed<const N: usize>(buf: &mut impl Buf) -> Result<[u8; N], Error> {
+    if let Some(bytes) = buf.chunk().first_chunk::<N>() {
+        let bytes = *bytes;
+        buf.advance(N);
+        return Ok(bytes);
+    }
+
+    let mut bytes = [0; N];
+    buf.try_copy_to_slice(&mut bytes)
+        .map_err(|_| Error::EndOfBuffer)?;
+    Ok(bytes)
+}
+
 /// Checks if the buffer has at least `len` bytes remaining. Returns an [Error::EndOfBuffer] if not.
 #[inline]
 pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
@@ -65,8 +80,71 @@ pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Copying;
-    use bytes::Buf as _;
+    use crate::{Copying, ReadExt, varint::UInt};
+    use bytes::{Buf as _, Bytes};
+    use core::cell::Cell;
+
+    struct CountRemaining<B> {
+        inner: B,
+        calls: Cell<usize>,
+    }
+
+    impl<B> CountRemaining<B> {
+        fn new(inner: B) -> Self {
+            Self {
+                inner,
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl<B: Buf> Buf for CountRemaining<B> {}
+
+    impl<B: Buf> bytes::Buf for CountRemaining<B> {
+        fn remaining(&self) -> usize {
+            self.calls.set(self.calls.get() + 1);
+            self.inner.remaining()
+        }
+
+        fn chunk(&self) -> &[u8] {
+            self.inner.chunk()
+        }
+
+        fn advance(&mut self, count: usize) {
+            self.inner.advance(count);
+        }
+
+        fn copy_to_bytes(&mut self, count: usize) -> Bytes {
+            self.inner.copy_to_bytes(count)
+        }
+    }
+
+    #[test]
+    fn test_numeric_reads_only_query_total_length_for_bounds() {
+        let bytes = Bytes::from_static(&[0, 0, 0, 1, 0, 0, 0, 2]);
+        let source = || bytes.clone().chain(Bytes::from_static(&[9]));
+
+        let mut scalar = CountRemaining::new(source());
+        assert_eq!(u32::read(&mut scalar).unwrap(), 1);
+        assert_eq!(u32::read(&mut scalar).unwrap(), 2);
+        assert_eq!(scalar.calls.get(), 0);
+
+        let mut vector = CountRemaining::new(source());
+        assert_eq!(u32::read_vec(&mut vector, 2, &()).unwrap(), [1, 2]);
+        assert_eq!(vector.calls.get(), 1);
+
+        let mut array = CountRemaining::new(source());
+        assert_eq!(u32::read_array::<2>(&mut array, &()).unwrap(), [1, 2]);
+        assert_eq!(array.calls.get(), 1);
+
+        // Even a cross-chunk varint needs no total-length query for its individual bytes.
+        let mut varint = CountRemaining::new(
+            Bytes::from_static(&[0xAC]).chain(Bytes::from_static(&[0x02, 0x7F])),
+        );
+        assert_eq!(UInt::<u32>::read(&mut varint).unwrap().0, 300);
+        assert_eq!(u8::read(&mut varint).unwrap(), 127);
+        assert_eq!(varint.calls.get(), 0);
+    }
 
     #[test]
     fn test_ensure_zeros() {

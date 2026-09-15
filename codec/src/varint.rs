@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{Buf, EncodeSize, Error, FixedSize, Read, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, Write, util::read_fixed};
 use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
@@ -396,7 +396,7 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 /// - The buffer ends while reading
 fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     // Fast path for single-byte values.
-    let mut byte = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
+    let mut byte = read_fixed::<1>(buf)?[0];
     if byte & CONTINUATION_BIT_MASK == 0 {
         return Ok(T::from(byte));
     }
@@ -408,7 +408,7 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
         if let Some(value) = decoder.feed(byte)? {
             return Ok(value);
         }
-        byte = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
+        byte = read_fixed::<1>(buf)?[0];
     }
 }
 
