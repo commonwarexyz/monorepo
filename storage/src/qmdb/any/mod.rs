@@ -1649,7 +1649,7 @@ pub(crate) mod test {
                 .lines()
                 .filter(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
+                        && (line.contains("index_worker") || line.contains("index_decoder"))
                 })
                 .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
                 .sum()
