@@ -35,7 +35,10 @@ where
 pub struct Verification<C> {
     /// Number of pending votes processed.
     pub batch: usize,
-    /// Signers whose attestations failed verification.
+    /// Signers identified as invalid by attestation verification.
+    ///
+    /// An empty result does not mean every input vote was individually verified:
+    /// successful optimistic recovery returns no per-vote results.
     pub invalid: Vec<Participant>,
     /// A certificate recovered and verified from the buffered votes.
     pub certificate: Option<C>,
@@ -256,8 +259,13 @@ impl<D: Digest> ProposalState<D> {
 /// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),
 /// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
-/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
-/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+/// To avoid unnecessary verification, it tracks already verified votes and stops processing a vote kind
+/// once it has a verified quorum or certificate.
+///
+/// For a non-attributable scheme, each vote kind gets at most one optimistic recovery attempt per view:
+/// the verifier assembles a certificate from unverified votes and verifies that certificate. Success does
+/// not individually verify the votes; failure falls back to attestation verification, which identifies
+/// invalid signers for blocking.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
@@ -532,9 +540,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// proposal is known (notarizes reference one proposal) and the buffers
     /// warrant a batch (see [Certification::should_verify]).
     ///
-    /// Non-attributable schemes first try to recover and verify a certificate from
-    /// the buffered votes. If that fails, `S::verify_attestations` identifies invalid
-    /// signers. All work runs in one CPU-bound job submitted through [Strategy::spawn].
+    /// Non-attributable schemes use the optimistic recovery path described on
+    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
     ///
     /// # Arguments
     ///
@@ -625,9 +632,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Batch verifies pending [Vote::Nullify] messages, if worthwhile (see
     /// [Certification::should_verify]).
     ///
-    /// Non-attributable schemes first try to recover and verify a certificate from
-    /// the buffered votes. If that fails, `S::verify_attestations` identifies invalid
-    /// signers. All work runs in one CPU-bound job submitted through [Strategy::spawn].
+    /// Non-attributable schemes use the optimistic recovery path described on
+    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
     ///
     /// # Arguments
     ///
@@ -704,9 +710,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// proposal is known (finalizes reference one proposal) and the buffers
     /// warrant a batch (see [Certification::should_verify]).
     ///
-    /// Non-attributable schemes first try to recover and verify a certificate from
-    /// the buffered votes. If that fails, `S::verify_attestations` identifies invalid
-    /// signers. All work runs in one CPU-bound job submitted through [Strategy::spawn].
+    /// Non-attributable schemes use the optimistic recovery path described on
+    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
     ///
     /// # Arguments
     ///

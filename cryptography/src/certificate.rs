@@ -226,6 +226,10 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
     /// Verifies a certificate that was recovered or received from the network.
+    ///
+    /// Acceptance authenticates a quorum for `subject` under the scheme's key setup, fault model,
+    /// and cryptographic assumptions. It need not authenticate the individual attestations used
+    /// to assemble the certificate.
     fn verify_certificate<R, D>(
         &self,
         rng: &mut R,
@@ -404,10 +408,14 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Assembles a non-empty stream of attestations into a certificate.
+    /// Assembles a non-empty stream of attestations into a candidate certificate.
+    ///
+    /// Inputs may be unverified. `Ok` does not authenticate them or the resulting certificate;
+    /// callers using such inputs must call [`Verifier::verify_certificate`] for the intended subject.
     ///
     /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
-    /// A signer-unique quorum already verified for one subject must assemble successfully.
+    /// A signer-unique quorum already verified for one subject must assemble successfully into
+    /// a certificate that verifies for that subject.
     fn assemble<I>(
         &self,
         attestations: NonEmpty<I>,

@@ -5,8 +5,21 @@
 //!
 //! Unlike multi-signature schemes, threshold signatures:
 //! - Use partial signatures that can be combined to form a threshold signature
-//! - Require a quorum of signatures to recover the full signature
+//! - Authenticate a quorum with a single group signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
+//!
+//! For a fixed, securely generated sharing, threshold unforgeability implies that, except with
+//! negligible probability, a coalition producing a fresh certificate in the standard corruption and
+//! partial-signing model has a transcript containing exposed shares or valid responses for the exact
+//! subject covering a quorum of distinct participants. An extractor uses those shares and responses
+//! to compute their valid partials. This is not a public proof of knowledge or a guarantee about a
+//! later recipient.
+//!
+//! Certificate verification does not validate the partials supplied to assembly. Invalid partials
+//! can have cancelling interpolation errors, even with exactly a quorum of inputs. A valid
+//! certificate therefore authenticates quorum authorization without proving input validity or
+//! identifying which participants signed. The certificate alone does not generally reveal their
+//! valid partials.
 
 #[cfg(feature = "mocks")]
 pub mod mocks;
@@ -337,7 +350,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles a certificate from a non-empty collection of attestations.
+    /// Assembles a candidate certificate from a non-empty collection of attestations.
+    ///
+    /// Checks encoding, signer bounds, uniqueness, and quorum, but does not verify partials.
+    /// Call [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
     pub fn assemble<S, I, T>(
         &self,
         attestations: NonEmpty<I>,
