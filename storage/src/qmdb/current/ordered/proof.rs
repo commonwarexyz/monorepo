@@ -12,7 +12,6 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 
@@ -38,7 +37,7 @@ pub mod dynamic {
 /// Proof information for verifying a key has a particular value in the database.
 ///
 /// `C` stores the embedded operation proof's bitmap chunk.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
 pub struct KeyValueProof<F: Graftable, K: Key, D: Digest, C> {
     /// The proof authenticating the active update operation.
     pub proof: OperationProof<F, D, C>,
@@ -68,24 +67,10 @@ impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, K, D, C> 
     }
 }
 
-impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> Write for KeyValueProof<F, K, D, C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.next_key.write(buf);
-    }
-}
-
-impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> EncodeSize for KeyValueProof<F, K, D, C> {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.next_key.encode_size()
-    }
-}
-
 impl<F: Graftable, K: Key, D: Digest, C> Read for KeyValueProof<F, K, D, C>
 where
     OperationProof<F, D, C>: Read,
 {
-    /// `(proof_cfg, key_cfg)`: the read configurations for the embedded operation proof and key.
     type Cfg = (<OperationProof<F, D, C> as Read>::Cfg, <K as Read>::Cfg);
 
     fn read_cfg(
@@ -119,14 +104,16 @@ where
 /// no active keys through the most recent commit operation.
 ///
 /// `C` stores the embedded operation proof's bitmap chunk. Verify using [Self::verify].
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
 pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, C> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
+    #[codec(tag = 0)]
     KeyValue(OperationProof<F, D, C>, Update<K, V>),
 
     /// Proves that the database has no active keys, allowing any key to be proven excluded.
     /// The commit operation's activity floor must equal its own location.
+    #[codec(tag = 1)]
     Commit(OperationProof<F, D, C>, Option<V::Value>),
 }
 
@@ -163,48 +150,6 @@ where
     }
 }
 
-impl<F, K, V, D, C> Write for ExclusionProof<F, K, V, D, C>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    C: AsRef<[u8]>,
-    Update<K, V>: Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::KeyValue(op_proof, update) => {
-                KEY_VALUE_CONTEXT.write(buf);
-                op_proof.write(buf);
-                update.write(buf);
-            }
-            Self::Commit(op_proof, value) => {
-                COMMIT_CONTEXT.write(buf);
-                op_proof.write(buf);
-                value.write(buf);
-            }
-        }
-    }
-}
-
-impl<F, K, V, D, C> EncodeSize for ExclusionProof<F, K, V, D, C>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    C: AsRef<[u8]>,
-    Update<K, V>: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::KeyValue(op_proof, update) => op_proof.encode_size() + update.encode_size(),
-            Self::Commit(op_proof, value) => op_proof.encode_size() + value.encode_size(),
-        }
-    }
-}
-
 impl<F, K, V, D, C> Read for ExclusionProof<F, K, V, D, C>
 where
     F: Graftable,
@@ -214,8 +159,6 @@ where
     OperationProof<F, D, C>: Read,
     Update<K, V>: Read,
 {
-    /// `(proof_cfg, update_cfg, value_cfg)`: the read configurations for the embedded operation
-    /// proof, [Update], and commit metadata value.
     type Cfg = (
         <OperationProof<F, D, C> as Read>::Cfg,
         <Update<K, V> as Read>::Cfg,

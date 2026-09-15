@@ -10,11 +10,10 @@ use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_formatting::hex;
-use commonware_runtime::BufMut;
 use commonware_utils::Array;
 use std::fmt;
 
-#[derive(Clone, PartialEq, Debug, Eq)]
+#[derive(Clone, PartialEq, Debug, Eq, Write)]
 pub struct Update<K: Key, V: ValueEncoding>(pub K, pub V::Value);
 
 #[cfg(feature = "arbitrary")]
@@ -68,18 +67,6 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 
 impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
     const SIZE: usize = K::SIZE + V::SIZE;
-}
-
-impl<K, V> Write for Update<K, V>
-where
-    K: Key + Write,
-    V: ValueEncoding,
-    V::Value: Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-        self.1.write(buf);
-    }
 }
 
 impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {

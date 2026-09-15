@@ -13,7 +13,7 @@
 //! and reopen.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _};
+use commonware_codec::{Copying, DecodeExt as _, FixedSize, Read};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
@@ -76,28 +76,12 @@ struct Entry {
     value: Value,
 }
 
+#[derive(Read, FixedSize)]
 struct IndexRecord {
     index: u64,
     key: Key,
     value_offset: u64,
     value_size: u32,
-}
-
-impl Read for IndexRecord {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            index: u64::read(buf)?,
-            key: Key::read(buf)?,
-            value_offset: u64::read(buf)?,
-            value_size: u32::read(buf)?,
-        })
-    }
-}
-
-impl FixedSize for IndexRecord {
-    const SIZE: usize = u64::SIZE + Key::SIZE + u64::SIZE + u32::SIZE;
 }
 
 /// Build the prunable archive configuration used by this target.

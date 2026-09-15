@@ -10,7 +10,6 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -57,7 +56,7 @@ pub enum ReconstructionError {
 /// digests required by the requested `inactive_peaks` and bagging policy. For `BackwardFold`, this
 /// may include active suffix peaks that a single range proof could collapse into a synthetic suffix
 /// accumulator.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Eq, Write, EncodeSize)]
 pub struct Proof<F: Family, D: Digest> {
     /// The total number of leaves in the data structure. For MMR proofs, this is the number of
     /// leaves in the MMR, though other authenticated data structures may override the meaning of
@@ -65,6 +64,7 @@ pub struct Proof<F: Family, D: Digest> {
     /// of bits in the bitmap within this field.
     pub leaves: Location<F>,
     /// The number of inactive peaks in the structure when this proof was generated.
+    #[codec(encode_with = { UInt(*value as u64).write(buf) }, encode_size = UInt(*value as u64).encode_size())]
     pub inactive_peaks: usize,
     /// The digests necessary for proving inclusion.
     pub digests: Vec<D>,
@@ -75,22 +75,6 @@ impl<F: Family, D: Digest> PartialEq for Proof<F, D> {
         self.leaves == other.leaves
             && self.inactive_peaks == other.inactive_peaks
             && self.digests == other.digests
-    }
-}
-
-impl<F: Family, D: Digest> EncodeSize for Proof<F, D> {
-    fn encode_size(&self) -> usize {
-        self.leaves.encode_size()
-            + UInt(self.inactive_peaks as u64).encode_size()
-            + self.digests.encode_size()
-    }
-}
-
-impl<F: Family, D: Digest> Write for Proof<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.leaves.write(buf);
-        UInt(self.inactive_peaks as u64).write(buf);
-        self.digests.write(buf);
     }
 }
 

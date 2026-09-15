@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
-use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use bytes::Bytes;
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
@@ -52,15 +52,19 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Write, EncodeSize, Read)]
+#[read_cfg(crate::CodecConfig)]
 pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
+    #[codec(cfg = &RangeCfg::new(..=cfg.maximum_shard_size))]
     shard: Bytes,
 
     /// The index of [`Chunk`] in the original data.
+    #[codec(cfg = &())]
     index: u16,
 
     /// The multi-proof of the shard in the [`bmt`] at the given index.
+    #[codec(cfg = &1)]
     proof: bmt::Proof<D>,
 }
 
@@ -119,46 +123,6 @@ impl<D: Digest> CheckedChunk<D> {
             index,
             digest,
         }
-    }
-}
-
-impl<D: Digest> Write for Chunk<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.shard.write(writer);
-        self.index.write(writer);
-        self.proof.write(writer);
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.shard.write_bufs(buf);
-        self.index.write(buf);
-        self.proof.write(buf);
-    }
-}
-
-impl<D: Digest> Read for Chunk<D> {
-    /// The maximum size of the shard.
-    type Cfg = crate::CodecConfig;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=cfg.maximum_shard_size))?;
-        let index = u16::read(reader)?;
-        let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;
-        Ok(Self {
-            shard,
-            index,
-            proof,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for Chunk<D> {
-    fn encode_size(&self) -> usize {
-        self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.shard.encode_inline_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 

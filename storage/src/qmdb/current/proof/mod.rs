@@ -42,7 +42,6 @@ use crate::{
         },
     },
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
@@ -122,7 +121,7 @@ pub fn required_chunks<F: Graftable, const N: usize>(
 ///
 /// See the [Canonical root structure](self#canonical-root-structure) section in the module
 /// documentation for the full layout.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
 pub struct OpsRootWitness<F: Graftable, D: Digest> {
     /// The grafted-tree root committed by the canonical root.
     pub grafted_root: D,
@@ -132,6 +131,18 @@ pub struct OpsRootWitness<F: Graftable, D: Digest> {
 
     /// The trailing partial chunk contribution, if the bitmap length is not chunk-aligned:
     /// `(next_bit, partial_chunk_digest)`.
+    #[codec(
+        encode_with = {
+            value.is_some().write(buf);
+            if let Some((next_bit, digest)) = value {
+                UInt(*next_bit).write(buf);
+                digest.write(buf);
+            }
+        },
+        encode_size = {
+            value.as_ref().map_or(1, |(next_bit, digest)| 1 + UInt(*next_bit).encode_size() + digest.encode_size())
+        }
+    )]
     pub partial_chunk: Option<(u64, D)>,
 }
 
@@ -153,29 +164,6 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     /// Return true if this witness proves that `root` commits to `ops_root`.
     pub fn verify<H: Hasher<Digest = D>>(&self, ops_root: &D, root: &D) -> bool {
         self.root::<H>(ops_root) == *root
-    }
-}
-
-impl<F: Graftable, D: Digest> Write for OpsRootWitness<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.grafted_root.write(buf);
-        self.pending_chunk_digest.write(buf);
-        self.partial_chunk.is_some().write(buf);
-        if let Some((next_bit, digest)) = &self.partial_chunk {
-            UInt(*next_bit).write(buf);
-            digest.write(buf);
-        }
-    }
-}
-
-impl<F: Graftable, D: Digest> EncodeSize for OpsRootWitness<F, D> {
-    fn encode_size(&self) -> usize {
-        self.grafted_root.encode_size()
-            + self.pending_chunk_digest.encode_size()
-            + self
-                .partial_chunk
-                .as_ref()
-                .map_or(1, |(nb, d)| 1 + UInt(*nb).encode_size() + d.encode_size())
     }
 }
 
@@ -216,18 +204,23 @@ where
 }
 
 /// A proof that a range of operations exist in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
+/// The read configuration limits the number of digests in the embedded Merkle proof.
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize, Read)]
+#[read_cfg(usize)]
 pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
     /// The pending-chunk contribution, if any.
+    #[codec(cfg = &())]
     pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// Digest of the bitmap's trailing partial chunk, if any.
+    #[codec(cfg = &())]
     pub partial_chunk_digest: Option<D>,
 
     /// The ops-tree root digest.
+    #[codec(cfg = &())]
     pub ops_root: D,
 }
 
@@ -570,45 +563,6 @@ where
     }
 
     Ok(collected)
-}
-
-impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.pending_chunk_digest.write(buf);
-        self.partial_chunk_digest.write(buf);
-        self.ops_root.write(buf);
-    }
-}
-
-impl<F: Graftable, D: Digest> EncodeSize for RangeProof<F, D> {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size()
-            + self.pending_chunk_digest.encode_size()
-            + self.partial_chunk_digest.encode_size()
-            + self.ops_root.encode_size()
-    }
-}
-
-impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests in the embedded Merkle proof.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_digests: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
-        let partial_chunk_digest = Option::<D>::read(buf)?;
-        let ops_root = D::read(buf)?;
-        Ok(Self {
-            proof,
-            pending_chunk_digest,
-            partial_chunk_digest,
-            ops_root,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]

@@ -10,10 +10,10 @@
 //! nothing, and that sentinel appends land at the repaired tail and reopen intact.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{Copying, DecodeExt as _, FixedSize, Read, Write};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -44,7 +44,7 @@ const VALUE_PARTITION: &str = "fuzz-values";
 const METADATA_PARTITION: &str = "fuzz-markers";
 
 /// Test index entry that stores a u64 id and references a value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Write, Read, FixedSize)]
 struct TestEntry {
     id: u64,
     value_offset: u64,
@@ -59,36 +59,6 @@ impl TestEntry {
             value_size: 0,
         }
     }
-}
-
-impl Write for TestEntry {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.id.write(buf);
-        self.value_offset.write(buf);
-        self.value_size.write(buf);
-    }
-}
-
-impl Read for TestEntry {
-    type Cfg = ();
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        _: &Self::Cfg,
-    ) -> std::result::Result<Self, commonware_codec::Error> {
-        let id = u64::read(buf)?;
-        let value_offset = u64::read(buf)?;
-        let value_size = u32::read(buf)?;
-        Ok(Self {
-            id,
-            value_offset,
-            value_size,
-        })
-    }
-}
-
-impl FixedSize for TestEntry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl Record for TestEntry {

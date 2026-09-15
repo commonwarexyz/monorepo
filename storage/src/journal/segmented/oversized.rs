@@ -1207,11 +1207,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
+    use commonware_codec::{FixedSize, Read, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
+        Blob as _, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     /// Test index entry that stores a u64 id and references a value.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Write, Read, FixedSize)]
     struct TestEntry {
         id: u64,
         value_offset: u64,
@@ -1239,33 +1239,6 @@ mod tests {
                 value_size,
             }
         }
-    }
-
-    impl Write for TestEntry {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.id.write(buf);
-            self.value_offset.write(buf);
-            self.value_size.write(buf);
-        }
-    }
-
-    impl Read for TestEntry {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            let id = u64::read(buf)?;
-            let value_offset = u64::read(buf)?;
-            let value_size = u32::read(buf)?;
-            Ok(Self {
-                id,
-                value_offset,
-                value_size,
-            })
-        }
-    }
-
-    impl FixedSize for TestEntry {
-        const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
     }
 
     impl Record for TestEntry {

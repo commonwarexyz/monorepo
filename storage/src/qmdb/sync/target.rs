@@ -4,14 +4,13 @@ use crate::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use commonware_runtime::BufMut;
 use commonware_utils::{non_empty_range, range::NonEmptyRange};
 
 /// Target state to sync to.
 ///
 /// `PartialEq`, `Eq`, and `Clone` are implemented manually to avoid requiring `F` to implement
 /// them.
-#[derive(Debug)]
+#[derive(Debug, Write, EncodeSize)]
 pub struct Target<F: Family, D: Digest> {
     /// The ops root the sync engine verifies streaming batches against.
     pub root: D,
@@ -54,19 +53,6 @@ impl<F: Family, D: Digest> PartialEq for Target<F, D> {
 
 impl<F: Family, D: Digest> Eq for Target<F, D> {}
 
-impl<F: Family, D: Digest> Write for Target<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
-        self.range.write(buf);
-    }
-}
-
-impl<F: Family, D: Digest> EncodeSize for Target<F, D> {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.range.encode_size()
-    }
-}
-
 impl<F: Family, D: Digest> Read for Target<F, D> {
     type Cfg = ();
 
@@ -101,7 +87,7 @@ where
 }
 
 /// Target state for syncing to a compact-storage database.
-#[derive(Debug)]
+#[derive(Debug, Write, EncodeSize)]
 pub struct CompactTarget<F: Family, D: Digest> {
     /// Target database root.
     pub root: D,
@@ -144,19 +130,6 @@ impl<F: Family, D: Digest> PartialEq for CompactTarget<F, D> {
 }
 
 impl<F: Family, D: Digest> Eq for CompactTarget<F, D> {}
-
-impl<F: Family, D: Digest> Write for CompactTarget<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
-        self.size.write(buf);
-    }
-}
-
-impl<F: Family, D: Digest> EncodeSize for CompactTarget<F, D> {
-    fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.size.encode_size()
-    }
-}
 
 impl<F: Family, D: Digest> Read for CompactTarget<F, D> {
     type Cfg = ();
