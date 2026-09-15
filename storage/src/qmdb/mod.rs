@@ -32,6 +32,17 @@
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
 //! durable and guarantees no recovery is needed on startup after a crash.
 //!
+//! # Initialization bounds
+//!
+//! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
+//! operations, counting commit records and pruned operations. `None` opens the latest retained
+//! state. Zero is invalid, and a bound above the stored size does not grow the database.
+//! Initialization fails if pruning removed history needed by the selected commit.
+//!
+//! Initialization durably removes the later history. The bound does not limit future appends.
+//! Close all existing users of the storage before reopening. If initialization fails, retry it.
+//! To require an exact checkpoint, also check the recovered root and range.
+//!
 //! # Ownership
 //!
 //! Mutating methods take the database by value and return it on success. If a mutating
