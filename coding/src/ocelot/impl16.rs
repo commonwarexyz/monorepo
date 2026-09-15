@@ -743,8 +743,9 @@ impl WithKernel for ChecksumRange<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plans for the GF(2^16) coding implementation.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use crate::ocelot::{
         code::test_suites::{
@@ -752,8 +753,50 @@ mod tests {
         },
         kernel::{portable::Portable, with_kernel},
     };
+    use arbitrary::{Arbitrary, Unstructured};
 
     const OCELOT16: Impl16<Portable> = Impl16::new(Portable);
+
+    /// A bounded property check for the GF(2^16) implementation.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check portable encoding and erasure recovery.
+        PortableCode,
+        /// Check a specialized implementation method against scalar arithmetic.
+        Implementation(ImplPlan),
+        /// Check the default-method adapter against scalar arithmetic.
+        DefaultMethods(ImplPlan),
+        /// Compare the dispatched implementation with the portable implementation.
+        DispatchedDifferential(ImplPlan),
+    }
+
+    impl Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::PortableCode => fuzz_code(u, OCELOT16),
+                Self::Implementation(plan) => fuzz_impl(
+                    u,
+                    OCELOT16,
+                    plan,
+                    2 * Portable::LANES,
+                    elements,
+                    layout,
+                    |coefficient| GF16(u16::from(coefficient)),
+                ),
+                Self::DefaultMethods(plan) => fuzz_impl(
+                    u,
+                    DefaultImpl(OCELOT16),
+                    plan,
+                    2 * Portable::LANES,
+                    elements,
+                    layout,
+                    |coefficient| GF16(u16::from(coefficient)),
+                ),
+                Self::DispatchedDifferential(plan) => with_kernel(FuzzImplDifferential { u, plan }),
+            }
+        }
+    }
 
     fn elements(bytes: &[u8]) -> Vec<GF16> {
         assert!(bytes.len().is_multiple_of(2));
@@ -781,12 +824,40 @@ mod tests {
         bytes
     }
 
+    struct FuzzImplDifferential<'a, 'b> {
+        u: &'a mut Unstructured<'b>,
+        plan: ImplPlan,
+    }
+
+    impl WithKernel for FuzzImplDifferential<'_, '_> {
+        type Output = arbitrary::Result<()>;
+
+        fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+            fuzz_impl_matches_reference(
+                self.u,
+                Impl16::new(kernel),
+                OCELOT16,
+                self.plan,
+                2 * K::LANES,
+                elements,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ocelot::{
+        code::test_suites::ImplPlan, impl16::fuzz::Plan, kernel::portable::Portable,
+    };
+
     #[test]
     fn minifuzz_code() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(100)
-            .test(|u| fuzz_code(u, OCELOT16));
+            .test(|u| Plan::PortableCode.run(u));
     }
 
     #[test]
@@ -795,63 +866,28 @@ mod tests {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(100)
-                .test(|u| {
-                    fuzz_impl(
-                        u,
-                        OCELOT16,
-                        plan,
-                        2 * Portable::LANES,
-                        elements,
-                        layout,
-                        |coefficient| GF16(u16::from(coefficient)),
-                    )
-                });
+                .test(|u| Plan::Implementation(plan).run(u));
         }
+    }
+
+    #[test]
+    fn minifuzz_default_methods() {
         for plan in ImplPlan::DEFAULTS {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(100)
-                .test(|u| {
-                    fuzz_impl(
-                        u,
-                        DefaultImpl(OCELOT16),
-                        plan,
-                        2 * Portable::LANES,
-                        elements,
-                        layout,
-                        |coefficient| GF16(u16::from(coefficient)),
-                    )
-                });
-        }
-    }
-
-    struct FuzzImplDifferential;
-
-    impl WithKernel for FuzzImplDifferential {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            for plan in ImplPlan::ALL {
-                commonware_invariants::minifuzz::Builder::default()
-                    .with_seed(0)
-                    .with_search_limit(100)
-                    .test(|u| {
-                        fuzz_impl_matches_reference(
-                            u,
-                            Impl16::new(kernel),
-                            OCELOT16,
-                            plan,
-                            2 * K::LANES,
-                            elements,
-                        )
-                    });
-            }
+                .test(|u| Plan::DefaultMethods(plan).run(u));
         }
     }
 
     #[test]
     fn minifuzz_impl_matches_portable() {
-        with_kernel(FuzzImplDifferential);
+        for plan in ImplPlan::ALL {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| Plan::DispatchedDifferential(plan).run(u));
+        }
     }
 
     #[test]

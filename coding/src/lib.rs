@@ -25,6 +25,12 @@ commonware_macros::stability_scope!(ALPHA {
     mod ocelot;
     pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16};
 
+    #[cfg(feature = "fuzz")]
+    pub mod fuzz;
+
+    #[cfg(any(test, feature = "fuzz"))]
+    mod test_suites;
+
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Config {
@@ -517,79 +523,19 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use arbitrary::Unstructured;
+    use crate::test_suites::generate_case;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_utils::NZU16;
 
-    const MAX_SHARD_SIZE: usize = 1 << 31;
-    const MAX_SHARDS: u16 = 32;
-    const MAX_DATA: usize = 1024;
-    const MIN_EXTRA_SHARDS: u16 = 1;
-
-    fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
-        let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
-        let extra_shards =
-            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
-        let total_shards = minimum_shards + extra_shards;
-
-        let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
-        let data = u.bytes(data_len)?.to_vec();
-
-        let selected_len = usize::from(minimum_shards)
-            + (usize::from(u.arbitrary::<u16>()?) % (usize::from(extra_shards) + 1));
-        let mut selected: Vec<u16> = (0..total_shards).collect();
-        for i in 0..selected_len {
-            let remaining = usize::from(total_shards) - i;
-            let j = i + (usize::from(u.arbitrary::<u16>()?) % remaining);
-            selected.swap(i, j);
-        }
-        selected.truncate(selected_len);
-
-        Ok((
-            Config {
-                minimum_shards: NZU16!(minimum_shards),
-                extra_shards: NZU16!(extra_shards),
-            },
-            data,
-            selected,
-        ))
-    }
-
     mod scheme {
         use super::*;
         use crate::{
             Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16, PhasedAsScheme, Scheme, Zoda,
-            reed_solomon::ReedSolomon,
+            reed_solomon::ReedSolomon, test_suites::roundtrip,
         };
-        use commonware_codec::Encode;
         use commonware_parallel::Sequential;
-
-        fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
-            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-            let read_cfg = CodecConfig {
-                maximum_shard_size: MAX_SHARD_SIZE,
-            };
-            for shard in &shards {
-                let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_shard, *shard);
-            }
-
-            let mut checked_shards = Vec::new();
-            for (i, shard) in shards.into_iter().enumerate() {
-                if !selected.contains(&(i as u16)) {
-                    continue;
-                }
-                let checked = S::check(config, &commitment, i as u16, &shard, &Sequential).unwrap();
-                checked_shards.push(checked);
-            }
-
-            checked_shards.reverse();
-            let decoded =
-                S::decode(config, &commitment, checked_shards.iter(), &Sequential).unwrap();
-            assert_eq!(decoded, data);
-        }
 
         fn decode_rejects_mixed_commitments<S: Scheme>(
             config: &Config,
@@ -721,22 +667,16 @@ mod test {
 
         #[test]
         fn minifuzz_roundtrip_ocelot() {
-            minifuzz::test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
-                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::Roundtrip8.run(u));
         }
 
         #[test]
         fn minifuzz_roundtrip_ocelot16() {
-            minifuzz::test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
-                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::Roundtrip16.run(u));
         }
 
         #[test]
@@ -766,71 +706,11 @@ mod test {
 
     mod phased_scheme {
         use super::*;
-        use crate::{OcelotHinted8, OcelotHinted16, PhasedScheme, Zoda};
-        use commonware_codec::Encode;
+        use crate::{
+            OcelotHinted8, OcelotHinted16, PhasedScheme, Zoda,
+            test_suites::phased_roundtrip as roundtrip,
+        };
         use commonware_parallel::Sequential;
-
-        fn roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
-            let owner = *selected.first().expect("selected must not be empty");
-            let (commitment, shards) = S::encode(b"", config, data, &Sequential).unwrap();
-            let read_cfg = CodecConfig {
-                maximum_shard_size: MAX_SHARD_SIZE,
-            };
-            for shard in &shards {
-                let decoded_shard =
-                    S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_shard, *shard);
-            }
-
-            let (checking_data, own_checked, _) = S::weaken(
-                b"",
-                config,
-                &commitment,
-                owner,
-                shards[owner as usize].clone(),
-                &Sequential,
-            )
-            .unwrap();
-            let mut checked_shards = vec![own_checked];
-            for &index in selected {
-                if index == owner {
-                    continue;
-                }
-                let (_, _, weak_shard) = S::weaken(
-                    b"",
-                    config,
-                    &commitment,
-                    index,
-                    shards[index as usize].clone(),
-                    &Sequential,
-                )
-                .unwrap();
-                let decoded_weak =
-                    S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_weak, weak_shard);
-                let checked = S::check(
-                    config,
-                    &commitment,
-                    &checking_data,
-                    index,
-                    decoded_weak,
-                    &Sequential,
-                )
-                .unwrap();
-                checked_shards.push(checked);
-            }
-
-            checked_shards.reverse();
-            let decoded = S::decode(
-                config,
-                &commitment,
-                checking_data,
-                checked_shards.iter(),
-                &Sequential,
-            )
-            .unwrap();
-            assert_eq!(decoded, data);
-        }
 
         fn check_rejects_mixed_commitments<S: PhasedScheme>(
             config: &Config,
@@ -962,20 +842,16 @@ mod test {
 
         #[test]
         fn minifuzz_roundtrip_ocelot() {
-            minifuzz::test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<OcelotHinted8<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::HintedRoundtrip8.run(u));
         }
 
         #[test]
         fn minifuzz_roundtrip_ocelot16() {
-            minifuzz::test(|u| {
-                let (config, data, selected) = generate_case(u)?;
-                roundtrip::<OcelotHinted16<Sha256>>(&config, &data, &selected);
-                Ok(())
-            });
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::HintedRoundtrip16.run(u));
         }
     }
 
