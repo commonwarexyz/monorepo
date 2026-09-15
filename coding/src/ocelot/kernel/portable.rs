@@ -9,8 +9,8 @@ pub struct Portable;
 
 impl Kernel for Portable {
     type Vector = [u8; 16];
-    const LANES: usize = 16;
     type Constant = u8;
+    const LANES: usize = 16;
 
     #[inline]
     fn splat(self, x: u8) -> u8 {
