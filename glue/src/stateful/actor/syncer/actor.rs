@@ -270,7 +270,16 @@ mod tests {
         type Config = u64;
         type SyncTargets = u64;
 
-        async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
+        async fn init(
+            _context: deterministic::Context,
+            config: Self::Config,
+            expected: Option<Self::SyncTargets>,
+        ) -> Self {
+            assert_eq!(
+                expected,
+                Some(config),
+                "startup must pass the configured target"
+            );
             Self(config)
         }
 
@@ -306,10 +315,6 @@ mod tests {
 
         async fn committed_targets(&self) -> Self::SyncTargets {
             self.0
-        }
-
-        async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
-            assert_eq!(targets, self.0, "test database cannot rewind");
         }
     }
 
@@ -596,7 +601,7 @@ mod tests {
             }
             assert_eq!(marshal.get_processed_height().await, Some(Height::new(10)));
 
-            first.abort();
+            first.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
@@ -675,7 +680,7 @@ mod tests {
                     context.sleep(Duration::from_millis(1)).await;
                 }
             }
-            first.abort();
+            first.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
@@ -703,7 +708,7 @@ mod tests {
                 "stale selected block must be unavailable before restart",
             );
             assert!(marshal.get_block(Height::new(8)).await.is_some());
-            second.abort();
+            second.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
