@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     mem::take,
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::debug;
 
@@ -43,6 +43,45 @@ pub(super) fn section_from_name(name: &[u8]) -> Result<u64, Error> {
     Ok(u64::from_be_bytes(section))
 }
 
+/// Remove sections and whole pages above a ceiling before opening exclusive recovery owners.
+/// The containing page remains intact for checksum validation and exact logical truncation.
+pub(super) async fn truncate_paged_tail<E: Storage>(
+    context: &E,
+    partition: &str,
+    page_size: NonZeroU16,
+    section: u64,
+    end: u64,
+) -> Result<(), Error> {
+    let mut sections = stored_names(context, partition)
+        .await?
+        .iter()
+        .map(|name| section_from_name(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    sections.sort_unstable();
+    for stored in sections.into_iter().rev() {
+        if stored > section {
+            context
+                .remove(partition, Some(&stored.to_be_bytes()))
+                .await?;
+            continue;
+        }
+        if stored == section {
+            let (blob, size) = context.open(partition, &stored.to_be_bytes()).await?;
+            // An unrepresentable physical ceiling excludes no representable blob bytes.
+            let page_size = u64::from(page_size.get());
+            let ceiling = end
+                .div_ceil(page_size)
+                .saturating_mul(page_size + commonware_runtime::buffer::paged::CHECKSUM_SIZE);
+            if ceiling < size {
+                blob.resize(ceiling).await?;
+                blob.sync().await?;
+            }
+        }
+        break;
+    }
+    Ok(())
+}
+
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
@@ -61,10 +100,11 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Shorten an unpublished section during initialization.
+    /// Shorten an unpublished section during initialization. A shorter length is durable when
+    /// this returns.
     fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Irreversibly publish this section for appends.
+    /// Publish this section for appends.
     fn publish(&mut self);
 }
 
@@ -94,7 +134,8 @@ impl<B: Blob> SectionBuffer for AppendBuffer<B> {
     }
 }
 
-impl<B: Blob> SectionBuffer for WriteBuffer<B> {
+// Glob's recovery owner controls access to truncation for uncached sections.
+impl<B: Blob> SectionBuffer for Write<B> {
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -112,12 +153,14 @@ impl<B: Blob> SectionBuffer for WriteBuffer<B> {
     }
 
     async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        self.truncate_pending(len).await
+        if len < self.size() {
+            self.resize(len).await?;
+            self.sync().await?;
+        }
+        Ok(())
     }
 
-    fn publish(&mut self) {
-        Self::publish(self);
-    }
+    fn publish(&mut self) {}
 }
 
 /// Factory for creating section buffers from raw blobs.
@@ -168,13 +211,10 @@ pub struct WriteFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
-    type Buffer = WriteBuffer<B>;
+    type Buffer = Write<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(WriteBuffer {
-            inner: Write::new(blob, size, self.capacity, self.pool.clone()),
-            pending: true,
-        })
+        Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
     }
 }
 
@@ -194,8 +234,8 @@ impl<B: Blob> AppendBuffer<B> {
         }
     }
 
-    /// Repair an unpublished section. Initialized sections cannot be shortened. Panics if the
-    /// requested end would shorten a published section.
+    /// Repair an unpublished section. A shorter length is durable when this returns. Initialized
+    /// sections cannot be shortened. Panics if the requested end would shorten a published section.
     pub async fn truncate_pending(&mut self, end: u64) -> Result<(), RError> {
         match self {
             Self::Pending(p) => p.as_mut().expect("pending section").truncate(end).await,
@@ -376,59 +416,6 @@ impl<B: Blob> crate::journal::frame::FrameReader for AppendBuffer<B> {
     }
 }
 
-/// Uncached section storage with a one-way initialization boundary.
-pub struct WriteBuffer<B: Blob> {
-    inner: Write<B>,
-    pending: bool,
-}
-impl<B: Blob> WriteBuffer<B> {
-    /// Publish the section.
-    pub const fn publish(&mut self) {
-        self.pending = false;
-    }
-
-    /// Repair the unpublished section. Panics if a published section would be shortened.
-    pub async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        if len >= self.inner.size() {
-            return Ok(());
-        }
-        assert!(self.pending, "cannot truncate a published section");
-        self.inner.resize(len).await?;
-        self.inner.sync().await
-    }
-
-    /// Current section length.
-    pub const fn size(&self) -> u64 {
-        self.inner.size()
-    }
-
-    /// Read section bytes.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
-        self.inner.read_at(offset, len).await
-    }
-
-    /// Write bytes after closing initialization.
-    pub async fn write_at(&mut self, offset: u64, buf: Vec<u8>) -> Result<(), RError> {
-        self.publish();
-        self.inner.write_at(offset, buf).await
-    }
-
-    /// Sync section bytes.
-    pub async fn sync(&mut self) -> Result<(), RError> {
-        self.inner.sync().await
-    }
-
-    /// Begin syncing section bytes.
-    pub async fn start_sync(&mut self) -> Handle<()> {
-        self.inner.start_sync().await
-    }
-
-    /// Drain an existing sync.
-    pub async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        self.inner.wait_for_sync().await
-    }
-}
-
 /// Configuration for blob management.
 #[derive(Clone)]
 pub struct Config<F> {
@@ -566,9 +553,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.blobs.insert(section, buffer);
         }
 
-        let blob = self.blobs.get_mut(&section).unwrap();
-        blob.publish();
-        Ok(blob)
+        Ok(self.blobs.get_mut(&section).unwrap())
     }
 
     /// Sync the given `sections` to storage.
@@ -647,12 +632,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let mut blob = self.blobs.remove(&section).unwrap();
             blob.wait_for_sync().await?;
             let size = blob.size();
-            drop(blob);
 
             // Remove blob from storage
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
             pruned = true;
 
             debug!(section, size, "pruned blob");
@@ -712,10 +697,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if let Some(mut blob) = self.blobs.remove(&section) {
             blob.wait_for_sync().await?;
             let size = blob.size();
-            drop(blob);
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
             self.tracked.dec();
             debug!(section, size, "removed section");
             Ok(true)
@@ -729,11 +714,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size();
-            drop(blob);
             debug!(section, size, "destroyed blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
@@ -752,18 +737,19 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         let blobs = take(&mut self.blobs);
         for (section, blob) in blobs {
             let size = blob.size();
-            drop(blob);
             debug!(section, size, "cleared blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
         Ok(())
     }
 
-    /// Truncate by removing all sections after `section` and resizing the target section.
+    /// Truncate by removing all sections after `section` and resizing the target section. A
+    /// shorter section length is durable when this returns.
     pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
@@ -779,10 +765,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Remove the underlying blob from storage
             let mut blob = self.blobs.remove(&s).unwrap();
             blob.wait_for_sync().await?;
-            drop(blob);
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
+            drop(blob);
             self.tracked.dec();
             debug!(section = s, "removed blob during truncate");
         }
@@ -790,7 +776,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.truncate_pending_section(section, size).await
     }
 
-    /// Truncate only the given section without affecting other sections.
+    /// Truncate only the given section without affecting other sections. A shorter length is
+    /// durable when this returns.
     pub async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
@@ -807,6 +794,25 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Durably truncate independent sections to their selected upper bounds.
+    pub async fn truncate_pending_sections(
+        &mut self,
+        sizes: &BTreeMap<u64, u64>,
+    ) -> Result<(), Error> {
+        if sizes.is_empty() {
+            return Ok(());
+        }
+        for &section in sizes.keys() {
+            self.prune_guard(section)?;
+        }
+        let futures = self.blobs.iter_mut().filter_map(|(section, blob)| {
+            let &size = sizes.get(section)?;
+            (size < blob.size()).then(|| blob.truncate_pending(size))
+        });
+        try_join_all(futures).await.map_err(Error::Runtime)?;
+        Ok(())
+    }
+
     /// Returns the byte size of the given section.
     pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.prune_guard(section)?;
@@ -815,10 +821,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BufferPooler as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+        BufferPooler, Runner as _, Spawner as _, Supervisor as _, WriteOptions, deterministic,
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
@@ -829,6 +835,64 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    /// Materialize a crash that retains new page bytes but loses their checksum lengths.
+    pub(in super::super) async fn seed_torn_suffix<E: Storage + BufferPooler>(
+        context: &E,
+        partition: &str,
+        section: u64,
+        page: &[u8],
+        suffix_pages: usize,
+    ) {
+        let physical = page.len() + commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
+        let source = format!("{partition}-source");
+        let (raw, size) = context.open(&source, b"source").await.unwrap();
+        let cache = CacheRef::from_pooler(
+            context,
+            (page.len() as u16).try_into().unwrap(),
+            commonware_utils::NZUsize!(4),
+        );
+        let mut writer = Writer::new(raw.clone(), size, 2 * page.len(), cache)
+            .await
+            .unwrap();
+        writer.append(page).await.unwrap();
+        writer.sync().await.unwrap();
+        let acknowledged = raw
+            .read_at(0, physical, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+
+        // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
+        // the acknowledged page. The same-open raw clone observes exactly those submitted bytes.
+        writer
+            .append_owned(page.repeat(suffix_pages).into())
+            .await
+            .unwrap();
+        let mut image = raw
+            .read_at(0, physical * (suffix_pages + 1), ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec();
+        assert_eq!(&image[..physical], acknowledged.as_ref());
+        drop(writer);
+        drop(raw);
+        for page_index in 1..=suffix_pages {
+            let footer = page_index * physical + page.len();
+            image[footer..footer + 2].fill(0);
+            image[footer + 6..footer + 8].fill(0);
+        }
+        let (blob, _) = context
+            .open(partition, &section.to_be_bytes())
+            .await
+            .unwrap();
+        blob.write_at(0, image, WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
 
     impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         pub fn test_configuration(&self) -> (E, String, F) {
@@ -850,6 +914,7 @@ mod tests {
     struct TestFactory {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
     #[test]
@@ -868,31 +933,24 @@ mod tests {
             buffer.truncate_pending(4).await.unwrap();
         });
     }
-    #[test]
-    #[should_panic(expected = "cannot truncate a published section")]
-    fn test_published_uncached_section_rejects_truncation() {
-        deterministic::Runner::default().start(|context| async move {
-            let (blob, _) = context.open("published", b"uncached").await.unwrap();
-            let mut buffer = WriteBuffer {
-                inner: Write::new(
-                    blob,
-                    8,
-                    commonware_utils::NZUsize!(1024),
-                    context.storage_buffer_pool().clone(),
-                ),
-                pending: false,
-            };
-            buffer.truncate_pending(4).await.unwrap();
-        });
-    }
 
-    struct TestBuffer {
+    struct TestBuffer<B: Blob> {
+        _blob: B,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
-    impl SectionBuffer for TestBuffer {
+    impl<B: Blob> Drop for TestBuffer<B> {
+        fn drop(&mut self) {
+            if let Some(on_drop) = &self.on_drop {
+                on_drop();
+            }
+        }
+    }
+
+    impl<B: Blob> SectionBuffer for TestBuffer<B> {
         fn publish(&mut self) {}
 
         fn size(&self) -> u64 {
@@ -933,13 +991,15 @@ mod tests {
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {
-        type Buffer = TestBuffer;
+        type Buffer = TestBuffer<B>;
 
-        async fn create(&self, _blob: B, _size: u64) -> Result<Self::Buffer, RError> {
+        async fn create(&self, blob: B, _size: u64) -> Result<Self::Buffer, RError> {
             Ok(TestBuffer {
+                _blob: blob,
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
+                on_drop: self.on_drop.clone(),
             })
         }
     }
@@ -950,7 +1010,60 @@ mod tests {
             factory: TestFactory {
                 pending,
                 wait_for_syncs,
+                on_drop: None,
             },
+        }
+    }
+
+    #[test]
+    fn test_cleanup_drops_each_owner_after_removal() {
+        for operation in [
+            "prune",
+            "remove_section",
+            "destroy",
+            "clear",
+            "truncate_pending",
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let drops = Arc::new(Mutex::new(Vec::new()));
+                let observed = drops.clone();
+                let observer = context.child("drop_observer");
+                let mut cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+                cfg.factory.on_drop = Some(Arc::new(move || {
+                    // Deterministic namespace reads complete on their first poll.
+                    let names = observer.scan("test").now_or_never().and_then(Result::ok);
+                    observed.lock().push(names);
+                }));
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                manager.get_or_create(1).await.unwrap();
+                manager.get_or_create(2).await.unwrap();
+
+                match operation {
+                    "prune" => assert!(manager.prune(3).await.unwrap()),
+                    "remove_section" => {
+                        assert!(manager.remove_section(1).await.unwrap());
+                        assert!(manager.remove_section(2).await.unwrap());
+                    }
+                    "destroy" => manager.destroy().await.unwrap(),
+                    "clear" => manager.clear().await.unwrap(),
+                    "truncate_pending" => manager.truncate_pending(0, 0).await.unwrap(),
+                    _ => unreachable!(),
+                }
+
+                let remaining = if operation == "truncate_pending" {
+                    1u64
+                } else {
+                    2u64
+                };
+                assert_eq!(
+                    *drops.lock(),
+                    vec![
+                        Some(vec![remaining.to_be_bytes().to_vec()]),
+                        Some(Vec::new())
+                    ],
+                    "{operation}",
+                );
+            });
         }
     }
 
