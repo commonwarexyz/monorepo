@@ -6,7 +6,7 @@ use crate::{
     },
     rmap::RMap,
 };
-use commonware_codec::{Buf, CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
     Metrics, ReadOptions, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -15,9 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 /// Record stored in the `Cache`.
-#[derive(Write, EncodeSize)]
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg(V::Cfg)]
 struct Record<V: CodecShared> {
     #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    #[codec(read_with = { Ok(UInt::read(buf)?.into()) })]
     index: u64,
     value: V,
 }
@@ -26,16 +28,6 @@ impl<V: CodecShared> Record<V> {
     /// Create a new `Record`.
     const fn new(index: u64, value: V) -> Self {
         Self { index, value }
-    }
-}
-
-impl<V: CodecShared> Read for Record<V> {
-    type Cfg = V::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let index = UInt::read(buf)?.into();
-        let value = V::read_cfg(buf, cfg)?;
-        Ok(Self { index, value })
     }
 }
 

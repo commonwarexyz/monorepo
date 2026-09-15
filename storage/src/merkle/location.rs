@@ -1,5 +1,5 @@
 use super::{Family, position::Position};
-use commonware_codec::{Buf, EncodeSize, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write, varint::UInt};
 use core::{
     convert::TryFrom,
     fmt,
@@ -15,14 +15,30 @@ use core::{
 /// Values up to the family's maximum are valid (see [Location::is_valid]). As a 0-based leaf
 /// index, valid indices are `0..MAX - 1`. As a leaf count or exclusive range-end, the maximum
 /// is `MAX` itself.
-#[derive(Write, EncodeSize)]
+#[derive(Write, EncodeSize, Read)]
 pub struct Location<F: Family>(
     #[codec(
         encode_with = { UInt(*value).write(buf) },
-        encode_size = UInt(*value).encode_size()
+        encode_size = UInt(*value).encode_size(),
+        read_with = {
+            let value = UInt::<u64>::read(buf)?.into();
+            if value <= F::MAX_LEAVES.as_u64() {
+                Ok(value)
+            } else {
+                Err(commonware_codec::Error::Invalid(
+                    "Location",
+                    "value exceeds MAX_LEAVES",
+                ))
+            }
+        }
     )]
     u64,
-    #[codec(encode_with = {}, encode_size = 0)] PhantomData<F>,
+    #[codec(
+        encode_with = {},
+        encode_size = 0,
+        read_with = { Ok(core::marker::PhantomData) }
+    )]
+    PhantomData<F>,
 );
 
 #[cfg(feature = "arbitrary")]
@@ -185,25 +201,6 @@ impl<F: Family> From<Location<F>> for u64 {
     #[inline]
     fn from(loc: Location<F>) -> Self {
         *loc
-    }
-}
-
-// --- Codec implementations using varint encoding ---
-
-impl<F: Family> Read for Location<F> {
-    type Cfg = ();
-
-    #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let loc = Self::new(UInt::read(buf)?.into());
-        if loc.is_valid() {
-            Ok(loc)
-        } else {
-            Err(commonware_codec::Error::Invalid(
-                "Location",
-                "value exceeds MAX_LEAVES",
-            ))
-        }
     }
 }
 

@@ -1,6 +1,5 @@
 //! Ordered current proofs with fixed-size or runtime-sized bitmap chunks.
 
-use super::{COMMIT_CONTEXT, KEY_VALUE_CONTEXT};
 use crate::{
     merkle::Graftable,
     qmdb::{
@@ -12,7 +11,7 @@ use crate::{
         operation::Key,
     },
 };
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 
 /// Proofs with fixed-size bitmap chunks.
@@ -37,12 +36,16 @@ pub mod dynamic {
 /// Proof information for verifying a key has a particular value in the database.
 ///
 /// `C` stores the embedded operation proof's bitmap chunk.
-#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize, Read)]
+#[read_cfg((<OperationProof<F, D, C> as Read>::Cfg, <K as Read>::Cfg))]
+#[codec(read_bounds(OperationProof<F, D, C>: Read))]
 pub struct KeyValueProof<F: Graftable, K: Key, D: Digest, C> {
     /// The proof authenticating the active update operation.
+    #[codec(cfg = &cfg.0)]
     pub proof: OperationProof<F, D, C>,
 
     /// The next active key in lexicographic order, wrapping at the end.
+    #[codec(cfg = &cfg.1)]
     pub next_key: K,
 }
 
@@ -67,22 +70,6 @@ impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, K, D, C> 
     }
 }
 
-impl<F: Graftable, K: Key, D: Digest, C> Read for KeyValueProof<F, K, D, C>
-where
-    OperationProof<F, D, C>: Read,
-{
-    type Cfg = (<OperationProof<F, D, C> as Read>::Cfg, <K as Read>::Cfg);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (proof_cfg, key_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = OperationProof::<F, D, C>::read_cfg(buf, proof_cfg)?;
-        let next_key = K::read_cfg(buf, key_cfg)?;
-        Ok(Self { proof, next_key })
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<F: Graftable, K: Key, D: Digest, C> arbitrary::Arbitrary<'_> for KeyValueProof<F, K, D, C>
 where
@@ -104,17 +91,25 @@ where
 /// no active keys through the most recent commit operation.
 ///
 /// `C` stores the embedded operation proof's bitmap chunk. Verify using [Self::verify].
-#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize, Read)]
+#[read_cfg((<OperationProof<F, D, C> as Read>::Cfg, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg))]
+#[codec(read_bounds(OperationProof<F, D, C>: Read, Update<K, V>: Read))]
 pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, C> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
     #[codec(tag = 0)]
-    KeyValue(OperationProof<F, D, C>, Update<K, V>),
+    KeyValue(
+        #[codec(cfg = &cfg.0)] OperationProof<F, D, C>,
+        #[codec(cfg = &cfg.1)] Update<K, V>,
+    ),
 
     /// Proves that the database has no active keys, allowing any key to be proven excluded.
     /// The commit operation's activity floor must equal its own location.
     #[codec(tag = 1)]
-    Commit(OperationProof<F, D, C>, Option<V::Value>),
+    Commit(
+        #[codec(cfg = &cfg.0)] OperationProof<F, D, C>,
+        #[codec(cfg = &cfg.2)] Option<V::Value>,
+    ),
 }
 
 impl<F, K, V, D, C> ExclusionProof<F, K, V, D, C>
@@ -147,41 +142,6 @@ where
         };
 
         op_proof.verify::<H, _>(op, root)
-    }
-}
-
-impl<F, K, V, D, C> Read for ExclusionProof<F, K, V, D, C>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    OperationProof<F, D, C>: Read,
-    Update<K, V>: Read,
-{
-    type Cfg = (
-        <OperationProof<F, D, C> as Read>::Cfg,
-        <Update<K, V> as Read>::Cfg,
-        <V::Value as Read>::Cfg,
-    );
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (proof_cfg, update_cfg, value_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        match u8::read(buf)? {
-            KEY_VALUE_CONTEXT => {
-                let op_proof = OperationProof::<F, D, C>::read_cfg(buf, proof_cfg)?;
-                let update = Update::<K, V>::read_cfg(buf, update_cfg)?;
-                Ok(Self::KeyValue(op_proof, update))
-            }
-            COMMIT_CONTEXT => {
-                let op_proof = OperationProof::<F, D, C>::read_cfg(buf, proof_cfg)?;
-                let value = Option::<V::Value>::read_cfg(buf, value_cfg)?;
-                Ok(Self::Commit(op_proof, value))
-            }
-            tag => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
     }
 }
 

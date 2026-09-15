@@ -5,8 +5,7 @@ use crate::{
     qmdb::{self, operation::Floored, sync::ServeError},
 };
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
-    Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -192,22 +191,29 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
 /// In a [`Response::Boundary`], the proof, the operation, and the pinned nodes are verified as a
 /// unit. The pinned nodes are only believable because the proof folds them into digests it already
 /// commits to.
-#[derive(Write, EncodeSize)]
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg((usize, Op::Cfg))]
+#[codec(read_bounds(Op: Read))]
 pub enum Response<F: Family, Op, D: Digest> {
     /// Answer to a [`Request::Operations`].
     Operations {
         /// Proof authenticating `operations` against the root at the requested size.
+        #[codec(cfg = &cfg.0.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT))]
         proof: Proof<F, D>,
         /// The operations that were fetched.
+        #[codec(cfg = &((..=cfg.0).into(), cfg.1.clone()))]
         operations: Vec<Op>,
     },
     /// Answer to a [`Request::Boundary`].
     Boundary {
         /// Proof authenticating `op` against the root at the requested size.
+        #[codec(cfg = &MAX_PROOF_DIGESTS_PER_ELEMENT)]
         proof: Proof<F, D>,
         /// The operation at the requested boundary.
+        #[codec(cfg = &cfg.1)]
         op: Op,
         /// Pinned nodes at the requested location.
+        #[codec(cfg = &((..=MAX_PINNED_NODES).into(), ()))]
         pinned_nodes: Vec<D>,
     },
 }
@@ -237,32 +243,6 @@ impl<F: Family, Op: Clone, D: Digest> Clone for Response<F, Op, D> {
                 op: op.clone(),
                 pinned_nodes: pinned_nodes.clone(),
             },
-        }
-    }
-}
-
-impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
-    type Cfg = (usize, Op::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => {
-                let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-                let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
-                let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
-                Ok(Self::Operations { proof, operations })
-            }
-            1 => {
-                let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
-                let op = Op::read_cfg(buf, op_cfg)?;
-                let pinned_nodes = Vec::<D>::read_range(buf, ..=MAX_PINNED_NODES)?;
-                Ok(Self::Boundary {
-                    proof,
-                    op,
-                    pinned_nodes,
-                })
-            }
-            d => Err(CodecError::InvalidEnum(d)),
         }
     }
 }

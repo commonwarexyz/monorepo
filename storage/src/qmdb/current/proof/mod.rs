@@ -42,7 +42,7 @@ use crate::{
         },
     },
 };
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
+use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
@@ -121,7 +121,7 @@ pub fn required_chunks<F: Graftable, const N: usize>(
 ///
 /// See the [Canonical root structure](self#canonical-root-structure) section in the module
 /// documentation for the full layout.
-#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize)]
+#[derive(Clone, Eq, PartialEq, Debug, Write, EncodeSize, Read)]
 pub struct OpsRootWitness<F: Graftable, D: Digest> {
     /// The grafted-tree root committed by the canonical root.
     pub grafted_root: D,
@@ -141,6 +141,15 @@ pub struct OpsRootWitness<F: Graftable, D: Digest> {
         },
         encode_size = {
             value.as_ref().map_or(1, |(next_bit, digest)| 1 + UInt(*next_bit).encode_size() + digest.encode_size())
+        },
+        read_with = {
+            if bool::read(buf)? {
+                let next_bit = UInt::<u64>::read(buf)?.into();
+                let digest = D::read(buf)?;
+                Ok(Some((next_bit, digest)))
+            } else {
+                Ok(None)
+            }
         }
     )]
     pub partial_chunk: Option<(u64, D)>,
@@ -164,27 +173,6 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     /// Return true if this witness proves that `root` commits to `ops_root`.
     pub fn verify<H: Hasher<Digest = D>>(&self, ops_root: &D, root: &D) -> bool {
         self.root::<H>(ops_root) == *root
-    }
-}
-
-impl<F: Graftable, D: Digest> Read for OpsRootWitness<F, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let grafted_root = D::read(buf)?;
-        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
-        let partial_chunk = if bool::read(buf)? {
-            let next_bit = UInt::<u64>::read(buf)?.into();
-            let digest = D::read(buf)?;
-            Some((next_bit, digest))
-        } else {
-            None
-        };
-        Ok(Self {
-            grafted_root,
-            pending_chunk_digest,
-            partial_chunk,
-        })
     }
 }
 

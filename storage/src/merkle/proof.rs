@@ -10,7 +10,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -56,17 +56,28 @@ pub enum ReconstructionError {
 /// digests required by the requested `inactive_peaks` and bagging policy. For `BackwardFold`, this
 /// may include active suffix peaks that a single range proof could collapse into a synthetic suffix
 /// accumulator.
-#[derive(Clone, Debug, Eq, Write, EncodeSize)]
+///
+/// The read configuration limits the number of digests in the proof.
+#[derive(Clone, Debug, Eq, Write, EncodeSize, Read)]
+#[read_cfg(usize)]
+#[codec(read_bounds())]
 pub struct Proof<F: Family, D: Digest> {
     /// The total number of leaves in the data structure. For MMR proofs, this is the number of
     /// leaves in the MMR, though other authenticated data structures may override the meaning of
     /// this field. For example, the authenticated [crate::AuthenticatedBitMap] stores the number
     /// of bits in the bitmap within this field.
+    #[codec(cfg = &())]
     pub leaves: Location<F>,
     /// The number of inactive peaks in the structure when this proof was generated.
     #[codec(encode_with = { UInt(*value as u64).write(buf) }, encode_size = UInt(*value as u64).encode_size())]
+    #[codec(read_with = {
+        usize::try_from(UInt::<u64>::read(buf)?.0).map_err(|_| {
+            commonware_codec::Error::Invalid("Proof", "inactive_peaks exceeds usize")
+        })
+    })]
     pub inactive_peaks: usize,
     /// The digests necessary for proving inclusion.
+    #[codec(cfg = &((..=*cfg).into(), ()))]
     pub digests: Vec<D>,
 }
 
@@ -75,27 +86,6 @@ impl<F: Family, D: Digest> PartialEq for Proof<F, D> {
         self.leaves == other.leaves
             && self.inactive_peaks == other.inactive_peaks
             && self.digests == other.digests
-    }
-}
-
-impl<F: Family, D: Digest> commonware_codec::Read for Proof<F, D> {
-    /// The maximum number of digests in the proof.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_digests: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let leaves = Location::<F>::read(buf)?;
-        let inactive_peaks = usize::try_from(UInt::<u64>::read(buf)?.0).map_err(|_| {
-            commonware_codec::Error::Invalid("Proof", "inactive_peaks exceeds usize")
-        })?;
-        let digests = Vec::<D>::read_range(buf, ..=*max_digests)?;
-        Ok(Self {
-            leaves,
-            inactive_peaks,
-            digests,
-        })
     }
 }
 
