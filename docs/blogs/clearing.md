@@ -102,6 +102,12 @@ For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
 The wallet keeps one unacknowledged request in flight, retries it unchanged after response loss, and durably saves the verified acknowledgment and openings before signing the next endpoint. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
+## Collecting Fees
+
+An operator can require the payer to include a payment to a designated fee recipient, such as the operator's own account, in the same signed batch. It checks the requested payments and the fee increment before countersigning. If the fee is insufficient, it rejects the batch. The payer authorizes the fee alongside the other payments, and the operator's acknowledgment binds them together.
+
+The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator; changing it requires no protocol change.
+
 ## Optimizing for Hot Accounts
 
 Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Existing accounts can spend receipt-backed incoming credit within the epoch, before settlement. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:

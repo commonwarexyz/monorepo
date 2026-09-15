@@ -246,6 +246,20 @@ O’Grady</a></div>
         batch. The operator accepts or rejects the whole batch and
         returns one acknowledgment with an opening for each advanced
         entry.</p>
+        <h2 id="collecting-fees">Collecting Fees</h2>
+        <p>An operator can require the payer to include a payment to a
+        designated fee recipient, such as the operator’s own account, in
+        the same signed batch. It checks the requested payments and the
+        fee increment before countersigning. If the fee is insufficient,
+        it rejects the batch. The payer authorizes the fee alongside the
+        other payments, and the operator’s acknowledgment binds them
+        together.</p>
+        <p>The operator can price each transfer type or payer
+        independently, including volume discounts or negotiated rates.
+        Validators net the fee entry like any other payment, and
+        settlement uses the same commitments and proofs. The fee
+        schedule stays with the operator; changing it requires no
+        protocol change.</p>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
