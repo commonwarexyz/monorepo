@@ -8,10 +8,8 @@ use crate::aws::{
     utils::*,
 };
 use aws_sdk_ec2::types::Filter;
-use futures::{
-    future::try_join_all,
-    stream::{self, StreamExt, TryStreamExt},
-};
+use commonware_utils::futures::try_join_all;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{collections::HashMap, fs::File, path::PathBuf};
 use tracing::{error, info};
 

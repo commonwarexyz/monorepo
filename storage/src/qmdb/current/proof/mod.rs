@@ -45,9 +45,11 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::{
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+    futures::try_join_all,
+};
 use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
 use tracing::debug;
 
 pub mod operation;
