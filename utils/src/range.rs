@@ -40,6 +40,14 @@ impl<Idx: Copy> NonEmptyRange<Idx> {
     }
 }
 
+impl<Idx> core::ops::Deref for NonEmptyRange<Idx> {
+    type Target = Range<Idx>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl<Idx: PartialOrd> TryFrom<Range<Idx>> for NonEmptyRange<Idx> {
     type Error = EmptyRange;
 
@@ -197,6 +205,13 @@ mod tests {
                 Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
             ));
         }
+    }
+
+    #[test]
+    fn test_non_empty_range_deref() {
+        let r = NonEmptyRange::new(0u32..5).unwrap();
+        assert!(r.contains(&3));
+        assert_eq!(r.len(), 5);
     }
 
     #[cfg(feature = "arbitrary")]
