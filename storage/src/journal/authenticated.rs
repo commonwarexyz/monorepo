@@ -615,8 +615,8 @@ where
         Ok(self)
     }
 
-    /// Create a new [Journal] from the given components after aligning the Merkle structure with
-    /// the journal.
+    /// Create a [Journal], replaying any journal operations missing from Merkle.
+    /// Return an error if the Merkle tree extends past the journal end.
     #[boxed]
     pub async fn from_components(
         merkle: Merkle<F, E, H::Digest, S>,
@@ -637,29 +637,22 @@ where
         })
     }
 
-    /// Align the Merkle structure to be consistent with the journal. Any items in the structure
-    /// that are not in the journal are popped, and any items in the journal that are not in the
-    /// structure are added. Items are added in batches of size `apply_batch_size` to bound peak
-    /// memory use: each batch's items are buffered in memory so their leaves can be hashed
-    /// across the strategy.
+    /// Align the Merkle structure to be consistent with the journal. The structure must not
+    /// extend past the journal end. Any items in the journal that are not in the structure are
+    /// added. Items are added in batches of size `apply_batch_size` to bound peak memory use. Each
+    /// batch's items are buffered in memory so their leaves can be hashed across the strategy.
     async fn align(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Merkle<F, E, H::Digest, S>, Error<F>> {
-        // Rewind Merkle structure elements that are ahead of the journal.
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
         if merkle_leaves > journal_size {
-            let rewind_count = merkle_leaves - journal_size;
-            warn!(
-                journal_size,
-                ?rewind_count,
-                "rewinding Merkle structure to match journal"
-            );
-            merkle = merkle.rewind(*rewind_count as usize).await?;
-            merkle_leaves = Location::new(journal_size);
+            return Err(Error::Journal(JournalError::Corruption(
+                "Merkle size exceeds the initialized operation journal".into(),
+            )));
         }
 
         // If the Merkle structure is behind, replay journal items to catch up.
@@ -857,6 +850,46 @@ where
     }
 }
 
+/// Selected journal and Merkle state awaiting coordinated durable finalization.
+pub(crate) struct Recovery<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Backing<E>,
+    H: Hasher,
+    S: Strategy,
+{
+    journal: C::Recovery,
+    merkle: merkle::full::Recovery<F, E, H::Digest, S>,
+    hasher: StandardHasher<H>,
+    selected_end: u64,
+}
+
+impl<F, E, C, H, S> Recovery<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Backing<E, Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Persist the selected operations before the Merkle state acknowledging them.
+    pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
+        let journal = self.journal.finish(self.selected_end).await?;
+        let journal = journal.sync().await?;
+        let merkle = self.merkle.finish().await?;
+        let merkle =
+            Journal::<F, E, C, H, S>::align(merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
+                .await?;
+        let merkle = merkle.sync().await?;
+        Ok(Journal {
+            journal,
+            merkle,
+            hasher: self.hasher,
+        })
+    }
+}
+
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
@@ -868,32 +901,82 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Create a new authenticated [Journal].
-    ///
-    /// The backing journal will be rewound to the last item matching `rewind_predicate`,
-    /// and the merkle structure will be aligned to match.
+    /// Create an authenticated journal ending at its last matching item.
+    /// An empty retained range preserves its append position.
     #[boxed]
     pub async fn new(
         context: E,
         merkle_cfg: merkle::full::Config<S>,
         journal_cfg: C::Config,
-        rewind_predicate: fn(&C::Item) -> bool,
+        predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Self, Error<F>> {
-        let journal = C::init(context.child("journal"), journal_cfg).await?;
-        let (journal, _) = journal.rewind_to(rewind_predicate).await?;
+        Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging)
+            .await?
+            .finish()
+            .await
+    }
 
+    /// Recover a journal whose last matching item ends at or below `max_size`.
+    ///
+    /// Initialization durably discards the suffix before returning. A cap below retained
+    /// history, or pruned history with no matching retained item, returns a pruning error.
+    #[boxed]
+    pub async fn init_at_most(
+        context: E,
+        merkle_cfg: merkle::full::Config<S>,
+        journal_cfg: C::Config,
+        max_size: u64,
+        predicate: fn(&C::Item) -> bool,
+        bagging: merkle::Bagging,
+    ) -> Result<Self, Error<F>> {
+        Self::prepare(
+            context,
+            merkle_cfg,
+            journal_cfg,
+            Some(max_size),
+            predicate,
+            bagging,
+        )
+        .await?
+        .finish()
+        .await
+    }
+
+    /// Select and validate component availability before deliberately discarding history.
+    pub(crate) async fn prepare(
+        context: E,
+        merkle_cfg: merkle::full::Config<S>,
+        journal_cfg: C::Config,
+        max_size: Option<u64>,
+        predicate: fn(&C::Item) -> bool,
+        bagging: merkle::Bagging,
+    ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
+        let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
+        let bounds = journal.bounds();
+        let selected_end = if max_size.is_none() && bounds.is_empty() {
+            bounds.end
+        } else {
+            journal
+                .last_matching(max_size.unwrap_or(u64::MAX), predicate)
+                .await?
+        };
         let hasher = StandardHasher::<H>::new(bagging);
-        let merkle = Merkle::init(context.child("merkle"), &hasher, merkle_cfg).await?;
-        let merkle = Self::align(merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
-
-        let journal = journal.sync().await?;
-        let merkle = merkle.sync().await?;
-
-        Ok(Self {
-            merkle,
+        let merkle = Merkle::prepare(
+            context.child("merkle"),
+            &hasher,
+            merkle_cfg,
+            Some(Location::new(selected_end)),
+        )
+        .await?;
+        if *merkle.leaves() < bounds.start {
+            return Err(JournalError::ItemPruned(*merkle.leaves()).into());
+        }
+        Ok(Recovery {
             journal,
+            merkle,
             hasher,
+            selected_end,
         })
     }
 }
@@ -1106,14 +1189,32 @@ pub trait Backing<E: Context>: Mutable {
 
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
+}
 
-    /// Initialize the journal from its configuration.
-    fn init(
-        context: E,
-        cfg: Self::Config,
-    ) -> impl core::future::Future<Output = Result<Self, JournalError>> + Send
-    where
-        Self: Sized;
+/// Recover the portion useful for state sync, or reset an unusable local range.
+/// The context factory preserves the caller's metric prefix if recovery needs a second open.
+pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
+    context: impl Fn() -> E + Send,
+    cfg: J::Config,
+    range: Range<u64>,
+) -> Result<J, JournalError> {
+    assert!(!range.is_empty(), "range must not be empty");
+    let pending = match J::recover(context(), cfg.clone(), Some(range.end)).await {
+        Ok(pending) => pending,
+        // A bound below the retained start cannot select a prefix. Open the reset owner.
+        Err(JournalError::ItemPruned(_)) => J::recover(context(), cfg, None).await?,
+        Err(err) => return Err(err),
+    };
+    let bounds = pending.bounds();
+    if bounds == (0..0) && range.start == 0 {
+        return pending.finish(0).await;
+    }
+    if bounds.start > range.start || bounds.end <= range.start {
+        return pending.reset(range.start).await?.finish(range.start).await;
+    }
+    let journal = pending.finish(range.end).await?;
+    let (journal, _) = journal.prune(range.start).await?;
+    Ok(journal)
 }
 
 #[cfg(test)]
@@ -1135,7 +1236,7 @@ mod tests {
         },
         utils::detached::{DropMonitor, block_strategy},
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Rayon, Sequential};
@@ -1149,11 +1250,11 @@ mod tests {
         },
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use futures::StreamExt as _;
     use std::{
         future::Future,
-        num::{NonZeroU16, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU64, NonZeroUsize},
         time::Duration,
     };
 
@@ -1200,6 +1301,82 @@ mod tests {
         items: Vec<TestOp<F>>,
     ) -> MerkleizedBatchArc<F, Sha256, TestOp<F>, Sequential> {
         batch.add_many(items).merkleize(base)
+    }
+
+    #[test]
+    fn test_initialization_syncs_operations_before_merkle_repair() {
+        deterministic::Runner::default().start(|context| async move {
+            let operation_syncs = PendingSyncs::default();
+            let merkle_syncs = PendingSyncs::default();
+            operation_syncs.unblock();
+            merkle_syncs.unblock();
+            let operation_context = DelayedSyncContext {
+                inner: context.child("operations"),
+                pending: operation_syncs.clone(),
+            };
+            let merkle_context = DelayedSyncContext {
+                inner: context.child("merkle"),
+                pending: merkle_syncs.clone(),
+            };
+            let cfg = merkle_config("sync-order", &context);
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                merkle_context.child("seed"),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let batch = merkle.new_batch().add(&hasher, &Sha256::fill(1));
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            _ = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
+            let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::prepare(
+                merkle_context,
+                &hasher,
+                cfg,
+                Some(Location::new(0)),
+            )
+            .await
+            .unwrap();
+            let journal = ContiguousJournal::<_, TestOp<mmr::Family>>::recover(
+                operation_context,
+                journal_config("sync-order", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let journal = Box::new(journal)
+                .truncate(0)
+                .await
+                .unwrap()
+                .append(&create_operation::<mmr::Family>(1))
+                .await
+                .unwrap();
+            let pending = Recovery::<
+                mmr::Family,
+                _,
+                ContiguousJournal<_, TestOp<mmr::Family>>,
+                Sha256,
+                Sequential,
+            > {
+                journal: *journal,
+                merkle,
+                hasher,
+                selected_end: 1,
+            };
+            operation_syncs.arm();
+            merkle_syncs.arm();
+            let finish = pending.finish();
+            futures::pin_mut!(finish);
+            assert!(futures::poll!(&mut finish).is_pending());
+            assert_eq!(operation_syncs.calls(), 1);
+            assert_eq!(merkle_syncs.calls(), 0);
+            operation_syncs.unblock();
+            merkle_syncs.unblock();
+            let journal = finish.await.unwrap();
+            assert_eq!(journal.bounds(), 0..1);
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// Create Merkle configuration for tests with the given strategy.
@@ -1463,11 +1640,13 @@ mod tests {
         executor.start(test_align_with_empty_mmr_and_journal_inner::<mmb::Family>);
     }
 
-    /// Verify that align() pops Merkle elements when Merkle is ahead of the journal.
-    async fn test_align_when_mmr_ahead_inner<F: Family + PartialEq>(context: Context) {
+    /// Published components cannot repair a Merkle tree that extends past the operation journal.
+    async fn test_from_components_rejects_merkle_ahead_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
         let (mut merkle, mut journal, hasher) = create_components::<F>(context, "mmr-ahead").await;
 
-        // Add 20 operations to both Merkle and journal
+        // Keep Merkle one operation ahead of the journal.
         {
             let batch = {
                 let mut batch = merkle.new_batch();
@@ -1475,7 +1654,9 @@ mod tests {
                     let op = create_operation::<F>(i as u8);
                     let encoded = op.encode();
                     batch = batch.add(&hasher, &encoded);
-                    (journal, _) = journal.append(&op).await.unwrap();
+                    if i < 19 {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                    }
                 }
                 batch
             };
@@ -1483,31 +1664,25 @@ mod tests {
             merkle = merkle.apply_batch(&batch).unwrap();
         }
 
-        // Add commit operation to journal only (making journal ahead)
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
-        let (journal, _) = journal.append(&commit_op).await.unwrap();
         let journal = journal.sync().await.unwrap();
-
-        // Merkle has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-        let merkle = TestJournal::<F>::align(merkle, &journal, &hasher, APPLY_BATCH_SIZE)
-            .await
-            .unwrap();
-
-        // Merkle should have been aligned to match journal
-        assert_eq!(merkle.leaves(), Location::<F>::new(21));
-        assert_eq!(journal.size(), 21);
+        let result =
+            TestJournal::<F>::from_components(merkle, journal, hasher, APPLY_BATCH_SIZE).await;
+        assert!(matches!(
+            result,
+            Err(Error::Journal(JournalError::Corruption(_)))
+        ));
     }
 
     #[test_traced("WARN")]
-    fn test_align_when_mmr_ahead_mmr() {
+    fn test_from_components_rejects_merkle_ahead_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_align_when_mmr_ahead_inner::<mmr::Family>);
+        executor.start(test_from_components_rejects_merkle_ahead_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
-    fn test_align_when_mmr_ahead_mmb() {
+    fn test_from_components_rejects_merkle_ahead_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_align_when_mmr_ahead_inner::<mmb::Family>);
+        executor.start(test_from_components_rejects_merkle_ahead_inner::<mmb::Family>);
     }
 
     /// Verify that align() replays journal operations when journal is ahead of Merkle.
@@ -1672,291 +1847,271 @@ mod tests {
         });
     }
 
-    async fn test_rewind_inner<F: Family + PartialEq>(context: Context) {
-        // Test 1: Matching operation is kept
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_match"),
-                journal_config("rewind-match", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations where operation 3 is a commit
-            for i in 0..3 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+    async fn test_initialization_selection_inner<F: Family + PartialEq>(context: Context) {
+        for start in [0, 7] {
+            for cap in [0, 1, 2, 3, 4, 7, 8, 11, 12, 14, 15, 100] {
+                let suffix = format!("select-{start}-{cap}");
+                let cfg = journal_config(&suffix, &context);
+                let mut journal = ContiguousJournal::init(context.child("create"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..15 {
+                    let op = if [1, 3, 10, 13].contains(&i) {
+                        TestOp::<F>::CommitFloor(None, Location::new(0))
+                    } else {
+                        create_operation::<F>(i)
+                    };
+                    (journal, _) = journal.append(&op).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                if start > 0 {
+                    (journal, _) = journal.prune(start).await.unwrap();
+                }
+                drop(journal);
+                let pending = <ContiguousJournal<_, TestOp<F>> as Backing<_>>::recover(
+                    context.child("select"),
+                    cfg.clone(),
+                    Some(cap),
+                )
+                .await;
+                let expected = [2, 4, 11, 14]
+                    .into_iter()
+                    .filter(|end| *end <= cap && *end > start)
+                    .max();
+                if cap < start {
+                    assert!(matches!(pending, Err(JournalError::ItemPruned(_))));
+                    continue;
+                }
+                let pending = pending.unwrap();
+                let selected = pending.last_matching(cap, |op| op.is_commit()).await;
+                if expected.is_none() && start > 0 {
+                    assert!(matches!(selected, Err(JournalError::ItemPruned(_))));
+                    continue;
+                }
+                let size = selected.unwrap();
+                assert_eq!(size, expected.unwrap_or(0));
+                drop(pending.finish(size).await.unwrap());
+                let journal =
+                    ContiguousJournal::<_, TestOp<F>>::init(context.child("restart"), cfg)
+                        .await
+                        .unwrap();
+                assert_eq!(journal.size(), size);
             }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap();
-            for i in 4..7 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind to last commit
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 4);
-            assert_eq!(journal.size(), 4);
-
-            // Verify the commit operation is still there
-            let op = journal.read(3).await.unwrap();
-            assert!(op.is_commit());
         }
-
-        // Test 2: Last matching operation is chosen when multiple match
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_multiple"),
-                journal_config("rewind-multiple", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add multiple commits
-            (journal, _) = journal.append(&create_operation::<F>(0)).await.unwrap();
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 1
-            (journal, _) = journal.append(&create_operation::<F>(2)).await.unwrap();
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(1)))
-                .await
-                .unwrap(); // pos 3
-            (journal, _) = journal.append(&create_operation::<F>(4)).await.unwrap();
-
-            // Should rewind to last commit (pos 3)
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 4);
-
-            // Verify the last commit is still there
-            let op = journal.read(3).await.unwrap();
-            assert!(op.is_commit());
-
-            // Verify we can't read pos 4
-            assert!(journal.read(4).await.is_err());
-        }
-
-        // Test 3: Rewind to pruning boundary when no match
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_no_match"),
-                journal_config("rewind-no-match", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations with no commits
-            for i in 0..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind should go to pruning boundary (0 for unpruned)
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
-            assert_eq!(journal.size(), 0);
-        }
-
-        // Test 4: Rewind with existing pruning boundary
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_with_pruning"),
-                journal_config("rewind-with-pruning", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations and a commit at position 10 (past first section boundary of 7)
-            for i in 0..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 10
-            for i in 11..15 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-
-            // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
-            (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-
-            // Add more uncommitted operations
-            for i in 15..20 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind should keep the commit at position 10
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 11);
-
-            // Verify commit is still there
-            let op = journal.read(10).await.unwrap();
-            assert!(op.is_commit());
-        }
-
-        // Test 5: Rewind with no matches after pruning boundary
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_no_match_pruned"),
-                journal_config("rewind-no-match-pruned", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations with a commit at position 5 (in section 0: 0-6)
-            for i in 0..5 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 5
-            for i in 6..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-
-            // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
-            // Pruning boundary will be at position 7 (start of section 1)
-            (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-
-            // Add uncommitted operations with no commits (in section 1: 7-13)
-            for i in 10..14 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind with no matching commits after the pruning boundary
-            // Should rewind to the pruning boundary at position 7
-            let (_, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 7);
-        }
-
-        // Test 6: Empty journal
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_empty"),
-                journal_config("rewind-empty", &context),
-            )
-            .await
-            .unwrap();
-
-            // Rewind empty journal should be no-op
-            let final_size;
-            (journal, final_size) = journal
-                .rewind_to(|op: &TestOp<F>| op.is_commit())
-                .await
-                .unwrap();
-            assert_eq!(final_size, 0);
-            assert_eq!(journal.size(), 0);
-        }
-
-        // Test 7: Position based authenticated journal rewind.
-        {
-            let merkle_cfg = merkle_config("rewind", &context);
-            let journal_cfg = journal_config("rewind", &context);
+        for cap in [0, 1, 2, 3, 4, 5, 6, 7, 8, 100] {
+            let suffix = format!("authenticated-cap-{cap}");
+            let mc = merkle_config(&suffix, &context);
+            let jc = journal_config(&suffix, &context);
             let mut journal = TestJournal::<F>::new(
-                context.child("rewind"),
-                merkle_cfg,
-                journal_cfg,
-                |op| op.is_commit(),
+                context.child("create_auth"),
+                mc.clone(),
+                jc.clone(),
+                |_| true,
                 ForwardFold,
             )
             .await
             .unwrap();
-
-            // Add operations with a commit at position 5 (in section 0: 0-6)
-            for i in 0..5 {
+            let mut roots = vec![journal_root(&journal)];
+            for i in 0..8 {
                 (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                roots.push(journal_root(&journal));
             }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 5
-            for i in 6..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            assert_eq!(journal.size(), 10);
-
-            journal = journal.rewind(2).await.unwrap();
-            assert_eq!(journal.size(), 2);
-            assert_eq!(journal.merkle.leaves(), 2);
-            assert_eq!(journal.merkle.size(), 3);
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 0);
-            assert!(!bounds.is_empty());
-
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.merkle.leaves(), 0);
-            assert_eq!(journal.merkle.size(), 0);
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 0);
-            assert!(bounds.is_empty());
-
-            // Test rewinding after pruning.
-            for i in 0..255 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal.prune(Location::<F>::new(100)).await.unwrap();
-            assert_eq!(journal.bounds().start, 98);
-            journal = journal.rewind(98).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 98);
-            assert_eq!(journal.merkle.leaves(), 98);
-            assert_eq!(bounds.start, 98);
-            assert!(bounds.is_empty());
-
-            // Rewinding into the pruned region fails.
-            let res = journal.rewind(97).await;
-            assert!(matches!(
-                res,
-                Err(Error::Journal(JournalError::ItemPruned(97)))
-            ));
-        }
-
-        // Test 8: Rewind target beyond current size fails.
-        {
-            let merkle_cfg = merkle_config("rewind-invalid", &context);
-            let journal_cfg = journal_config("rewind-invalid", &context);
-            let mut journal = TestJournal::<F>::new(
-                context,
-                merkle_cfg,
-                journal_cfg,
-                |op| op.is_commit(),
+            _ = journal.sync().await.unwrap();
+            let journal = TestJournal::<F>::init_at_most(
+                context.child("cap_auth"),
+                mc.clone(),
+                jc.clone(),
+                cap,
+                |_| true,
                 ForwardFold,
             )
             .await
             .unwrap();
-
-            for i in 0..2 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            assert!(matches!(
-                journal.rewind(3).await,
-                Err(Error::Journal(JournalError::InvalidRewind(_)))
-            ));
+            let size = cap.min(8);
+            assert_eq!(*journal.size(), size);
+            assert_eq!(journal_root(&journal), roots[size as usize]);
+            drop(journal);
+            let journal =
+                TestJournal::<F>::new(context.child("restart_auth"), mc, jc, |_| true, ForwardFold)
+                    .await
+                    .unwrap();
+            assert_eq!(*journal.size(), size);
+            assert_eq!(journal_root(&journal), roots[size as usize]);
         }
     }
 
     #[test_traced("INFO")]
-    fn test_rewind_mmr() {
+    fn test_initialization_selection_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_rewind_inner::<mmr::Family>);
+        executor.start(test_initialization_selection_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_rewind_mmb() {
+    fn test_initialization_selection_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_rewind_inner::<mmb::Family>);
+        executor.start(test_initialization_selection_inner::<mmb::Family>);
+    }
+
+    /// Commit A then B, reopen at A, append an equal-length branch without syncing, then crash
+    /// with the appends retained and any unsynced resize lost. Recovery must yield A or a prefix
+    /// of the new branch, never B's operations or B's Merkle nodes.
+    fn init_at_most_equal_length_branch_crash_inner<F: Family + PartialEq>() {
+        const A: u64 = 4;
+        fn is_commit<F: Family>(op: &TestOp<F>) -> bool {
+            op.is_commit()
+        }
+        // One operation per page makes the reopen bound page aligned in the operation journal.
+        // The two-page write buffer floor flushes the branch in whole-buffer bursts.
+        fn journal_cfg<F: Family + PartialEq>(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+            let page = NonZeroU16::new(<TestOp<F> as FixedSize>::SIZE as u16).unwrap();
+            JConfig {
+                partition: format!("journal-{suffix}"),
+                items_per_blob: NZU64!(1000),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+            }
+        }
+        // One node per page makes the reopen bound page aligned in the Merkle journal.
+        fn merkle_cfg(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+            let page = NonZeroU16::new(Digest::SIZE as u16).unwrap();
+            MerkleConfig {
+                journal_partition: format!("mmr-journal-{suffix}"),
+                metadata_partition: format!("mmr-metadata-{suffix}"),
+                items_per_blob: NZU64!(1000),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+            }
+        }
+        fn branch<F: Family + PartialEq>(first: u8, len: u64) -> Vec<TestOp<F>> {
+            let mut ops: Vec<TestOp<F>> = (0..len - 1)
+                .map(|i| create_operation::<F>(first + i as u8))
+                .collect();
+            ops.push(TestOp::<F>::CommitFloor(None, Location::new(0)));
+            ops
+        }
+
+        // A three-operation branch is flushed whole and a five-operation branch only in part,
+        // so recovery sees the new commit in the first case and only A's commit in the second.
+        for len in [3u64, 5] {
+            let suffix = format!("equal-length-branch-{len}");
+            let crash_suffix = suffix.clone();
+            let (roots, checkpoint) =
+                deterministic::Runner::default().start_and_recover(move |context| async move {
+                    let mc = merkle_cfg(&crash_suffix, &context);
+                    let jc = journal_cfg::<F>(&crash_suffix, &context);
+                    let mut journal = TestJournal::<F>::new(
+                        context.child("create"),
+                        mc.clone(),
+                        jc.clone(),
+                        is_commit::<F>,
+                        ForwardFold,
+                    )
+                    .await
+                    .unwrap();
+                    for op in branch::<F>(0, A) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                    }
+                    let mut journal = journal.sync().await.unwrap();
+                    let root_a = journal_root(&journal);
+                    for op in branch::<F>(50, len) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                    }
+                    let journal = journal.sync().await.unwrap();
+                    assert_eq!(*journal.size(), A + len);
+                    drop(journal);
+
+                    // Keep unsynced writes and drop unsynced resizes at the crash.
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: probability!(1.0),
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        resize_rate: Some(deterministic::ResizeConfig {
+                            failure_rate: probability!(0.0),
+                            partial_rate: probability!(0.0),
+                        }),
+                        ..Default::default()
+                    };
+                    let mut journal = TestJournal::<F>::init_at_most(
+                        context.child("cap"),
+                        mc,
+                        jc,
+                        A,
+                        is_commit::<F>,
+                        ForwardFold,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(*journal.size(), A);
+                    assert_eq!(journal_root(&journal), root_a);
+                    let mut roots = vec![root_a];
+                    for op in branch::<F>(100, len) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                        roots.push(journal_root(&journal));
+                    }
+                    drop(journal);
+                    roots
+                });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let journal = TestJournal::<F>::new(
+                    context.child("reopen"),
+                    merkle_cfg(&suffix, &context),
+                    journal_cfg::<F>(&suffix, &context),
+                    is_commit::<F>,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                let size = *journal.size();
+                assert!(
+                    (A..=A + len).contains(&size),
+                    "recovered size {size} is not a prefix of the new branch"
+                );
+                let expected = branch::<F>(100, len);
+                for pos in A..size {
+                    assert_eq!(
+                        journal.read(pos).await.unwrap(),
+                        expected[(pos - A) as usize],
+                        "operation at retained position {pos} was never written there"
+                    );
+                }
+                let root = journal_root(&journal);
+                assert_eq!(
+                    root,
+                    roots[(size - A) as usize],
+                    "root does not match the recovered operations"
+                );
+                let (proof, ops) = journal
+                    .proof(Location::new(0), NonZeroU64::new(size).unwrap(), 0)
+                    .await
+                    .unwrap();
+                assert_eq!(ops.len() as u64, size);
+                assert!(verify_proof(
+                    &proof,
+                    &ops,
+                    Location::new(0),
+                    &root,
+                    &StandardHasher::new(ForwardFold)
+                ));
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_init_at_most_equal_length_branch_crash_mmr() {
+        init_at_most_equal_length_branch_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_init_at_most_equal_length_branch_crash_mmb() {
+        init_at_most_equal_length_branch_crash_inner::<mmb::Family>();
     }
 
     /// Verify that append() increments the operation count, returns correct locations, and
@@ -2202,6 +2357,51 @@ mod tests {
             let read_op = journal.read(*Location::<F>::new(i as u64)).await.unwrap();
             assert_eq!(read_op, *expected_op);
         }
+    }
+
+    /// Reopening recovers the Merkle journal bounded, so publication persists its recovery
+    /// watermark even when no node is flushed.
+    #[test_traced]
+    fn test_reopen_persists_merkle_watermark() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_journal(&context, "first", "watermark", &pending);
+            let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
+            for i in 0..5u8 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+            (journal, _) = journal
+                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                .await
+                .unwrap();
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            let size = *journal.merkle.size();
+            drop(journal);
+            let before = ContiguousJournal::<_, Digest>::persisted_watermark(
+                context.child("p0"),
+                "mmr-journal-watermark",
+            )
+            .await
+            .unwrap();
+            assert_eq!(before, Some(0));
+
+            let journal =
+                create_empty_journal::<mmr::Family>(context.child("second"), "watermark").await;
+            assert_eq!(*journal.merkle.size(), size);
+            drop(journal);
+            let after = ContiguousJournal::<_, Digest>::persisted_watermark(
+                context.child("p1"),
+                "mmr-journal-watermark",
+            )
+            .await
+            .unwrap();
+            assert_eq!(after, Some(size));
+        });
     }
 
     #[test_traced("INFO")]
@@ -3230,7 +3430,7 @@ mod tests {
         let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
 
         // Apply A, then commit and sync so the recovered state below includes it (reopen
-        // rewinds to the last commit operation).
+        // selects the last commit operation during initialization).
         journal = journal.apply_batch(&merkleized_a).await.unwrap();
         let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
         (journal, _) = journal.append(&commit_op).await.unwrap();
@@ -3787,5 +3987,58 @@ mod tests {
             );
             assert!(ancestor.upgrade().is_none());
         });
+    }
+
+    async fn fully_pruned_authenticated_reopens<F: Family + PartialEq>(context: Context) {
+        let merkle_cfg = merkle_config("fully-pruned-reopen", &context);
+        let journal_cfg = journal_config("fully-pruned-reopen", &context);
+        assert_eq!(journal_cfg.items_per_blob.get(), 7);
+        let mut journal = TestJournal::<F>::new(
+            context.child("seed"),
+            merkle_cfg.clone(),
+            journal_cfg.clone(),
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0u8..7 {
+            let (next, pos) = journal.append(&create_operation::<F>(i)).await.unwrap();
+            journal = next;
+            assert_eq!(*pos, u64::from(i));
+        }
+        let journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let (journal, boundary) = journal.prune(Location::new(7)).await.unwrap();
+        assert_eq!(*boundary, 7);
+        assert_eq!(journal.bounds(), 7..7);
+        assert_eq!(journal.root(0).unwrap(), root);
+        drop(journal);
+
+        let journal = TestJournal::<F>::new(
+            context.child("reopen"),
+            merkle_cfg,
+            journal_cfg,
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.bounds(), 7..7);
+        assert_eq!(journal.root(0).unwrap(), root);
+        let (journal, pos) = journal.append(&create_operation::<F>(7)).await.unwrap();
+        assert_eq!(*pos, 7);
+        assert_eq!(journal.bounds(), 7..8);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_fully_pruned_authenticated_reopens_mmr() {
+        deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_fully_pruned_authenticated_reopens_mmb() {
+        deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
     }
 }
