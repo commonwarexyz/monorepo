@@ -4,7 +4,7 @@ use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as Codec
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, IoBuf, WriteOptions,
+    Blob, BufMut, Error as RError, IoBuf, IoBufMut, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -25,11 +25,11 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     /// Serialize `value` followed by the CRC of its serialized bytes.
-    fn encode(value: &V) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Self::SIZE);
+    fn encode(value: &V) -> IoBufMut {
+        let mut buf = IoBufMut::with_capacity(Self::SIZE);
         value.write(&mut buf);
         assert_eq!(buf.len(), V::SIZE, "write() did not write expected bytes");
-        let crc = Crc32::checksum(&buf);
+        let crc = Crc32::checksum(buf.as_ref());
         crc.write(&mut buf);
         buf
     }
@@ -583,18 +583,17 @@ mod tests {
     #[test]
     fn test_record_preserves_owned_byte_fields() {
         let value = View::new(7);
-        let encoded = Record::encode(&value);
-        let source = IoBuf::from(encoded.clone());
+        let encoded = Record::encode(&value).freeze();
+        let source = encoded.clone();
         let decoded = Record::<View>::decode_valid(source).unwrap();
         assert_eq!(decoded.bytes, value.bytes);
         decoded.assert_shared();
 
-        let mut corrupt = encoded.clone();
+        let mut corrupt = encoded.as_ref().to_vec();
         corrupt[0] ^= 1;
         assert!(Record::<View>::decode_valid(corrupt.into()).is_none());
-        let mut truncated = encoded;
-        truncated.pop();
-        assert!(Record::<View>::decode_valid(truncated.into()).is_none());
+        let truncated = encoded.slice(..encoded.len() - 1);
+        assert!(Record::<View>::decode_valid(truncated).is_none());
     }
 
     type TestOrdinal = Ordinal<Context, u64>;
