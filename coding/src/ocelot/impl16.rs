@@ -74,6 +74,14 @@ impl<K: Kernel> Impl for Impl16<K> {
         self.kernel.run(AddInto { dst, src });
     }
 
+    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
+        Impl8::new(self.kernel).derivative_four(quarters);
+    }
+
+    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
+        Impl8::new(self.kernel).derivative_sixteen(blocks);
+    }
+
     fn sub_into(self, dst: &mut [u8], src: &[u8]) {
         self.add_into(dst, src);
     }
@@ -84,7 +92,16 @@ impl<K: Kernel> Impl for Impl16<K> {
         if c.0 <= u8::MAX as u16 {
             return Impl8::new(self.kernel).mul_add(dst, src, GF8(c.0 as u8));
         }
-        self.kernel.run(MulAdd { dst, src, c });
+        self.kernel.run(MulAdd::<true> { dst, src, c });
+    }
+
+    fn mul_into(self, dst: &mut [u8], src: &[u8], c: GF16) {
+        assert!(src.len().is_multiple_of(2), "shard length is not aligned");
+        // Subfield coefficients multiply both byte planes independently.
+        if c.0 <= u8::MAX as u16 {
+            return Impl8::new(self.kernel).mul_into(dst, src, GF8(c.0 as u8));
+        }
+        self.kernel.run(MulAdd::<false> { dst, src, c });
     }
 
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: GF16) {
@@ -163,13 +180,13 @@ impl<K: Kernel> Impl for Impl16<K> {
     }
 }
 
-struct MulAdd<'a> {
+struct MulAdd<'a, const ADD: bool> {
     dst: &'a mut [u8],
     src: &'a [u8],
     c: GF16,
 }
 
-impl WithKernel for MulAdd<'_> {
+impl<const ADD: bool> WithKernel for MulAdd<'_, ADD> {
     type Output = ();
 
     #[inline(always)]
@@ -189,7 +206,7 @@ impl WithKernel for MulAdd<'_> {
     }
 }
 
-impl MulAdd<'_> {
+impl<const ADD: bool> MulAdd<'_, ADD> {
     #[inline(always)]
     fn block<K: Kernel>(kernel: K, dst: &mut [u8], src: &[u8], c: GF16, prepared: GF16Constant<K>) {
         let symbols = src.len() / 2;
@@ -198,30 +215,40 @@ impl MulAdd<'_> {
         let full = symbols / K::LANES * K::LANES;
         for start in (0..full).step_by(K::LANES) {
             let end = start + K::LANES;
-            let sum = GF16Vec::load_planes(kernel, &dst_lo[start..end], &dst_hi[start..end])
-                + GF16Vec::load_planes(kernel, &src_lo[start..end], &src_hi[start..end])
-                    .mul_prepared(prepared);
+            let product = GF16Vec::load_planes(kernel, &src_lo[start..end], &src_hi[start..end])
+                .mul_prepared(prepared);
+            let sum = if ADD {
+                GF16Vec::load_planes(kernel, &dst_lo[start..end], &dst_hi[start..end]) + product
+            } else {
+                product
+            };
             sum.store_planes(&mut dst_lo[start..end], &mut dst_hi[start..end]);
         }
         let partial = full + (symbols - full) / K::PARTIAL_GRANULARITY * K::PARTIAL_GRANULARITY;
         if partial > full {
             let range = full..partial;
-            let sum = GF16Vec::load_partial_planes(
-                kernel,
-                &dst_lo[range.clone()],
-                &dst_hi[range.clone()],
-            ) + GF16Vec::load_partial_planes(
+            let product = GF16Vec::load_partial_planes(
                 kernel,
                 &src_lo[range.clone()],
                 &src_hi[range.clone()],
             )
             .mul_prepared(prepared);
+            let sum = if ADD {
+                GF16Vec::load_partial_planes(kernel, &dst_lo[range.clone()], &dst_hi[range.clone()])
+                    + product
+            } else {
+                product
+            };
             sum.store_partial_planes(&mut dst_lo[range.clone()], &mut dst_hi[range]);
         }
         for i in partial..symbols {
-            let dst = GF16(u16::from(dst_lo[i]) | (u16::from(dst_hi[i]) << 8));
             let src = GF16(u16::from(src_lo[i]) | (u16::from(src_hi[i]) << 8));
-            let sum = dst + src * c;
+            let product = src * c;
+            let sum = if ADD {
+                GF16(u16::from(dst_lo[i]) | (u16::from(dst_hi[i]) << 8)) + product
+            } else {
+                product
+            };
             dst_lo[i] = sum.0 as u8;
             dst_hi[i] = (sum.0 >> 8) as u8;
         }
@@ -805,6 +832,17 @@ mod tests {
                 rng.fill_bytes(&mut y[range.clone()]);
 
                 for c in [0, 1, 0x80, 0xff, 0x0100, 0x0128, 0x84e4, 0xffff].map(GF16) {
+                    let mut overwritten = x.clone();
+                    overwritten[range.clone()].fill(0xa5);
+                    imp.mul_into(&mut overwritten[range.clone()], &y[range.clone()], c);
+                    let products: Vec<_> = elements(&y[range.clone()])
+                        .into_iter()
+                        .map(|y| y * c)
+                        .collect();
+                    let mut expected_overwrite = overwritten.clone();
+                    expected_overwrite[range.clone()].copy_from_slice(&layout(&products));
+                    assert_eq!(overwritten, expected_overwrite);
+
                     let mut actual = x.clone();
                     imp.mul_add(&mut actual[range.clone()], &y[range.clone()], c);
                     let products: Vec<_> = elements(&x[range.clone()])

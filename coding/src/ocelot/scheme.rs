@@ -310,15 +310,24 @@ fn encode_codeword<I: Impl, H: Hasher>(
     let padded_len = original_count
         .checked_mul(shard_len)
         .ok_or(Error::InvalidData)?;
+    let recovery_len = recovery_count
+        .checked_mul(shard_len)
+        .ok_or(Error::InvalidData)?;
     let mut padded = vec![0; padded_len];
     padded[..u32::SIZE].copy_from_slice(&data_bytes.to_be_bytes());
     data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
     let originals = Bytes::from(padded);
     let original_refs: Vec<_> = originals.chunks_exact(shard_len).collect();
-    let recovery = Encoder::new(imp).encode(&original_refs, recovery_count, strategy);
+    let mut recovery = vec![0; recovery_len];
+    let mut recovery_shards: Vec<_> = recovery.chunks_exact_mut(shard_len).collect();
+    Encoder::new(imp).encode_into(&original_refs, &mut recovery_shards, strategy);
+    let recovery = Bytes::from(recovery);
     let shard_bytes: Vec<Bytes> = (0..original_count)
         .map(|index| originals.slice(index * shard_len..(index + 1) * shard_len))
-        .chain(recovery.into_iter().map(Bytes::from))
+        .chain(
+            (0..recovery_count)
+                .map(|index| recovery.slice(index * shard_len..(index + 1) * shard_len)),
+        )
         .collect();
 
     let digests = strategy
@@ -699,22 +708,28 @@ impl<I: Impl, H: Hasher> OcelotX<I, H> {
         let recovered = recover(self.imp, selection, RecoveryMode::FullCodeword, strategy)?;
         let data = extract_data::<I>(&recovered.originals, recovered.shard_len, None)?;
         let originals: Vec<&[u8]> = recovered.originals.iter().map(AsRef::as_ref).collect();
-        let canonical_recovery;
+        let mut canonical_recovery;
         let recovery: Vec<&[u8]> = if recovered.all_originals {
-            canonical_recovery = Encoder::new(self.imp).encode(
-                &originals,
-                usize::from(config.extra_shards.get()),
-                strategy,
-            );
-            for (provided, canonical) in recovered.recovery.iter().zip(&canonical_recovery) {
+            let recovery_len = recovered
+                .recovery
+                .len()
+                .checked_mul(recovered.shard_len)
+                .ok_or(Error::InvalidData)?;
+            canonical_recovery = vec![0; recovery_len];
+            let mut recovery: Vec<_> = canonical_recovery
+                .chunks_exact_mut(recovered.shard_len)
+                .collect();
+            Encoder::new(self.imp).encode_into(&originals, &mut recovery, strategy);
+            let recovery: Vec<_> = recovery.into_iter().map(|shard| &*shard).collect();
+            for (provided, canonical) in recovered.recovery.iter().zip(&recovery) {
                 if provided
                     .as_ref()
-                    .is_some_and(|provided| provided.as_ref() != canonical)
+                    .is_some_and(|provided| provided.as_ref() != *canonical)
                 {
                     return Err(Error::InvalidData);
                 }
             }
-            canonical_recovery.iter().map(Vec::as_slice).collect()
+            recovery
         } else {
             recovered
                 .recovery
