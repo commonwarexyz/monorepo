@@ -5,6 +5,7 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, Sha256};
+//! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot (fastest path)
 //! let digest = Sha256::hash(&[b"hello,", b"world!"]);
@@ -16,11 +17,17 @@
 //! hasher.update(b"world!");
 //! let (_hasher, digest) = hasher.finalize();
 //! println!("digest: {:?}", digest);
+//!
+//! // Hash independent messages. Sha256 uses batch acceleration when
+//! // available and the strategy controls parallel execution.
+//! let messages: [[u8; 32]; 16] = core::array::from_fn(|lane| [lane as u8; 32]);
+//! let digests = Sha256::hash_many(&messages, &Sequential);
+//! assert_eq!(digests[3], Sha256::hash(&[messages[3].as_slice()]));
 //! ```
 
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
@@ -174,6 +181,10 @@ impl Sha256 {
     }
 }
 
+const fn compression_blocks(len: usize) -> usize {
+    len / 64 + 1 + (len % 64 >= 56) as usize
+}
+
 impl Hasher for Sha256 {
     type Digest = Digest;
 
@@ -189,6 +200,32 @@ impl Hasher for Sha256 {
             return pair;
         }
         (Self::hash(left), Self::hash(right))
+    }
+
+    #[track_caller]
+    fn hash_many<M: AsRef<[u8]> + Sync>(
+        messages: &[M],
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> Vec<Self::Digest> {
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                crate::hash_many_with::<Self, _, _, _, _>(
+                    messages,
+                    strategy,
+                    simd::hash_x16,
+                    simd::supports_hash_x16(),
+                    compression_blocks,
+                )
+            } else {
+                crate::hash_many_with::<Self, _, _, _, _>(
+                    messages,
+                    strategy,
+                    |_| None,
+                    false,
+                    compression_blocks,
+                )
+            }
+        }
     }
 
     #[inline]
@@ -291,6 +328,8 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::{Rayon, Sequential, Strategy};
+    use commonware_utils::NZUsize;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -395,6 +434,73 @@ mod tests {
             vec![vec![fill; 32], vec![fill + 1; 32]]
         }
         crate::fuzz::Plan::<Sha256>::new(node(0x11), node(0x33)).run();
+    }
+
+    #[test]
+    fn test_hash_many_boundaries_match_individual_hashes() {
+        for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
+            let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| {
+                (0..len)
+                    .map(|i| (i as u8).wrapping_add(lane as u8))
+                    .collect()
+            });
+            let refs = messages.each_ref().map(Vec::as_slice);
+            let expected = refs
+                .iter()
+                .map(|&message| Sha256::hash(&[message]))
+                .collect::<Vec<_>>();
+            assert_eq!(Sha256::hash_many(&refs, &Sequential), expected);
+        }
+
+        let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
+        let mut refs = messages.each_ref().map(Vec::as_slice);
+        refs[9] = &messages[9][..63];
+        let expected = refs
+            .iter()
+            .map(|&message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(Sha256::hash_many(&refs, &Sequential), expected);
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        assert_eq!(Sha256::hash_many(&refs, &strategy), expected);
+        #[cfg(target_arch = "x86_64")]
+        assert!(simd::hash_x16(refs).is_none());
+    }
+
+    #[test]
+    fn test_hash_many_balances_padded_blocks() {
+        let mut messages = vec![vec![0; 55]];
+        messages.extend((0..55).map(|_| Vec::<u8>::new()));
+        let ranges = crate::hash_ranges(&messages, 2, &compression_blocks);
+        assert_eq!(
+            ranges.iter().map(|range| range.len()).collect::<Vec<_>>(),
+            vec![28, 28],
+        );
+
+        let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
+        let expected = messages
+            .iter()
+            .map(|message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(Sha256::hash_many(&messages, &strategy), expected);
+    }
+
+    #[test]
+    fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
+        let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
+        let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
+        let expected = messages
+            .iter()
+            .map(|&message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(Sha256::hash_many(&messages, &Sequential), expected);
+
+        let message = &backing[1..130];
+        let messages = [message; 16];
+        let expected = messages
+            .iter()
+            .map(|&message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(Sha256::hash_many(&messages, &Sequential), expected);
     }
 
     #[test]

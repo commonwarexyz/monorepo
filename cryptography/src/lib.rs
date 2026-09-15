@@ -65,7 +65,7 @@ commonware_macros::stability_scope!(ALPHA {
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
-    use alloc::sync::Arc;
+    use alloc::{sync::Arc, vec::Vec};
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
@@ -73,7 +73,7 @@ commonware_macros::stability_scope!(BETA {
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
-    use std::sync::Arc;
+    use std::{sync::Arc, vec::Vec};
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -263,6 +263,131 @@ commonware_macros::stability_scope!(BETA {
 
     pub type DigestOf<H> = <H as Hasher>::Digest;
 
+    const HASH_BATCH_SIZE: usize = 16;
+
+    #[inline]
+    const fn message_work(len: usize) -> usize {
+        len.saturating_add(1)
+    }
+
+    /// Split estimated work into ordered ranges while leaving at least one message
+    /// for each remaining worker. Individual messages are never divided.
+    fn hash_ranges<M: AsRef<[u8]>, W: Fn(usize) -> usize>(
+        messages: &[M],
+        parallelism: usize,
+        work: &W,
+    ) -> Vec<core::ops::Range<usize>> {
+        let workers = parallelism.max(1).min(messages.len());
+        let total = messages
+            .iter()
+            .fold(0u128, |sum, message| sum + work(message.as_ref().len()) as u128);
+        let workers_u128 = workers as u128;
+        let per_worker = total / workers_u128;
+        let extra = total % workers_u128;
+        let mut ranges = Vec::with_capacity(workers);
+        let mut start = 0;
+        let mut end = 0;
+        let mut covered_work = 0u128;
+        let mut target_work = 0u128;
+
+        for worker in 0..workers - 1 {
+            target_work += per_worker + u128::from((worker as u128) < extra);
+            let remaining_workers = workers - worker - 1;
+            let max_end = messages.len() - remaining_workers;
+            loop {
+                covered_work += work(messages[end].as_ref().len()) as u128;
+                end += 1;
+                if covered_work >= target_work || end == max_end {
+                    break;
+                }
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+        ranges.push(start..messages.len());
+        ranges
+    }
+
+    fn hash_pairs_into<H: Hasher, M: AsRef<[u8]>>(messages: &[M], digests: &mut Vec<H::Digest>) {
+        let (pairs, remainder) = messages.as_chunks::<2>();
+        for pair in pairs {
+            let (left, right) = H::hash_pair(&[pair[0].as_ref()], &[pair[1].as_ref()]);
+            digests.push(left);
+            digests.push(right);
+        }
+        if let [message] = remainder {
+            digests.push(H::hash(&[message.as_ref()]));
+        }
+    }
+
+    fn hash_span<H, M, F>(messages: &[M], hash_x16: &F, x16_accelerated: bool) -> Vec<H::Digest>
+    where
+        H: Hasher,
+        M: AsRef<[u8]>,
+        F: for<'a> Fn([&'a [u8]; HASH_BATCH_SIZE]) -> Option<[H::Digest; HASH_BATCH_SIZE]>,
+    {
+        let mut digests = Vec::with_capacity(messages.len());
+        if !x16_accelerated {
+            hash_pairs_into::<H, _>(messages, &mut digests);
+            return digests;
+        }
+
+        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+            let (batches, remainder) = run.as_chunks::<HASH_BATCH_SIZE>();
+            for batch in batches {
+                let inputs = core::array::from_fn(|lane| batch[lane].as_ref());
+                if let Some(batch_digests) = hash_x16(inputs) {
+                    digests.extend(batch_digests);
+                } else {
+                    hash_pairs_into::<H, _>(batch, &mut digests);
+                }
+            }
+            hash_pairs_into::<H, _>(remainder, &mut digests);
+        }
+        digests
+    }
+
+    #[track_caller]
+    fn hash_many_with<H, M, S, F, W>(
+        messages: &[M],
+        strategy: &S,
+        hash_x16: F,
+        x16_accelerated: bool,
+        message_work: W,
+    ) -> Vec<H::Digest>
+    where
+        H: Hasher,
+        M: AsRef<[u8]> + Sync,
+        S: Strategy,
+        F: for<'a> Fn([&'a [u8]; HASH_BATCH_SIZE]) -> Option<[H::Digest; HASH_BATCH_SIZE]>
+            + Send
+            + Sync,
+        W: Fn(usize) -> usize + Sync,
+    {
+        if messages.is_empty() {
+            return Vec::new();
+        }
+
+        let work = messages.iter().fold(0usize, |sum, message| {
+            sum.saturating_add(message_work(message.as_ref().len()))
+        });
+        strategy.run(
+            work,
+            || hash_span::<H, _, _>(messages, &hash_x16, x16_accelerated),
+            || {
+                let manual = strategy.manual();
+                let ranges = hash_ranges(messages, manual.parallelism(), &message_work);
+                manual
+                    .map_collect_vec(ranges, |range| {
+                        hash_span::<H, _, _>(&messages[range], &hash_x16, x16_accelerated)
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        )
+    }
+
     /// Interface that commonware crates rely on for hashing.
     ///
     /// Hash functions in commonware primitives are not typically hardcoded
@@ -291,6 +416,21 @@ commonware_macros::stability_scope!(BETA {
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
         fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
 
+        /// Hash multiple independent byte slices.
+        ///
+        /// Returns one digest per input in the same order. Inputs may be empty,
+        /// differ in length, or overlap. Output position `i` is equivalent to
+        /// `Self::hash(&[messages[i].as_ref()])`.
+        /// Implementations may accelerate supported batches, and `strategy`
+        /// selects between serial and parallel execution.
+        #[track_caller]
+        fn hash_many<M: AsRef<[u8]> + Sync>(
+            messages: &[M],
+            strategy: &impl Strategy,
+        ) -> Vec<Self::Digest> {
+            hash_many_with::<Self, _, _, _, _>(messages, strategy, |_| None, false, message_work)
+        }
+
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
 
@@ -304,7 +444,56 @@ commonware_macros::stability_scope!(BETA {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_utils::test_rng;
+    use commonware_parallel::{Rayon, Sequential, Strategy};
+    use commonware_utils::{NZUsize, test_rng};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SINGLE_HASHES: AtomicUsize = AtomicUsize::new(0);
+    static PAIRED_HASHES: AtomicUsize = AtomicUsize::new(0);
+    static X16_HASHES: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Default)]
+    struct CountingHasher(Sha256);
+
+    impl Hasher for CountingHasher {
+        type Digest = <Sha256 as Hasher>::Digest;
+
+        fn hash(parts: &[&[u8]]) -> Self::Digest {
+            SINGLE_HASHES.fetch_add(1, Ordering::Relaxed);
+            Sha256::hash(parts)
+        }
+
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+            PAIRED_HASHES.fetch_add(1, Ordering::Relaxed);
+            Sha256::hash_pair(left, right)
+        }
+
+        fn update(&mut self, bytes: &[u8]) -> &mut Self {
+            self.0.update(bytes);
+            self
+        }
+
+        fn finalize(self) -> (Self, Self::Digest) {
+            let (hasher, digest) = self.0.finalize();
+            (Self(hasher), digest)
+        }
+    }
+
+    fn reset_hash_counts() {
+        SINGLE_HASHES.store(0, Ordering::Relaxed);
+        PAIRED_HASHES.store(0, Ordering::Relaxed);
+        X16_HASHES.store(0, Ordering::Relaxed);
+    }
+
+    fn simulated_hash_x16(
+        batch: [&[u8]; HASH_BATCH_SIZE],
+    ) -> Option<[<Sha256 as Hasher>::Digest; HASH_BATCH_SIZE]> {
+        if batch.iter().any(|message| message.len() != batch[0].len()) {
+            return None;
+        }
+        X16_HASHES.fetch_add(1, Ordering::Relaxed);
+        Some(batch.map(|message| Sha256::hash(&[message])))
+    }
 
     fn test_validate<C: PrivateKey>() {
         let private_key = C::random(test_rng());
@@ -600,5 +789,107 @@ mod tests {
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
+    }
+
+    #[test]
+    fn hash_many_preserves_default_and_parallel_work_shapes() {
+        let messages = (0..5)
+            .map(|index| vec![index as u8; index + 1])
+            .collect::<Vec<_>>();
+        reset_hash_counts();
+        let actual = CountingHasher::hash_many(&messages, &Sequential);
+        let expected = messages
+            .iter()
+            .map(|message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(SINGLE_HASHES.load(Ordering::Relaxed), 1);
+        assert_eq!(PAIRED_HASHES.load(Ordering::Relaxed), 2);
+        assert_eq!(X16_HASHES.load(Ordering::Relaxed), 0);
+
+        let messages = (0..18)
+            .map(|index| vec![index as u8; 128])
+            .collect::<Vec<_>>();
+        reset_hash_counts();
+        let actual = hash_many_with::<CountingHasher, _, _, _, _>(
+            &messages,
+            &Sequential,
+            simulated_hash_x16,
+            true,
+            message_work,
+        );
+        let expected = messages
+            .iter()
+            .map(|message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(SINGLE_HASHES.load(Ordering::Relaxed), 0);
+        assert_eq!(PAIRED_HASHES.load(Ordering::Relaxed), 1);
+        assert_eq!(X16_HASHES.load(Ordering::Relaxed), 1);
+
+        let messages = (0..144)
+            .map(|index| vec![index as u8; 128])
+            .collect::<Vec<_>>();
+        let ranges = hash_ranges(&messages, 8, &message_work);
+        assert_eq!(
+            ranges.iter().map(|range| range.len()).collect::<Vec<_>>(),
+            vec![18; 8]
+        );
+
+        reset_hash_counts();
+        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
+        let actual = hash_many_with::<CountingHasher, _, _, _, _>(
+            &messages,
+            &strategy,
+            simulated_hash_x16,
+            true,
+            message_work,
+        );
+        let expected = messages
+            .iter()
+            .map(|message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(SINGLE_HASHES.load(Ordering::Relaxed), 0);
+        assert_eq!(PAIRED_HASHES.load(Ordering::Relaxed), 8);
+        assert_eq!(X16_HASHES.load(Ordering::Relaxed), 8);
+
+        for prefix in 0..=17 {
+            let messages = (0..prefix)
+                .map(|index| vec![index as u8; 32])
+                .chain((0..16).map(|index| vec![(prefix + index) as u8; 128]))
+                .collect::<Vec<_>>();
+            reset_hash_counts();
+            let actual = hash_many_with::<CountingHasher, _, _, _, _>(
+                &messages,
+                &Sequential,
+                simulated_hash_x16,
+                true,
+                message_work,
+            );
+            let expected = messages
+                .iter()
+                .map(|message| Sha256::hash(&[message]))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                X16_HASHES.load(Ordering::Relaxed),
+                1 + prefix / HASH_BATCH_SIZE,
+                "prefix length {prefix}",
+            );
+        }
+    }
+
+    #[test]
+    fn hash_ranges_cover_uneven_messages_in_order() {
+        let messages = [vec![0; 1_000], vec![], vec![1], vec![2; 64], vec![3; 2]];
+        for parallelism in 1..=8 {
+            let ranges = hash_ranges(&messages, parallelism, &message_work);
+            assert_eq!(ranges.len(), parallelism.min(messages.len()));
+            assert!(ranges.iter().all(|range| !range.is_empty()));
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(ranges.last().unwrap().end, messages.len());
+            assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+        }
     }
 }
