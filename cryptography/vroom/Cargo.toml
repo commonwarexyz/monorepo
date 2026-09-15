@@ -1,0 +1,47 @@
+[package]
+name = "commonware-cryptography-vroom"
+edition.workspace = true
+publish = true
+version.workspace = true
+license = "Apache-2.0"
+description = "Perform vectorized prime-field arithmetic using the residue number system."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography/vroom"
+documentation = "https://docs.rs/commonware-cryptography-vroom"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitrary = { workspace = true, optional = true }
+cfg-if.workspace = true
+commonware-macros.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = [ "derive" ] }
+blst = { workspace = true, features = [ "no-threads" ] }
+commonware-cryptography-curve25519 = { workspace = true, features = [ "std" ] }
+commonware-invariants.workspace = true
+commonware-math = { workspace = true, features = [ "std" ] }
+commonware-utils = { workspace = true, features = [ "std" ] }
+criterion.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "field"
+harness = false
+path = "benches/field.rs"
+
+[features]
+default = [ "std" ]
+fuzz = [ "arbitrary/derive", "dep:arbitrary", "std" ]
+std = [ "commonware-macros/std", "subtle/std", "zeroize/std" ]

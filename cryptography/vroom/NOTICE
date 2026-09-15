@@ -1,0 +1,23 @@
+The RNS Montgomery design follows VROOM: Accelerating (Almost All)
+Number-Theoretic Cryptography Using Vectorization and the Residue Number
+System, by Simon Langowski, Kaiwen He, and Srinivas Devadas.
+
+Reference implementation: VROOM, commit
+013169524f701ec62f95048c427ccf9065da1abe.
+
+The VROOM reference implementation's MIT license is reproduced in
+LICENSE-VROOM. The Rust arithmetic, parameter generator, and SIMD kernels
+in this crate are native implementations.
+
+src/field/inverse.rs adapts binary-GCD batching and packed transformation
+coefficients from blst 0.3.16. src/field/word/armv8.S contains its AArch64
+field-arithmetic routines with private symbol names.
+Copyright Supranational LLC.
+
+https://github.com/supranational/blst
+Reference revision: e7f90de551e8df682f3cc99067d204d8b90d27ad.
+Licensed under the Apache License, Version 2.0 (LICENSE-BLST).
+
+The iteration bound and approximation follow Thomas Pornin,
+Optimized Binary GCD for Modular Inversion, revised August 23, 2020.
+https://eprint.iacr.org/2020/972

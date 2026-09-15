@@ -60,6 +60,11 @@ jobs:
         cargo install dylint-link --version 6.0.0 --locked
     - name: Fmt
       run: just check-fmt
+    - name: Check VROOM parameters
+      if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
+      run: python3 cryptography/vroom/scripts/parameters.py --check
+      env:
+        RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_VERSION }}
     - name: Lint
       run: just clippy ${{ matrix.flags }}
     - name: Dylint
@@ -382,8 +387,12 @@ jobs:
         sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
+    - name: Build cryptography-bls
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/bls/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_bls.wasm"
     - name: Build cryptography-curve25519
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/curve25519/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_curve25519.wasm"
+    - name: Build cryptography-vroom
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/vroom/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_vroom.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build math

@@ -1,0 +1,31 @@
+This crate contains Rust adaptations of curve, hashing, and pairing arithmetic
+from blst 0.3.16, Copyright Supranational LLC.
+
+https://github.com/supranational/blst
+Reference revision: e7f90de551e8df682f3cc99067d204d8b90d27ad.
+Licensed under the Apache License, Version 2.0 (LICENSE-BLST).
+
+Field arithmetic is provided by commonware-cryptography-vroom.
+
+The bounded extension-field arithmetic, homogeneous group formulas, and Miller
+loop are adapted from VROOM/src/fp2.hpp, fp12.hpp, ec.hpp, and miller.hpp,
+Copyright 2026 Simon Langowski.
+
+https://github.com/SimonLangowski/VROOM
+Reference revision: 013169524f701ec62f95048c427ccf9065da1abe.
+Licensed under the MIT License (LICENSE-VROOM).
+
+Banderwagon variable-time multi-scalar multiplication adapts the unsigned
+Pippenger organization and window-sizing policy from ark-ec 0.4.2 by the
+arkworks contributors.
+
+https://github.com/arkworks-rs/algebra
+Reference revision: 57be20e56a142b059bca05653961f8a9ca4f54ae.
+Source: ec/src/scalar_mul/variable_base/mod.rs and ec/src/scalar_mul/mod.rs.
+
+The window policy follows the ceiling-logarithm convention in ark-std 0.4.0.
+https://github.com/arkworks-rs/std
+Reference revision: 6b7081d0162f1d0b8d4934538a9916f03d9554b1.
+Source: src/lib.rs.
+
+These adaptations use the MIT license option (LICENSE-ARKWORKS).
