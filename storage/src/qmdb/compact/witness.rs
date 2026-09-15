@@ -660,7 +660,7 @@ where
     Op: Read + Floored<F>,
 {
     crate::qmdb::validate_initialization_bound(max_size)?;
-    let pending = Journal::<E, F, H::Digest>::recover(context, config, None).await?;
+    let pending = recover::<E, F, H::Digest>(context, config, max_size).await?;
     let bounds = pending.bounds();
     if bounds.is_empty() {
         if bounds.start != 0 {
@@ -697,6 +697,45 @@ where
     let (witness, op) = rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)?;
     let journal = pending.finish(end).await?;
     Ok((Store::new(journal, witness), op))
+}
+
+/// Open the witness journal for initialization, opening only the sections holding positions
+/// `max_size` can select while the journal's positions stay below its sizes.
+///
+/// Position 0 holds the bootstrap witness of size 1 and every appended witness raises the size by
+/// at least one, so the witness at position `p` has size at least `p + 1` and a witness of size at
+/// most `cap` lies below position `cap`. A compact-sync import lands at the journal end whatever
+/// its size, so after an import of a size not above that end a selectable witness may lie at or
+/// beyond `cap`. Such a journal shows as a retained start above `cap`, known from blob names
+/// before any open, or as a bounded view ending at `cap` that is empty or whose top witness is
+/// smaller than `cap`. It is then opened whole.
+async fn recover<E, F, D>(
+    context: E,
+    config: variable::Config<()>,
+    max_size: Option<Location<F>>,
+) -> Result<variable::Recovery<E, Witness<F, D>>, Error<F>>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+{
+    let Some(cap) = max_size else {
+        return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
+    };
+    if variable::Recovery::<E, Witness<F, D>>::span(&context, &config)
+        .await?
+        .start
+        > *cap
+    {
+        return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
+    }
+    let bounded = Journal::<E, F, D>::recover(context, config, Some(*cap)).await?;
+    let bounds = bounded.bounds();
+    if bounds.end < *cap || (!bounds.is_empty() && bounded.read(bounds.end - 1).await?.size >= cap)
+    {
+        return Ok(bounded);
+    }
+    Ok(bounded.unbounded().await?)
 }
 
 /// Insert and persist the initial `Commit(None, 0)` for a new compact db.
