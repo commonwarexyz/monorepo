@@ -1,7 +1,8 @@
 //! Additive transforms shared by encoding and decoding.
 
 use super::code::Impl;
-use commonware_math::algebra::Additive;
+use commonware_math::algebra::Field;
+use std::sync::Arc;
 
 const WORK_ALIGN: usize = 64;
 
@@ -32,6 +33,21 @@ impl Shards {
             size,
             len,
         }
+    }
+
+    /// Reuse this allocation for a new shard count and maximum width.
+    pub fn reset(&mut self, count: usize, len: usize) {
+        let size = count.checked_mul(len).expect("workspace size overflow");
+        let allocated = size
+            .checked_add(WORK_ALIGN - 1)
+            .expect("workspace size overflow");
+        if self.storage.len() < allocated {
+            self.storage.resize(allocated, 0);
+            self.offset = self.storage.as_ptr().align_offset(WORK_ALIGN);
+        }
+        self.count = count;
+        self.size = size;
+        self.len = len;
     }
 
     /// Set the shard width within the original allocation. Contents are scratch space.
@@ -88,8 +104,10 @@ impl Shards {
     }
 }
 
-pub struct Transform<I: Impl> {
-    pub imp: I,
+/// Immutable field tables shared by all arithmetic kernels for an implementation.
+pub struct Tables<E> {
+    /// Field points in codeword order, expressed in the Cantor basis.
+    pub points: Box<[E]>,
     /// The twiddle factors of the transform, indexed by codeword position.
     ///
     /// Let `j` be the number of trailing zeros of `x`, and `b` be `x` with
@@ -97,12 +115,11 @@ pub struct Transform<I: Impl> {
     /// point at position `b`, and `s_j` is the polynomial vanishing on the
     /// span of the first `j` basis elements, normalized so `s_j(v_j) = 1`.
     /// Index 0 is unused.
-    skews: Box<[I::Element]>,
+    skews: Box<[E]>,
 }
 
-impl<I: Impl> Transform<I> {
-    /// Compute the transform's twiddle factors.
-    pub fn new(imp: I) -> Self {
+impl<E: Field + Copy + 'static> Tables<E> {
+    pub fn new<I: Impl<Element = E>>() -> Self {
         let basis = I::basis();
         assert_eq!(basis.len(), I::BITS, "basis has the wrong size");
 
@@ -130,9 +147,31 @@ impl<I: Impl> Transform<I> {
             }
         }
 
+        let mut points = vec![E::zero(); I::ORDER];
+        for (i, basis) in basis.iter().enumerate() {
+            let bit = 1 << i;
+            for j in 0..bit {
+                points[bit + j] = points[j] + basis;
+            }
+        }
+        Self {
+            points: points.into_boxed_slice(),
+            skews: skews.into_boxed_slice(),
+        }
+    }
+}
+
+pub struct Transform<I: Impl> {
+    pub imp: I,
+    pub tables: Arc<Tables<I::Element>>,
+}
+
+impl<I: Impl> Transform<I> {
+    /// Use the implementation's shared field tables.
+    pub fn new(imp: I) -> Self {
         Self {
             imp,
-            skews: skews.into_boxed_slice(),
+            tables: I::tables(),
         }
     }
 
@@ -150,9 +189,9 @@ impl<I: Impl> Transform<I> {
             // schedule; fully live groups fuse both layers.
             for r in (0..nonzero).step_by(4 * dist) {
                 let coefficients = [
-                    self.skews[shift + r + dist],
-                    self.skews[shift + r + 3 * dist],
-                    self.skews[shift + r + 2 * dist],
+                    self.tables.skews[shift + r + dist],
+                    self.tables.skews[shift + r + 3 * dist],
+                    self.tables.skews[shift + r + 2 * dist],
                 ];
                 if r + 2 * dist < nonzero {
                     let len = work.len;
@@ -174,7 +213,7 @@ impl<I: Impl> Transform<I> {
         }
         if dist < m {
             for r in (0..nonzero).step_by(2 * dist) {
-                let c = self.skews[shift + r + dist];
+                let c = self.tables.skews[shift + r + dist];
                 for (x, y) in work.halves_mut(r, dist) {
                     self.imp.ifft_butterfly(x, y, c);
                 }
@@ -197,9 +236,9 @@ impl<I: Impl> Transform<I> {
             // layers in reverse order from the inverse transform.
             for r in (0..needed).step_by(2 * dist) {
                 let coefficients = [
-                    self.skews[r + quarter],
-                    self.skews[r + 3 * quarter],
-                    self.skews[r + dist],
+                    self.tables.skews[r + quarter],
+                    self.tables.skews[r + 3 * quarter],
+                    self.tables.skews[r + dist],
                 ];
                 if r + dist < needed {
                     let len = work.len;
@@ -221,7 +260,7 @@ impl<I: Impl> Transform<I> {
         }
         if dist == 1 {
             for r in (0..needed).step_by(2) {
-                let c = self.skews[r + 1];
+                let c = self.tables.skews[r + 1];
                 for (x, y) in work.halves_mut(r, 1) {
                     self.imp.fft_butterfly(x, y, c);
                 }
@@ -306,7 +345,7 @@ mod tests {
         let mut dist = 1;
         while dist < work.count {
             for r in (0..nonzero).step_by(2 * dist) {
-                let c = transform.skews[shift + r + dist];
+                let c = transform.tables.skews[shift + r + dist];
                 for (x, y) in work.halves_mut(r, dist) {
                     transform.imp.ifft_butterfly(x, y, c);
                 }
@@ -319,7 +358,7 @@ mod tests {
         let mut dist = work.count / 2;
         while dist >= 1 {
             for r in (0..needed).step_by(2 * dist) {
-                let c = transform.skews[r + dist];
+                let c = transform.tables.skews[r + dist];
                 for (x, y) in work.halves_mut(r, dist) {
                     transform.imp.fft_butterfly(x, y, c);
                 }
@@ -370,8 +409,9 @@ mod tests {
 
     #[test]
     fn workspace_keeps_alignment_and_shard_count() {
-        for count in [1, 3, 64] {
-            let mut work = Shards::new(count, 4096);
+        let mut work = Shards::new(1, 2);
+        for count in [1, 3, 64, 2, 128, 1] {
+            work.reset(count, 4096);
             for len in [4096, 130, 2, 4096] {
                 work.resize(len);
                 assert!(work.data().as_ptr().align_offset(WORK_ALIGN) == 0);
