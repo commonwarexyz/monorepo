@@ -312,7 +312,7 @@ where
 
                 // This update op is now a `find_update_op` candidate for later ops of its key.
                 if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key.clone());
+                    cache.put(loc, op.into_key().expect("operation without key"));
                 }
             }
         } else if op.has_floor().is_some() {
@@ -447,7 +447,7 @@ where
             let matches = *k == *key;
 
             if !matches && let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, k.clone());
+                cache.put(*loc, op.into_key().expect("operation without key"));
             }
             matches
         };
