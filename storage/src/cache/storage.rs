@@ -232,17 +232,17 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Cache::put].
-    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<(Box<Self>, bool), Error> {
+    async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
             debug!(index, oldest_allowed, "ignoring put below prune floor");
-            return Ok((self, false));
+            return Ok(self);
         }
 
         // Check for existing index
         if self.indices.contains_key(&index) {
-            return Ok((self, true));
+            return Ok(self);
         }
 
         // Store item in journal
@@ -262,7 +262,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok((self, true))
+        Ok(self)
     }
 
     /// See [Cache::sync].
@@ -346,7 +346,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// floor is satisfied without storing: pruning declared that range obsolete, so nothing
     /// is mutated and nothing below the floor is ever readable.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put(index, value).await?;
+        self.0 = self.0.put(index, value).await?;
         Ok(self)
     }
 
@@ -358,14 +358,10 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
     /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
     ///
-    /// If the index already exists, the cache is just synced. A put satisfied below the
-    /// prune floor stored nothing, so it skips the sync.
+    /// If the index already exists or falls below the prune floor, nothing is stored and the
+    /// cache is just synced.
     pub async fn put_sync(mut self, index: u64, value: V) -> Result<Self, Error> {
-        let stored;
-        (self.0, stored) = self.0.put(index, value).await?;
-        if !stored {
-            return Ok(self);
-        }
+        self.0 = self.0.put(index, value).await?;
         self.sync().await
     }
 

@@ -671,6 +671,14 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// The same holds for a blob reopened within a run. A blob has one open at
+    /// a time, see [`Storage::open_versioned`]. Once every handle to a blob has
+    /// been dropped, a handle returned by a later open reads only crash-durable
+    /// bytes, even when operations issued through the dropped handles were
+    /// cancelled or are still in flight. Writes and resizes that no completed
+    /// sync covered are either made durable before the open returns or are not
+    /// visible through the new handle.
+    ///
     /// # Cancellation
     ///
     /// Dropping an operation's future does not guarantee cancellation: the
@@ -707,19 +715,15 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
-        /// Storage implementations may reject a second open while any handle from
-        /// an earlier open is alive, unless the blob has since been removed. Clone
-        /// the returned blob to share it. If multiple opens are permitted,
-        /// independently opened handles are not expected to coordinate, and writing
-        /// through them concurrently is undefined.
+        /// A blob has one open at a time. Clone the returned blob to share it, and
+        /// drop every clone before opening the blob again.
         ///
         /// An Ok result indicates the blob is durably created (or already exists).
         ///
         /// # Errors
         ///
-        /// An implementation that enforces one open returns
-        /// [Error::BlobAlreadyOpen] if a handle from an earlier open is still alive
-        /// and the blob has not been removed since.
+        /// Returns [Error::BlobAlreadyOpen] if a handle from an earlier open of the blob is
+        /// still alive and the blob has not been removed since.
         ///
         /// # Versions
         ///
@@ -866,24 +870,24 @@ stability_scope!(BETA {
     /// To support blob implementations that enable concurrent reads and
     /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// Cloning a blob shares one open, similar to wrapping one file descriptor
-    /// in a lock. A storage implementation may reject another open for the same
-    /// name while any clone remains alive, unless the blob has since been
-    /// removed. If it permits multiple opens, independently opened handles are
-    /// not expected to coordinate, and writing through them concurrently is
-    /// undefined.
+    /// Cloning a blob shares one open, similar to wrapping a single file
+    /// descriptor in a lock. A blob has one open at a time: opening it again
+    /// while any clone is alive returns [Error::BlobAlreadyOpen]. Use clones
+    /// to share access to a blob.
     ///
-    /// Dropping the final clone of an open whose writes or resizes are not
-    /// covered by a completed [Blob::sync] does not make them durable at a known
-    /// point. An implementation may discard them or continue durability work
-    /// after drop; a later operation may report that work's failure. Call
-    /// sync before dropping to make changes durable and observe errors.
+    /// Dropping the last clone of a blob whose writes or resizes are not covered
+    /// by a completed [Blob::sync] does not make them durable at a known point.
+    /// A runtime may sync them afterwards, surfacing a failure to later
+    /// [Storage::open_versioned] calls for the same blob until it is removed, or a
+    /// later handle may not see them at all. Call `sync` before dropping to make
+    /// changes durable and to observe errors.
     ///
     /// # Durability
     ///
     /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged.
+    /// unchanged. A blob reopened within a run after every clone was dropped reads only
+    /// bytes a sync covered, see the `Storage` durability notes.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
@@ -1502,6 +1506,89 @@ mod tests {
                     },
                 };
             }
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_duplicate_open_returns_error<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
+            let partition = "duplicate_open";
+            let name = b"blob";
+            let (first, _) = context.open(partition, name).await.unwrap();
+            first
+                .write_at(0, b"old", WriteOptions::default())
+                .await
+                .unwrap();
+            let retained = first.clone();
+            assert!(matches!(
+                context.open(partition, name).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+            drop(first);
+            assert!(matches!(
+                context.open_versioned(
+                    partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION
+                ).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+            assert_eq!(
+                retained
+                    .read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"old".as_slice()
+            );
+            retained
+                .write_at(0, b"new", WriteOptions::default())
+                .await
+                .unwrap();
+            retained.sync().await.unwrap();
+            drop(retained);
+
+            let (old, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 3);
+            assert_eq!(
+                old.read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"new".as_slice()
+            );
+            context.remove(partition, Some(name)).await.unwrap();
+            let (current, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 0);
+            drop(old);
+            assert!(matches!(
+                context.open(partition, name).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+            current
+                .write_at(0, b"replacement", WriteOptions::default())
+                .await
+                .unwrap();
+            current.sync().await.unwrap();
+            drop(current);
+
+            let (reopened, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 11);
+            assert_eq!(
+                reopened
+                    .read_at(0, 11, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"replacement".as_slice()
+            );
         });
     }
 
