@@ -233,7 +233,7 @@ mod tests {
             assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
             assert!(!cache.has(1));
 
-            // put_sync below the prune floor skips the sync
+            // put_sync below the prune floor stores nothing
             let cache = cache
                 .put_sync(1, 1)
                 .await

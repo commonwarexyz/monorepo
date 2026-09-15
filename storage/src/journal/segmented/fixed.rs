@@ -305,7 +305,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             // The checkpoint preflight authorized this exact truncation. Make it durable before
             // the paired value journal can release any corresponding bytes.
             manager.truncate_pending(section, size).await?;
-            manager.sync(section).await?;
             return Ok(Self {
                 manager,
                 unrecovered: BTreeSet::new(),
