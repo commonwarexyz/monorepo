@@ -292,6 +292,22 @@ impl IoBufs {
             return Self::default();
         }
 
+        // The first chunk alone proves these splits are in bounds.
+        if let IoBufsInner::Chunked(bufs) = &mut self.inner
+            && let Some(front) = bufs.front_mut()
+            && at <= front.len()
+        {
+            let prefix = if at == front.len() {
+                bufs.pop_front().expect("front checked above")
+            } else {
+                front.split_to(at)
+            };
+            if bufs.len() <= 3 {
+                self.canonicalize();
+            }
+            return Self::from(prefix);
+        }
+
         let remaining = self.remaining();
         assert!(
             at <= remaining,
@@ -1656,7 +1672,10 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -1982,6 +2001,59 @@ mod tests {
     fn test_iobufs_split_to_out_of_bounds() {
         let mut bufs = IoBufs::from(b"abc");
         let _ = bufs.split_to(4);
+    }
+
+    #[test]
+    fn test_iobufs_split_first_chunk_preserves_views() {
+        for count in 1..=8 {
+            for at in 0..=4 {
+                let mut chunks = VecDeque::with_capacity(count);
+                for index in 0..count {
+                    chunks.push_back(IoBuf::from(vec![index as u8; 4]));
+                }
+                let mut bufs = if count >= 4 {
+                    // Keep the deque wrapped to exercise its logical front.
+                    let first = chunks.pop_front().unwrap();
+                    chunks.push_back(first);
+                    assert!(!chunks.as_slices().1.is_empty());
+                    IoBufs {
+                        inner: IoBufsInner::Chunked(chunks),
+                    }
+                } else {
+                    IoBufs::from_chunks_iter(chunks)
+                };
+                let expected = bufs.clone().coalesce();
+                let front = bufs.chunk().as_ptr();
+                let second = bufs.chunk_at(1).map(<[u8]>::as_ptr);
+                let prefix = bufs.split_to(at);
+                assert!(prefix.is_single());
+                if at != 0 {
+                    assert_eq!(prefix.chunk().as_ptr(), front);
+                }
+                assert_eq!(prefix.coalesce().as_ref(), &expected.as_ref()[..at]);
+                assert_eq!(bufs.clone().coalesce().as_ref(), &expected.as_ref()[at..]);
+                assert_eq!(bufs.chunk_count(), count - usize::from(at == 4));
+
+                if at < 4 {
+                    assert_eq!(bufs.chunk().as_ptr(), front.wrapping_add(at));
+                } else if let Some(second) = second {
+                    assert_eq!(bufs.chunk().as_ptr(), second);
+                } else {
+                    assert!(bufs.is_empty());
+                    assert!(bufs.is_single());
+                }
+
+                // An invalid split must fail before mutating the remaining buffers.
+                let before = bufs.clone().coalesce();
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        bufs.split_to(before.len() + 1);
+                    }))
+                    .is_err()
+                );
+                assert_eq!(bufs.coalesce(), before);
+            }
+        }
     }
 
     #[test]
