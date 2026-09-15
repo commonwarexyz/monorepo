@@ -58,9 +58,12 @@ impl Generations {
     }
 }
 
-/// In-memory storage implementation for the commonware runtime.
+/// Raw memory snapshots used by the deterministic fault model.
+///
+/// Each open reads an independent durable snapshot. Logical user leases belong to the enclosing
+/// [super::open::Opens] so retained crash mutations can outlive them.
 #[derive(Clone)]
-pub struct Storage {
+pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
     pool: BufferPool,
@@ -165,6 +168,16 @@ impl Storage {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
         self.partitions.lock().get(partition)?.get(name).cloned()
+    }
+
+    /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
+    /// its container header does not resolve.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        let content = self.raw_blob(partition, name)?;
+        let versions = BlobVersion::new(0)..=BlobVersion::new(u16::MAX);
+        let (_, _, data_offset) = resolve_header(&content, &versions, partition, name).ok()??;
+        Some(content[data_offset as usize..].to_vec())
     }
 
     /// Install durable raw contents without validating the blob's container header.
@@ -519,6 +532,80 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
+    async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
+        for name in [Some(b"blob".as_slice()), None] {
+            // Storage clones and forwarding wrappers share the same logical open.
+            let (first, _) = storage.open("partition", b"blob").await.unwrap();
+            first
+                .write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let clone = first.clone();
+            assert!(matches!(
+                shared.open("partition", b"blob").await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            drop(first);
+            assert!(matches!(
+                shared.open_versioned("partition", b"blob", crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION).await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            drop(clone);
+            let (old, len) = shared.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+
+            // Removal permits a replacement while the old incarnation remains readable.
+            storage.remove("partition", name).await.unwrap();
+            let (current, len) = shared.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 0);
+            assert_eq!(
+                old.read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"saved"
+            );
+            drop(old);
+            assert!(matches!(
+                storage.open("partition", b"blob").await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            current
+                .write_at(0, b"fresh", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(current);
+            let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                reopened
+                    .read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"fresh"
+            );
+            drop(reopened);
+            shared.remove("partition", None).await.unwrap();
+        }
+    }
+
+    #[rstest]
+    #[case::direct(false)]
+    #[case::recording(true)]
+    fn test_public_memory_logical_open(#[case] recording: bool) {
+        crate::deterministic::Runner::default().start(|_| async move {
+            let storage = crate::mocks::MemoryStorage::new(test_pool());
+            if recording {
+                let (first, _) = crate::mocks::RecordingContext::new(storage.clone());
+                let (second, _) = crate::mocks::RecordingContext::new(storage);
+                assert_logical_open_contract(first, second).await;
+            } else {
+                assert_logical_open_contract(storage.clone(), storage).await;
+            }
+        });
+    }
+
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
     #[cfg_attr(
@@ -530,7 +617,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let storage = Storage::new(test_pool());
+            let storage = crate::mocks::MemoryStorage::new(test_pool());
             run_storage_tests(context, storage).await;
         });
     }
@@ -564,7 +651,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
         const INSTALLED: &[u8] = b"current";
 
-        let storage = Storage::new(test_pool());
+        let storage = crate::mocks::MemoryStorage::new(test_pool());
         let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
         stale
             .write_at(0, b"stale", WriteOptions::default())
@@ -597,6 +684,13 @@ mod tests {
                 .coalesce(),
             INSTALLED
         );
+        drop(stale);
+        assert!(matches!(
+            storage.open(PARTITION, NAME).await,
+            Err(crate::Error::BlobAlreadyOpen(_, _))
+        ));
+        drop(fresh);
+        drop(storage.open(PARTITION, NAME).await.unwrap());
     }
 
     #[tokio::test]
