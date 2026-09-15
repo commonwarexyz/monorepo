@@ -1609,8 +1609,7 @@ where
             .values()
             .map(|shard| (shard.index, &shard.data))
             .collect::<Vec<_>>();
-        let checked =
-            C::check_many(&commitment.config(), &commitment.root(), &shards, strategy);
+        let checked = C::check_many(&commitment.config(), &commitment.root(), &shards, strategy);
         for ((peer, _), checked) in pending.into_iter().zip(checked) {
             match checked {
                 Ok(checked) => self.common.checked_shards.push(checked),
