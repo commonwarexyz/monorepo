@@ -6,13 +6,29 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = [ "mocks" ]
+default = [ "stateful-all" ]
+stateful-all = [
+	"stateful-cert-mock-restarts",
+	"stateful-cert-mock-restarts-db",
+	"stateful-cert-mock-state-sync",
+	"stateful-cert-mock-twins",
+	"stateful-cert-mock-twins-coding",
+	"stateful-db-sync",
+	"stateful-probe",
+]
 mocks = [
 	"commonware-consensus/mocks",
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
 ]
+stateful-cert-mock-restarts = [ "mocks" ]
+stateful-cert-mock-restarts-db = [ "mocks" ]
+stateful-cert-mock-twins = [ "mocks" ]
+stateful-cert-mock-twins-coding = [ "dep:commonware-coding", "mocks" ]
+stateful-cert-mock-state-sync = [ "mocks" ]
+stateful-db-sync = [ "mocks" ]
+stateful-probe = [ "mocks" ]
 
 [package.metadata]
 cargo-fuzz = true
@@ -26,6 +42,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-actor.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
+commonware-coding = { workspace = true, optional = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-glue.workspace = true
@@ -45,6 +62,15 @@ tracing.workspace = true
 [[bin]]
 name = "stateful_cert_mock_twins"
 path = "fuzz_targets/stateful_cert_mock_twins.rs"
+required-features = [ "stateful-cert-mock-twins" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_twins_coding"
+path = "fuzz_targets/stateful_cert_mock_twins_coding.rs"
+required-features = [ "stateful-cert-mock-twins-coding" ]
 test = false
 doc = false
 bench = false
@@ -52,6 +78,39 @@ bench = false
 [[bin]]
 name = "stateful_cert_mock_restarts"
 path = "fuzz_targets/stateful_cert_mock_restarts.rs"
+required-features = [ "stateful-cert-mock-restarts" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_restarts_db"
+path = "fuzz_targets/stateful_cert_mock_restarts_db.rs"
+required-features = [ "stateful-cert-mock-restarts-db" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_state_sync"
+path = "fuzz_targets/stateful_cert_mock_state_sync.rs"
+required-features = [ "stateful-cert-mock-state-sync" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_db_sync"
+path = "fuzz_targets/stateful_db_sync.rs"
+required-features = [ "stateful-db-sync" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_probe"
+path = "fuzz_targets/stateful_probe.rs"
+required-features = [ "stateful-probe" ]
 test = false
 doc = false
 bench = false

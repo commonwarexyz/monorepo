@@ -1797,6 +1797,7 @@ dependencies = [
  "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
+ "commonware-coding",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-glue",

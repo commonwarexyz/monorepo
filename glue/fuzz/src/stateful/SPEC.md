@@ -1,4 +1,4 @@
-# Glue Stateful Twins Fuzzing — Specification
+# Glue Stateful Fuzzing — Specification
 
 This document is the technical specification for the glue stateful fuzzing feature.
 It states *what* the feature must do and *which properties
@@ -82,17 +82,39 @@ produces, and on whether a block verifies.
 - **G5.** Achieve all of the above without modifying `glue/src`, `storage/src`, and `consensus/src`.
 - **G6.** Keep the target fast enough to be worth running: throughput is an acceptance criterion,
   not an afterthought.
+- **G7 — Stateful database diversity.** Exercise Stateful with every supported database-adapter
+  class relevant to this feature—`any`, `current`, immutable standard and compact, and keyless
+  standard and compact—so adapter-specific correctness defects are not hidden by testing only one
+  database construction. This is a behavioral coverage goal, not a requirement for 100% line
+  coverage.
+- **G8 — Stateful floor probe.** Exercise the real Stateful `Probe` actor through discovery and
+  service under adversarial peer input, ensuring that floor selection depends only on valid
+  responses from distinct committee members and remains safe across retries and subscription or
+  attachment ordering.
+- **G9 — Retention.** Exercise periodic marshal and database pruning under restarts, so that a
+  prune reaching into the state a restarted node still needs is a detectable defect.
+- **G10 — State sync.** Exercise one-time peer state sync at both of its layers: the database-set
+  coordinator, sync engines, prune, and rewind over every adapter class and over multi-database
+  tuples with no consensus above them; and the full late-joiner path through the probe, the p2p
+  sync source, the stateful actor's syncing mode, and its handoff to marshal-driven processing,
+  including a sync interrupted by a crash and a node restarted after its sync completed.
 
 ## 3. Technical requirements
 
-- **R1 — One fuzz target.** The feature MUST expose one libFuzzer target exercising the Stateful
-  module.
-- **R2 — Thin target.** The target file MUST only instantiate the fuzzer. It MUST contain no
-  fuzzing logic and no fuzzing primitives; both live in `glue/fuzz/src/stateful`.
-- **R3 — Architectural conformance.** The feature MUST follow the architecture and code style of
-  `consensus/fuzz`: a thin `#![no_main]` target over library logic, a hand-written `Arbitrary`
-  input whose byte tape seeds both the deterministic runtime and the scenario sampler, invariants
-  in a dedicated module, and a panicking oracle that prints the reproducing input.
+- **R1 — Focused fuzz targets.** The feature MUST expose independently runnable libFuzzer targets
+  for Twins safety over the standard marshal, Twins safety over the coding marshal, restart
+  recovery, database-adapter coverage under restart recovery, late-joiner state sync, database-set
+  state sync, and the Stateful probe protocol.
+  Targets MAY share library machinery, but each distinct search space MUST retain its own corpus so
+  progress in one does not displace inputs for another.
+- **R2 — Thin targets.** Every fuzz-target file MUST only instantiate libFuzzer and invoke a
+  library entry point. Target files MUST contain no harness logic or fuzzing primitives; all such
+  code belongs in `glue/fuzz/src/stateful`.
+- **R3 — Architectural conformance.** Every target MUST follow the established fuzz-crate
+  architecture: a thin `#![no_main]` target over library logic, a hand-written `Arbitrary` input
+  with explicit bounded controls followed by a remaining byte tape, deterministic execution driven
+  only by that tape, target-specific safety predicates implemented in the library, and a panicking
+  oracle that identifies the reproducing input.
 - **R4 — Twins topology.** The cluster MUST consist of five engines over four identities: three
   correct, and one virtual faulty identity composed of two engines instantiated from the real
   consensus codebase, sharing one signing key. Twins method is implemented via networking and the stateful application.
@@ -112,81 +134,188 @@ produces, and on whether a block verifies.
   makes no progress MUST NOT be reported as a failure.
 - **R9 — Mock certificate scheme.** SimplexCertMock MUST be used. No real cryptography may be used
   in the signing or certificate path, because it is too slow for fuzzing.
-- **R10 — Non-modification.** The feature MUST NOT change anything under `consensus/src`, `storage/src`, or
-  `glue/src`. All code lives in the fuzz crate.
-- **R11 — Node stack.** Every engine MUST run the real stack: a Simplex engine, a marshal actor in
-  the Standard `Deferred` configuration, the real Stateful actor, and a real QMDB-backed database
-  set. Stateful is incompatible with `Inline`, which does not verify the embedded context, so
-  `Inline` is excluded. Each node MUST use a single database in the set, and MUST start with no
-  finalized floor attached, so the startup path is marshal reconciliation and peer state sync is
-  never entered.
-- **R12 — Restarts.** The run MUST be able to crash and restart correct identities only in when
-  all 4 nodes are correct, on a schedule
-  drawn from the fuzz input, so that lazy recovery is exercised. Neither half of the compromised
-  identity may be crashed. At most one correct identity may be down at any moment.
-- **R13 — Bounded run.** The run MUST be bounded so that throughput stays above the floor in §10.
-  The adversarial prefix and the storage buffer and cache sizes MUST each be a single named
-  constant shared by every run. The number of suffix heights a run requires, and the leader term
-  length, are drawn from the input tape within single named bounds, so what a run explores varies
-  but its bounds do not. A value that varies per configuration is a defect under P2.
-- **R14 — Deterministic execution.** A run MUST be fully determined by its input bytes: the same
-  input reproduces the same execution, using the deterministic runtime, SimplexCertMock, and a
-  `FuzzRng` instantiated from the input's raw bytes rather than from a seed. No entropy-backed
-  randomness, seeds, wall-clock time, or real cryptography.
-- **R15 — Deterministic regression suite.** The scenarios the target explores MUST additionally be
-  executable as ordinary `#[test]`s in the fuzz crate, driven by fixed inputs instead of libFuzzer
-  and checking the same invariants. This suite is the primary regression gate; the fuzz target
-  extends it, it does not replace it.
+- **R10 — Fuzz-only implementation.** Every file changed by this feature MUST be under
+  `glue/fuzz/`. No file outside that directory—including crate sources, workspace metadata, or CI
+  configuration—may be modified, with one exception: adding a dependency to `glue/fuzz/Cargo.toml`
+  necessarily records it in the workspace `Cargo.lock`, and that lockfile entry is the only change
+  permitted outside `glue/fuzz/`. All exercised behavior MUST be reached through public APIs
+  exposed by the existing crates.
+- **R11 — Cluster node stack.** In the Twins, restart, and database-adapter targets, every engine
+  MUST run the real stack: a Simplex engine, a marshal actor, the real Stateful actor, and a real
+  QMDB-backed database selected for that target. The restart, database-adapter, and standard Twins
+  targets run marshal in the Standard `Deferred` configuration; the coding Twins target runs it in
+  the Coding `Marshaled` configuration, with blocks disseminated as erasure-coded shards. Stateful
+  is incompatible with `Inline`, which does not verify the embedded context, so `Inline` is
+  excluded. Each node MUST use a single database. In the Twins, restart, and database-adapter
+  targets every node starts with no finalized floor attached, so startup uses marshal
+  reconciliation and does not enter peer state sync; the state-sync target's late joiner is
+  governed by R25. The probe target is governed separately by R20 and R21.
+- **R12 — Restart scope.** The restart targets, plain and database-adapter, MUST accept a
+  fuzz-controlled schedule that can crash and restart correct identities while retaining their
+  storage, so lazy recovery is exercised. All four identities MUST be correct in any run that
+  exercises restarts, and at most one identity may be down at a time. The Twins target MUST NOT
+  restart either half of the compromised identity.
+- **R13 — Bounded runs.** Every target MUST bound its node count, input consumption, event count,
+  simulated duration, and allocated storage so execution remains suitable for continuous fuzzing
+  and meets any applicable throughput floor in §10. Within a target, each bound MUST be fixed
+  across all selected scenarios and database adapters; no configuration may receive relaxed
+  limits. Cluster suffix heights and leader term length MAY vary with the fuzz input only within
+  those fixed bounds.
+- **R14 — Deterministic execution.** Every target MUST reproduce the same behavior and observations
+  from the same input. Scheduling and randomized choices MUST depend only on the input bytes and
+  execute under the deterministic runtime, without entropy-backed randomness or wall-clock time.
+  Cluster targets MUST use SimplexCertMock, and no target may depend on real cryptography.
+- **R15 — Deterministic regression suite.** Every fuzz target MUST have ordinary tests in the fuzz
+  crate, driven by fixed representative inputs, that exercise its required modes and applicable §8
+  invariants. These tests MUST use the same library entry points and oracles as libFuzzer. The suite
+  is the primary regression gate; fuzzing extends it rather than replacing it.
 - **R16 — Self-contained.** The feature MUST NOT depend on `commonware-consensus-fuzz-*`. The twins
   driver and channel-splitting logic are re-derived in `glue/fuzz` from the published crates. The
   corresponding code in `consensus/fuzz` is a reference to model on, not a dependency, and this
   duplication is deliberate.
-- **R16 - not block fuzzing activities.** `disconnect_on_block` for p2p networks must be set to
-  `false` to not block faulty messages,
+- **R17 — Non-blocking peer policy.** Simulated networks carrying adversarial traffic MUST set
+  `disconnect_on_block` to `false` so blocking one peer does not prevent the harness from continuing
+  to explore later faulty messages.
+- **R18 — Database-adapter matrix.** One database-adapter target MUST exercise the restart cluster
+  of §7.2. Its structured input MUST select among `any`, `current`, immutable standard, immutable
+  compact, keyless standard, and keyless compact. Each run MUST instantiate one real database of
+  the selected class behind `Shared` and drive it through Stateful's genesis, batch creation and
+  forking, application mutation, merkleization, apply, finalize, and crash/restart recovery paths
+  under the existing safety invariants. The Twins target MUST use the representative `any` adapter;
+  adapter diversity is not crossed with the Twins adversary because restart recovery already
+  exercises the adapter lifecycle and the separate search spaces avoid redundant cost. Merely
+  constructing an adapter or testing the underlying storage directly does not satisfy this
+  requirement.
+- **R19 — Adapter-correct workload.** The fuzz application MUST respect the selected database
+  model: immutable adapters receive only fresh-key inserts, keyless adapters receive appends, and
+  compact adapters are not assumed to support historical reads. Every proposed or verified block
+  MUST commit to the selected adapter's exact sync target. For `current`, the application MUST
+  additionally commit to and verify the canonical state root separately because its sync target
+  covers the operations root and range rather than the canonical root. Application behavior MUST
+  remain within the `Application` contract for every adapter.
+- **R20 — Real probe boundary and floor oracle.** The probe target MUST run real
+  `stateful::probe::Probe` actors over the deterministic simulated network. Source probes MUST serve
+  finalizations from real marshal mailboxes, and the discovering probe MUST be driven only through
+  its public mailbox and P2P receiver boundary. Fuzz-controlled malformed traffic MUST enter as raw
+  network bytes. The harness MUST NOT reimplement floor selection, response verification, or probe
+  state transitions. Whenever the probe derives a floor `F`, at least `f + 1` distinct committee
+  members MUST have contributed valid finalizations to the resolving sample, `F` MUST equal the
+  highest finalization in that sample, and the modeled state of the peer that supplied `F` MUST
+  contain that finalization.
+- **R21 — Probe adversary program.** The probe target's structured input MUST bound and control the
+  finalization held by each source, message delivery order, delay, drop and duplication, malformed
+  raw payloads, participant or non-participant origin, retry advancement, subscription cancellation
+  or repetition, and marshal attachment timing. Peer count, event count, message size, and simulated
+  duration MUST remain bounded.
+- **R22 — Shared backend machinery.** The database-adapter target MUST reuse the existing
+  deterministic restart driver, the real Stateful stack, and the safety predicates through a
+  statically dispatched, harness-local backend abstraction. Adapter-specific
+  code MUST be limited to database types and configuration, valid batch operations, sync-target
+  construction, and canonical-commitment extraction. The feature MUST NOT duplicate the complete
+  runner or node stack for each adapter or add dynamic dispatch to the path through the Stateful
+  actor and its adapter; the only erasure is the one R23 places at the consensus boundary.
+- **R23 — Consensus monomorphized per marshal variant.** The block type consensus carries MUST be
+  generic over the marshal variant and over nothing else: every database backend commits through
+  one commitment type, and the stateful actor's mailbox is type-erased before it reaches the
+  marshal wrapper and the marshal actor. Simplex, marshal, and the wrapper are then compiled once
+  per variant in a binary, and only the Stateful actor and the adapter it manages vary with the
+  backend. The erasure sits on the consensus side of the boundary; the Stateful actor is driven
+  through its real mailbox without indirection.
+- **R24 — Fuzz-controlled pruning.** The restart and database-adapter targets MUST accept
+  fuzz-controlled periodic pruning: the maintenance interval and the marshal and QMDB retention
+  windows beyond the acknowledgement window, or no pruning at all. QMDB retention MUST NOT exceed
+  marshal retention, which the actor asserts. The Twins targets do not prune.
+- **R25 — Late-joiner state sync.** The state-sync target MUST run three correct identities from
+  genesis and start the fourth only after they have applied a fuzz-selected number of heights,
+  requesting peer state sync. The joiner MUST discover its floor through the real `Probe` from
+  the serving nodes, sync its database set through the real p2p sync source from their resolvers,
+  and hand off to marshal-driven processing through the real Stateful actor. Every node serves
+  floors and sync operations. The input MUST control the sync batch size, an optional crash of the
+  joiner at a chosen delay after it starts, the general restart schedule over every node, and
+  pruning per R24. A restarted joiner MUST request state sync again and leave the startup plan to
+  decide: an interrupted sync resumes from its persisted floor or a newer discovered one, and a
+  completed sync is never repeated.
+- **R26 — Database-set state sync.** The database-set target MUST drive a `DatabaseSet` through
+  `StateSyncSet::sync`, `prune`, `rewind_to_targets`, and re-execution with no consensus above
+  it. A serving set of the selected shape applies a tape-driven history and serves the sync
+  through the `Source` implemented by its `Shared` databases; a divergent set applies a different
+  workload over the same history. The set shapes MUST cover the single-database implementation
+  for every adapter class and the tuple implementation over mixed adapter classes. The input MUST
+  control the sync engine tuning, the heights served before, during, and after the sync, and the
+  densities of delayed and divergent answers. The peer wrapper models the p2p resolver: a database
+  that cannot serve a request is retried, never surfaced to the engine as a source error, and a
+  divergent answer is delivered with a feedback channel so the engine's verdict is observable.
 
 ## 4. Properties
 
 The feature must exhibit the following qualitative guarantees. These are the audit's acceptance
 criteria; the checkable predicates are enumerated in §8.
 
-- **P1 — Correct-node symmetry.** Every correct node runs the same application, the same stack, and
-  the same configuration. Any divergence among them is therefore attributable to glue and never to
-  the harness. A correct node MUST NOT be given a distinguishing knob.
-- **P2 — Uniform bounds.** Prefix length, timeout, storage sizing, and the bounds on required
-  suffix heights and term length are shared constants. No configuration may be granted a relaxed
-  bound to make it pass.
-- **P3 — Adversary confinement.** Application-level faults occur only on the secondary half. A
-  correct node's application never deviates, so a violation of §8 is never explained by the
-  harness having lied on a correct node's behalf.
-- **P4 — Contract-bounded adversary.** The faulty application stays within what the `Application`
-  trait permits. A run that fails only because the adversary exceeded that contract is not a
-  finding; §6 states the boundary and §9 records what is excluded by it.
+- **P1 — Correct-node symmetry.** Within each cluster run, every correct node runs the same
+  application, stack, and selected database configuration. Any divergence among them is therefore
+  attributable to the exercised system rather than a distinguishing harness setting. This
+  property does not apply to the probe target, whose source finalizations are intentionally
+  fuzz-controlled under R21.
+- **P2 — Uniform per-target bounds.** Each target applies the same execution and resource bounds to
+  every scenario or database adapter it can select. Distinct targets may use different bounds
+  because they exercise different search spaces, but no selected configuration may receive relaxed
+  limits to make it pass.
+- **P3 — Adversary confinement.** In the Twins target, application-level faults occur only on the
+  secondary half; the primary half and every correct node use the correct application. The restart
+  targets, plain and database-adapter, use only
+  correct applications. Probe adversarial input is confined to
+  the public boundaries and controls listed in R20 and R21, without altering the recorded
+  source-state model.
+- **P4 — Contract-bounded application adversary.** In the Twins targets, the faulty application
+  stays within what the `Application` trait permits. A run that fails only because the harness
+  supplied behavior outside that contract is not a finding; §6 states the boundary and §9 records
+  what is excluded.
 - **P5 — Determinism and minimization.** Any failure must be reproducible from the crashing input
   and minimizable by the fuzzer, with no cross-run state leakage. The input's byte tape MUST NOT
   be printed in `Debug` output; its length may be.
+- **P6 — Search-space isolation.** Adding database-adapter and probe targets MUST NOT change the
+  existing Twins or restart targets' input decoding, topology, scheduling, fault model, or safety
+  predicates. Shared machinery MAY be refactored only when the existing targets remain behaviorally
+  equivalent and their corpora remain replayable.
 
 ## 5. Files and interfaces
 
 ### 5.1 Feature module — `glue/fuzz/src/stateful/`
 
 The decomposition below is indicative: it records the structure the feature is expected to have
-and is not itself a requirement. The target name in §5.2 is normative (R1, R2).
+and is not itself a requirement. The target names in §5.2 are normative (R1, R2).
 
 - `mod.rs` — module wiring; re-exports the input type and the entry function.
 - `input.rs` — the fuzz input type and its hand-written `Arbitrary`.
 - `network.rs` — the per-channel split forwarders and routers that realise the twins partition.
-- `stack.rs` — construction of one engine: channels, broadcast, archives, marshal, Stateful, QMDB,
-  and the Simplex engine, plus the restart path.
+- `stack.rs` — construction of one engine: channels, dissemination, archives, marshal, Stateful,
+  QMDB, and the Simplex engine, plus the restart path.
+- `marshal.rs` — the standard and coding marshal variants (payload, dissemination, wrapper, and
+  dissemination-channel routing) and the type-erased application and reporter of R23.
 - `app.rs` — the correct application and the faulty application.
-- `runner.rs` — the twins driver: scenario selection, engine startup, restart scheduling, and the
-  measurement point.
+- `backend.rs` — statically dispatched database types, configurations, valid workload operations,
+  and the shared commitment with its conversion to each adapter's sync target.
+- `probe.rs` — deterministic Probe topology, adversarial event driver, global source-state model,
+  and Probe-specific oracles.
+- `state_sync.rs` — the late-joiner driver of R25.
+- `db_sync.rs` — the database-set driver of R26: set shapes, the serving and divergent history,
+  the peer wrapper, and the convergence, prune, replay, and rewind checks.
+- `runner.rs` — deterministic cluster execution and measurement shared by the Twins, restart, and
+  database-adapter targets.
 - `invariants.rs` — the checks in §8.
 
-### 5.2 Fuzz target
+### 5.2 Fuzz targets
 
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_twins.rs`
-- The corresponding `[[bin]]` entry in `glue/fuzz/Cargo.toml`.
-- `glue/fuzz` added to the workspace members and to the fuzz matrix in CI.
+- `glue/fuzz/fuzz_targets/stateful_cert_mock_twins_coding.rs`
+- `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts.rs`
+- `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts_db.rs`
+- `glue/fuzz/fuzz_targets/stateful_cert_mock_state_sync.rs`
+- `glue/fuzz/fuzz_targets/stateful_db_sync.rs`
+- `glue/fuzz/fuzz_targets/stateful_probe.rs`
+- A corresponding `[[bin]]` entry for every target in `glue/fuzz/Cargo.toml`.
+- `glue/fuzz` remains a workspace member and fuzz-matrix entry; target discovery runs each target
+  with its own corpus.
 
 ### 5.3 Consumed dependencies (pre-existing; named, not defined here)
 
@@ -210,8 +339,10 @@ dependencies and must be re-audited against this document.
 
 ## 6. Adversary model (normative)
 
-The adversary is the compromised identity. It is byzantine in two independent layers, and correct
-nodes are never adversarial in any layer.
+Each target has a confined fault model. A1–A4 define the Twins adversary: one compromised identity
+is Byzantine at the message and application layers, while correct nodes are never adversarial. The
+probe adversary is limited to R20, R21, and I8. The restart targets, plain and database-adapter,
+contain no Byzantine participants; their crash schedule is an environment fault.
 
 - **A1 — Message layer.** Each of the compromised identity's channels that carries
   view-addressable traffic MUST be split in two, with the twins scenario deciding, per view, which
@@ -243,60 +374,171 @@ nodes are never adversarial in any layer.
 Crash and restart of correct identities is an environment fault, not adversarial behaviour; it is
 specified in §7.
 
-## 7. Run structure
+## 7. Run structures
 
-Every run MUST proceed as follows.
+Every target MUST use its bounded, deterministic structure below.
 
-1. **Setup.** Four identities and their SimplexCertMock schemes are derived from the input tape.
-   Five engines are constructed per R11. The compromised identity's channels are split per A1.
-2. **Prefix.** The engines run under the selected twins scenario, which prescribes a partition for
-   each of a small bounded number of leading rounds. The faulty application is active throughout.
-3. **Restarts.** On a schedule drawn from the input tape, correct identities are crashed and
-   restarted per R12. A restart retains the node's storage, so the restarted engine reconciles its
-   database set against marshal's processed anchor and comes back with an empty pending map,
-   forcing lazy recovery on its next proposal or verification.
-4. **Suffix.** Past the prefix the scenario prescribes no partition, so the network is whole and
-   both halves address every identity.
-5. **Measurement point.** The run ends when every correct node has applied the required number of
-   suffix heights, or when the run's bounded timeout expires. Completion is keyed on application
-   rather than delivery, because the commitment I2 compares exists only once a height is applied.
-   Because quorum is three of four, a crash during a partition can legitimately stall the run, so a
-   run that never reaches the required heights MUST end at the timeout and MUST NOT be reported as
-   a failure. The invariants in §8 are then checked over whatever was observed,
-   including nothing.
+### 7.1 Twins
 
-Observations MUST be keyed by engine, not by identity, since the two halves share a key.
+1. **Setup.** Four identities and five engines are constructed per R4 and R11 using the
+   representative `any` adapter. The compromised identity's channels are split per A1. The
+   standard and coding targets differ only in the marshal variant every engine runs; under the
+   coding marshal the dissemination channel carries shards, which name no view and so reach both
+   halves.
+2. **Prefix.** The engines execute the selected bounded Twins scenario while the secondary half's
+   faulty application is active.
+3. **Suffix.** After the scripted prefix, the network is whole and both compromised halves address
+   every identity.
+4. **Measurement.** The run ends when every correct node applies the required suffix heights or the
+   bounded timeout expires. I1-I4 and I6 are checked over everything observed. A stalled run is not
+   a liveness failure.
+
+Twins observations MUST be keyed by engine because the compromised halves share an identity.
+
+### 7.2 Restart and database-adapter targets
+
+1. **Setup.** Four correct identities are constructed. The restart target uses its existing
+   database configuration; the restart-based database-adapter target uses the backend selected by
+   its structured input.
+2. **Execution and restarts.** Correct nodes execute the real stack, pruning per the input (R24),
+   while a bounded schedule crashes and restarts at most one identity at a time. Storage
+   partitions are retained, forcing reconciliation and lazy recovery.
+3. **Measurement.** The run ends when every correct node applies the required heights or the bounded
+   timeout expires. I1-I4, I6, and I9 are checked using the same observations and predicates as
+   before. A stalled run is not a liveness failure.
+
+### 7.3 Probe target
+
+1. **Setup.** The deterministic network is populated with real source Probe actors attached to real
+   marshal mailboxes and one discovering Probe actor.
+2. **Source state.** Each source marshal is seeded from the structured input, and the harness records
+   the exact finalization held by each source.
+3. **Adversarial execution.** The bounded event program drives subscriptions, attachment, retries,
+   network delivery, and raw malformed traffic through public boundaries.
+4. **Measurement.** If a floor is emitted, I7 and I8 are checked against the recorded source state
+   and resolving sample. No floor is required when a sufficient valid sample was not collected. I4
+   and I6 apply throughout.
+
+### 7.4 State-sync target
+
+1. **Setup.** Four correct identities are constructed over the representative `any` adapter, with
+   pruning per the input. Three start at genesis; every engine owns a probe channel and serves
+   floors once its marshal is attached.
+2. **Join.** Once the first serving node has applied the input's join height, the fourth engine
+   starts requesting peer state sync (R25). Its probe subscribes for a floor, the plan attaches
+   it, the database set syncs from the serving nodes' resolvers, and the actor hands off.
+3. **Crashes.** If the input names a joiner crash delay, the joiner is crashed that long after it
+   started, so an in-flight sync is interrupted and resumed; the general restart schedule then
+   runs over every node.
+4. **Measurement.** The run ends when every node, the joiner included, has applied the required
+   heights, or the bounded timeout expires. I1-I4, I6, I9, and I10 are checked. A joiner whose
+   sync stalls because the serving nodes pruned what it needed is a healthy timeout.
+
+### 7.5 Database-set target
+
+1. **Setup.** The serving and divergent sets of the selected shape are initialized on separate
+   partitions and apply the served history, the serving set durably. Every height's anchor,
+   transition, targets, and roots are recorded.
+2. **Sync.** A fresh set of the same shape syncs from the serving set through the peer wrapper
+   (R26). If heights are served during the sync, the first is announced before the sync starts so
+   the coordinator retargets in every such run; the rest are announced live, some twice, some
+   not at all, and a stale announcement precedes the real one for its height so the coordinator
+   ignores it without it displacing anything. The last height served during the sync MUST be
+   announced, and nothing MUST be sent after it: a compact database serves only its current size
+   and last commit, so a coordinator left chasing a target older than the serving set holds would
+   wait on modeled unavailability, not on a defect, and the convergence check below would report
+   a false failure. The tip channel is then closed or left idle.
+3. **Convergence.** The sync MUST converge within the bounded simulated time: the peers answer
+   honestly eventually and the history is finite, so a timeout or a sync error is a failure. This
+   is the one bounded liveness check in the feature, and it applies to this target only.
+4. **Use.** The synced set is checked against the recorded history (I11), pruned to its anchor,
+   advanced through the rest of the history by re-execution, rewound to the anchor, and advanced
+   again. Every re-executed height MUST reproduce the recorded targets and roots.
 
 ## 8. Invariants (must hold at the measurement point)
 
-At the measurement point the following MUST hold across the correct nodes; a violation is a
-reportable defect. Both halves of the compromised identity are excluded from I1-I3.
+At each target's measurement point, every applicable invariant below MUST hold; a violation is a
+reportable defect. I1-I3 apply to correct nodes in the Twins, restart, database-adapter, and
+state-sync targets, with both compromised halves excluded from the Twins comparisons. I4-I6 apply
+to every target. I7-I8 apply to the probe target. I9 applies to every cluster target that prunes,
+I10 to the state-sync target, and I11 to the database-set target.
 
 - **I1 — Chain of blocks.** The finalized chains observed at the correct nodes MUST be consistent
   in the sense of the chain-of-blocks method: at most one distinct block per height across all
   correct nodes; each block's recorded parent is the block at the preceding height, rooted at
   genesis; and each node's delivery sequence advances by one height at a time from its starting
   anchor. Delivery is at-least-once and restarts make repeats normal, so an exact repeat of a
-  height already delivered MUST be accepted and a differing repeat MUST NOT.
+  height already delivered MUST be accepted and a differing repeat MUST NOT. A node that peer
+  synced starts its sequence at the floor it synced from, and its first block MUST be the child
+  of the block the other correct nodes delivered below it; if no correct node has delivered that
+  height by the measurement point, which nodes' in-order delivery makes possible only when the
+  synced node is ahead of every other node, the anchor cannot be compared and the run MUST be
+  reported as unmeasured rather than as passing. A sync resumed after a crash begins a new
+  sequence at its floor, which MUST NOT lie below an earlier one.
 - **I2 — Database-state agreement.** For every height finalized by two or more correct nodes,
   those nodes' committed database state for that height MUST be identical. The observable is the
-  per-height database commitment each node reaches once the height is applied, recorded per node
-  at the moment it is applied rather than sampled globally, so that nodes progressing at different
-  rates are compared at the same height and not at the same instant. Application is at-least-once
-  and restarts replay heights, so an exact repeat of a commitment already recorded for a height MUST
-  be accepted and a differing repeat MUST NOT. This is the invariant the
-  feature exists for; I1 holding while I2 fails is the defect class no existing target can see.
+  per-height canonical state commitment each node reaches once the height is applied, recorded per
+  node at the moment it is applied rather than sampled globally, so that nodes progressing at
+  different rates are compared at the same height and not at the same instant. For `current`, this
+  canonical commitment MUST remain distinct from the operations sync target described by R19.
+  Application is at-least-once and restarts replay heights, so an exact repeat of a commitment
+  already recorded for a height MUST be accepted and a differing repeat MUST NOT. This is the
+  invariant the feature exists for; I1 holding while I2 fails is the defect class no existing
+  target can see.
 - **I3 — Verification-verdict agreement.** No correct node's application may accept a block that
   another correct node's application rejected. R5 makes the correct application deterministic and
   P1 makes every correct node run it identically, so a violation is attributable to Stateful
   presenting different inputs to the same deterministic function.
-- **I4 — No panic.** No engine may panic. Because A3 keeps the faulty application inside the
-  trait's contract, every documented panic in Stateful is unreachable in a correct implementation,
-  and there is no allowlist: any panic, on any engine, correct or compromised, is a finding.
-- **I5 — Source tree untouched.** `git status` over `glue/src` and `consensus/src` MUST stay clean
-  across the entire feature (R10).
+- **I4 — No panic.** No actor, engine, or harness task may panic. In the Twins targets, A3 keeps
+  the faulty application inside the `Application` contract. In the probe target, all malformed or
+  adversarial input is delivered through interfaces required to handle it safely. There is no panic
+  allowlist: any panic in any target is a finding.
+- **I5 — Fuzz-only change scope.** Every change introduced by this feature MUST be confined to
+  `glue/fuzz/`. No file under `glue/src`, `storage/src`, `consensus/src`, or elsewhere in the
+  workspace may be modified, and any pre-existing unrelated working-tree changes MUST be preserved.
 - **I6 — Reproducibility.** A failing input replayed MUST fail identically. A failure that does not
   reproduce is itself a defect, in the harness rather than in glue.
+- **I7 — Probe floor provenance.** If the discovering probe emits floor `F`, the oracle MUST
+  establish that the resolving sample contains valid responses from at least `f + 1` distinct
+  members of the solicited committee, that `F` is the highest-round finalization in that sample,
+  and that the source-state model for the peer supplying `F` contains that exact finalization. A run
+  that never collects a sufficient sample MAY terminate without producing a floor.
+- **I8 — Probe response isolation.** Every response admitted to the sample MUST decode, meet the
+  minimum epoch, have an available verifier, verify successfully, and come from a solicited
+  committee member. At most one response per peer MAY contribute. A pending peer that sends
+  malformed or unverifiable data, or a non-participant that sends an otherwise valid finalization,
+  MUST be blocked. Stale or unjudgeable responses and traffic from an already-counted peer or after
+  floor selection MUST NOT change the sample or selected floor.
+- **I9 — Retention.** Pruning MUST NOT discard operations inside the retention window. The
+  observable is the oldest operation location a node's database still retains, recorded by the
+  application each time a height is applied, for adapters that expose operation history. The
+  record is taken in `finalized`, which the actor awaits before scheduling the prune that
+  finalizing the same height may trigger. An observation that raises the node's maximum applied
+  height to `h` can therefore reflect prunes triggered by heights up to `h - 1`, the newest of
+  which targeted height `h - 1 - w`, where `w` is the acknowledgement window plus the configured
+  QMDB retention; an observation below an existing maximum `m`, a restarted node replaying, can
+  reflect the prune `m` itself triggered before the crash, so its bound is height `m - w`.
+  Inactivity floors are monotone in height, so the oldest retained location MUST NOT exceed the
+  prune floor of the bounding height, and below the window nothing may have been pruned. A
+  database populated by peer state sync starts at the floor of the height it synced to, the one
+  below the first height the node applied afterwards, and is bounded by that floor until pruning
+  moves past it. Prune floors are chain properties, so any correct node's record serves; a height
+  no correct node applied by the measurement point is bounded by the floor of the nearest applied
+  height above it, which floors' monotonicity makes a sound, looser bound rather than a failure.
+- **I10 — Single, durable state sync.** Across a node's starts, in order: the plan MUST NOT
+  choose peer state sync unless the driver requested it or an interrupted sync had to resume; the
+  durable sync height, once recorded, MUST be present at every later start, MUST NOT decrease,
+  and the plan MUST NOT choose peer state sync again; a resumed sync MUST NOT move its floor
+  backward; and every height applied after a start MUST lie above the sync height that start
+  carried. A node counts as peer synced once it applied a height after a start that chose to
+  sync; the fixed-input suite requires exactly one such node.
+- **I11 — Synced-set fidelity.** A converged sync MUST return an anchor the serving set actually
+  produced, at or above the anchor it started from; the synced set's committed targets and every
+  database's root MUST equal the serving set's at that anchor; the engine MUST NOT reject an
+  answer served from the serving set; pruning to the anchor MUST leave its targets and roots
+  unchanged; re-executing the serving set's later history on the synced set MUST reproduce the
+  recorded targets and roots at every height; and rewinding to the anchor MUST restore its
+  targets and roots exactly, after which re-execution MUST reproduce them again.
 
 An invariant MUST NOT be disabled, weakened, or narrowed to make a configuration pass. A
 configuration that cannot satisfy one is either a reportable defect or an exclusion recorded in §9;
@@ -310,15 +552,21 @@ no exclusion may be introduced in code.
 - **Contract-violating application faults.** Proposals whose commitments disagree with their
   merkleized result, and replays that disagree with the block replayed, are excluded by A3.
 - **Restarting the compromised identity.** Excluded by R12.
-- **Peer state sync.** No node attaches a finalized floor, so the state-sync startup path and the
-  sync engines are not exercised.
-- **Marshal variants other than Standard `Deferred`.** `Inline` is unsupported by Stateful; the
-  coding variant is a later target.
-- **Multi-database sets.** Each node manages a single database.
-- **Pruning.** Periodic database and marshal pruning is disabled, so the deferred prune path is not
-  exercised.
+- **Peer state sync in the Twins, restart, and database-adapter targets.** Those nodes never
+  attach a finalized floor; the state-sync target (R25) and the database-set target (R26) cover
+  the sync path.
+- **Marshal variants other than Standard `Deferred` and Coding `Marshaled`.** `Inline` is
+  unsupported by Stateful. The restart, database-adapter, and state-sync targets run the standard
+  marshal only.
+- **Multi-database sets under consensus.** Each cluster node manages a single database; the
+  database-set target syncs, prunes, and rewinds tuple sets with no consensus above them.
+- **Pruning in the Twins targets.** The restart, database-adapter, and state-sync targets prune
+  per R24.
+- **Liveness of the late joiner.** A joiner whose sync never completes, because its serving
+  nodes pruned the operations it needs or because the run ends first, is a healthy timeout. Only
+  the database-set target's bounded convergence check (§7.5) asserts progress.
 - **Real cryptography and non-deterministic runtimes.** Excluded by R9 and R14.
-- **Modifying `glue/src` or `consensus/src`.** Excluded by R10.
+- **Modifying any file outside `glue/fuzz/`.** Excluded by R10.
 
 ## 10. End-to-end verification
 
@@ -344,17 +592,38 @@ should confirm. `cargo fuzz` requires a nightly toolchain; set it as a directory
 
 5. **The regression suite passes.**
    `cargo nextest run -p commonware-glue-fuzz stateful::` runs every fixed-input scenario and
-   reports all tests passing, exercising I1-I4 and I6 (R15; acceptance criterion 2).
+   reports all tests passing, exercising I1-I4, I6, and I9-I11 (R15; acceptance criterion 2).
+   The state-sync scenarios include one that interrupts the joiner's sync and one that restarts
+   the joiner after its sync completed; the database-set scenarios run every set shape against
+   a static history, a moving tip, and peers that answer almost only from the divergent set, and
+   keep the fuzzer-found input whose final served height went unannounced as a fixed regression
+   case for the terminal-tip rule of §7.5.
 
-6. **The fuzz target builds.**
-   `cargo +nightly fuzz build --fuzz-dir glue/fuzz stateful_cert_mock_twins` completes with no
-   warnings and no errors (acceptance criterion 1).
+6. **The fuzz targets build.**
+   `cargo +nightly fuzz build --fuzz-dir glue/fuzz <target>` completes with no warnings and no
+   errors for `stateful_cert_mock_twins`, `stateful_cert_mock_twins_coding`,
+   `stateful_cert_mock_state_sync`, and `stateful_db_sync` (acceptance criterion 1). The coding
+   target is built with only its own feature enabled, so the standard targets are confirmed not
+   to pull in the erasure coding stack.
 
 7. **Throughput clears the floor.**
-   A short smoke run, `cargo +nightly fuzz run --fuzz-dir glue/fuzz stateful_cert_mock_twins --
-   -max_total_time=8`, completes with no crash, hang, or out-of-memory, and libFuzzer's reported
-   `exec/s` is above 10 (acceptance criterion 3, R13). If it is not, the run bounds in R13 are what
-   move; the invariants are not.
+   A short smoke run of each target in step 6, `cargo +nightly fuzz run --fuzz-dir glue/fuzz
+   -s none <target> -- -max_total_time=8` over its own corpus, completes with no crash, hang, or
+   out-of-memory, and libFuzzer's reported `exec/s` is above 10 (acceptance criterion 3, R13). If
+   it is not, the run bounds in R13 are what move; the invariants are not.
+
+   The floor is a throughput measurement and is taken with the sanitizer disabled; it says
+   nothing about memory safety. A sanitized smoke run of each target, the same command without
+   `-s none`, MUST also complete with no crash, hang, or out-of-memory, with no `exec/s`
+   requirement: the exercised path is not free of unsafe code (the deterministic runtime's memory
+   storage initializes buffers unsafely, and SHA-256 dispatches to SIMD intrinsics), so the
+   address sanitizer keeps its value for campaigns and the smoke run keeps its findings. It costs
+   the cluster targets roughly five times their throughput: on the reference machine the restart
+   and state-sync targets run at 6-9 exec/s sanitized and at 30-40 exec/s without, and the
+   database-set target at about 70 and 400. On macOS the `crc-fast` dependency builds a dynamic
+   library whose sanitizer-coverage hooks cannot be resolved at link time without the sanitizer
+   runtime; pass `RUSTFLAGS="-C link-arg=-Wl,-undefined,dynamic_lookup"` to the `-s none` build
+   so they bind at load time.
 
 8. **The checks are not vacuous.** A test can pass because nothing was wrong, or because nothing
    was checked. This step rules out the second case.
@@ -365,11 +634,12 @@ should confirm. `cargo fuzz` requires a nightly toolchain; set it as a directory
    be above zero. A run that stalled and measured nothing MUST be reported as unmeasured, with its
    reason, and never counted as passing.
 
-   As a negative control, an auditor plants a defect — for example, makes one correct node's
-   application write a different value for one block — and confirms the suite fails under I2 while
-   I1 still passes, demonstrating that the database-state check carries signal that the chain check
-   does not. `invariants.rs` MUST NOT be changed for this control: the defect goes into the state,
-   not into the check.
+   As a negative control, an auditor perturbs the database root observed for one correct engine at
+   one height, after Stateful's sync-target validation, and confirms the suite fails under I2 while
+   I1 still passes. This demonstrates that the database-state check carries signal that the chain
+   check does not without relying on an application-level divergence, which Stateful rejects
+   earlier. `invariants.rs` MUST NOT be changed for this control: the defect is introduced at the
+   observation boundary, not in the check.
 
 Passing steps 1-7, plus the negative control in step 8, constitutes acceptance of this
 specification.

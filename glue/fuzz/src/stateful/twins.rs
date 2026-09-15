@@ -4,28 +4,46 @@
 //! its channels split per view by the selected twins scenario, with the correct
 //! application on the primary half and the faulty one on the secondary. Crashes
 //! belong to the restart driver, which runs a cluster of four correct nodes.
+//!
+//! The driver runs once over the standard marshal and, as a separate target,
+//! once over the coding marshal, where blocks reach marshal as erasure-coded
+//! shards and the stateful actor is driven through `Marshaled` rather than
+//! `Deferred`. The scenario, the applications, and the invariants are the same.
 
 use super::{
     MAX_CASES, NUM_IDENTITIES, PREFIX_ROUNDS, RUN_TIMEOUT,
-    app::{CorrectApp, FaultSchedule, FaultyApp},
+    app::{Block, CorrectApp, FaultSchedule, FaultyApp},
+    backend::{Any, Backend},
     input::StatefulTwinsFuzzInput,
     invariants::EngineObservations,
+    marshal::Marshal,
     network::{
         backfill_forwarder, backfill_router, broadcast_forwarder, broadcast_router,
         certificate_forwarder, certificate_router, resolver_forwarder, resolver_router,
         shared_router, vote_forwarder, vote_router,
     },
-    runner::{self, CorrectEngine, Outcome, RunReport},
-    stack::{EngineChannels, EngineConfig, register_channels, round_robin, spawn_engine},
+    runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
+    stack::{
+        EngineChannels, EngineConfig, SYNC_CONFIG, register_channels, round_robin, spawn_engine,
+    },
 };
-use commonware_consensus::{simplex::mocks::twins, types::View};
+use commonware_consensus::{
+    marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
+    simplex::mocks::twins,
+    types::View,
+};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Runner as _, Supervisor as _, deterministic};
 use commonware_utils::FuzzRng;
 use futures::future::join_all;
 
-/// Label this driver reports under.
+/// Label the standard-marshal driver reports under.
+#[cfg(feature = "stateful-cert-mock-twins")]
 const TARGET: &str = "glue-stateful-twins";
+
+/// Label the coding-marshal driver reports under.
+#[cfg(feature = "stateful-cert-mock-twins-coding")]
+const CODING_TARGET: &str = "glue-stateful-twins-coding";
 
 /// The engine index of the compromised identity's secondary half.
 const SECONDARY_ENGINE: usize = NUM_IDENTITIES as usize;
@@ -33,27 +51,63 @@ const SECONDARY_ENGINE: usize = NUM_IDENTITIES as usize;
 /// Engines in the cluster: one per identity plus the compromised half.
 const NUM_ENGINES: usize = SECONDARY_ENGINE + 1;
 
-/// libFuzzer entry point.
+/// libFuzzer entry point over the standard marshal.
+#[cfg(feature = "stateful-cert-mock-twins")]
 pub fn fuzz_stateful_cert_mock_twins(input: StatefulTwinsFuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
     runner::report(&raw_bytes, || run_stateful_twins(input));
 }
 
-/// Run one twins scenario and return what it measured.
+/// Run one twins scenario over the standard marshal and return what it
+/// measured.
 ///
 /// A run is fully determined by its input bytes.
+#[cfg(feature = "stateful-cert-mock-twins")]
 pub fn run_stateful_twins(input: StatefulTwinsFuzzInput) -> RunReport {
-    let entropy = input.raw_bytes.clone();
-    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
-    deterministic::Runner::new(config).start(|context| run(context, input, entropy))
+    execute::<Any, super::marshal::Standard>(TARGET, input)
 }
 
-async fn run(
+/// libFuzzer entry point over the coding marshal.
+#[cfg(feature = "stateful-cert-mock-twins-coding")]
+pub fn fuzz_stateful_cert_mock_twins_coding(input: StatefulTwinsFuzzInput) {
+    let raw_bytes = input.raw_bytes.clone();
+    runner::report(&raw_bytes, || run_stateful_twins_coding(input));
+}
+
+/// Run one twins scenario over the coding marshal and return what it
+/// measured.
+///
+/// A run is fully determined by its input bytes.
+#[cfg(feature = "stateful-cert-mock-twins-coding")]
+pub fn run_stateful_twins_coding(input: StatefulTwinsFuzzInput) -> RunReport {
+    execute::<Any, super::marshal::Coding>(CODING_TARGET, input)
+}
+
+/// Run one twins scenario over the five-engine cluster. A run is fully
+/// determined by its input bytes.
+fn execute<B, M>(target: &'static str, input: StatefulTwinsFuzzInput) -> RunReport
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<super::Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+{
+    let entropy = input.raw_bytes.clone();
+    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
+    deterministic::Runner::new(config).start(|context| run::<B, M>(context, target, input, entropy))
+}
+
+async fn run<B, M>(
     mut context: deterministic::Context,
+    target: &'static str,
     input: StatefulTwinsFuzzInput,
     entropy: Vec<u8>,
-) -> RunReport {
-    let cluster = runner::setup(&mut context).await;
+) -> RunReport
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<super::Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+{
+    let cluster = runner::setup::<B, M>(&mut context).await;
     let participants = cluster.participants.clone();
 
     // Draw the twins scenario from the tape.
@@ -73,7 +127,7 @@ async fn run(
         },
     );
     if cases.is_empty() {
-        return RunReport::skipped(TARGET, Outcome::NoCase);
+        return RunReport::skipped(target, B::NAME, M::NAME, Outcome::NoCase);
     }
     let selected = usize::from(input.case_selector) % cases.len();
     let case = cases
@@ -103,7 +157,14 @@ async fn run(
             continue;
         }
         correct.push(
-            CorrectEngine::start(&context, &cluster, index, elector.clone(), node.clone()).await,
+            CorrectEngine::<B, M, _>::start(
+                &context,
+                &cluster,
+                index,
+                NodeConfig::new(elector.clone(), None),
+                node.clone(),
+            )
+            .await,
         );
     }
 
@@ -116,17 +177,17 @@ async fn run(
         .child("compromised")
         .with_attribute("index", compromised);
 
-    let (vote_primary, vote_secondary) = raw.vote.0.split_with(vote_forwarder(
+    let (vote_primary, vote_secondary) = raw.vote.0.split_with(vote_forwarder::<M>(
         participants.clone(),
         scenario.clone(),
         term_length,
     ));
     let (vote_rx_primary, vote_rx_secondary) = raw.vote.1.split_with(
         node_context.child("vote_split"),
-        vote_router(participants.clone(), scenario.clone(), term_length),
+        vote_router::<M>(participants.clone(), scenario.clone(), term_length),
     );
     let (certificate_primary, certificate_secondary) =
-        raw.certificate.0.split_with(certificate_forwarder(
+        raw.certificate.0.split_with(certificate_forwarder::<M>(
             participants.clone(),
             scenario.clone(),
             term_length,
@@ -134,7 +195,7 @@ async fn run(
         ));
     let (certificate_rx_primary, certificate_rx_secondary) = raw.certificate.1.split_with(
         node_context.child("certificate_split"),
-        certificate_router(
+        certificate_router::<M>(
             participants.clone(),
             scenario.clone(),
             term_length,
@@ -142,7 +203,7 @@ async fn run(
         ),
     );
     let (resolver_primary, resolver_secondary) =
-        raw.simplex_resolver.0.split_with(resolver_forwarder(
+        raw.simplex_resolver.0.split_with(resolver_forwarder::<M>(
             participants.clone(),
             scenario.clone(),
             term_length,
@@ -150,7 +211,7 @@ async fn run(
         ));
     let (resolver_rx_primary, resolver_rx_secondary) = raw.simplex_resolver.1.split_with(
         node_context.child("resolver_split"),
-        resolver_router(
+        resolver_router::<M>(
             participants.clone(),
             scenario.clone(),
             term_length,
@@ -166,20 +227,20 @@ async fn run(
         node_context.child("backfill_split"),
         backfill_router(participants.clone(), scenario.clone(), term_length),
     );
-    let (broadcast_primary, broadcast_secondary) = raw.broadcast.0.split_with(broadcast_forwarder(
-        participants.clone(),
-        scenario.clone(),
-        term_length,
-    ));
+    let (broadcast_primary, broadcast_secondary) = raw.broadcast.0.split_with(
+        broadcast_forwarder::<M>(participants.clone(), scenario.clone(), term_length),
+    );
     let (broadcast_rx_primary, broadcast_rx_secondary) = raw.broadcast.1.split_with(
         node_context.child("broadcast_split"),
-        broadcast_router(participants.clone(), scenario.clone(), term_length),
+        broadcast_router::<M>(participants.clone(), scenario.clone(), term_length),
     );
     let (database_rx_primary, database_rx_secondary) = raw
         .database
         .1
         .split_with(node_context.child("database_split"), shared_router());
 
+    // No node discovers or serves a floor in this driver, so the compromised
+    // identity's probe channel goes unused rather than split.
     let primary_channels = EngineChannels {
         vote: (vote_primary, vote_rx_primary),
         certificate: (certificate_primary, certificate_rx_primary),
@@ -187,6 +248,7 @@ async fn run(
         backfill: (backfill_primary, backfill_rx_primary),
         broadcast: (broadcast_primary, broadcast_rx_primary),
         database: (raw.database.0.clone(), database_rx_primary),
+        probe: None,
     };
     let secondary_channels = EngineChannels {
         vote: (vote_secondary, vote_rx_secondary),
@@ -195,9 +257,10 @@ async fn run(
         backfill: (backfill_secondary, backfill_rx_secondary),
         broadcast: (broadcast_secondary, broadcast_rx_secondary),
         database: (raw.database.0, database_rx_secondary),
+        probe: None,
     };
 
-    drop(spawn_engine(
+    drop(spawn_engine::<B, M, _, _, _, _, _, _, _>(
         node_context.child("primary"),
         cluster.oracle.clone(),
         EngineConfig {
@@ -206,18 +269,21 @@ async fn run(
             elector: elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: format!("engine-{compromised}-primary"),
-            application: CorrectApp::new(
+            application: CorrectApp::<B, M>::new(
                 cluster.genesis.clone(),
                 observations[compromised].clone(),
             ),
             observations: observations[compromised].clone(),
+            prune: None,
+            sync: SYNC_CONFIG,
+            state_sync: false,
         },
         primary_channels,
     ));
 
     let mut fault_rng = FuzzRng::new(entropy);
     let schedule = FaultSchedule::new(&mut fault_rng, input.faults);
-    drop(spawn_engine(
+    drop(spawn_engine::<B, M, _, _, _, _, _, _, _>(
         node_context.child("secondary"),
         cluster.oracle.clone(),
         EngineConfig {
@@ -227,13 +293,16 @@ async fn run(
             genesis: cluster.genesis.clone(),
             partition_prefix: format!("engine-{compromised}-secondary"),
             application: FaultyApp::new(
-                CorrectApp::new(
+                CorrectApp::<B, M>::new(
                     cluster.genesis.clone(),
                     observations[SECONDARY_ENGINE].clone(),
                 ),
                 schedule,
             ),
             observations: observations[SECONDARY_ENGINE].clone(),
+            prune: None,
+            sync: SYNC_CONFIG,
+            state_sync: false,
         },
         secondary_channels,
     ));
@@ -255,7 +324,14 @@ async fn run(
     };
 
     // Measurement point. Both halves of the compromised identity are excluded.
-    runner::measure(TARGET, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(
+        target,
+        outcome,
+        &correct,
+        &observations,
+        &cluster.genesis,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -305,76 +381,96 @@ mod tests {
         }
     }
 
-    /// Runs one fixed input and asserts the checks were not vacuous.
-    fn measured(input: StatefulTwinsFuzzInput) -> RunReport {
-        let report = run_stateful_twins(input);
-        println!("{report}");
-        assert!(
-            report.measured(),
-            "run measured nothing and must not be counted as passing: {report}"
-        );
-        report
+    /// The driver's test suite, run once per marshal variant the crate is
+    /// built with.
+    macro_rules! twins_suite {
+        ($name:ident, $run:path, $feature:literal) => {
+            #[cfg(feature = $feature)]
+            mod $name {
+                use super::*;
+
+                /// Runs one fixed input and asserts the checks were not vacuous.
+                fn measured(input: StatefulTwinsFuzzInput) -> RunReport {
+                    let report = $run(input);
+                    println!("{report}");
+                    assert!(
+                        report.measured(),
+                        "run measured nothing and must not be counted as passing: {report}"
+                    );
+                    report
+                }
+
+                #[test]
+                fn sampled_partitions_hold_invariants() {
+                    measured(input(0, false, ALL_FAULTS, 1, 1, 0));
+                }
+
+                #[test]
+                fn sustained_partitions_hold_invariants() {
+                    measured(input(0, true, ALL_FAULTS, 2, 1, 0));
+                }
+
+                #[test]
+                fn disarmed_adversary_holds_invariants() {
+                    measured(input(0, false, NO_FAULTS, 1, 1, 0));
+                }
+
+                #[test]
+                fn long_terms_hold_invariants() {
+                    measured(input(3, true, ALL_FAULTS, 2, 4, 7));
+                }
+
+                /// The target explores a scenario per case selector; every one
+                /// of them is a regression case.
+                #[test]
+                fn selected_cases_hold_invariants() {
+                    for case_selector in 0..8u16 {
+                        let report = $run(input(
+                            case_selector,
+                            case_selector % 2 == 1,
+                            ALL_FAULTS,
+                            u8::try_from(case_selector % u16::from(MAX_REQUIRED_HEIGHTS))
+                                .expect("fits")
+                                + 1,
+                            u32::from(case_selector % MAX_TERM_LENGTH as u16) + 1,
+                            u8::try_from(case_selector).expect("fits"),
+                        ));
+                        println!("case {case_selector}: {report}");
+                        assert!(
+                            report.counts.correct_nodes > 0,
+                            "case {case_selector} observed no correct node: {report}"
+                        );
+                    }
+                }
+
+                /// The twins driver never crashes a node.
+                #[test]
+                fn no_restarts_occur() {
+                    assert_eq!(
+                        measured(input(1, false, ALL_FAULTS, 2, 2, 3))
+                            .counts
+                            .restarts,
+                        0
+                    );
+                }
+
+                /// I6: a replayed input fails, or passes, identically.
+                #[test]
+                fn replay_is_reproducible() {
+                    let first = $run(input(2, false, ALL_FAULTS, 2, 3, 11));
+                    let second = $run(input(2, false, ALL_FAULTS, 2, 3, 11));
+                    assert_eq!(first, second, "replaying an input changed what it measured");
+                }
+            }
+        };
     }
 
-    #[test]
-    fn sampled_partitions_hold_invariants() {
-        measured(input(0, false, ALL_FAULTS, 1, 1, 0));
-    }
-
-    #[test]
-    fn sustained_partitions_hold_invariants() {
-        measured(input(0, true, ALL_FAULTS, 2, 1, 0));
-    }
-
-    #[test]
-    fn disarmed_adversary_holds_invariants() {
-        measured(input(0, false, NO_FAULTS, 1, 1, 0));
-    }
-
-    #[test]
-    fn long_terms_hold_invariants() {
-        measured(input(3, true, ALL_FAULTS, 2, 4, 7));
-    }
-
-    /// The target explores a scenario per case selector; every one of them is a
-    /// regression case.
-    #[test]
-    fn selected_cases_hold_invariants() {
-        for case_selector in 0..8u16 {
-            let report = run_stateful_twins(input(
-                case_selector,
-                case_selector % 2 == 1,
-                ALL_FAULTS,
-                u8::try_from(case_selector % u16::from(MAX_REQUIRED_HEIGHTS)).expect("fits") + 1,
-                u32::from(case_selector % MAX_TERM_LENGTH as u16) + 1,
-                u8::try_from(case_selector).expect("fits"),
-            ));
-            println!("case {case_selector}: {report}");
-            assert!(
-                report.counts.correct_nodes > 0,
-                "case {case_selector} observed no correct node: {report}"
-            );
-        }
-    }
-
-    /// The twins driver never crashes a node.
-    #[test]
-    fn no_restarts_occur() {
-        assert_eq!(
-            measured(input(1, false, ALL_FAULTS, 2, 2, 3))
-                .counts
-                .restarts,
-            0
-        );
-    }
-
-    /// I6: a replayed input fails, or passes, identically.
-    #[test]
-    fn replay_is_reproducible() {
-        let first = run_stateful_twins(input(2, false, ALL_FAULTS, 2, 3, 11));
-        let second = run_stateful_twins(input(2, false, ALL_FAULTS, 2, 3, 11));
-        assert_eq!(first, second, "replaying an input changed what it measured");
-    }
+    twins_suite!(standard, run_stateful_twins, "stateful-cert-mock-twins");
+    twins_suite!(
+        coding,
+        run_stateful_twins_coding,
+        "stateful-cert-mock-twins-coding"
+    );
 
     /// P5: the byte tape never reaches `Debug` output; its length may.
     #[test]
