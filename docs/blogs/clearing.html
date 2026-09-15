@@ -143,11 +143,11 @@ O’Grady</a></div>
         waiting for settlement. Their chosen payment operator returns a
         binding receipt in one round trip. The user sends it with the
         API request, or the operator delivers it directly to save a hop.
-        The provider can serve the response knowing it holds evidence to
-        challenge any operator settlement that omits or contradicts the
-        payment. The operator later nets payments across accounts
-        without separate channels or funded routes, dramatically
-        reducing the data needed for settlement.</p>
+        The provider can serve the response knowing the receipt gives it
+        evidence to hold the operator accountable if settlement omits or
+        contradicts the payment. The operator later nets payments across
+        accounts without separate channels or funded routes,
+        dramatically reducing the data needed for settlement.</p>
         <p>Suppose a user <span class="math inline">a</span> has 100 and
         wants to pay 20 to <span class="math inline">b</span>, who has
         40. The operator verifies and records <span
@@ -470,6 +470,18 @@ O’Grady</a></div>
         class="math inline">\Delta_e</span>. Validators retain the
         public corpus but cannot reconstruct a private receipt nobody
         saved.</p>
+        <p>Suppose <span class="math inline">b</span> has already served
+        the API response, but the operator leaves <span
+        class="math inline">a</span>’s payment of 20 out of the close.
+        The receipt and a public proof of the omission let <span
+        class="math inline">b</span> prove operator fault without the
+        operator’s cooperation. That is what makes the receipt binding.
+        An application could use this evidence to compensate <span
+        class="math inline">b</span> from an onchain insurance fund,
+        permanently exclude the operator, or support offchain
+        resolution. The recipient can seek a remedy beyond simply
+        deciding not to use that operator again (unlike other approaches
+        that offer only best-effort preconfirmations).</p>
         <h2 id="a-deadline-to-exit">A Deadline to Exit</h2>
         <p>A successful challenge stops a contested close from
         finalizing, but users must still be able to get their funds out.
@@ -627,9 +639,9 @@ O’Grady</a></div>
         <p>Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32
         GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s).
         Table timings use in-memory storage and exclude networking and
-        durable commit; the SSD timing below includes QMDB commit.
+        durable commit, while the SSD timing below includes QMDB commit.
         Certificate verification uses one thread. The SSD run uses a 4
-        MiB QMDB cache; the full dataset fits in RAM.</p>
+        MiB QMDB cache, and the full dataset fits in RAM.</p>
         </div>
         <p>With only 1,024 of a million live accounts paying the same
         512 recipients, each validator processes a 105 KB update in 8.69
@@ -647,8 +659,7 @@ O’Grady</a></div>
         <h3 id="proof-sizes-and-verification">Proof Sizes and
         Verification</h3>
         <p>The tables below show encoded proof sizes, with verification
-        times beneath them. Times are medians of ten samples on one CPU
-        thread of the same host, starting from decoded proofs.</p>
+        times beneath them.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -665,7 +676,10 @@ O’Grady</a></div>
         <div class="image-caption">
         <p>Figure 8: BMT challenges for payers included in the close,
         with Ed25519 receipts and one-entry vectors. Sizes exclude the
-        separately supplied close and chain transaction framing.</p>
+        separately supplied close and chain transaction framing. For
+        Figures 8 through 10, verification times are medians of ten
+        samples on one CPU thread of the Figure 6 host, starting from
+        decoded proofs.</p>
         </div>
         <p>A normal withdrawal opens a certified output in its close’s
         BMT. Its proof grows with the number of withdrawal outputs <span

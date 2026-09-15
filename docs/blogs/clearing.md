@@ -27,7 +27,7 @@ One payment or a bajillion, each account settles once.
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment operator returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing it holds evidence to challenge any operator settlement that omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
+With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment operator returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing the receipt gives it evidence to hold the operator accountable if settlement omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
 
 Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator verifies and records $a$'s signed request $S$, then countersigns it as $R$. Before forwarding the receipt to $b$, $a$ verifies and retains it.
 
@@ -234,6 +234,8 @@ The activity tree records each active account's terminal position. A missing pay
 
 Because certification has checked the accounting and signed terminal positions, a receipt holder can prove a contradiction with signatures and Merkle openings in one onchain call, without an interactive dispute game. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
 
+Suppose $b$ has already served the API response, but the operator leaves $a$'s payment of 20 out of the close. The receipt and a public proof of the omission let $b$ prove operator fault without the operator's cooperation. That is what makes the receipt binding. An application could use this evidence to compensate $b$ from an onchain insurance fund, permanently exclude the operator, or support offchain resolution. The recipient can seek a remedy beyond simply deciding not to use that operator again (unlike other approaches that offer only best-effort preconfirmations).
+
 ## A Deadline to Exit
 
 A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain, even during an active epoch. The next registration must include it.
@@ -359,7 +361,7 @@ We benchmarked the Commonware Library's [initial implementation](https://github.
 ```
 
 ::: {.image-caption}
-Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude networking and durable commit; the SSD timing below includes QMDB commit. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache; the full dataset fits in RAM.
+Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude networking and durable commit, while the SSD timing below includes QMDB commit. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache, and the full dataset fits in RAM.
 :::
 
 With only 1,024 of a million live accounts paying the same 512 recipients, each validator processes a 105 KB update in 8.69 ms in memory, or 20.5 ms on SSD.
@@ -376,7 +378,7 @@ Figure 7: Every account repeatedly pays one unit to its next neighbor. Counters 
 
 ### Proof Sizes and Verification
 
-The tables below show encoded proof sizes, with verification times beneath them. Times are medians of ten samples on one CPU thread of the same host, starting from decoded proofs.
+The tables below show encoded proof sizes, with verification times beneath them.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -395,7 +397,7 @@ The tables below show encoded proof sizes, with verification times beneath them.
 ```
 
 ::: {.image-caption}
-Figure 8: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing.
+Figure 8: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing. For Figures 8 through 10, verification times are medians of ten samples on one CPU thread of the Figure 6 host, starting from decoded proofs.
 :::
 
 A normal withdrawal opens a certified output in its close's BMT. Its proof grows with the number of withdrawal outputs $W$, independently of the live account database.
