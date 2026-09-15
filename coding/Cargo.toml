@@ -46,6 +46,7 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
+fuzz = [ "arbitrary" ]
 
 [[bench]]
 name = "coding_scheme_times"
