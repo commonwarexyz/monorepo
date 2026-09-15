@@ -141,13 +141,18 @@ impl Read for Setup {
     }
 }
 
-#[derive(Clone, Debug, Write)]
+#[derive(Clone, Debug, Write, Read)]
 pub struct PrivateKey {
     #[codec(
         encode_with = {
             value.expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
         },
-        encode_size = F::SIZE
+        encode_size = F::SIZE,
+        read_with = {
+            let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+            let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
+            Ok(Secret::new(x))
+        }
     )]
     inner: Secret<F>,
 }
@@ -290,18 +295,6 @@ impl PrivateKey {
             pedersen_to_plain,
         };
         (outputs, VrfCommitments { proof, commitments })
-    }
-}
-
-impl Read for PrivateKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
-        Ok(Self {
-            inner: Secret::new(x),
-        })
     }
 }
 

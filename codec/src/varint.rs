@@ -266,8 +266,15 @@ mod sealed {
 
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UInt<U: UPrim>(pub U);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize)]
+pub struct UInt<U: UPrim>(
+    #[codec(
+    encode_with = { write(*value, buf); },
+    encode_size = size(*value),
+    read_with = { read(buf) }
+)]
+    pub U,
+);
 
 // Implements `Into<U>` for `UInt<U>` for all unsigned integer types.
 // This allows for easy conversion from `UInt<U>` to `U` using `.into()`.
@@ -284,25 +291,6 @@ macro_rules! impl_varuint_into {
 }
 impl_varuint_into!(u16, u32, u64, u128);
 
-impl<U: UPrim> Write for UInt<U> {
-    fn write(&self, buf: &mut impl BufMut) {
-        write(self.0, buf);
-    }
-}
-
-impl<U: UPrim> Read for UInt<U> {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        read(buf).map(UInt)
-    }
-}
-
-impl<U: UPrim> EncodeSize for UInt<U> {
-    fn encode_size(&self) -> usize {
-        size(self.0)
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<U: UPrim> arbitrary::Arbitrary<'_> for UInt<U>
 where
@@ -316,8 +304,15 @@ where
 
 /// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
 /// varints rather than the default fixed-width integers.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SInt<S: SPrim>(pub S);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize)]
+pub struct SInt<S: SPrim>(
+    #[codec(
+    encode_with = { write_signed::<S>(*value, buf); },
+    encode_size = size_signed::<S>(*value),
+    read_with = { read_signed::<S>(buf) }
+)]
+    pub S,
+);
 
 // Implements `Into<U>` for `SInt<U>` for all signed integer types.
 // This allows for easy conversion from `SInt<S>` to `S` using `.into()`.
@@ -333,25 +328,6 @@ macro_rules! impl_varsint_into {
     };
 }
 impl_varsint_into!(i16, i32, i64, i128);
-
-impl<S: SPrim> Write for SInt<S> {
-    fn write(&self, buf: &mut impl BufMut) {
-        write_signed::<S>(self.0, buf);
-    }
-}
-
-impl<S: SPrim> Read for SInt<S> {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        read_signed::<S>(buf).map(SInt)
-    }
-}
-
-impl<S: SPrim> EncodeSize for SInt<S> {
-    fn encode_size(&self) -> usize {
-        size_signed::<S>(self.0)
-    }
-}
 
 #[cfg(feature = "arbitrary")]
 impl<S: SPrim> arbitrary::Arbitrary<'_> for SInt<S>

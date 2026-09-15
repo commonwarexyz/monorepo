@@ -615,23 +615,16 @@ mod tests {
 
     impl FixedArrayBound for Bounded {}
 
-    #[derive(Debug, Eq, PartialEq, FixedArray, Write)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read)]
     #[fixed_array(bytes([u8; 2]))]
+    #[codec(read_bounds(T: FixedArrayBound))]
     struct BoundedGeneric<T> {
-        #[codec(encode_with = {})]
+        #[codec(
+            encode_with = {},
+            read_with = { Ok(PhantomData) }
+        )]
         marker: PhantomData<T>,
         raw: [u8; 2],
-    }
-
-    impl<T: FixedArrayBound> Read for BoundedGeneric<T> {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self {
-                marker: PhantomData,
-                raw: <[u8; 2]>::read(buf)?,
-            })
-        }
     }
 
     impl<T: FixedArrayBound> FixedSize for BoundedGeneric<T> {
@@ -663,23 +656,15 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray, Write)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read)]
     #[fixed_array(bytes([u8; 2]))]
     struct LifetimeFixed<'a> {
-        #[codec(encode_with = {})]
+        #[codec(
+            encode_with = {},
+            read_with = { Ok(PhantomData) }
+        )]
         marker: PhantomData<&'a ()>,
         raw: [u8; 2],
-    }
-
-    impl Read for LifetimeFixed<'_> {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self {
-                marker: PhantomData,
-                raw: <[u8; 2]>::read(buf)?,
-            })
-        }
     }
 
     impl FixedSize for LifetimeFixed<'_> {

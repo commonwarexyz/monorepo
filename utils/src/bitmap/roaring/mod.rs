@@ -75,7 +75,7 @@ mod prunable;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use container::Container;
 use core::ops::Range;
 pub use prunable::Prunable;
@@ -104,6 +104,7 @@ const fn combine(key: u64, index: u16) -> u64 {
 ///
 /// This is an append-only data structure optimized for memory efficiency and
 /// fast set operations. Values can be inserted but not removed.
+/// The read configuration bounds the container count to limit decoding allocations.
 ///
 /// # Example
 ///
@@ -124,9 +125,14 @@ const fn combine(key: u64, index: u16) -> u64 {
 ///     println!("{}", value);
 /// }
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 pub struct Bitmap {
     /// Map from high 48 bits to container storing low 16 bits.
+    #[codec(read_with = {
+        let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
+        Self::from_containers(containers).map(|bitmap| bitmap.containers)
+    })]
     containers: BTreeMap<u64, Container>,
 }
 
@@ -328,19 +334,6 @@ impl FromIterator<u64> for Bitmap {
         let mut bitmap = Self::new();
         bitmap.extend(iter);
         bitmap
-    }
-}
-
-impl Read for Bitmap {
-    /// Configuration for decoding: range limit on number of containers.
-    ///
-    /// Use `RangeCfg::new(..=max_containers)` to limit memory allocation.
-    type Cfg = RangeCfg<usize>;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        // Use BTreeMap's codec which validates sorted/unique keys and bounds count.
-        let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
-        Self::from_containers(containers)
     }
 }
 

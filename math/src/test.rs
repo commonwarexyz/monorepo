@@ -1,5 +1,5 @@
 use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
-use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Read, Write};
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -14,23 +14,21 @@ fn mul_mod(a: u64, b: u64, p: u64) -> u64 {
 }
 
 /// The prime field F_p for the test modulus `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Write, FixedSize)]
-pub struct F(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Write, FixedSize, Read)]
+#[read_cfg(())]
+pub struct F(
+    #[codec(read_with = {
+    let value = u64::read_cfg(buf, cfg)?;
+    if value >= P {
+        return Err(commonware_codec::Error::Invalid("F", "out of range"));
+    }
+    Ok(value)
+})]
+    u64,
+);
 
 impl F {
     pub const MAX: u64 = P - 1;
-}
-
-impl Read for F {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let value = u64::read(buf)?;
-        if value >= P {
-            return Err(commonware_codec::Error::Invalid("F", "out of range"));
-        }
-        Ok(Self(value))
-    }
 }
 
 impl From<u8> for F {
@@ -138,24 +136,22 @@ impl arbitrary::Arbitrary<'_> for F {
 /// This is constructed as a subgroup of the units in `F_q`.
 ///
 /// `q = 2p + 1`, so the group of units has a subgroup of order `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Write, FixedSize)]
-pub struct G(u64);
-
-impl Read for G {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let value = u64::read(buf)?;
-        if value >= Q {
-            return Err(commonware_codec::Error::Invalid("G", "out of range"));
-        }
-        let out = Self(value);
-        if out.0 == 0 || out.scale(&[P]).0 != 1 {
-            return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
-        }
-        Ok(out)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Write, FixedSize, Read)]
+#[read_cfg(())]
+pub struct G(
+    #[codec(read_with = {
+    let value = u64::read_cfg(buf, cfg)?;
+    if value >= Q {
+        return Err(commonware_codec::Error::Invalid("G", "out of range"));
     }
-}
+    let out = G(value);
+    if out.0 == 0 || out.scale(&[P]).0 != 1 {
+        return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
+    }
+    Ok(value)
+})]
+    u64,
+);
 
 impl Object for G {}
 
@@ -240,7 +236,7 @@ commonware_macros::stability_scope!(ALPHA {
         use super::*;
         use crate::algebra::test_suites;
         use arbitrary::{Arbitrary, Unstructured};
-        use commonware_codec::Encode as _;
+        use commonware_codec::{Encode as _, ReadExt as _};
 
         #[derive(Debug, Arbitrary)]
         pub enum Plan {
@@ -282,7 +278,7 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, ReadExt};
     use commonware_utils::test_rng;
 
     #[test]

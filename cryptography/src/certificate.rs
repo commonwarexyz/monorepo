@@ -71,9 +71,7 @@ use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::Bytes;
-use commonware_codec::{
-    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, Read, Write, types::lazy::Lazy,
-};
+use commonware_codec::{Codec, CodecFixed, EncodeSize, Read, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
@@ -511,8 +509,12 @@ pub trait Provider: Clone + Send + Sync + 'static {
 /// Bitmap wrapper that tracks which participants signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, EncodeSize)]
+/// The read configuration bounds the participant count. Signing schemes must
+/// validate the exact bitmap length against their participant set during verification.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, EncodeSize, Read)]
+#[read_cfg(usize)]
 pub struct Signers {
+    #[codec(cfg = &(*cfg as u64))]
     bitmap: BitMap<1>,
 }
 
@@ -583,21 +585,6 @@ where
     fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
         let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
         Self::new(total, signers)
-    }
-}
-
-impl Read for Signers {
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, max_participants: &usize) -> Result<Self, CodecError> {
-        let bitmap = BitMap::read_cfg(reader, &(*max_participants as u64))?;
-        // The participant count is treated as an upper bound for decoding flexibility, e.g. one
-        // might use `Scheme::certificate_codec_config_unbounded` for decoding certificates from
-        // local storage.
-        //
-        // Exact length validation **must** be enforced at verification time by the signing schemes
-        // against the actual participant set size.
-        Ok(Self { bitmap })
     }
 }
 

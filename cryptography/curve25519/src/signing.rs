@@ -205,16 +205,21 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
 /// Encodings that do not represent a curve point can never verify a signature.
 /// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
 /// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
-#[derive(Clone, Write)]
+#[derive(Clone, Read, Write)]
 pub struct VerifyingKey {
     /// The encoded point.
     ///
     /// When deserializing, we just have the bytes, deferring parsing of them until
     /// signature verification, so that we can more efficiently parse them in batch.
-    #[codec(encode_with = { value.as_bytes().write(buf); })]
+    #[codec(
+        encode_with = { value.as_bytes().write(buf); },
+        read_with = {
+            Ok(core::VerifyingKeyBytes::new(<[u8; 32]>::read_cfg(buf, cfg)?))
+        }
+    )]
     bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
-    #[codec(encode_with = {})]
+    #[codec(encode_with = {}, read_with = { Ok(None) })]
     point: Option<G>,
 }
 
@@ -264,17 +269,6 @@ impl AsRef<[u8]> for VerifyingKey {
 
 impl FixedSize for VerifyingKey {
     const SIZE: usize = 32;
-}
-
-impl Read for VerifyingKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
-            point: None,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]

@@ -502,11 +502,12 @@ impl GT {
 }
 
 /// The private key type.
-#[derive(Clone, Debug, PartialEq, Eq, Write)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, Read)]
 pub struct Private {
     #[codec(
         encode_with = { value.expose(|scalar| scalar.write(buf)); },
-        encode_size = Self::SIZE
+        encode_size = Self::SIZE,
+        read_with = { Ok(Secret::new(Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?)) }
     )]
     scalar: Secret<Scalar>,
 }
@@ -531,15 +532,6 @@ impl Private {
     /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
     pub fn expose_unwrap(self) -> Scalar {
         self.scalar.expose_unwrap()
-    }
-}
-
-impl Read for Private {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
-        Ok(Self::new(scalar))
     }
 }
 

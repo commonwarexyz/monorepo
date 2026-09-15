@@ -263,20 +263,17 @@ mod test {
     use proptest::prelude::*;
 
     /// A byte that's always <= 100
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Write, FixedSize)]
-    struct Small(u8);
-
-    impl Read for Small {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl crate::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
-            let byte = u8::read_cfg(buf, &())?;
-            if byte > 100 {
-                return Err(crate::Error::Invalid("Small", "value > 100"));
-            }
-            Ok(Self(byte))
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Write, FixedSize, Read)]
+    struct Small(
+        #[codec(read_with = {
+        let byte = u8::read_cfg(buf, &())?;
+        if byte > 100 {
+            return Err(crate::Error::Invalid("Small", "value > 100"));
         }
-    }
+        Ok(byte)
+    })]
+        u8,
+    );
 
     impl Arbitrary for Small {
         type Parameters = ();

@@ -3,7 +3,7 @@
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
@@ -86,8 +86,25 @@ pub enum Error {
 }
 
 /// A vector that is guaranteed to contain at least one element.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
-pub struct NonEmptyVec<T>(Vec<T>);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize, Read)]
+#[read_cfg((RangeCfg<NonZeroUsize>, T::Cfg))]
+#[codec(read_bounds(T: Read))]
+pub struct NonEmptyVec<T>(
+    #[codec(
+        cfg = &(cfg.0.into(), cfg.1.clone()),
+        read_with = {
+            let items = Vec::read_cfg(buf, cfg)?;
+            if items.is_empty() {
+                return Err(commonware_codec::Error::Invalid(
+                    "NonEmptyVec",
+                    "cannot decode empty vector",
+                ));
+            }
+            Ok(items)
+        }
+    )]
+    Vec<T>,
+);
 
 impl<T> NonEmptyVec<T> {
     /// Creates a new [`NonEmptyVec`] with a single element.
@@ -375,21 +392,6 @@ impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter_mut()
-    }
-}
-
-impl<T: Read> Read for NonEmptyVec<T> {
-    type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
-        if items.is_empty() {
-            return Err(commonware_codec::Error::Invalid(
-                "NonEmptyVec",
-                "cannot decode empty vector",
-            ));
-        }
-        Ok(Self(items))
     }
 }
 

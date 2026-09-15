@@ -11,7 +11,7 @@
 use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum number of runs in a Run container.
@@ -23,7 +23,7 @@ pub const MAX_RUNS: usize = 32768;
 ///
 /// Each entry is an inclusive range `[start, end]`. Entries are sorted by `start` and
 /// kept disjoint and non-adjacent: adjacent or overlapping runs are merged on insertion.
-#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct Run {
     /// Sorted vector of `(start, end)` inclusive ranges.
     ///
@@ -32,6 +32,11 @@ pub struct Run {
     ///
     /// Invariant: for any consecutive entries `(s1, e1)` and `(s2, e2)`, `e1 + 1 < s2`
     /// (non-overlapping AND non-adjacent — adjacent runs would have been merged).
+    #[codec(read_with = {
+        let runs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
+        validate_runs(&runs)?;
+        Ok(runs)
+    })]
     runs: Vec<(u16, u16)>,
 }
 
@@ -342,16 +347,6 @@ impl Run {
     pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
         validate_runs(&runs)?;
         Ok(Self { runs })
-    }
-}
-
-impl Read for Run {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        // Read as Vec of (start, end) pairs with bounded count to prevent OOM.
-        let runs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
-        Self::from_runs_checked(runs)
     }
 }
 

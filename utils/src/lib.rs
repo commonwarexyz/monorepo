@@ -66,9 +66,7 @@ commonware_macros::stability_scope!(BETA {
     pub use probability::Probability;
     pub mod range;
 
-    use commonware_codec::{
-        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
-    };
+    use commonware_codec::{EncodeSize, Read, Write, varint::UInt};
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///
@@ -81,9 +79,18 @@ commonware_macros::stability_scope!(BETA {
     /// Participant indices are used to identify validators in attestations,
     /// votes, and certificates. The index corresponds to the position of the
     /// validator's public key in the ordered participant set.
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
+    #[derive(
+        Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize, Read,
+    )]
     #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-    pub struct Participant(#[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())] u32);
+    pub struct Participant(
+        #[codec(
+            encode_with = { UInt(*value).write(buf); },
+            encode_size = UInt(*value).encode_size(),
+            read_with = { Ok(UInt::read_cfg(buf, &())?.into()) }
+        )]
+        u32,
+    );
 
     impl Participant {
         /// Creates a new participant from a u32 index.
@@ -115,15 +122,6 @@ commonware_macros::stability_scope!(BETA {
     impl core::fmt::Display for Participant {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "{}", self.0)
-        }
-    }
-
-    impl Read for Participant {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-            let value: u32 = UInt::read(buf)?.into();
-            Ok(Self(value))
         }
     }
 

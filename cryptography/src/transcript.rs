@@ -6,7 +6,7 @@
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use commonware_codec::{
-    Buf, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
+    EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
     varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_math::algebra::Random;
@@ -512,24 +512,17 @@ impl Summary {
 /// This is the primary way to compare two transcripts for equality.
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FixedArray, Write)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FixedArray, Write, Read)]
 pub struct Summary {
-    #[codec(encode_with = { buf.put_slice(value.as_bytes()); })]
+    #[codec(
+        encode_with = { buf.put_slice(value.as_bytes()); },
+        read_with = |buf, _cfg| Ok(blake3::Hash::from_bytes(ReadExt::read(buf)?))
+    )]
     hash: blake3::Hash,
 }
 
 impl FixedSize for Summary {
     const SIZE: usize = blake3::OUT_LEN;
-}
-
-impl Read for Summary {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            hash: blake3::Hash::from_bytes(ReadExt::read(buf)?),
-        })
-    }
 }
 
 impl AsRef<[u8]> for Summary {

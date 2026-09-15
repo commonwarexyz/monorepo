@@ -33,8 +33,24 @@ pub enum Error {
 use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
-pub struct Set<T>(Vec<T>);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize, Read)]
+#[read_cfg((RangeCfg<usize>, T::Cfg))]
+#[codec(read_bounds(T: Read + Ord))]
+pub struct Set<T>(
+    #[codec(read_with = {
+        let items = Vec::<T>::read_cfg(buf, cfg)?;
+        for i in 1..items.len() {
+            if items[i - 1] >= items[i] {
+                return Err(commonware_codec::Error::Invalid(
+                    "Set",
+                    "items must be sorted and unique",
+                ));
+            }
+        }
+        Ok(items)
+    })]
+    Vec<T>,
+);
 
 impl<T: fmt::Debug> fmt::Debug for Set<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,23 +104,6 @@ impl<T> Set<T> {
     /// Returns an iterator over the items in the collection.
     pub fn iter(&self) -> core::slice::Iter<'_, T> {
         self.into_iter()
-    }
-}
-
-impl<T: Read + Ord> Read for Set<T> {
-    type Cfg = (RangeCfg<usize>, T::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let items = Vec::<T>::read_cfg(buf, cfg)?;
-        for i in 1..items.len() {
-            if items[i - 1] >= items[i] {
-                return Err(commonware_codec::Error::Invalid(
-                    "Set",
-                    "items must be sorted and unique",
-                ));
-            }
-        }
-        Ok(Self(items))
     }
 }
 
@@ -592,8 +591,19 @@ where
 }
 
 /// An ordered, deduplicated collection of key-value pairs with unique values.
-#[derive(Clone, PartialEq, Eq, Hash, Write, EncodeSize)]
+#[derive(Clone, PartialEq, Eq, Hash, Write, EncodeSize, Read)]
+#[read_cfg((RangeCfg<usize>, K::Cfg, V::Cfg))]
+#[codec(read_bounds(K: Read + Ord, V: Eq + Hash + Read))]
 pub struct BiMap<K, V> {
+    #[codec(read_with = {
+        let inner = Map::<K, V>::read_cfg(buf, cfg)?;
+        Self::try_from(inner).map(|value| value.inner).map_err(|_| {
+            commonware_codec::Error::Invalid(
+                "BiMap",
+                "duplicate value detected during deserialization",
+            )
+        })
+    })]
     inner: Map<K, V>,
 }
 
@@ -784,20 +794,6 @@ impl<K: Ord + Clone, V: Clone + Eq + Hash, const N: usize> TryFrom<&[(K, V); N]>
 impl<K, V> From<BiMap<K, V>> for Vec<(K, V)> {
     fn from(wrapped: BiMap<K, V>) -> Self {
         wrapped.inner.into()
-    }
-}
-
-impl<K: Read + Ord, V: Eq + Hash + Read> Read for BiMap<K, V> {
-    type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let inner = Map::<K, V>::read_cfg(buf, cfg)?;
-        Self::try_from(inner).map_err(|_| {
-            commonware_codec::Error::Invalid(
-                "BiMap",
-                "duplicate value detected during deserialization",
-            )
-        })
     }
 }
 

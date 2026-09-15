@@ -354,9 +354,7 @@ use crate::{
     },
     transcript::{Summary, Transcript, Version},
 };
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
-};
+use commonware_codec::{Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, Write, mode, modes};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
     poly::{Interpolator, Poly},
@@ -565,12 +563,19 @@ pub enum FinalizeError<P> {
 }
 
 /// The output of a successful DKG.
-#[derive(Debug, Clone, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Debug, Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds(P: PublicKey))]
 pub struct Output<V: Variant, P> {
+    #[codec(cfg = &())]
     summary: Summary,
+    #[codec(cfg = cfg)]
     public: Sharing<V>,
+    #[codec(cfg = &(RangeCfg::new(1..=cfg.0.get() as usize), ()))]
     dealers: Set<P>,
+    #[codec(cfg = &(RangeCfg::new(1..=cfg.0.get() as usize), ()))]
     players: Set<P>,
+    #[codec(cfg = &(RangeCfg::new(0..=cfg.0.get() as usize), ()))]
     revealed: Set<P>,
 }
 
@@ -606,24 +611,6 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// These are players whose shares can be reconstructed from the selected dealer reveals.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_participants, max_supported_mode): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let max_participants_usize = max_participants.get() as usize;
-        Ok(Self {
-            summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
-            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?,
-            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?,
-        })
     }
 }
 
@@ -996,11 +983,12 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct DealerPrivMsg {
     #[codec(
         encode_with = { value.expose(|share| share.write(buf)); },
-        encode_size = value.expose(|share| share.encode_size())
+        encode_size = value.expose(|share| share.encode_size()),
+        read_with = |buf, _cfg| Ok(Secret::new(Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?))
     )]
     share: Secret<Scalar>,
 }
@@ -1011,17 +999,6 @@ impl DealerPrivMsg {
         Self {
             share: Secret::new(share),
         }
-    }
-}
-
-impl Read for DealerPrivMsg {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(Scalar::read_cfg(
-            buf,
-            &ScalarReadCfg::RejectZero,
-        )?))
     }
 }
 
@@ -2052,6 +2029,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_codec::ReadExt;
     use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
     use std::collections::BTreeSet;

@@ -1,5 +1,5 @@
 use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
-use commonware_codec::{Buf, FixedSize, Read, Write};
+use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand_core::CryptoRng;
 
@@ -9,20 +9,18 @@ use rand_core::CryptoRng;
 const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
-#[derive(Clone, Copy, PartialEq, Eq, Write, FixedSize)]
-pub struct F(u64);
-
-impl Read for F {
-    type Cfg = <u64 as Read>::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let x = u64::read_cfg(buf, cfg)?;
-        if x >= P {
-            return Err(commonware_codec::Error::Invalid("F", "out of range"));
-        }
-        Ok(Self(x))
+#[derive(Clone, Copy, PartialEq, Eq, Write, FixedSize, Read)]
+#[read_cfg(<u64 as Read>::Cfg)]
+pub struct F(
+    #[codec(read_with = {
+    let x = u64::read_cfg(buf, cfg)?;
+    if x >= P {
+        return Err(commonware_codec::Error::Invalid("F", "out of range"));
     }
-}
+    Ok(x)
+})]
+    u64,
+);
 
 impl core::fmt::Debug for F {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
