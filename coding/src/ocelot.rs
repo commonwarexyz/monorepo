@@ -5,7 +5,7 @@ mod kernel;
 mod scheme;
 mod transform;
 
-use crate::{Config, PhasedScheme};
+use crate::{Config, PhasedScheme, Scheme};
 use bytes::Buf;
 use code::Impl;
 use commonware_cryptography::{Hasher, transcript::Summary};
@@ -14,10 +14,165 @@ use field::gf8::{GF8, GF8Vec};
 use impl16::Impl16;
 use kernel::{Kernel, WithKernel, with_kernel};
 pub use scheme::Error;
-use scheme::{CheckedShard, CheckingData, OcelotX, StrongShard, WeakShard};
-use std::{fmt, marker::PhantomData, ops::Range};
+use scheme::{
+    BasicCheckedShard, CheckedShard, CheckingData, OcelotHintedX, OcelotX, StrongShard, WeakShard,
+};
+use std::{
+    fmt,
+    marker::PhantomData,
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
+use transform::Tables;
 
 macro_rules! ocelot {
+    ($module:ident, $name:ident, $implementation:ident, $field:literal, $order:literal) => {
+        mod $module {
+            use super::*;
+
+            #[doc = concat!("Reed-Solomon coding over ", $field, ", with Merkle commitments using `H`.")]
+            ///
+            /// The original count plus the extra count rounded up to a power of two must
+            #[doc = concat!("not exceed ", $order, ".")]
+            ///
+            /// Shards are checked independently through Merkle inclusion proofs. Decoding
+            /// reconstructs the canonical codeword and verifies its commitment before
+            /// returning the payload, rejecting inconsistent encodings.
+            ///
+            /// Arithmetic kernels are selected internally for the current CPU. Large
+            /// shards are processed in independent byte stripes using the supplied strategy.
+            pub struct $name<H> {
+                _marker: PhantomData<H>,
+            }
+
+            impl<H> Clone for $name<H> {
+                fn clone(&self) -> Self {
+                    *self
+                }
+            }
+
+            impl<H> Copy for $name<H> {}
+
+            impl<H> fmt::Debug for $name<H> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.debug_struct(stringify!($name)).finish()
+                }
+            }
+
+            impl<H: Hasher> Scheme for $name<H> {
+                type Commitment = H::Digest;
+                type Shard = WeakShard<H::Digest>;
+                type CheckedShard = BasicCheckedShard<H::Digest>;
+                type Error = Error;
+
+                fn encode(
+                    config: &Config,
+                    data: impl Buf,
+                    strategy: &impl Strategy,
+                ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+                    with_kernel(Encode::<H, _, _> {
+                        config,
+                        data,
+                        strategy,
+                        _marker: PhantomData,
+                    })
+                }
+
+                fn check(
+                    config: &Config,
+                    commitment: &Self::Commitment,
+                    index: u16,
+                    shard: &Self::Shard,
+                    strategy: &impl Strategy,
+                ) -> Result<Self::CheckedShard, Self::Error> {
+                    with_kernel(Check::<H, _> {
+                        config,
+                        commitment,
+                        index,
+                        shard,
+                        strategy,
+                    })
+                }
+
+                fn decode<'a>(
+                    config: &Config,
+                    commitment: &Self::Commitment,
+                    shards: impl Iterator<Item = &'a Self::CheckedShard>,
+                    strategy: &impl Strategy,
+                ) -> Result<Vec<u8>, Self::Error> {
+                    with_kernel(Decode::<H, _, _> {
+                        config,
+                        commitment,
+                        shards,
+                        strategy,
+                    })
+                }
+            }
+
+            struct Encode<'a, H, B, S> {
+                config: &'a Config,
+                data: B,
+                strategy: &'a S,
+                _marker: PhantomData<H>,
+            }
+
+            impl<H: Hasher, B: Buf, S: Strategy> WithKernel for Encode<'_, H, B, S> {
+                type Output = Result<(H::Digest, Vec<WeakShard<H::Digest>>), Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H>::new($implementation::new(kernel))
+                        .encode(self.config, self.data, self.strategy)
+                }
+            }
+
+            struct Check<'a, H: Hasher, S> {
+                config: &'a Config,
+                commitment: &'a H::Digest,
+                index: u16,
+                shard: &'a WeakShard<H::Digest>,
+                strategy: &'a S,
+            }
+
+            impl<H: Hasher, S: Strategy> WithKernel for Check<'_, H, S> {
+                type Output = Result<BasicCheckedShard<H::Digest>, Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H>::new($implementation::new(kernel)).check(
+                        self.config,
+                        self.commitment,
+                        self.index,
+                        self.shard,
+                        self.strategy,
+                    )
+                }
+            }
+
+            struct Decode<'a, H: Hasher, T, S> {
+                config: &'a Config,
+                commitment: &'a H::Digest,
+                shards: T,
+                strategy: &'a S,
+            }
+
+            impl<'a, H: Hasher, T: Iterator<Item = &'a BasicCheckedShard<H::Digest>>, S: Strategy>
+                WithKernel for Decode<'_, H, T, S>
+            {
+                type Output = Result<Vec<u8>, Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H>::new($implementation::new(kernel))
+                        .decode(self.config, self.commitment, self.shards, self.strategy)
+                }
+            }
+        }
+        pub use $module::$name;
+    };
+}
+
+ocelot!(ocelot8, Ocelot8, Impl8, "GF(2^8)", "256");
+ocelot!(ocelot16, Ocelot16, Impl16, "GF(2^16)", "65,536");
+
+macro_rules! ocelot_hinted {
     ($module:ident, $name:ident, $implementation:ident, $checksum_bytes:literal, $field:literal, $order:literal) => {
         mod $module {
             use super::*;
@@ -149,7 +304,7 @@ macro_rules! ocelot {
                 type Output = Result<(Summary, Vec<StrongShard<H::Digest>>), Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).encode(
+                    OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).encode(
                         self.namespace,
                         self.config,
                         self.data,
@@ -172,7 +327,7 @@ macro_rules! ocelot {
                 type Output = Result<Vec<u8>, Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).decode(
+                    OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).decode(
                         self.config,
                         self.commitment,
                         self.checking_data,
@@ -195,7 +350,7 @@ macro_rules! ocelot {
                 type Output = Result<(CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>), Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).weaken(
+                    OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).weaken(
                         self.namespace,
                         self.config,
                         self.commitment,
@@ -219,7 +374,7 @@ macro_rules! ocelot {
                 type Output = Result<CheckedShard, Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).check(
+                    OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).check(
                         self.config,
                         self.commitment,
                         self.checking_data,
@@ -234,8 +389,15 @@ macro_rules! ocelot {
     };
 }
 
-ocelot!(ocelot8, Ocelot8, Impl8, 16, "GF(2^8)", "256");
-ocelot!(ocelot16, Ocelot16, Impl16, 32, "GF(2^16)", "65,536");
+ocelot_hinted!(ocelot_hinted8, OcelotHinted8, Impl8, 16, "GF(2^8)", "256");
+ocelot_hinted!(
+    ocelot_hinted16,
+    OcelotHinted16,
+    Impl16,
+    32,
+    "GF(2^16)",
+    "65,536"
+);
 
 /// Ocelot's GF(2^8) arithmetic, using a concrete byte kernel.
 #[derive(Clone, Copy)]
@@ -254,6 +416,13 @@ impl<K: Kernel> Impl for Impl8<K> {
     type Element = GF8;
     const BITS: usize = 8;
     const NAMESPACE: &'static [u8] = b"_COMMONWARE_CODING_OCELOT8";
+
+    fn tables() -> Arc<Tables<GF8>> {
+        static TABLES: OnceLock<Arc<Tables<GF8>>> = OnceLock::new();
+        TABLES
+            .get_or_init(|| Arc::new(Tables::new::<Self>()))
+            .clone()
+    }
 
     fn basis() -> &'static [GF8] {
         &[
