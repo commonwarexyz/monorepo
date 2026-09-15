@@ -987,22 +987,139 @@ impl WithKernel for ChecksumRange<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Externally driven property checks for Ocelot.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::{
-        Impl8,
-        code::{
-            Encoder,
-            test_suites::{
-                DefaultImpl, ImplPlan, fuzz_code, fuzz_impl, fuzz_impl_matches_reference,
-            },
-        },
+        Impl8, Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16,
+        code::test_suites::{DefaultImpl, fuzz_code, fuzz_impl, fuzz_impl_matches_reference},
         field::gf8::GF8,
         kernel::{Kernel, WithKernel, portable::Portable, with_kernel},
     };
-    use commonware_parallel::Sequential;
+    pub use super::{
+        code::{fuzz as code, test_suites::ImplPlan},
+        field::{gf8::fuzz as gf8, gf16::fuzz as gf16},
+        impl16::fuzz as impl16,
+        kernel::fuzz as kernel,
+        scheme::fuzz as scheme,
+        transform::fuzz as transform,
+    };
+    use crate::{
+        PhasedAsScheme,
+        test_suites::{generate_case, phased_roundtrip, roundtrip},
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_cryptography::Sha256;
 
     const OCELOT8: Impl8<Portable> = Impl8::new(Portable);
+
+    /// A bounded property check for the GF(2^8) implementation.
+    #[derive(Debug, Arbitrary)]
+    pub enum Impl8Plan {
+        /// Check portable encoding and erasure recovery.
+        PortableCode,
+        /// Check a specialized implementation method against scalar arithmetic.
+        Implementation(ImplPlan),
+        /// Check the default-method adapter against scalar arithmetic.
+        DefaultMethods(ImplPlan),
+        /// Compare the dispatched implementation with the portable implementation.
+        DispatchedDifferential(ImplPlan),
+    }
+
+    impl Impl8Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::PortableCode => fuzz_code(u, OCELOT8),
+                Self::Implementation(plan) => fuzz_impl(
+                    u,
+                    OCELOT8,
+                    plan,
+                    Portable::LANES,
+                    elements,
+                    layout,
+                    GF8::from,
+                ),
+                Self::DefaultMethods(plan) => fuzz_impl(
+                    u,
+                    DefaultImpl(OCELOT8),
+                    plan,
+                    Portable::LANES,
+                    elements,
+                    layout,
+                    GF8::from,
+                ),
+                Self::DispatchedDifferential(plan) => with_kernel(FuzzImplDifferential { u, plan }),
+            }
+        }
+    }
+
+    /// A bounded property check for Ocelot.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check GF(2^8) coding implementation properties.
+        Impl8(Impl8Plan),
+        /// Check GF(2^16) coding implementation properties.
+        Impl16(impl16::Plan),
+        /// Check internal coding machinery.
+        Code(code::Plan),
+        /// Check byte kernels.
+        Kernel(kernel::Plan),
+        /// Check GF(2^8) arithmetic.
+        Gf8(gf8::Plan),
+        /// Check GF(2^16) arithmetic.
+        Gf16(gf16::Plan),
+        /// Check transform machinery.
+        Transform(transform::Plan),
+        /// Check coding scheme internals.
+        Scheme(scheme::Plan),
+        /// Roundtrip basic and phased GF(2^8) wrappers.
+        Roundtrip8,
+        /// Roundtrip basic and phased GF(2^16) wrappers.
+        Roundtrip16,
+        /// Roundtrip the hinted GF(2^8) phased API.
+        HintedRoundtrip8,
+        /// Roundtrip the hinted GF(2^16) phased API.
+        HintedRoundtrip16,
+    }
+
+    impl Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Impl8(plan) => plan.run(u),
+                Self::Impl16(plan) => plan.run(u),
+                Self::Code(plan) => plan.run(u),
+                Self::Kernel(plan) => plan.run(u),
+                Self::Gf8(plan) => plan.run(u),
+                Self::Gf16(plan) => plan.run(u),
+                Self::Transform(plan) => plan.run(u),
+                Self::Scheme(plan) => plan.run(u),
+                Self::Roundtrip8 => {
+                    let (config, data, selected) = generate_case(u)?;
+                    roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                    roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+                    Ok(())
+                }
+                Self::Roundtrip16 => {
+                    let (config, data, selected) = generate_case(u)?;
+                    roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+                    roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+                    Ok(())
+                }
+                Self::HintedRoundtrip8 => {
+                    let (config, data, selected) = generate_case(u)?;
+                    phased_roundtrip::<OcelotHinted8<Sha256>>(&config, &data, &selected);
+                    Ok(())
+                }
+                Self::HintedRoundtrip16 => {
+                    let (config, data, selected) = generate_case(u)?;
+                    phased_roundtrip::<OcelotHinted16<Sha256>>(&config, &data, &selected);
+                    Ok(())
+                }
+            }
+        }
+    }
 
     fn elements(bytes: &[u8]) -> Vec<GF8> {
         bytes.iter().copied().map(GF8::from).collect()
@@ -1012,12 +1129,43 @@ mod tests {
         elements.iter().copied().map(u8::from).collect()
     }
 
+    struct FuzzImplDifferential<'a, 'b> {
+        u: &'a mut Unstructured<'b>,
+        plan: ImplPlan,
+    }
+
+    impl WithKernel for FuzzImplDifferential<'_, '_> {
+        type Output = arbitrary::Result<()>;
+
+        fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+            fuzz_impl_matches_reference(
+                self.u,
+                Impl8::new(kernel),
+                OCELOT8,
+                self.plan,
+                K::LANES,
+                elements,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Impl8,
+        code::{Encoder, test_suites::ImplPlan},
+        fuzz::Impl8Plan,
+        kernel::portable::Portable,
+    };
+    use commonware_parallel::Sequential;
+
     #[test]
     fn minifuzz_code() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(100)
-            .test(|u| fuzz_code(u, OCELOT8));
+            .test(|u| Impl8Plan::PortableCode.run(u));
     }
 
     #[test]
@@ -1026,68 +1174,33 @@ mod tests {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(100)
-                .test(|u| {
-                    fuzz_impl(
-                        u,
-                        OCELOT8,
-                        plan,
-                        Portable::LANES,
-                        elements,
-                        layout,
-                        GF8::from,
-                    )
-                });
+                .test(|u| Impl8Plan::Implementation(plan).run(u));
         }
+    }
+
+    #[test]
+    fn minifuzz_default_methods() {
         for plan in ImplPlan::DEFAULTS {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(100)
-                .test(|u| {
-                    fuzz_impl(
-                        u,
-                        DefaultImpl(OCELOT8),
-                        plan,
-                        Portable::LANES,
-                        elements,
-                        layout,
-                        GF8::from,
-                    )
-                });
-        }
-    }
-
-    struct FuzzImplDifferential;
-
-    impl WithKernel for FuzzImplDifferential {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            for plan in ImplPlan::ALL {
-                commonware_invariants::minifuzz::Builder::default()
-                    .with_seed(0)
-                    .with_search_limit(100)
-                    .test(|u| {
-                        fuzz_impl_matches_reference(
-                            u,
-                            Impl8::new(kernel),
-                            OCELOT8,
-                            plan,
-                            K::LANES,
-                            elements,
-                        )
-                    });
-            }
+                .test(|u| Impl8Plan::DefaultMethods(plan).run(u));
         }
     }
 
     #[test]
     fn minifuzz_impl_matches_portable() {
-        with_kernel(FuzzImplDifferential);
+        for plan in ImplPlan::ALL {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| Impl8Plan::DispatchedDifferential(plan).run(u));
+        }
     }
 
     #[test]
     #[should_panic(expected = "too many shards")]
     fn encode_rejects_padded_count_overflow() {
-        Encoder::new(OCELOT8).encode(&[&[1][..]; 127], 129, &Sequential);
+        Encoder::new(Impl8::new(Portable)).encode(&[&[1][..]; 127], 129, &Sequential);
     }
 }

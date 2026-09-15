@@ -829,7 +829,7 @@ fn derivative<I: Impl>(imp: I, data: &mut [u8], len: usize) {
     derivative(imp, b, len);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod test_suites {
     //! Property tests for implementations of Ocelot's shard arithmetic.
     //!
@@ -838,27 +838,38 @@ pub mod test_suites {
     //! decoding properties only need the portable implementations.
 
     use super::{Decoder, Encoder, Error, Impl};
-    use arbitrary::Unstructured;
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{Additive, Field, Ring};
     use commonware_parallel::Sequential;
     use std::ops::Range;
 
-    /// One independently fuzzed part of the [`Impl`] contract.
-    #[derive(Clone, Copy, Debug)]
+    /// One independently fuzzed part of Ocelot's shard arithmetic contract.
+    #[derive(Arbitrary, Clone, Copy, Debug)]
     pub enum ImplPlan {
+        /// Add shards element by element.
         Add,
+        /// Subtract shards element by element.
         Sub,
+        /// Add a scalar multiple of a shard.
         MulAdd,
+        /// Multiply a shard by a scalar.
         MulInto,
+        /// Subtract a scalar multiple of a shard.
         MulSub,
+        /// Compute the derivative of four shards.
         DerivativeFour,
+        /// Compute the derivative of sixteen shards.
         DerivativeSixteen,
+        /// Check a single butterfly layer.
         Butterfly,
+        /// Check two fused butterfly layers.
         ButterflyTwoLayers,
+        /// Check shard checksums.
         Checksum,
     }
 
     impl ImplPlan {
+        #[cfg(test)]
         pub const ALL: [Self; 10] = [
             Self::Add,
             Self::Sub,
@@ -872,6 +883,7 @@ pub mod test_suites {
             Self::Checksum,
         ];
 
+        #[cfg(test)]
         pub const DEFAULTS: [Self; 5] = [
             Self::MulInto,
             Self::DerivativeFour,
@@ -1716,19 +1728,75 @@ pub mod test_suites {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        Decoder, Encoder, Impl, STRIPE_BYTES, decode_stripe_bytes, derivative, stripe_bytes,
-    };
-    use crate::ocelot::{Impl8, field::gf8::GF8, impl16::Impl16, kernel::portable::Portable};
-    use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
-    use rand::Rng as _;
-    use std::{
-        ops::Range,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+/// Fuzz plans for Ocelot's internal coding machinery.
+/// Fuzz plans for internal coding operations.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::{Impl, derivative};
+    use crate::ocelot::{Impl8, kernel::portable::Portable};
+    use arbitrary::{Arbitrary, Unstructured};
+
+    /// A bounded shape for exercising the recursive derivative.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum DerivativeShape {
+        /// One one-byte shard.
+        OneByOne,
+        /// Two three-byte shards.
+        TwoByThree,
+        /// Four 65-byte shards.
+        FourBy65,
+        /// Eight 129-byte shards.
+        EightBy129,
+        /// Sixteen 511-byte shards.
+        SixteenBy511,
+        /// Sixteen 512-byte shards.
+        SixteenBy512,
+        /// Sixteen 513-byte shards.
+        SixteenBy513,
+        /// Thirty-two 513-byte shards.
+        ThirtyTwoBy513,
+    }
+
+    impl DerivativeShape {
+        const fn dimensions(&self) -> (usize, usize) {
+            match self {
+                Self::OneByOne => (1, 1),
+                Self::TwoByThree => (2, 3),
+                Self::FourBy65 => (4, 65),
+                Self::EightBy129 => (8, 129),
+                Self::SixteenBy511 => (16, 511),
+                Self::SixteenBy512 => (16, 512),
+                Self::SixteenBy513 => (16, 513),
+                Self::ThirtyTwoBy513 => (32, 513),
+            }
+        }
+    }
+
+    /// A bounded property check for coding internals.
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        /// Compare the optimized derivative with its recursive definition.
+        Derivative(DerivativeShape),
+    }
+
+    impl Plan {
+        /// Run this fuzz plan using additional structured input from `u`.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Derivative(shape) => {
+                    let imp = Impl8::new(Portable);
+                    let (count, len) = shape.dimensions();
+                    let mut actual = vec![0; count * len];
+                    u.fill_buffer(&mut actual)?;
+                    let mut expected = actual.clone();
+                    derivative(imp, &mut actual, len);
+                    derivative_reference(imp, &mut expected, len);
+                    assert_eq!(actual, expected);
+                    Ok(())
+                }
+            }
+        }
+    }
 
     fn derivative_reference<I: Impl>(imp: I, data: &mut [u8], len: usize) {
         if data.len() == len {
@@ -1745,33 +1813,41 @@ mod tests {
         imp.add_into(a, b);
         derivative_reference(imp, b, len);
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Decoder, Encoder, Impl, STRIPE_BYTES, decode_stripe_bytes,
+        fuzz::{DerivativeShape, Plan},
+        stripe_bytes,
+    };
+    use crate::ocelot::{Impl8, field::gf8::GF8, impl16::Impl16, kernel::portable::Portable};
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+    use rand::Rng as _;
+    use std::{
+        ops::Range,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn minifuzz_derivative() {
-        let imp = Impl8::new(Portable);
         // Exercise both fused leaves, the 512-byte cutoff, and recursion explicitly.
-        for (count, len) in [
-            (1, 1),
-            (2, 3),
-            (4, 65),
-            (8, 129),
-            (16, 511),
-            (16, 512),
-            (16, 513),
-            (32, 513),
+        for shape in [
+            DerivativeShape::OneByOne,
+            DerivativeShape::TwoByThree,
+            DerivativeShape::FourBy65,
+            DerivativeShape::EightBy129,
+            DerivativeShape::SixteenBy511,
+            DerivativeShape::SixteenBy512,
+            DerivativeShape::SixteenBy513,
+            DerivativeShape::ThirtyTwoBy513,
         ] {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(100)
-                .test(|u| {
-                    let mut actual = vec![0; count * len];
-                    u.fill_buffer(&mut actual)?;
-                    let mut expected = actual.clone();
-                    derivative(imp, &mut actual, len);
-                    derivative_reference(imp, &mut expected, len);
-                    assert_eq!(actual, expected);
-                    Ok(())
-                });
+                .test(|u| Plan::Derivative(shape).run(u));
         }
     }
 
