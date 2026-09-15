@@ -207,6 +207,7 @@ mod tests {
         test_keyless_variable_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
         test_keyless_variable_rewind_recovery => run_rewind_recovery, reopen;
         test_keyless_variable_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_variable_rewind_pruned_floor_errors => run_rewind_pruned_floor_errors, reopen;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
