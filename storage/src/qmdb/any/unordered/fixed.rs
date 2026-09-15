@@ -640,66 +640,6 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical
-    /// root and key-value state.
-    #[test_traced("WARN")]
-    fn test_unordered_fixed_init_cache_equivalence() {
-        deterministic::Runner::default().start(|context| async move {
-            // Populate a database with enough keys to drive collision resolution in the compressed
-            // index, then commit and drop it.
-            let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-            let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
-
-            // Track the expected key-value state alongside the applied ops. The `any` root is a
-            // pure function of the immutable log, so only a state check can catch a snapshot
-            // rebuilt into the wrong index.
-            let ops = create_test_ops(10_000);
-            let mut expected = HashMap::new();
-            for op in &ops {
-                match op {
-                    Operation::Update(Update(key, value)) => {
-                        expected.insert(*key, Some(*value));
-                    }
-                    Operation::Delete(key) => {
-                        expected.insert(*key, None);
-                    }
-                    Operation::CommitFloor(_, _) => unreachable!(),
-                }
-            }
-            let db = apply_ops(db, ops).await;
-            let db = db.commit().await.unwrap();
-            let db = db.sync().await.unwrap();
-            let root = db.root();
-            drop(db);
-
-            // Reopen with the cache disabled, with a tiny multi-entry cache that evicts throughout
-            // replay, and with a large cache. All rebuild the snapshot from the same immutable log,
-            // so every root and key-value result must match the pre-drop state.
-            for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
-                let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-                cfg.init_cache_size = cache_size;
-                let ctx = context
-                    .child("reopen")
-                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
-                let db = AnyTest::init(ctx, cfg).await.unwrap();
-                assert_eq!(
-                    db.root(),
-                    root,
-                    "root mismatch at cache_size={cache_size:?}"
-                );
-                for (key, value) in &expected {
-                    assert_eq!(
-                        db.get(key).await.unwrap(),
-                        *value,
-                        "state mismatch at cache_size={cache_size:?}"
-                    );
-                }
-                drop(db);
-            }
-        });
-    }
-
     /// Build a `P`-partitioned unordered db with churny ops, then assert that reopening it with a
     /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
     /// de-interleave, counts that round down to fewer workers with wider ranges, and counts

@@ -711,6 +711,79 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
+    /// with the cache disabled, with a tiny cache that evicts throughout replay, or with a large
+    /// cache must produce the identical root and key-value state. Every variant routes its
+    /// rebuild through the shared cache path but resolves collisions with its own index and
+    /// cursor, so each is checked against the state recorded before the drop.
+    pub(crate) async fn test_any_db_init_cache_equivalence<F: Family, D, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context, Option<NonZeroUsize>) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        V: Clone + CodecShared + PartialEq + core::fmt::Debug,
+    {
+        const ELEMENTS: u64 = 2000;
+
+        // Churn overlapping keys across several commits so replay supersedes and deletes cached
+        // locations. Keys share their leading bytes so every variant, including the partitioned
+        // ones, resolves collisions on every lookup.
+        let mut expected: HashMap<Digest, Option<V>> = HashMap::new();
+        let mut db = db;
+        for round in 0u64..4 {
+            let mut batch = db.new_batch();
+            for i in 0u64..ELEMENTS {
+                let k = colliding_digest((i % 16) as u8, i);
+                let v = match (round, i % 4) {
+                    (0, _) => Some(make_value(i)),
+                    (_, 0) => Some(make_value(i + round * ELEMENTS)),
+                    (_, 1) => None,
+                    (_, 2) if round % 2 == 0 => Some(make_value(i + round)),
+                    (_, 2) => None,
+                    _ => continue,
+                };
+                expected.insert(k, v.clone());
+                batch = batch.write(k, v);
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+        }
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        let op_count = db.size();
+        drop(db);
+
+        // All three cache sizes rebuild the snapshot from the same immutable log, so every root
+        // and key-value result must match the pre-drop state.
+        for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
+            let ctx = context
+                .child("reopen")
+                .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
+            let db = reopen_db(ctx, cache_size).await;
+            assert_eq!(
+                db.size(),
+                op_count,
+                "size mismatch at cache_size={cache_size:?}"
+            );
+            assert_eq!(
+                db.root(),
+                root,
+                "root mismatch at cache_size={cache_size:?}"
+            );
+            for (key, value) in &expected {
+                assert_eq!(
+                    db.get(key).await.unwrap(),
+                    *value,
+                    "state mismatch at cache_size={cache_size:?}"
+                );
+            }
+            drop(db);
+        }
+    }
+
     /// Test rewinding to a prior committed state and recovering that state after reopen.
     pub(crate) async fn test_any_db_rewind_recovery<D, V>(
         context: Context,
@@ -1577,6 +1650,34 @@ pub(crate) mod test {
                 }
             }
         };
+        (with_reopen_cache: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $l>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        let ctx = context.child(stringify!($l));
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                            .await
+                            .unwrap();
+                        $f(
+                            ctx,
+                            db,
+                            |ctx, cache_size| {
+                                Box::pin(async move {
+                                    let mut cfg = $cfg::<OneCap>("db", &ctx);
+                                    cfg.init_cache_size = cache_size;
+                                    <$db>::init(ctx.child("storage"), cfg).await.unwrap()
+                                })
+                            },
+                            to_digest,
+                        )
+                        .await;
+                    });
+                }
+            }
+        };
     }
 
     // Generate one slow test per variant across all variants (MMR + MMB).
@@ -1586,6 +1687,9 @@ pub(crate) mod test {
         };
         (with_make_value: $f:ident, $traced:literal) => {
             with_all_variants!(test_for_variant!(with_make_value: $f, $traced));
+        };
+        (with_reopen_cache: $f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant!(with_reopen_cache: $f, $traced));
         };
     }
 
@@ -1613,6 +1717,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
+    test_for_all_variants!(with_reopen_cache: test_any_db_init_cache_equivalence, "WARN");
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
