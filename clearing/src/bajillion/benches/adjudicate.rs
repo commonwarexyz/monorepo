@@ -13,13 +13,13 @@ fn bench_adjudicate(c: &mut Criterion) {
         let (context, header, roots, withdrawal_total, challenges) = super::fixtures::runner()
             .start(|runtime| async move {
                 let fixture = active_close_fixture(runtime, profile).await;
-                let close = fixture.prepared.close();
+                let (context, close, _, challenges) = Box::pin(proven_challenges(fixture)).await;
                 (
-                    fixture.context.clone(),
+                    context,
                     close.header,
                     close.roots,
                     close.withdrawal_total,
-                    proven_challenges(&fixture),
+                    challenges,
                 )
             });
         for (kind, challenge) in challenges {

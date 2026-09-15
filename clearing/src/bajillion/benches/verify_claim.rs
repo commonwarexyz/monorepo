@@ -23,23 +23,26 @@ fn bench_verify_claim(c: &mut Criterion) {
                         &fixture,
                         total,
                         WithdrawalAction::Amount(NonZeroU64::MIN),
+                        0,
                     ),
                 ));
             }
             let account = fixture.accounts[profile.live_accounts / 2].0.clone();
-            let (state, _) = fixture
-                .prepared
-                .apply(fixture.state)
+            let (state, _) = Box::pin(fixture.prepared.apply(fixture.state))
                 .await
                 .expect("close applies");
-            let opening = state.opening(account).await.expect("current balance opens");
+            let opening = state
+                .state()
+                .opening(account)
+                .await
+                .expect("current balance opens");
             assert_eq!(
                 opening
-                    .verify::<Sha256>(&state.root())
+                    .verify::<Sha256>(&state.state().root())
                     .expect("opening verifies"),
                 opening.balance
             );
-            (claims, state.root(), opening)
+            (claims, state.state().root(), opening)
         });
         for (total, fixture) in claims {
             c.bench_function(

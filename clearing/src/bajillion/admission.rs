@@ -4,7 +4,7 @@ mod certificate;
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     posted,
-    qmdb::State,
+    replica::Replica,
     transition::{self, CloseContext, OperatorKey, PreparedClose},
 };
 use bytes::Bytes;
@@ -23,13 +23,17 @@ pub type Vote = bls12381::Vote;
 
 /// Decodes and authenticates a full proposal before signing its header.
 ///
-/// The returned candidate owns the complete claim evidence and incremental state batch.
-/// Applications must durably retain both before publishing the vote. Signing does not
-/// install the candidate or admit it to settlement.
+/// The caller authenticates the context against settlement registration, which owns the
+/// predecessor liability and its association with the state and log roots.
+///
+/// The returned candidate contains all three native batches and original proof sources.
+/// Applications apply and synchronize those batches, then durably publish their common
+/// checkpoint and signing decision before releasing the vote. Signing alone does not install
+/// the candidate or admit it to settlement.
 #[allow(clippy::too_many_arguments)]
 pub async fn seal<H, P, D, E, S, B, R>(
     scheme: &bls12381::Scheme,
-    state: &State<E, H, S>,
+    replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
     operator: &OperatorKey,
     deposits: &DepositBatch<P>,
@@ -56,7 +60,7 @@ where
     let dealing = posted::decode_with_strategy(encoded, context, strategy)
         .map_err(|_| AdmissionError::InvalidDealing)?;
     let prepared = transition::validate_close_with_strategy::<H, P, D, E, S, B, R>(
-        state,
+        replica,
         context,
         operator,
         deposits,

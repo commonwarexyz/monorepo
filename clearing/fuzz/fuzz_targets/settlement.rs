@@ -10,26 +10,23 @@ use commonware_clearing::bajillion::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
         WithdrawalId,
     },
-    challenge::{
-        AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup,
-        higher_entry_lookup,
-    },
-    commitment::{self, VectorKind, VectorRoot},
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict},
+    custody::Epoch,
+    logs::{LogHead, Opening as LogOpening, PayoutOperation},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
-    qmdb::{State, StateHead, StateOpening, StateRoot, account_key},
+    qmdb::{StateHead, StateOpening, StateRoot, account_key},
     settlement::{
-        BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, FinalizedClaims, HardFaultReason,
-        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig,
+        BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, Genesis, HardFaultReason,
+        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig, UnclaimedInterval,
     },
     state::SettlementOutput,
     transition::{
-        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature,
-        OperatorVariant, PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput,
-        prepare_close_with_strategy,
+        BatchId, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature, OperatorVariant,
+        PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, RangeCfg};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
@@ -191,7 +188,6 @@ struct Prepared {
     context: TestContext,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
-    withdrawal_claims: Vec<TestWithdrawalClaim>,
     withdrawal_outputs: Vec<WithdrawalOutput>,
     close: TestClose,
     successor: TestCache,
@@ -217,18 +213,19 @@ struct ModeledWithdrawalClaim {
     claim: TestWithdrawalClaim,
 }
 
+// Ghost issuance and payment records provide an independent oracle for the interval ledger.
 #[derive(Clone)]
 struct FinalizedClaimBatch {
     batch_id: BatchId<Digest>,
-    withdrawal_root: VectorRoot<Digest>,
+    withdrawal_root: LogHead<Digest>,
     withdrawals: Vec<ModeledWithdrawalClaim>,
-    claimed_withdrawals: BTreeSet<u32>,
+    claimed_withdrawals: BTreeSet<u64>,
     withdrawal_remaining: u64,
 }
 
 impl FinalizedClaimBatch {
     fn is_live(&self) -> bool {
-        self.withdrawal_remaining != 0
+        self.claimed_withdrawals.len() < self.withdrawals.len()
     }
 }
 
@@ -240,7 +237,7 @@ impl Slot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Snapshot {
-    claims: BTreeMap<BatchId<Digest>, FinalizedClaims<Digest>>,
+    claims: BTreeMap<u64, u64>,
     state_root: StateRoot<Digest>,
     custody: u64,
     claimable: u64,
@@ -303,7 +300,7 @@ struct Harness {
     foreign_opening: StateOpening<VerifyingKey, Digest>,
     seed: u64,
     chain: TestChain,
-    claims: BTreeMap<BatchId<Digest>, FinalizedClaims<Digest>>,
+    claims: BTreeMap<u64, u64>,
     deployment: Digest,
     operator: SigningKey,
     operator_ack: Private,
@@ -362,7 +359,7 @@ impl Harness {
         )
         .await;
         let finalized = TestCache {
-            head: *state.head(),
+            head: *state.state().head(),
             leaves,
         };
         let mut foreign_seed = input.seed.wrapping_add(0x200);
@@ -382,7 +379,7 @@ impl Harness {
             vec![(foreign.clone(), 1)],
         )
         .await;
-        let foreign_opening = foreign_state.opening(foreign).await.unwrap();
+        let foreign_opening = foreign_state.state().opening(foreign).await.unwrap();
         let seed = input.seed.to_be_bytes();
         let deployment = Sha256::hash(&[b"settlement-stateful-fuzz", &seed]);
         let operator = SigningKey::from_seed(input.seed ^ 0xa5a5_a5a5_a5a5_a5a5);
@@ -410,7 +407,21 @@ impl Harness {
             deployment,
             operator.public_key(),
             committee.clone(),
-            &(&finalized.head).into(),
+            &Genesis::new(
+                finalized.root(),
+                finalized.head.operations(),
+                &finalized
+                    .leaves
+                    .iter()
+                    .map(|entry| {
+                        (
+                            account_key(&entry.account).unwrap(),
+                            NonZeroU64::new(entry.balance).unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
             0,
             config,
         )
@@ -478,26 +489,24 @@ impl Harness {
         let encoded = self.claims.encode();
         self.claims = BTreeMap::decode_cfg(
             encoded.clone(),
-            &((..=MAX_ACTIONS).into(), ((), (..=MAX_ACCOUNTS).into())),
+            &((..=MAX_ACTIONS * MAX_ACCOUNTS).into(), ((), ())),
         )
         .unwrap();
         assert_eq!(self.claims.encode(), encoded);
-        let state = self.state.take().unwrap().commit().await.unwrap();
-        let head = *state.head();
+        let state = self.state.take().unwrap().sync().await.unwrap();
+        let head = *state.state().head();
         drop(state);
-        let state = State::<_, Sha256>::open(
-            self.runtime.child("replica"),
-            support::config(&self.runtime, "settlement"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(*state.head(), head);
+        let state = support::open_state(self.runtime.child("replica"), "settlement")
+            .await
+            .unwrap();
+        assert_eq!(*state.state().head(), head);
         self.state = Some(state);
         for account in &self.accounts {
             assert_eq!(
                 self.state
                     .as_ref()
                     .unwrap()
+                    .state()
                     .get(&account_key(&account.public_key()).unwrap())
                     .await
                     .unwrap()
@@ -587,7 +596,7 @@ impl Harness {
                 batch,
                 claim,
                 mutation,
-            } => self.claim_withdrawal(step, *batch, *claim, *mutation),
+            } => self.claim_withdrawal(*batch, *claim, *mutation).await,
             Action::BeginHardFaultSettlement => self.begin_hard_fault_settlement(),
             Action::ClaimHardFault { account, mutation } => {
                 self.claim_hard_fault(*account, *mutation).await
@@ -697,6 +706,25 @@ impl Harness {
             })
             .expect("modeled finalized reserves fit in u64");
         assert_eq!(modeled_claimable, self.claimable);
+        let actual = self
+            .claims
+            .iter()
+            .flat_map(|(&start, &end)| start..end)
+            .collect::<Vec<_>>();
+        let mut expected = self
+            .finalized_claim_batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .withdrawals
+                    .iter()
+                    .filter(|entry| !batch.claimed_withdrawals.contains(&entry.claim.position()))
+                    .map(|entry| entry.claim.position())
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        assert!(self.claims.len() <= expected.len());
         self.custody
             .checked_add(self.claimable)
             .expect("active and claimable custody fit the accounting domain");
@@ -1036,18 +1064,20 @@ impl Harness {
         admission_deadline: u64,
         challenge_deadline: u64,
     ) -> TestContext {
-        assert_eq!(cache.root(), self.state.as_ref().unwrap().root());
+        assert_eq!(cache.root(), self.state.as_ref().unwrap().state().root());
         support::close_context(
             self.deployment,
             epoch,
             self.operator.public_key(),
             self.state.as_ref().unwrap(),
+            cache.liability(),
             deposits,
             withdrawals,
             admission_deadline,
             challenge_deadline,
             CloseLimits::new(4, 5, 4, 4, 16, u64::MAX, u64::MAX, u64::MAX),
             self.committee_digest,
+            self.chain.registration_floors(),
         )
     }
 
@@ -1239,16 +1269,12 @@ impl Harness {
         prepared: PreparedClose<VerifyingKey, Digest>,
     ) -> Prepared {
         let close = prepared.close().clone();
-        let withdrawal_claims = withdrawals
+        let withdrawal_outputs = close.withdrawal_outputs().to_vec();
+        withdrawals
             .requests()
             .iter()
-            .map(|request| {
-                let claim = prepared
-                    .withdrawal_claim(request.account())
-                    .expect("validated withdrawal has a canonical claim");
-                let output = claim
-                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                    .expect("validated withdrawal claim verifies");
+            .zip(&withdrawal_outputs)
+            .for_each(|(request, output)| {
                 assert_eq!(output.destination(), request.body().destination());
                 let row = close
                     .rows
@@ -1289,13 +1315,7 @@ impl Harness {
                         assert_eq!(row.successor, 0);
                     }
                 }
-                claim
-            })
-            .collect::<Vec<_>>();
-        let withdrawal_outputs = withdrawal_claims
-            .iter()
-            .map(|claim| claim.output().clone())
-            .collect::<Vec<_>>();
+            });
         assert_eq!(withdrawal_outputs.len(), withdrawals.len());
         assert_eq!(close.withdrawal_total, output_total(&withdrawal_outputs));
         for entry in close.out_vectors.iter().flat_map(|vector| vector.entries()) {
@@ -1324,7 +1344,6 @@ impl Harness {
             context,
             deposits,
             withdrawals,
-            withdrawal_claims,
             withdrawal_outputs,
             close,
             successor,
@@ -1335,7 +1354,7 @@ impl Harness {
         &self,
         prepared: &Prepared,
     ) -> (Certificate, PreparedClose<VerifyingKey, Digest>) {
-        let before = *self.state.as_ref().unwrap().head();
+        let before = *self.state.as_ref().unwrap().state().head();
         let (vote, candidate) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &self.validator,
             self.state.as_ref().unwrap(),
@@ -1349,7 +1368,7 @@ impl Harness {
         )
         .await
         .unwrap();
-        assert_eq!(*self.state.as_ref().unwrap().head(), before);
+        assert_eq!(*self.state.as_ref().unwrap().state().head(), before);
         assert_eq!(candidate.close().header, prepared.close.header);
         (self.validator.assemble_exact([vote]).unwrap(), candidate)
     }
@@ -1617,8 +1636,9 @@ impl Harness {
         mutation: u8,
     ) -> StateOpening<VerifyingKey, Digest> {
         let state = self.state.as_ref().unwrap();
-        let before = *state.head();
+        let before = *state.state().head();
         let canonical = state
+            .state()
             .opening_at(
                 self.finalized.root(),
                 self.finalized.head.operations(),
@@ -1638,6 +1658,7 @@ impl Harness {
                 .find(|entry| &entry.account != account);
             match wrong_account {
                 Some(entry) => state
+                    .state()
                     .opening_at(
                         self.finalized.root(),
                         self.finalized.head.operations(),
@@ -1653,6 +1674,7 @@ impl Harness {
                     && slot.successor.balance(account) != 0
             }) {
                 Some(slot) => state
+                    .state()
                     .opening_at(
                         slot.successor.root(),
                         slot.successor.head.operations(),
@@ -1666,7 +1688,7 @@ impl Harness {
         if variant != 9 && canonical.is_some() {
             assert!(opening.verify::<Sha256>(&self.finalized.root()).is_ok());
         }
-        assert_eq!(*state.head(), before);
+        assert_eq!(*state.state().head(), before);
         opening
     }
 
@@ -1851,15 +1873,51 @@ impl Harness {
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
             let (state, validated) = candidate.apply(self.state.take().unwrap()).await.unwrap();
-            self.state = Some(state.commit().await.unwrap());
             assert_eq!(validated.header, prepared.close.header);
+            let registered = self
+                .registered
+                .take()
+                .expect("admission requires the exact registered epoch");
+            let payout_start = registered.context.predecessor_logs().payouts.operations;
+            let mut withdrawal_claims = Vec::with_capacity(registered.withdrawal_outputs.len());
+            for (offset, expected_output) in registered.withdrawal_outputs.iter().enumerate() {
+                let position = payout_start
+                    .checked_add(u64::try_from(offset).expect("bounded output count fits in u64"))
+                    .expect("bounded payout position cannot overflow");
+                let (opening, operations) = state
+                    .logs()
+                    .payout_opening(
+                        &validated.roots.withdrawal_outputs,
+                        position,
+                        NonZeroU64::MIN,
+                    )
+                    .await
+                    .expect("an applied withdrawal output has a native opening");
+                let [PayoutOperation::Append(output)] = operations.as_slice() else {
+                    panic!("a withdrawal position contains exactly one output append");
+                };
+                assert_eq!(output, expected_output);
+                let claim = WithdrawalClaim::new(output.clone(), opening);
+                assert_eq!(
+                    &claim
+                        .verify::<Sha256>(&validated.roots.withdrawal_outputs)
+                        .expect("native withdrawal claim verifies"),
+                    expected_output
+                );
+                withdrawal_claims.push(claim);
+            }
+            self.state = Some(state.sync().await.unwrap());
             self.replica = prepared.successor.clone();
-            assert_eq!(*self.state.as_ref().unwrap().head(), self.replica.head);
+            assert_eq!(
+                *self.state.as_ref().unwrap().state().head(),
+                self.replica.head
+            );
             for account in &self.accounts {
                 assert_eq!(
                     self.state
                         .as_ref()
                         .unwrap()
+                        .state()
                         .get(&account_key(&account.public_key()).unwrap())
                         .await
                         .unwrap()
@@ -1868,10 +1926,6 @@ impl Harness {
                     self.replica.balance(&account.public_key())
                 );
             }
-            let registered = self
-                .registered
-                .take()
-                .expect("admission requires the exact registered epoch");
             for record in registered.deposits.records() {
                 assert_eq!(
                     self.staged_deposits.remove(record.account()),
@@ -1895,7 +1949,7 @@ impl Harness {
                 context: registered.context,
                 deposits: registered.deposits,
                 withdrawals: registered.withdrawals,
-                withdrawal_claims: registered.withdrawal_claims,
+                withdrawal_claims,
                 withdrawal_outputs: registered.withdrawal_outputs,
                 header: registered.close.header,
                 certificate: retained_certificate,
@@ -1940,7 +1994,9 @@ impl Harness {
             OutcomeClass::Error
         };
         let result = self.chain.finalize(now).map(|(batch, claims)| {
-            assert!(self.claims.insert(batch.batch_id, claims).is_none());
+            if let Some(interval) = claims {
+                assert!(self.claims.insert(interval.start, interval.end).is_none());
+            }
             batch
         });
         assert_eq!(OutcomeClass::of(&result), expected);
@@ -2113,15 +2169,12 @@ impl Harness {
     }
 
     /// Builds guaranteed-proven evidence of one challenge kind against a validated close.
-    fn challenge_evidence(
+    async fn challenge_evidence(
         &self,
         family: u8,
         context: &TestContext,
-        _predecessor: &TestCache,
         close: &TestClose,
     ) -> (TestChallenge, ChallengeKind) {
-        let index = ChallengeIndex::new::<Sha256>(context, close)
-            .expect("validated close has a canonical challenge index");
         let key = &self.accounts[usize::from(family) % self.accounts.len()];
         let payer = key.public_key();
         let row = close
@@ -2175,16 +2228,28 @@ impl Harness {
             .checked_add(1)
             .expect("bounded fixture debit cannot overflow");
         match family % 3 {
-            0 => (
-                Challenge::HigherAckDebit {
-                    ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
-                    payer: Box::new(
-                        account_lookup::<Sha256, _, _>(&index, &payer)
-                            .expect("validated close has canonical payer evidence"),
-                    ),
-                },
-                ChallengeKind::HigherAckDebit,
-            ),
+            0 => {
+                let range = close
+                    .roots
+                    .activity_range(context)
+                    .expect("validated close has an exact activity range");
+                let logs = self.state.as_ref().unwrap().logs();
+                let epoch = Epoch::at(logs, context.payment().epoch(), range)
+                    .await
+                    .expect("an admitted close has retained native activity");
+                (
+                    Challenge::HigherAckDebit {
+                        ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
+                        payer: Box::new(
+                            epoch
+                                .account_lookup(logs, &payer)
+                                .await
+                                .expect("validated close has canonical payer evidence"),
+                        ),
+                    },
+                    ChallengeKind::HigherAckDebit,
+                )
+            }
             1 => {
                 let OutTipLookup::Present {
                     cumulative,
@@ -2196,6 +2261,14 @@ impl Harness {
                 else {
                     panic!("retained vector carries the disputed entry");
                 };
+                let range = close
+                    .roots
+                    .activity_range(context)
+                    .expect("validated close has an exact activity range");
+                let logs = self.state.as_ref().unwrap().logs();
+                let epoch = Epoch::at(logs, context.payment().epoch(), range)
+                    .await
+                    .expect("an admitted close has retained native activity");
                 (
                     Challenge::HigherAckEntry {
                         entry: Box::new(EntryWitness {
@@ -2206,10 +2279,10 @@ impl Harness {
                             opening,
                         }),
                         sender: Box::new(
-                            higher_entry_lookup::<Sha256, _, _>(
-                                &index, &payer, committed, &recipient,
-                            )
-                            .expect("validated close has canonical composed sender evidence"),
+                            epoch
+                                .higher_entry_lookup(logs, &payer, &recipient)
+                                .await
+                                .expect("validated close has canonical composed sender evidence"),
                         ),
                     },
                     ChallengeKind::HigherAckEntry,
@@ -2244,34 +2317,29 @@ impl Harness {
         } else {
             self.slots
                 .get(usize::from(slot_selector) % self.slots.len())
-                .map(|slot| {
-                    (
-                        slot.context.clone(),
-                        slot.batch_id(),
-                        slot.predecessor.clone(),
-                        slot.close.clone(),
-                    )
-                })
+                .map(|slot| (slot.context.clone(), slot.batch_id(), slot.close.clone()))
         };
-        let (context, batch, predecessor, close) = if let Some(selected) = selected {
-            selected
+        let (context, batch, close, admitted) = if let Some((context, batch, close)) = selected {
+            (context, batch, close, true)
         } else {
             let prepared = self.make_prepared().await;
             (
                 prepared.context,
                 prepared.close.header.batch_id::<Sha256>(),
-                prepared.predecessor,
                 prepared.close,
+                false,
             )
         };
-        let family = mutation % 3;
+        // The unknown-batch action has no applied native interval to serve. AckFork preserves the
+        // negative challenge path without advancing the replica solely to manufacture evidence.
+        let family = if admitted { mutation % 3 } else { 2 };
         let variant = (mutation / 4) % 4;
         let submitted_batch = if variant == 1 || (!encoded && variant != 0) {
             BatchId::new(self.digest(b"unknown-batch", step))
         } else {
             batch
         };
-        let (challenge, kind) = self.challenge_evidence(family, &context, &predecessor, &close);
+        let (challenge, kind) = self.challenge_evidence(family, &context, &close).await;
         let canonical = challenge.encode().to_vec();
         let mut bytes = canonical.clone();
         let maximum = if encoded && variant == 2 {
@@ -2344,17 +2412,6 @@ impl Harness {
         });
     }
 
-    fn unknown_claim_batch(&self, label: &[u8], step: u64) -> BatchId<Digest> {
-        (0..=MAX_RETAINED_CLAIM_BATCHES)
-            .map(|offset| BatchId::new(self.digest(label, step.wrapping_add(offset as u64))))
-            .find(|candidate| {
-                self.finalized_claim_batches
-                    .iter()
-                    .all(|batch| batch.batch_id != *candidate)
-            })
-            .expect("a bounded claim history leaves an unused synthetic batch id")
-    }
-
     fn select_withdrawal_claim(
         &self,
         batch_selector: u8,
@@ -2407,162 +2464,81 @@ impl Harness {
         ))
     }
 
-    fn cross_withdrawal_claim(
-        &self,
-        batch_selector: u8,
-        claim_selector: u8,
-    ) -> Option<(usize, usize, usize)> {
-        let mut targets = self
-            .finalized_claim_batches
-            .iter()
-            .enumerate()
-            .filter_map(|(index, batch)| batch.is_live().then_some(index))
-            .collect::<Vec<_>>();
-        if targets.is_empty() {
-            targets.extend(0..self.finalized_claim_batches.len());
-        }
-        let start = usize::from(batch_selector) % targets.len().max(1);
-        for offset in 0..targets.len() {
-            let target_index = targets[(start + offset) % targets.len()];
-            let target = &self.finalized_claim_batches[target_index];
-            let claims = self
-                .finalized_claim_batches
-                .iter()
-                .enumerate()
-                .flat_map(|(source_index, source)| {
-                    source
-                        .withdrawals
-                        .iter()
-                        .enumerate()
-                        .filter_map(move |(claim_index, entry)| {
-                            (source_index != target_index
-                                && source.withdrawal_root != target.withdrawal_root
-                                && !target.claimed_withdrawals.contains(&entry.claim.position()))
-                            .then_some((source_index, claim_index))
-                        })
-                })
-                .collect::<Vec<_>>();
-            if let Some((source_index, claim_index)) =
-                claims.get(usize::from(claim_selector) % claims.len().max(1))
-            {
-                return Some((target_index, *source_index, *claim_index));
-            }
-        }
-        None
-    }
-
-    fn malformed_withdrawal_submission(
-        &self,
-        step: u64,
-        batch_selector: u8,
-        claim_selector: u8,
-    ) -> (BatchId<Digest>, TestWithdrawalClaim) {
-        let selected = self
-            .select_unconsumed_withdrawal_claim(batch_selector, claim_selector)
-            .or_else(|| self.select_withdrawal_claim(batch_selector, claim_selector, false));
-        if let Some((batch_index, claim_index)) = selected {
-            let batch = &self.finalized_claim_batches[batch_index];
-            return (
-                batch.batch_id,
-                malformed_withdrawal_claim(&batch.withdrawals[claim_index].claim),
-            );
-        }
-        let batch_id = self
-            .finalized_claim_batches
-            .iter()
-            .find(|batch| batch.is_live())
-            .or_else(|| self.finalized_claim_batches.first())
-            .map_or_else(
-                || self.unknown_claim_batch(b"malformed-withdrawal-batch", step),
-                |batch| batch.batch_id,
-            );
-        (
-            batch_id,
-            malformed_withdrawal_claim(&synthetic_withdrawal_claim()),
-        )
-    }
-
-    fn claim_withdrawal(
+    async fn claim_withdrawal(
         &mut self,
-        step: u64,
         batch_selector: u8,
         claim_selector: u8,
         mutation: u8,
     ) -> ActionOutcome {
-        let canonical = |live_only| {
-            if let Some((batch_index, claim_index)) =
-                self.select_withdrawal_claim(batch_selector, claim_selector, live_only)
-            {
-                let batch = &self.finalized_claim_batches[batch_index];
-                let entry = &batch.withdrawals[claim_index];
-                let accepted = (batch.is_live()
-                    && !batch.claimed_withdrawals.contains(&entry.claim.position()))
+        let mutation = mutation % 5;
+        let selected = if mutation == 0 {
+            self.select_unconsumed_withdrawal_claim(batch_selector, claim_selector)
+        } else {
+            self.select_withdrawal_claim(batch_selector, claim_selector, false)
+        };
+        let mut claim = selected.map_or_else(synthetic_withdrawal_claim, |(batch, index)| {
+            self.finalized_claim_batches[batch].withdrawals[index]
+                .claim
+                .clone()
+        });
+        let finalized = self.chain.finalized_payouts();
+        let accepted = selected.and_then(|(batch_index, claim_index)| {
+            let batch = &self.finalized_claim_batches[batch_index];
+            let entry = &batch.withdrawals[claim_index];
+            (!batch.claimed_withdrawals.contains(&entry.claim.position())
+                && mutation < 3
+                && (mutation != 2 || batch.withdrawal_root == finalized))
                 .then(|| {
                     (
                         batch_index,
                         entry.claim.position(),
                         entry.claim.output().clone(),
                     )
-                });
-                (batch.batch_id, entry.claim.clone(), accepted)
-            } else {
-                (
-                    self.unknown_claim_batch(b"canonical-withdrawal-batch", step),
-                    synthetic_withdrawal_claim(),
-                    None,
-                )
-            }
-        };
-        let (batch_id, claim, accepted) = match mutation % 5 {
-            0 => canonical(true),
-            1 => canonical(false),
-            2 => {
-                let claim = self
-                    .select_withdrawal_claim(batch_selector, claim_selector, false)
-                    .map_or_else(synthetic_withdrawal_claim, |(batch_index, claim_index)| {
-                        self.finalized_claim_batches[batch_index].withdrawals[claim_index]
-                            .claim
-                            .clone()
-                    });
-                (
-                    self.unknown_claim_batch(b"unknown-withdrawal-batch", step),
-                    claim,
-                    None,
-                )
-            }
-            3 => {
-                if let Some((target_index, source_index, claim_index)) =
-                    self.cross_withdrawal_claim(batch_selector, claim_selector)
-                {
-                    (
-                        self.finalized_claim_batches[target_index].batch_id,
-                        self.finalized_claim_batches[source_index].withdrawals[claim_index]
-                            .claim
-                            .clone(),
-                        None,
-                    )
-                } else {
-                    let (batch_id, claim) =
-                        self.malformed_withdrawal_submission(step, batch_selector, claim_selector);
-                    (batch_id, claim, None)
-                }
-            }
-            _ => {
-                let (batch_id, claim) =
-                    self.malformed_withdrawal_submission(step, batch_selector, claim_selector);
-                (batch_id, claim, None)
-            }
-        };
+                })
+        });
+        if mutation != 2 && selected.is_some() {
+            let (opening, _) = self
+                .state
+                .as_ref()
+                .unwrap()
+                .logs()
+                .payout_opening(&finalized, claim.position(), NonZeroU64::MIN)
+                .await
+                .unwrap();
+            claim = WithdrawalClaim::new(claim.output().clone(), opening);
+        }
+        if mutation == 3 {
+            claim = malformed_withdrawal_claim(&claim);
+        } else if mutation == 4 {
+            let (output, mut opening) = <(WithdrawalOutput, LogOpening<Digest>)>::decode_cfg(
+                claim.encode(),
+                &(RangeCfg::new(..=usize::MAX), ()),
+            )
+            .unwrap();
+            opening.proof = Default::default();
+            claim = WithdrawalClaim::new(output, opening);
+        }
         let expected = if accepted.is_some() {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
         };
-        let result = self
+        let interval = self
             .claims
-            .get_mut(&batch_id)
+            .range(..=claim.position())
+            .next_back()
+            .filter(|(_, end)| claim.position() < **end)
+            .map(|(&start, &end)| UnclaimedInterval { start, end });
+        let result = interval
             .ok_or(ClaimError::Unavailable)
-            .and_then(|claims| self.chain.claim_withdrawal(batch_id, claims, &claim));
+            .and_then(|interval| {
+                let effect = self.chain.claim_withdrawal(&interval, &claim)?;
+                self.claims.remove(&interval.start);
+                for fragment in effect.fragments.into_iter().flatten() {
+                    self.claims.insert(fragment.start, fragment.end);
+                }
+                Ok(effect.output)
+            });
         assert_eq!(OutcomeClass::of(&result), expected);
         if let Some((batch_index, position, expected_output)) = accepted {
             let output = result.expect("the oracle selected an unconsumed withdrawal output");
@@ -2572,11 +2548,8 @@ impl Harness {
             batch.withdrawal_remaining = batch
                 .withdrawal_remaining
                 .checked_sub(output.amount())
-                .expect("an authenticated withdrawal fits its modeled reserve");
-            self.claimable = self
-                .claimable
-                .checked_sub(output.amount())
-                .expect("an authenticated withdrawal fits total claimable custody");
+                .unwrap();
+            self.claimable = self.claimable.checked_sub(output.amount()).unwrap();
         }
         ActionOutcome::new(expected, None)
     }
@@ -2763,6 +2736,7 @@ impl Harness {
             self.state
                 .as_ref()
                 .unwrap()
+                .state()
                 .opening_at(
                     self.finalized.root(),
                     self.finalized.head.operations(),
@@ -2793,19 +2767,13 @@ fn synthetic_withdrawal_claim() -> TestWithdrawalClaim {
         &(..=MAX_DESTINATION_BYTES).into(),
     )
     .expect("a bounded synthetic withdrawal output decodes");
-    let mut builder = commitment::Builder::<Sha256>::new(VectorKind::WithdrawalOutput, 1)
-        .expect("one synthetic withdrawal output is bounded");
-    builder
-        .add_encoded(output.encode().as_ref())
-        .expect("a synthetic withdrawal output is length-framable");
-    let tree = builder
-        .build(&Sequential)
-        .expect("one synthetic withdrawal output commits");
-    TestWithdrawalClaim::decode_cfg(
-        (output, tree.opening(0).expect("position zero is present")).encode(),
-        &(..=MAX_DESTINATION_BYTES).into(),
+    WithdrawalClaim::new(
+        output,
+        LogOpening {
+            start: 0,
+            proof: Default::default(),
+        },
     )
-    .expect("a synthetic withdrawal claim decodes")
 }
 
 fn malformed_withdrawal_claim(claim: &TestWithdrawalClaim) -> TestWithdrawalClaim {
@@ -2898,7 +2866,10 @@ fn successor_snapshot(
     assert!(leaves.len() <= MAX_ACCOUNTS);
     let snapshot = TestCache { head, leaves };
     assert_eq!(snapshot.root(), close.roots.successor);
-    assert_eq!(snapshot.liability(), head.liability());
+    assert_eq!(
+        snapshot.liability(),
+        predecessor.liability() + deposits.total() - close.withdrawal_total
+    );
     assert_eq!(snapshot.len() as u64, head.live_accounts());
     snapshot
 }

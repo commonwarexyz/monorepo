@@ -11,11 +11,7 @@
 
 use super::pay::merge_entries;
 use crate::{
-    chain::{
-        state as chain_state,
-        tx::{DepositRequest, NativeTransferRequest},
-    },
-    operator::rpc as operator_rpc,
+    chain::tx::{DepositRequest, NativeTransferRequest},
     protocol::{
         Acceptance, Ack, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_DESTINATION_BYTES, MAX_ENTRIES,
         Receipt,
@@ -25,9 +21,10 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
+    logs::LogHead,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
-    transition::BatchId,
+    transition::WithdrawalClaim,
     vector::{OutEntry, OutVector},
 };
 use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
@@ -36,8 +33,9 @@ use commonware_cryptography_curve25519::signing::Signature;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 25;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
+const LOG_HEAD_BYTES: usize = LogHead::<Digest>::SIZE;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
 const MAX_STATE_OPENING_BYTES: usize = 16 * 1024;
 const MAX_STATE_PROOF_DIGESTS: usize = 256;
@@ -69,11 +67,11 @@ pub(crate) struct ContextCache {
     pub(crate) epoch: u64,
 }
 
-/// An open withdrawal intent with replaceable, locally verified evidence.
-/// Its batch identity is authenticated when evidence becomes available.
+/// A wallet-owned payout candidate authenticated at one finalized payout head.
 #[derive(Clone)]
 pub(crate) struct PendingWithdrawalClaim {
-    pub(crate) evidence: Option<operator_rpc::WithdrawalEvidenceResponse>,
+    pub(crate) head: LogHead<Digest>,
+    pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 pub(crate) struct State {
@@ -137,28 +135,22 @@ pub(crate) struct VectorState {
 pub(crate) enum ReconcileOutcome {
     /// The committed close's terminal entries covered every held receipt.
     Reconciled = 1,
-    /// The admitted close was invalidated before finalization.
-    Protected = 2,
-    /// An enforcement dead end: a finalized close understated a held receipt past the
-    /// challenge window, or a registered epoch's close never admitted and settlement faulted.
-    Unenforceable = 3,
+    /// The held credit reached a permanent non-clean outcome.
+    TerminalNonclean = 2,
 }
 
 /// The ledger records every concluded payment as `Accepted` (operator receipts held),
-/// `Finalized` (exact outgoing body authenticated in finalized activity), or `Abandoned`.
+/// `Retired` (its signing context has a permanent settlement boundary), or `Abandoned`.
 #[derive(Clone, Copy)]
 #[repr(i64)]
 enum PaymentState {
     Accepted = 3,
-    Finalized = 4,
+    Retired = 4,
     Abandoned = 5,
 }
 
 /// Payment conclusions whose deltas contribute to the wallet's balance lower bound.
-const SETTLED_STATES: [i64; 2] = [
-    PaymentState::Accepted as i64,
-    PaymentState::Finalized as i64,
-];
+const SETTLED_STATES: [i64; 2] = [PaymentState::Accepted as i64, PaymentState::Retired as i64];
 
 struct Binding {
     account: Key,
@@ -310,7 +302,7 @@ impl Store {
         )?;
         let conclusions = statement.query_map(
             params![
-                PaymentState::Finalized as i64,
+                PaymentState::Retired as i64,
                 PaymentState::Abandoned as i64,
                 i64::try_from(context.epoch()).ok(),
             ],
@@ -376,94 +368,54 @@ impl Store {
         self.finish_mutation(result)
     }
 
-    /// Clears a request whose irreversible settlement boundary and authenticated history exclude carriage.
-    pub(crate) fn discard_unused_withdrawal(
+    /// Retires the active signing authorization at a certified healthy deadline.
+    ///
+    /// Its deadline remains as a monotonic floor for future signing contexts.
+    pub(crate) fn retire_withdrawal(
         &mut self,
         request: &SignedWithdrawal<Key, Digest>,
     ) -> Result<()> {
         self.ensure_usable()?;
-        let result = (|| {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(
-                transaction.execute(
-                    "DELETE FROM agent_pending_claims
-                 WHERE singleton = 1 AND request = ?1 AND evidence IS NULL",
-                    [request.encode().as_ref()],
-                )? == 1,
-                "unused withdrawal differs from its pending intent"
-            );
-            transaction
-                .commit()
-                .map_err(|source| CommitUnknown::new("unused withdrawal", source))?;
-            Ok(())
-        })();
+        validate_pending_withdrawal(&self.connection, &self.account, request)?;
+        let result = retire_withdrawal_transaction(
+            &mut self.connection,
+            request.encode().as_ref(),
+            request.body().deadline(),
+        );
         self.finish_mutation(result)
     }
 
-    /// Opens the withdrawal-claim intent. Opening is idempotent.
-    #[cfg(test)]
-    pub(crate) fn open_withdrawal_claim(&mut self) -> Result<()> {
+    /// The highest deadline of any retired authorization.
+    pub(crate) fn retired_withdrawal_deadline(&self) -> Result<Option<u64>> {
         self.ensure_usable()?;
-        let result = open_claim_transaction(&mut self.connection);
-        self.finish_mutation(result)
+        let encoded = self.connection.query_row(
+            "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
+             FROM agent_meta WHERE singleton = 1",
+            [],
+            |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
+        )?;
+        let deadline = u64::decode(encoded)?;
+        Ok((deadline != 0).then_some(deadline))
     }
 
-    /// Replaces cached evidence after local validation, excluding completed positions.
+    /// Persists a payout candidate after verifying its finalized MMR opening.
     pub(crate) fn cache_withdrawal_claim(
         &mut self,
-        evidence: &operator_rpc::WithdrawalEvidenceResponse,
+        candidate: &PendingWithdrawalClaim,
     ) -> Result<()> {
         self.ensure_usable()?;
-        validate_withdrawal_evidence(&self.connection, evidence, &self.account)?;
-        let batch = evidence.batch_id().encode();
-        let position = i64::from(evidence.witness.claim.position());
-        let encoded = evidence.encode();
-        let request = evidence.witness.request.encode();
-        ensure_claim_bound(encoded.as_ref(), "withdrawal evidence")?;
-        let result = cache_claim_transaction(
-            &mut self.connection,
-            batch.as_ref(),
-            position,
-            encoded.as_ref(),
-            request.as_ref(),
-        );
+        validate_withdrawal_claim(candidate, &self.account)?;
+        let head = candidate.head.encode();
+        let claim = candidate.claim.encode();
+        ensure_claim_bound(claim.as_ref(), "withdrawal claim")?;
+        let result = cache_claim_transaction(&mut self.connection, head.as_ref(), claim.as_ref());
         self.finish_mutation(result)
     }
 
-    /// Whether a withdrawal claim against this exact (batch, position) already completed.
-    pub(crate) fn withdrawal_claim_completed(
-        &self,
-        batch_id: BatchId<Digest>,
-        position: u32,
-    ) -> Result<bool> {
+    pub(crate) fn complete_withdrawal_claim(&mut self, position: u64) -> Result<()> {
         self.ensure_usable()?;
-        claim_completed(
-            &self.connection,
-            batch_id.encode().as_ref(),
-            i64::from(position),
-        )
-    }
-
-    pub(crate) fn complete_withdrawal_claim(
-        &mut self,
-        evidence: &operator_rpc::WithdrawalEvidenceResponse,
-        result: &chain_state::WithdrawalResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        validate_withdrawal_evidence(&self.connection, evidence, &self.account)?;
-        validate_withdrawal_result(evidence, result)?;
-        let batch = evidence.batch_id().encode();
-        let position = i64::from(evidence.witness.claim.position());
-        let evidence = evidence.encode();
-        ensure_claim_bound(evidence.as_ref(), "withdrawal evidence")?;
-        let result = complete_claim_transaction(
-            &mut self.connection,
-            batch.as_ref(),
-            position,
-            evidence.as_ref(),
-        );
+        let position = position.encode();
+        let result = complete_claim_transaction(&mut self.connection, position.as_ref());
         self.finish_mutation(result)
     }
 
@@ -665,7 +617,7 @@ impl Store {
         entries: &[Entry],
         previous_debit: u64,
         receipt_count: u64,
-        finalized: bool,
+        retire_context: bool,
     ) -> Result<u64> {
         self.ensure_usable()?;
         validate_acceptance(acceptance, &self.account, &self.operator)?;
@@ -724,7 +676,7 @@ impl Store {
             encoded_authorization.as_ref(),
             encoded.as_ref(),
             &vector,
-            finalized,
+            retire_context,
         );
         self.finish_mutation(result).map(|()| next_receipt_count)
     }
@@ -961,15 +913,10 @@ impl Store {
         read_last_reconciled(&self.connection)
     }
 
-    /// Durably records that the epoch's admitted close was invalidated before finalization.
-    pub(crate) fn record_protected(&mut self, epoch: u64) -> Result<()> {
-        self.record_outcome(epoch, ReconcileOutcome::Protected)
-    }
-
-    /// Durably records an epoch whose held credit can no longer be enforced: a finalized close
-    /// understated it past the window, or its close never admitted and settlement faulted.
-    pub(crate) fn record_unenforceable(&mut self, epoch: u64) -> Result<()> {
-        self.record_outcome(epoch, ReconcileOutcome::Unenforceable)
+    /// Durably suppresses a terminal non-clean epoch. The immediate reconciliation summary owns
+    /// whether the close was invalidated or the held credit became unenforceable.
+    pub(crate) fn record_terminal_nonclean(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::TerminalNonclean)
     }
 
     fn record_outcome(&mut self, epoch: u64, outcome: ReconcileOutcome) -> Result<()> {
@@ -1008,7 +955,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_transfer = table_exists(connection, "agent_pending_transfer")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
-    let has_completed_claims = table_exists(connection, "agent_completed_claims")?;
     let has_payments = table_exists(connection, "agent_payments")?;
     let has_incoming_cursor = table_exists(connection, "agent_incoming_cursor")?;
     let has_incoming = table_exists(connection, "agent_incoming")?;
@@ -1022,7 +968,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                         'agent_meta', 'agent_state_openings', 'agent_context',
                         'agent_vector', 'agent_vector_entries',
                         'agent_pending_payment', 'agent_pending_deposit', 'agent_pending_transfer',
-                        'agent_pending_claims', 'agent_completed_claims', 'agent_payments',
+                        'agent_pending_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
                     ))
                 OR type IN ('trigger', 'view')
@@ -1047,7 +993,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         && !has_pending_deposit
         && !has_pending_transfer
         && !has_pending_claims
-        && !has_completed_claims
         && !has_payments
         && !has_incoming_cursor
         && !has_incoming
@@ -1066,7 +1011,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
             && has_pending_deposit
             && has_pending_transfer
             && has_pending_claims
-            && has_completed_claims
             && has_payments
             && has_incoming_cursor
             && has_incoming
@@ -1124,7 +1068,10 @@ fn initialize_schema(
              schema_version INTEGER NOT NULL,
              account BLOB NOT NULL CHECK (length(account) = {key_size}),
              deployment BLOB NOT NULL CHECK (length(deployment) = {digest_size}),
-             operator BLOB NOT NULL CHECK (length(operator) = {key_size})
+             operator BLOB NOT NULL CHECK (length(operator) = {key_size}),
+             retired_withdrawal_deadline BLOB NOT NULL CHECK (
+                 length(retired_withdrawal_deadline) = {u64_size}
+             )
          );
 
          CREATE TABLE agent_state_openings (
@@ -1186,19 +1133,17 @@ fn initialize_schema(
 
          CREATE TABLE agent_pending_claims (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-             evidence BLOB CHECK (
-                 evidence IS NULL OR length(evidence) BETWEEN 1 AND {max_claim_size}
+             claim_head BLOB CHECK (
+                 claim_head IS NULL OR length(claim_head) = {log_head_size}
+             ),
+             claim BLOB CHECK (
+                 claim IS NULL OR length(claim) BETWEEN 1 AND {max_claim_size}
              ),
              request BLOB CHECK (
                  request IS NULL OR length(request) BETWEEN 1 AND {max_claim_size}
              ),
+             CHECK ((claim_head IS NULL) = (claim IS NULL)),
              FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
-         );
-
-         CREATE TABLE agent_completed_claims (
-             batch BLOB NOT NULL CHECK (length(batch) = {batch_id_size}),
-             position INTEGER NOT NULL CHECK (position >= 0),
-             PRIMARY KEY (batch, position)
          );
 
          CREATE TABLE agent_payments (
@@ -1243,7 +1188,7 @@ fn initialize_schema(
 
          CREATE TABLE agent_reconciled (
              epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
-             status INTEGER NOT NULL CHECK (status IN (1, 2, 3))
+             status INTEGER NOT NULL CHECK (status IN (1, 2))
          );",
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,
@@ -1255,7 +1200,8 @@ fn initialize_schema(
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
-        batch_id_size = BatchId::<Digest>::SIZE,
+        log_head_size = LOG_HEAD_BYTES,
+        u64_size = u64::SIZE,
         max_receipt_size = MAX_RECEIPT_BYTES,
         deposit_event_size = DEPOSIT_REQUEST_BYTES,
         transfer_request_size = TRANSFER_REQUEST_BYTES,
@@ -1263,6 +1209,7 @@ fn initialize_schema(
     let encoded_account = account.encode();
     let encoded_deployment = deployment.encode();
     let encoded_operator = operator.encode();
+    let retired_withdrawal_deadline = 0_u64.encode();
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin SQLite agent initialization")?;
@@ -1271,13 +1218,15 @@ fn initialize_schema(
         .context("create SQLite agent schema")?;
     transaction.execute(
         "INSERT INTO agent_meta (
-             singleton, schema_version, account, deployment, operator
-         ) VALUES (1, ?1, ?2, ?3, ?4)",
+             singleton, schema_version, account, deployment, operator,
+             retired_withdrawal_deadline
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
         params![
             SCHEMA_VERSION,
             encoded_account.as_ref(),
             encoded_deployment.as_ref(),
             encoded_operator.as_ref(),
+            retired_withdrawal_deadline.as_ref(),
         ],
     )?;
     transaction.execute(
@@ -1295,7 +1244,8 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
         "SELECT singleton, schema_version,
                 length(account), account,
                 length(deployment), deployment,
-                length(operator), operator
+                length(operator), operator,
+                length(retired_withdrawal_deadline), retired_withdrawal_deadline
          FROM agent_meta
          ORDER BY singleton
          LIMIT 2",
@@ -1310,6 +1260,9 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
     let encoded_account = read_fixed_blob(row, 2, 3, Key::SIZE, "agent account")?;
     let encoded_deployment = read_fixed_blob(row, 4, 5, Digest::SIZE, "agent deployment")?;
     let encoded_operator = read_fixed_blob(row, 6, 7, Key::SIZE, "agent operator")?;
+    let retired_withdrawal_deadline =
+        read_fixed_blob(row, 8, 9, u64::SIZE, "retired withdrawal deadline")?;
+    u64::decode(retired_withdrawal_deadline)?;
     ensure!(
         rows.next()?.is_none(),
         "agent database has extra metadata rows"
@@ -1638,7 +1591,10 @@ fn read_pending_claim(
     Option<SignedWithdrawal<Key, Digest>>,
 )> {
     let mut statement = connection.prepare(
-        "SELECT singleton, length(evidence), evidence, length(request), request
+        "SELECT singleton,
+                length(claim_head), claim_head,
+                length(claim), claim,
+                length(request), request
          FROM agent_pending_claims ORDER BY singleton LIMIT 2",
     )?;
     let mut rows = statement.query([])?;
@@ -1649,38 +1605,35 @@ fn read_pending_claim(
         row.get::<_, i64>(0)? == 1,
         "agent database pending claim singleton is not canonical"
     );
-    let evidence = read_optional_bounded_blob(
-        row,
-        1,
-        2,
-        MAX_PENDING_CLAIM_BYTES,
-        "pending withdrawal evidence",
-    )?
-    .map(operator_rpc::WithdrawalEvidenceResponse::decode)
-    .transpose()?;
-    if let Some(evidence) = &evidence {
-        validate_withdrawal_evidence(connection, evidence, account)?;
-    }
+    let claim_head = read_optional_fixed_blob(row, 1, 2, LOG_HEAD_BYTES, "withdrawal claim head")?
+        .map(LogHead::decode)
+        .transpose()?;
+    let claim = read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "withdrawal claim")?
+        .map(|encoded| WithdrawalClaim::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into()))
+        .transpose()?;
+    let candidate = match (claim_head, claim) {
+        (Some(head), Some(claim)) => {
+            let candidate = PendingWithdrawalClaim { head, claim };
+            validate_withdrawal_claim(&candidate, account)?;
+            Some(candidate)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("withdrawal claim fields are incomplete"),
+    };
     let request =
-        read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
+        read_optional_bounded_blob(row, 5, 6, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
             .map(|encoded| {
                 SignedWithdrawal::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())
             })
             .transpose()?;
     if let Some(request) = &request {
         validate_pending_withdrawal(connection, account, request)?;
-        ensure!(
-            evidence
-                .as_ref()
-                .is_none_or(|evidence| evidence.witness.request == *request),
-            "withdrawal evidence differs from the pending request"
-        );
     }
     ensure!(
         rows.next()?.is_none(),
         "agent database has multiple pending withdrawal claims"
     );
-    Ok((Some(PendingWithdrawalClaim { evidence }), request))
+    Ok((candidate, request))
 }
 
 fn validate_pending_withdrawal(
@@ -1731,28 +1684,14 @@ fn validate_deposit(event: &DepositRequest, account: &Key) -> Result<()> {
     Ok(())
 }
 
-fn validate_withdrawal_evidence(
-    connection: &Connection,
-    evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    account: &Key,
-) -> Result<()> {
-    evidence.witness.verify(
-        &evidence.roots,
-        &read_binding(connection)?.deployment,
-        account,
-        account.as_ref(),
-    )?;
-    Ok(())
-}
-
-fn validate_withdrawal_result(
-    evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    result: &chain_state::WithdrawalResponse,
-) -> Result<()> {
+fn validate_withdrawal_claim(candidate: &PendingWithdrawalClaim, account: &Key) -> Result<()> {
+    let output = candidate
+        .claim
+        .verify::<Sha256>(&candidate.head)
+        .context("verify cached withdrawal proof")?;
     ensure!(
-        result.destination == *evidence.witness.claim.output().destination()
-            && result.amount == evidence.witness.claim.output().amount(),
-        "pending withdrawal result differs from its evidence"
+        output.destination().as_ref() == account.as_ref(),
+        "cached withdrawal proof has another destination"
     );
     Ok(())
 }
@@ -2186,7 +2125,7 @@ fn finalize_payment_unheld_transaction(
         Some(previous_debit),
         id,
         endpoint,
-        PaymentState::Finalized,
+        PaymentState::Retired,
         None,
         encoded_authorization,
         None,
@@ -2207,7 +2146,7 @@ fn commit_payment_transaction(
     encoded_authorization: &[u8],
     encoded_acceptance: &[u8],
     vector: &VectorWrite,
-    finalized: bool,
+    retire_context: bool,
 ) -> Result<()> {
     conclude_payment_transaction(
         connection,
@@ -2215,8 +2154,8 @@ fn commit_payment_transaction(
         Some(previous_debit),
         id,
         endpoint,
-        if finalized {
-            PaymentState::Finalized
+        if retire_context {
+            PaymentState::Retired
         } else {
             PaymentState::Accepted
         },
@@ -2359,10 +2298,17 @@ fn record_reconcile_transaction(
 
 fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute(
-        "INSERT INTO agent_pending_claims (singleton, evidence, request) VALUES (1, NULL, ?1)",
-        [request],
-    )?;
+    ensure!(
+        transaction.execute(
+            "INSERT INTO agent_pending_claims (
+                 singleton, claim_head, claim, request
+             ) VALUES (1, NULL, NULL, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET request = excluded.request
+             WHERE request IS NULL OR request = excluded.request",
+            [request],
+        )? == 1,
+        "another withdrawal authorization is active"
+    );
     transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
         .commit()
@@ -2370,44 +2316,57 @@ fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> 
     Ok(())
 }
 
-#[cfg(test)]
-fn open_claim_transaction(connection: &mut Connection) -> Result<()> {
+fn retire_withdrawal_transaction(
+    connection: &mut Connection,
+    request: &[u8],
+    deadline: u64,
+) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .context("begin claim intent open")?;
-    transaction.execute(
-        "INSERT INTO agent_pending_claims (singleton, evidence, request)
-         VALUES (1, NULL, NULL)
-         ON CONFLICT(singleton) DO NOTHING",
+        .context("begin withdrawal authorization retirement")?;
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_pending_claims SET request = NULL
+             WHERE singleton = 1 AND request = ?1",
+            [request],
+        )? == 1,
+        "withdrawal retirement does not match the active authorization"
+    );
+    let encoded = transaction.query_row(
+        "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
+         FROM agent_meta WHERE singleton = 1",
         [],
+        |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
     )?;
+    let retired = u64::decode(encoded)?.max(deadline).encode();
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_meta SET retired_withdrawal_deadline = ?1 WHERE singleton = 1",
+            [retired.as_ref()],
+        )? == 1,
+        "agent metadata is missing"
+    );
+    transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
         .commit()
-        .map_err(|source| CommitUnknown::new("claim intent open", source))?;
+        .map_err(|source| CommitUnknown::new("withdrawal authorization retirement", source))?;
     Ok(())
 }
 
-fn cache_claim_transaction(
-    connection: &mut Connection,
-    batch: &[u8],
-    position: i64,
-    evidence: &[u8],
-    request: &[u8],
-) -> Result<()> {
+fn cache_claim_transaction(connection: &mut Connection, head: &[u8], claim: &[u8]) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin claim evidence cache")?;
     ensure!(
-        !claim_completed(&transaction, batch, position)?,
-        "claim evidence names an already-completed (batch, position)"
-    );
-    ensure!(
         transaction.execute(
-            "UPDATE agent_pending_claims SET evidence = ?1
-             WHERE singleton = 1 AND (request IS NULL OR request = ?2)",
-            params![evidence, request],
+            "INSERT INTO agent_pending_claims (
+                 singleton, claim_head, claim, request
+             ) VALUES (1, ?1, ?2, NULL)
+             ON CONFLICT(singleton) DO UPDATE SET
+                 claim_head = ?1, claim = ?2",
+            params![head, claim],
         )? == 1,
-        "withdrawal evidence differs from the pending request"
+        "withdrawal payout candidate was not cached"
     );
     transaction
         .commit()
@@ -2415,49 +2374,36 @@ fn cache_claim_transaction(
     Ok(())
 }
 
-/// Completes the claim: the intent deletion and the durable record of the
-/// consumed `(batch, position)` commit in one transaction, so evidence
-/// against a spent release can never rebind to a later intent.
-fn complete_claim_transaction(
-    connection: &mut Connection,
-    batch: &[u8],
-    position: i64,
-    evidence: &[u8],
-) -> Result<()> {
+/// Clears the matching delivered payout without changing the active authorization.
+fn complete_claim_transaction(connection: &mut Connection, position: &[u8]) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin pending claim completion")?;
-    ensure!(
+    if let Some(encoded) = transaction
+        .query_row(
+            "SELECT claim FROM agent_pending_claims
+             WHERE singleton = 1 AND claim IS NOT NULL",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+    {
+        let claim =
+            WithdrawalClaim::<Digest>::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())?;
+        ensure!(
+            claim.position().encode().as_ref() == position,
+            "claim completion conflicts with another cached payout candidate"
+        );
         transaction.execute(
-            "DELETE FROM agent_pending_claims
-             WHERE singleton = 1 AND evidence = ?1",
-            [evidence],
-        )? == 1,
-        "pending claim completion does not match durable evidence"
-    );
-
-    // The cache guard refuses completed evidence before it can pin an intent,
-    // so the deleted intent's key is never already recorded: a conflicting
-    // insert aborts the completion loudly instead of masking that breach.
-    transaction.execute(
-        "INSERT INTO agent_completed_claims (batch, position) VALUES (?1, ?2)",
-        params![batch, position],
-    )?;
+            "UPDATE agent_pending_claims SET claim_head = NULL, claim = NULL
+             WHERE singleton = 1",
+            [],
+        )?;
+    }
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("pending claim completion", source))?;
     Ok(())
-}
-
-fn claim_completed(connection: &Connection, batch: &[u8], position: i64) -> Result<bool> {
-    Ok(connection.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM agent_completed_claims
-             WHERE batch = ?1 AND position = ?2
-         )",
-        params![batch, position],
-        |row| row.get(0),
-    )?)
 }
 
 fn read_fixed_blob(
@@ -2521,6 +2467,25 @@ fn read_optional_bounded_blob(
     }
 }
 
+fn read_optional_fixed_blob(
+    row: &rusqlite::Row<'_>,
+    length_column: usize,
+    value_column: usize,
+    expected: usize,
+    field: &str,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    let value = read_optional_bounded_blob(row, length_column, value_column, expected, field)?;
+    if let Some(value) = &value
+        && value.len() != expected
+    {
+        return Err(to_sqlite_error(anyhow::anyhow!(
+            "invalid {field} length {}, expected {expected}",
+            value.len()
+        )));
+    }
+    Ok(value)
+}
+
 fn sql_u64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{field} exceeds SQLite INTEGER range"))
 }
@@ -2543,6 +2508,9 @@ mod tests {
         *,
     };
     use crate::protocol::{Wallet, deployment, identities, operator_key, wallets};
+    use commonware_clearing::bajillion::boundary::WithdrawalAction;
+    use std::num::NonZeroU64;
+
     fn open_error(path: &Path, account: &Key, deployment: &Digest, operator: &Key) -> String {
         match Store::open(path, account, deployment, operator) {
             Ok(_) => panic!("incompatible agent database was accepted"),
@@ -2596,6 +2564,54 @@ mod tests {
     fn signed_send(wallet: &Wallet, anchor: &[u8]) -> (SendAuthorization<Key, Digest>, Vec<Entry>) {
         let context = PaymentContext::new(Sha256::hash(&[anchor]), 1, operator_key());
         sign_delta(&context, wallet, 1)
+    }
+
+    fn signed_withdrawal(
+        wallet: &Wallet,
+        root: &StateRoot<Digest>,
+        amount: u64,
+        deadline: u64,
+    ) -> SignedWithdrawal<Key, Digest> {
+        SignedWithdrawal::sign(
+            deployment(),
+            root.digest,
+            wallet.public_key().encode(),
+            WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
+            deadline,
+            wallet.signer(),
+        )
+    }
+
+    #[test]
+    fn withdrawal_authorization_floor_is_monotonic_across_reopen() {
+        let database = TempDatabase::new();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let (root, opening) = recovery_evidence(&account, 100);
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        let request = signed_withdrawal(&wallet, &root, 7, 10);
+        store.stage_withdrawal(&request).unwrap();
+        store.retire_withdrawal(&request).unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        assert!(state.pending_withdrawal.is_none());
+        assert!(state.pending_withdrawal_claim.is_none());
+        assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(10));
+
+        let later = signed_withdrawal(&wallet, &root, 7, 75);
+        store.stage_withdrawal(&later).unwrap();
+        store.retire_withdrawal(&later).unwrap();
+        let earlier = signed_withdrawal(&wallet, &root, 7, 20);
+        store.stage_withdrawal(&earlier).unwrap();
+        store.retire_withdrawal(&earlier).unwrap();
+        assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(75));
+        drop(store);
+
+        let (_, state) = open_store(database.path(), &account);
+        assert!(state.pending_withdrawal.is_none());
+        assert!(state.pending_withdrawal_claim.is_none());
     }
 
     #[test]

@@ -4,7 +4,8 @@ use crate::{
     chain::{
         ingress::Provider,
         native::NativeGenesis,
-        state::{Record, execute, status_key},
+        state::{Record, execute, payout_heads_at, status_key},
+        tx::SettlementTx,
         types::{
             Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, Qmdb, SyncTarget, now,
         },
@@ -155,17 +156,59 @@ where
         // regression. It serves query recency and display only.
         let timestamp = parent.timestamp.checked_add(1)?.max(now(&context.0));
 
-        // The drain stops under the block byte budget, so the proposed block
-        // always fits the p2p frame and its decode bound. Transactions beyond
-        // the per-transaction wire bound could never decode on a peer, so
-        // they are dropped rather than proposed.
-        let transactions = input
-            .provider
-            .drain(MAX_BLOCK_TXS, MAX_BLOCK_BYTES)
+        let mut transactions = input.provider.drain(MAX_BLOCK_TXS, MAX_BLOCK_BYTES).await;
+
+        // Finalization precedes transactions. Unsigned witnesses must target the same
+        // parent transition that block execution will apply, even during a full pipeline.
+        let heads = payout_heads_at(&batches, height, timestamp, &transactions)
             .await
-            .into_iter()
-            .filter(|tx| tx.encode_size() <= MAX_TX_BYTES)
-            .collect::<Vec<_>>();
+            .expect("proposal must read parent payout heads");
+        let mut retained = Vec::with_capacity(transactions.len());
+        let mut bytes = 0usize;
+        for mut tx in transactions.drain(..) {
+            let request = match &mut tx {
+                SettlementTx::ClaimWithdrawal(request) => Some(request),
+                SettlementTx::ClaimDeposit(request) => Some(&mut request.claim),
+                _ => None,
+            };
+            if let Some(request) = request {
+                let Some(head) = heads.get(&request.deployment) else {
+                    continue;
+                };
+                if request
+                    .claim
+                    .verify::<commonware_cryptography::Sha256>(head)
+                    .is_err()
+                {
+                    let Some(proof) = input
+                        .provider
+                        .payout_proof(request.deployment, *head, request.claim.position())
+                        .await
+                    else {
+                        continue;
+                    };
+                    if proof.position() != request.claim.position()
+                        || proof.output() != request.claim.output()
+                        || proof
+                            .verify::<commonware_cryptography::Sha256>(head)
+                            .is_err()
+                    {
+                        continue;
+                    }
+                    request.claim = proof;
+                }
+            }
+            let size = tx.encode_size();
+            if size <= MAX_TX_BYTES
+                && bytes
+                    .checked_add(size)
+                    .is_some_and(|total| total <= MAX_BLOCK_BYTES)
+            {
+                bytes += size;
+                retained.push(tx);
+            }
+        }
+        let transactions = retained;
         let merkleized = execute(
             batches,
             height,

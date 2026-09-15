@@ -161,21 +161,48 @@ closes must finalize first.
 
 | Process | Owned state |
 | --- | --- |
-| Wallet | SQLite payment intents, receipts, and authenticated balance openings. |
-| Operator | SQLite live payments and close jobs, plus one QMDB replica for balance proofs. |
-| Validator | Certified chain state, one complete QMDB balance replica per deployment, and retained close evidence. |
+| Wallet | SQLite payment intents, receipts, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
+| Operator | SQLite live payments and certified close jobs, with an optional balance QMDB and two native log replicas for proofs. |
+| Validator | Certified chain state; per deployment, a Current Ordered MMB balance QMDB, cumulative activity and payout MMRs, and a local compact keyless QMDB for checkpoints and saved votes. |
 
-Every validator checks the same dealing against its stored balances and saves
-the evidence before voting. Balance replicas follow admitted closes and serve
-historical proofs from the same QMDB. Activity and withdrawal proofs use
-individually stored leaves and shared Merkle nodes. The operator's proof replica
-advances independently of preparing the next dealing.
+Validators derive all three commitments from the same dealing before voting.
+The three protocol databases become durable before the local QMDB records their
+checkpoint and the validator's vote in Commit metadata. Native pruning makes that
+record durable and bounds its history before the vote is sent. The local decision
+survives rollback of the protocol databases and is never part of their certified
+roots or imported from another validator.
 
-Wallets authenticate chain reads using `genesis.json` and keep unresolved signed
-requests for retry. After a deployment fault, they can claim finalized withdrawals,
-refund unadmitted deposits, and recover balances once the surviving state is frozen.
-Keep the wallet databases and validators running so receipts and public proofs
-remain available.
+Each payout has a sparse native log position; commit markers are never payouts.
+The chain retains the current finalized activity and payout heads and ordered unclaimed ranges
+whose values are only their end positions. A claim splits its range and transfers
+its amount atomically. A zero-valued output still consumes its position.
+
+Wallets authenticate the current payout head and range coverage under the same
+certified block, then refresh the output proof through the operator or configured
+holders. Proposers refresh proofs again when finalization advances before execution.
+The exact active authorization remains independent of the cached payout claim.
+The claim retains its native position across proof replacement and restart. After a deployment fault, finalized payouts remain claimable without a
+new vote, alongside deposit refunds and recovery from the frozen balance root.
+
+Validators prune native history behind the current challenge and recovery boundaries.
+Run a validator with `--retain-native-history` to keep older native operations for
+proof serving through its ordinary query endpoint. Longer retention is a local
+choice; an offline replica does not delay other validators' pruning. Keep wallet
+databases and a replica with the required history available for old claims.
+The outstanding-range ledger shrinks as payouts are consumed. Each finalization
+retires the previous finalized admission and anchor. The chain keeps the latest
+finalized descriptor and the live pending suffix; the fixed admission and challenge
+windows bound that suffix. Proof servers walk retained native rows and payment
+entries for activity proofs, and native payout outputs for claims under the current
+finalized payout head. Public Commit operations carry no metadata. Unavailable
+operations make reads retryable rather than proving absence. Native transaction
+and deposit idempotency records are retained for replay protection.
+
+Run `terminal-operator --node-dir <operator-directory> --no-proof-replica` to
+accept payments, propose closes, and accept certificates without constructing any
+operator native trees or creating `operator.sqlite.qmdb`. Proof RPCs then report
+unavailability, and wallets use the configured holders. The default enables this
+best-effort replica; its certified replay precedes onchain admission.
 
 ## Files, restarts, and multiple operators
 
@@ -189,7 +216,7 @@ remain available.
   `-- operator-0/
       |-- *.json                keys and chain configuration
       |-- runtime/              follower state
-      |-- operator.sqlite.qmdb/ balance replica and retained proof history
+      |-- operator.sqlite.qmdb/ optional balance, activity, and payout replicas
       `-- *.sqlite              operator ledger and wallet databases
 ```
 
@@ -293,6 +320,6 @@ lifecycle tests and the [protocol documentation](../../clearing/src/bajillion/mo
 for settlement rules.
 
 This local demo uses deterministic wallet keys and trusted committee setup, with
-keys stored in plaintext. Peers catch up by replaying blocks, and stored history
-is not pruned. Each epoch supports up to 1,024 payment entries, 1,024 deposits,
+keys stored in plaintext. Chain followers retain block history; native balance and
+log replicas can recover from authenticated checkpoints and prune history older than their protected boundaries. Each epoch supports up to 1,024 payment entries, 1,024 deposits,
 and 1,024 withdrawals, touching at most 4,096 accounts.

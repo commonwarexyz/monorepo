@@ -29,11 +29,9 @@ use crate::{
         da::{Ballot, Dealing, Message as DaMessage},
         ingress::Submission,
         light::{self, Verified},
-        query::{
-            Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest, EvidenceResponse,
-            METHOD_EVIDENCE, ReadRequest,
-        },
+        query::ReadRequest,
         setup::{NetworkConfig, OperatorConfig, read_genesis},
+        state::Record,
         tx::{AdmitRequest, SettlementTx},
         types::{Block, Database, now},
         validator::{
@@ -54,7 +52,7 @@ use commonware_actor::{
     mailbox::{self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender},
 };
 use commonware_broadcast::buffered;
-use commonware_clearing::bajillion::admission::bls12381;
+use commonware_clearing::bajillion::{admission::bls12381, transition::CloseContext};
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
     Epochable as _, Reporter, Reporters,
@@ -93,10 +91,6 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt as _, oneshot},
     ordered::Set,
-};
-use futures::{
-    FutureExt as _,
-    future::{BoxFuture, pending},
 };
 use rand_core::CryptoRng;
 use std::{
@@ -207,10 +201,40 @@ where
             .get(&request.key())
             .await
             .context("read applied settlement state")?;
+        let unclaimed = if matches!(
+            request.lookup,
+            crate::chain::query::Lookup::Unclaimed { .. }
+        ) {
+            let proof = match &record {
+                Some(record) => crate::chain::query::ReadProof::Present {
+                    record: record.clone(),
+                    proof: guard.key_value_proof(request.key()).await?,
+                },
+                None => crate::chain::query::ReadProof::Absent {
+                    proof: guard.exclusion_proof(&request.key()).await?,
+                },
+            };
+            proof.unclaimed(request)
+        } else {
+            None
+        };
+        let payout_tip = if request.lookup.requires_payout_tip() {
+            match guard
+                .get(&crate::chain::state::payout_head_key(&request.deployment))
+                .await?
+            {
+                Some(Record::PayoutHead(head)) => Some(head),
+                _ => return Ok(None),
+            }
+        } else {
+            None
+        };
         Ok(Some(Verified {
             height: tip.height,
             timestamp: tip.timestamp,
             record,
+            unclaimed,
+            payout_tip,
         }))
     }
 }
@@ -275,7 +299,7 @@ pub(crate) enum Message {
     /// Submit the certified close and complete once the local certified
     /// state admitted the exact batch and roots.
     Admit {
-        request: Box<AdmitRequest>,
+        request: Box<(CloseContext<Key, Digest>, AdmitRequest)>,
         response: oneshot::Sender<Result<()>>,
     },
 }
@@ -322,10 +346,14 @@ impl Mailbox {
     }
 
     /// Submits the certified close and completes on certified admission.
-    pub(crate) async fn admit(&self, request: AdmitRequest) -> Result<()> {
+    pub(crate) async fn admit(
+        &self,
+        context: CloseContext<Key, Digest>,
+        request: AdmitRequest,
+    ) -> Result<()> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Admit {
-            request: Box::new(request),
+            request: Box::new((context, request)),
             response,
         });
         receiver.await.map_err(|_| PipelineStopped)?
@@ -405,8 +433,12 @@ impl Pipeline {
     }
 
     /// Submits the certified close and blocks until certified admission.
-    pub(crate) fn admit(&self, request: AdmitRequest) -> Result<()> {
-        futures::executor::block_on(self.mailbox.admit(request))
+    pub(crate) fn admit(
+        &self,
+        context: CloseContext<Key, Digest>,
+        request: AdmitRequest,
+    ) -> Result<()> {
+        futures::executor::block_on(self.mailbox.admit(context, request))
     }
 }
 
@@ -417,13 +449,6 @@ struct Outstanding {
     message: Bytes,
     routes: Vec<Route>,
     votes: BTreeMap<Participant, Ballot>,
-    response: oneshot::Sender<Result<SettlementResult>>,
-}
-
-/// One quorum whose retained evidence is being fetched from a validator.
-struct Fetch {
-    epoch: u64,
-    future: BoxFuture<'static, Result<SettlementResult>>,
     response: oneshot::Sender<Result<SettlementResult>>,
 }
 
@@ -449,7 +474,6 @@ where
     chain: C,
     mailbox: MailboxReceiver<Message>,
     outstanding: Option<Outstanding>,
-    fetch: Option<Fetch>,
     // Preparation runs on a worker: a fence can arrive before its certification request.
     fenced_from: Option<u64>,
 }
@@ -468,7 +492,6 @@ where
                 chain: config.chain,
                 mailbox,
                 outstanding: None,
-                fetch: None,
                 fenced_from: None,
             },
             Mailbox { sender },
@@ -506,9 +529,6 @@ where
                             if self.outstanding.as_ref().is_some_and(|close| close.prepared.context().payment().epoch() >= first) {
                                 self.outstanding.take().unwrap().response.send_lossy(Err(anyhow::anyhow!("certification is canonically fenced")));
                             }
-                            if self.fetch.as_ref().is_some_and(|fetch| fetch.epoch >= first) {
-                                self.fetch.take().unwrap().response.send_lossy(Err(anyhow::anyhow!("certification is canonically fenced")));
-                            }
                         }
                         Message::Certify { prepared, proposal, message, routes, response } => {
                             let epoch = prepared.context().payment().epoch();
@@ -519,7 +539,6 @@ where
                             // A replaced certification drops the stale
                             // response: its worker observes the closed
                             // channel and fails that close.
-                            self.fetch = None;
                             self.outstanding = Some(Outstanding {
                                 prepared: *prepared,
                                 proposal,
@@ -532,23 +551,17 @@ where
                             resend_at = self.context.current() + RESEND;
                         }
                         Message::Admit { request, response } => {
+                            let (context, request) = *request;
                             let result = client::admit(
                                 self.context.as_present(),
                                 &mut self.chain,
-                                *request,
+                                &context,
+                                request,
                             )
                             .await;
                             response.send_lossy(result);
                         }
                     }
-                },
-                result = async {
-                    match &mut self.fetch {
-                        Some(fetch) => (&mut fetch.future).await,
-                        None => pending().await,
-                    }
-                } => {
-                    self.fetch.take().expect("active evidence fetch").response.send_lossy(result);
                 },
                 message = receiver.recv() => {
                     let Ok((peer, bytes)) = message else {
@@ -659,89 +672,19 @@ where
                 std::iter::once(result.vote.clone()).chain(matching.map(|ballot| ballot.vote)),
             )
             .expect("exactly quorum verified votes assemble");
-        let context = self.context.child("evidence");
-        let holders = match self.chain.holders() {
-            Ok(holders) => holders,
-            Err(error) => {
-                outstanding.response.send_lossy(Err(error));
-                return;
-            }
-        };
-        let epoch = outstanding.prepared.context().payment().epoch();
-        self.fetch = Some(Fetch {
-            epoch,
-            future: Self::fetch_evidence(
-                context,
-                holders,
-                outstanding.prepared,
-                result,
-                certificate,
-            )
-            .boxed(),
-            response: outstanding.response,
-        });
-    }
-    async fn fetch_evidence(
-        context: E,
-        holders: Vec<SocketAddr>,
-        prepared: PreparedEpoch,
-        result: Ballot,
-        certificate: bls12381::Certificate,
-    ) -> Result<SettlementResult> {
-        let request = EvidenceRequest::new(
-            *prepared.context().deployment(),
-            EvidenceLookup::CloseEvidence {
-                batch_id: result.header.batch_id::<Sha256>(),
-            },
-        )
-        .encode();
-        // The certified-fault observer owns termination; unavailable holders leave
-        // this exact proposal and its quorum pending until the pipeline is fenced.
-        loop {
-            for &holder in &holders {
-                let Ok(body) = crate::rpc::invoke(
-                    &context,
-                    holder,
-                    "validator",
-                    METHOD_EVIDENCE,
-                    request.clone(),
-                )
-                .await
-                else {
-                    continue;
-                };
-                let Ok(EvidenceResponse::Served(Evidence::Close {
-                    header,
-                    roots,
-                    body:
-                        EvidenceBody::Complete {
-                            context: close_context,
-                            evidence,
-                        },
-                })) = EvidenceResponse::decode(body)
-                else {
-                    continue;
-                };
-                if header != result.header
-                    || roots != result.roots
-                    || close_context != result.context
-                {
-                    continue;
-                }
-                let certified = CertifiedEpoch {
-                    context: close_context,
-                    header,
-                    roots,
+        outstanding
+            .response
+            .send_lossy(outstanding.prepared.certify(
+                CertifiedEpoch {
+                    context: result.context,
+                    header: result.header,
+                    roots: result.roots,
                     withdrawal_total: result.withdrawal_total,
-                    evidence,
-                    certificate: certificate.clone(),
-                };
-                if let Ok(result) = prepared.certify(certified, 0, 0) {
-                    return Ok(result);
-                }
-            }
-            context.sleep(client::POLL).await;
-        }
+                    certificate,
+                },
+                0,
+                0,
+            ));
     }
 }
 
@@ -1143,6 +1086,8 @@ pub(crate) async fn start(
 
 #[cfg(test)]
 mod tests {
+    mod payouts;
+
     use super::*;
     use crate::{
         chain::{light::Verified, query::ReadRequest},
@@ -1155,9 +1100,7 @@ mod tests {
         CheckedSender, LimitedSender,
         simulated::{Config as NetConfig, Link, Network},
     };
-    use commonware_runtime::{
-        Clock as _, IoBuf, IoBufs, Listener as _, Network as _, Quota, Runner as _, deterministic,
-    };
+    use commonware_runtime::{Clock as _, IoBuf, IoBufs, Quota, Runner as _, deterministic};
     use commonware_utils::{NZU32, NZUsize, probability, sync::Mutex};
     use std::{sync::Arc, time::SystemTime};
 
@@ -1318,58 +1261,12 @@ mod tests {
                 withdrawal_total: result.withdrawal_total,
                 vote,
             };
-            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let mut holders = Vec::new();
-            for index in 0..2 {
-                let address = SocketAddr::from(([127, 0, 0, 1], 9400 + index));
-                holders.push(address);
-                let mut listener = context.bind(address).await.unwrap();
-                let mut evidence = result.evidence.clone();
-                if index == 0 {
-                    let mut bytes = evidence.to_vec();
-                    bytes[0] ^= 1;
-                    evidence = bytes.into();
-                }
-                let response = EvidenceResponse::Served(Evidence::Close {
-                    header: result.header,
-                    roots: result.roots,
-                    body: EvidenceBody::Complete {
-                        context: result.context.clone(),
-                        evidence,
-                    },
-                })
-                .encode();
-                let requests = requests.clone();
-                context
-                    .child(["corrupt_holder", "valid_holder"][index as usize])
-                    .spawn(move |_| async move {
-                        let mut unavailable = true;
-                        loop {
-                            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                            let request = crate::rpc::recv_request(&mut stream).await.unwrap();
-                            assert_eq!(request.method, METHOD_EVIDENCE);
-                            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            let response = if std::mem::replace(&mut unavailable, false) {
-                                crate::rpc::Response::Error {
-                                    error: Bytes::from_static(b"query temporarily unavailable"),
-                                }
-                            } else {
-                                crate::rpc::Response::Success {
-                                    body: response.clone(),
-                                }
-                            };
-                            crate::rpc::send_response(&mut sink, &response)
-                                .await
-                                .unwrap();
-                        }
-                    });
-            }
 
             let (certifier, mailbox) = Certifier::new(
                 context.child("certifier"),
                 Config {
                     verifier: verifier.clone(),
-                    chain: Stub(holders),
+                    chain: Stub(Vec::new()),
                     mailbox_size: NZUsize!(16),
                 },
             );
@@ -1461,6 +1358,7 @@ mod tests {
             other_accounts[1].balance -= 1;
             let other = protocol.fixture_complete(&other_accounts, &[],
                 protocol.prepare(crate::protocol::EpochRegistration {
+                    floors: None,
                     context: result.context.epoch_context().clone(),
                     deposits: commonware_clearing::bajillion::boundary::DepositBatch::empty(),
                     withdrawals: commonware_clearing::bajillion::boundary::WithdrawalBatch::empty(),
@@ -1488,7 +1386,6 @@ mod tests {
                 .expect("quorum votes assemble the certificate");
             assert!(verifier.verify_exact(&header, &certificate.certificate));
             assert_eq!(certificate.certificate.signers.count(), quorum);
-            assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 4);
             assert_eq!(messages.lock().len(), 2 * validator_keys.len());
             assert!(
                 !certificate
@@ -1500,9 +1397,29 @@ mod tests {
         });
     }
     #[test]
-    fn certifier_fence_cancels_pending_evidence_and_rejects_replacement() {
+    fn certifier_fence_cancels_pending_certification_and_rejects_replacement() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let prepared = protocol
+                .prepare(
+                    protocol
+                        .registration(
+                            0,
+                            commonware_clearing::bajillion::boundary::DepositBatch::empty(),
+                            commonware_clearing::bajillion::boundary::WithdrawalBatch::empty(),
+                            400,
+                        )
+                        .unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+            let dealing = Dealing {
+                deployment: protocol.deployment(),
+                epoch: 0,
+                context: prepared.context().clone(),
+                bytes: prepared.encoded().clone(),
+            };
+            let replacement = prepared.clone();
             let (mut certifier, mailbox) = Certifier::new(
                 context.child("certifier"),
                 Config {
@@ -1512,9 +1429,12 @@ mod tests {
                 },
             );
             let (response, receiver) = oneshot::channel();
-            certifier.fetch = Some(Fetch {
-                epoch: 0,
-                future: pending().boxed(),
+            certifier.outstanding = Some(Outstanding {
+                prepared,
+                proposal: dealing.id(),
+                message: DaMessage::Dealing(Box::new(dealing)).encode(),
+                routes: Vec::new(),
+                votes: BTreeMap::new(),
                 response,
             });
             certifier.start(commonware_p2p::utils::mocks::inert_channel::<
@@ -1530,22 +1450,9 @@ mod tests {
                     .to_string()
                     .contains("fenced")
             );
-            let prepared = protocol
-                .prepare(
-                    protocol
-                        .registration(
-                            0,
-                            commonware_clearing::bajillion::boundary::DepositBatch::empty(),
-                            commonware_clearing::bajillion::boundary::WithdrawalBatch::empty(),
-                            400,
-                        )
-                        .unwrap(),
-                    Vec::new(),
-                )
-                .unwrap();
             assert!(
                 mailbox
-                    .certify(prepared, Vec::new())
+                    .certify(replacement, Vec::new())
                     .await
                     .err()
                     .unwrap()

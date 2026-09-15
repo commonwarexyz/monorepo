@@ -20,8 +20,12 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use commonware_actor::mailbox::Receiver as MailboxReceiver;
 use commonware_clearing::bajillion::boundary::WithdrawalBatch;
-use commonware_codec::{DecodeExt as _, Encode as _};
-use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_codec::DecodeExt as _;
+#[cfg(test)]
+use commonware_codec::Encode as _;
+use commonware_cryptography::sha256::Digest;
+#[cfg(test)]
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Clock, Handle, Listener, Network, Runner as _, Spawner as _, Supervisor as _, tokio,
 };
@@ -55,6 +59,7 @@ pub(crate) fn run_operator(
     node_dir: PathBuf,
     database: PathBuf,
     workers: NonZeroUsize,
+    proof_replica: bool,
 ) -> Result<()> {
     let runtime = tokio::Runner::new(
         tokio::Config::new()
@@ -114,6 +119,7 @@ pub(crate) fn run_operator(
                 config.clearing,
                 config.ack,
                 epoch_fee,
+                proof_replica,
             )
             .context("initialize SQLite operator")?,
         ));
@@ -287,7 +293,15 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
 ) -> Result<()> {
     operator.lock().advance_close()?;
     let fault_request = chain.request(Lookup::Fault);
-    let fault = match chain.recent(ctx, &fault_request).await?.record {
+    let verified = chain.recent(ctx, &fault_request).await?;
+    let finalized = verified
+        .payout_tip
+        .context("certified fault read omitted the finalization boundary")?
+        .finalized;
+    if let Some(finalized) = finalized {
+        operator.lock().observe_finalized(finalized)?;
+    }
+    let fault = match verified.record {
         Some(Record::Fault(fault)) => Some(fault),
         None => None,
         Some(_) => bail!("certified fault read returned a foreign record"),
@@ -302,6 +316,9 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
     let epochs = operator.lock().pending_epochs()?;
     let mut invalid_from = None;
     for epoch in epochs {
+        if finalized.is_some_and(|finalized| epoch <= finalized) {
+            continue;
+        }
         match chain.admitted(ctx, epoch).await? {
             Some(record) if Some(record.batch_id) == invalid_batch => {
                 invalid_from = Some(epoch);
@@ -544,111 +561,84 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
     request: &operator_rpc::OperatorRequest,
     timing: Timing,
 ) -> Result<Option<rpc::Response>> {
-    match request {
-        operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
-            for attempt in 0..SUBMIT_ATTEMPTS {
-                if attempt > 0 {
-                    ctx.sleep(POLL).await;
-                }
-                if operator
-                    .lock()
-                    .staged_withdrawal(&request.request)?
-                    .is_some()
-                {
-                    return Ok(None);
-                }
-                let expected = operator.lock().registration_boundary()?.0;
-                let status = chain.recent_status(ctx).await?;
-                ensure!(
-                    !status.hard_faulted,
-                    "withdrawal deployment is hard-faulted"
-                );
-                request
-                    .request
-                    .verify_deployment(&status.deployment)
-                    .context("verify withdrawal authorization")?;
-                let inclusion = status
-                    .height
-                    .checked_add(1)
-                    .context("withdrawal inclusion height overflow")?;
-                let config = crate::protocol::settlement_config(&timing)?;
-                let minimum = inclusion
-                    .checked_add(config.minimum_withdrawal_notice.get())
-                    .context("withdrawal notice overflow")?;
-                let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
-                let deadline = request.request.body().deadline();
-                let current_root = request.request.body().state_root() == &status.state_root.digest;
-                let valid_notice = (minimum..=maximum).contains(&deadline);
-
-                let lookup = chain.request(Lookup::Withdrawal {
-                    account: request.request.account().clone(),
-                });
-                let queued = chain.recent(ctx, &lookup).await?;
-                ensure!(
-                    queued.height >= status.height && deadline > queued.height,
-                    "withdrawal has expired"
-                );
-                let queued = match queued.record {
-                    Some(Record::Withdrawal(accepted)) => accepted == request.request,
-                    None => false,
-                    Some(_) => bail!("certified withdrawal read returned a foreign record"),
-                };
-                if !queued {
-                    ensure!(
-                        current_root,
-                        "withdrawal reference root differs from the current finalized state"
-                    );
-                    ensure!(
-                        valid_notice,
-                        "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
-                        status.height
-                    );
-                }
-
-                // Publication fixes the current boundary. Keep this authorization intact
-                // until the close driver opens a successor boundary for it.
-                {
-                    let mut operator = operator.lock();
-                    if operator.registration_boundary()?.0 != expected {
-                        continue;
-                    }
-                    if !operator.withdrawals_frozen()? {
-                        return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
-                            &mut operator,
-                            request.clone(),
-                            queued,
-                        )));
-                    }
-                }
-                drive_closes(ctx, chain, operator, timing).await?;
+    if let operator_rpc::OperatorRequest::ApplyWithdrawal(request) = request {
+        for attempt in 0..SUBMIT_ATTEMPTS {
+            if attempt > 0 {
+                ctx.sleep(POLL).await;
             }
-            bail!("the next withdrawal boundary did not open in time; retry the saved request");
-        }
-        operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
-            // The reserve retires only against the certified release record
-            // at the claim's exact (batch, position), consumed by exactly
-            // this evidence. A proven absence means the batch has not
-            // released it yet.
-            let release = chain
-                .withdrawal_release(ctx, request.batch_id, request.claim.position())
-                .await
-                .context("confirm settlement withdrawal claim")?
-                .context("withdrawal batch is not claimable yet")?;
+            if operator
+                .lock()
+                .staged_withdrawal(&request.request)?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let expected = operator.lock().registration_boundary()?.0;
+            let status = chain.recent_status(ctx).await?;
             ensure!(
-                release.claim == Sha256::hash(&[&request.claim.encode()]),
-                "settlement rejected the withdrawal claim"
+                !status.hard_faulted,
+                "withdrawal deployment is hard-faulted"
             );
+            request
+                .request
+                .verify_deployment(&status.deployment)
+                .context("verify withdrawal authorization")?;
+            let inclusion = status
+                .height
+                .checked_add(1)
+                .context("withdrawal inclusion height overflow")?;
+            let config = crate::protocol::settlement_config(&timing)?;
+            let minimum = inclusion
+                .checked_add(config.minimum_withdrawal_notice.get())
+                .context("withdrawal notice overflow")?;
+            let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
+            let deadline = request.request.body().deadline();
+            let current_root = request.request.body().state_root() == &status.state_root.digest;
+            let valid_notice = (minimum..=maximum).contains(&deadline);
+
+            let lookup = chain.request(Lookup::Withdrawal {
+                account: request.request.account().clone(),
+            });
+            let queued = chain.recent(ctx, &lookup).await?;
             ensure!(
-                release.released.destination == *request.claim.output().destination()
-                    && release.released.amount == request.claim.output().amount(),
-                "settlement returned another withdrawal output"
+                queued.height >= status.height && deadline > queued.height,
+                "withdrawal has expired"
             );
-            return Ok(Some(operator_rpc::acknowledge_withdrawal_confirmed(
-                &mut operator.lock(),
-                request,
-            )));
+            let queued = match queued.record {
+                Some(Record::Withdrawal(accepted)) => accepted == request.request,
+                None => false,
+                Some(_) => bail!("certified withdrawal read returned a foreign record"),
+            };
+            if !queued {
+                ensure!(
+                    current_root,
+                    "withdrawal reference root differs from the current finalized state"
+                );
+                ensure!(
+                    valid_notice,
+                    "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
+                    status.height
+                );
+            }
+
+            // Publication fixes the current boundary. Keep this authorization intact
+            // until the close driver opens a successor boundary for it.
+            {
+                let mut operator = operator.lock();
+                if operator.registration_boundary()?.0 != expected {
+                    continue;
+                }
+                if !operator.withdrawals_frozen()? {
+                    return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
+                        &mut operator,
+                        request.clone(),
+                        queued,
+                    )));
+                }
+            }
+            drive_closes(ctx, chain, operator, timing).await?;
         }
-        _ => {}
+        bail!("the next withdrawal boundary did not open in time; retry the saved request");
     }
 
     if !matches!(
@@ -757,12 +747,24 @@ async fn registration_request<E: Env, C: Chain>(
             Some(_) => bail!("certified withdrawal read returned a foreign record"),
         }
     }
+    let queued = WithdrawalBatch::new(queued)?;
+    let genesis = operator.lock().genesis();
+    let mut openings = Vec::new();
+    for request in expected.1.requests() {
+        if queued.request_for(request.account()).is_none() {
+            openings.push(
+                chain
+                    .predecessor_opening(ctx, epoch, request.account().clone(), genesis)
+                    .await?,
+            );
+        }
+    }
     let mut operator = operator.lock();
     ensure!(
         operator.registration_boundary()? == expected,
         "the withdrawal boundary moved during registration"
     );
-    operator.signed_registration(&WithdrawalBatch::new(queued)?)
+    operator.signed_registration_with_openings(&queued, openings)
 }
 
 /// Publishes the live boundary while its triggering request remains valid, then
@@ -1522,7 +1524,12 @@ mod tests {
                             );
                             assert_eq!(chain.registration(&context).await.unwrap(), Some(first));
                             let first_close = operator.lock().complete_close(1).unwrap();
-                            assert!(first_close.withdrawals.requests().is_empty());
+                            assert_eq!(
+                                first_close.context.withdrawal_root(),
+                                &WithdrawalBatch::<crate::protocol::Key, Digest>::empty()
+                                    .root::<Sha256>()
+                                    .unwrap()
+                            );
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &first_close,
@@ -1590,15 +1597,8 @@ mod tests {
                                 WithdrawalAction::Close => tail,
                             };
                             assert_eq!(close.withdrawal_total, expected);
-                            assert_eq!(close.withdrawal_claims.len(), 1);
-                            let claim = &close.withdrawal_claims[0];
-                            assert_eq!(
-                                claim
-                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                                    .unwrap()
-                                    .amount(),
-                                expected
-                            );
+                            let position = close.context.predecessor_logs().payouts.operations;
+                            assert_eq!(close.roots.withdrawal_outputs.operations, position + 2);
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &close,
@@ -1614,32 +1614,49 @@ mod tests {
                                     .finalized
                             );
                             assert_eq!(status(&control).await.claimable, expected);
-                            if expected > 0 {
-                                let batch_id = close.header.batch_id::<Sha256>();
-                                let claim_tx = SettlementTx::ClaimWithdrawal(
-                                    crate::chain::tx::WithdrawalClaimRequest {
-                                        deployment: deployment(),
-                                        batch_id,
-                                        claim: claim.clone(),
-                                    },
-                                );
-                                control.submit(claim_tx.clone()).await;
-                                let release = chain
-                                    .withdrawal_release(&context, batch_id, claim.position())
+                            let claim = chain
+                                .payout_proof(&context, close.roots.withdrawal_outputs, position)
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                claim
+                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
+                                    .unwrap()
+                                    .amount(),
+                                expected
+                            );
+                            let before = chain
+                                .payout_status(&context, claim.position())
+                                .await
+                                .unwrap();
+                            assert!(before.interval.is_some());
+                            assert!(claim.verify::<Sha256>(&before.head).is_ok());
+                            let claim_tx = SettlementTx::ClaimWithdrawal(
+                                crate::chain::tx::WithdrawalClaimRequest {
+                                    deployment: deployment(),
+                                    start: before.interval.unwrap().start,
+                                    claim: claim.clone(),
+                                },
+                            );
+                            control.submit(claim_tx.clone()).await;
+                            assert!(
+                                chain
+                                    .payout_status(&context, claim.position())
                                     .await
                                     .unwrap()
-                                    .unwrap();
-                                assert_eq!(release.released.amount, expected);
-                                control.submit(claim_tx).await;
-                                assert_eq!(
-                                    chain
-                                        .withdrawal_release(&context, batch_id, claim.position())
-                                        .await
-                                        .unwrap(),
-                                    Some(release)
-                                );
-                                assert_eq!(status(&control).await.claimable, 0);
-                            }
+                                    .interval
+                                    .is_none()
+                            );
+                            control.submit(claim_tx).await;
+                            assert!(
+                                chain
+                                    .payout_status(&context, claim.position())
+                                    .await
+                                    .unwrap()
+                                    .interval
+                                    .is_none()
+                            );
+                            assert_eq!(status(&control).await.claimable, 0);
                             assert!(!status(&control).await.hard_faulted);
 
                             // Intake receipts outlive carriage. A replay after restart must
@@ -2042,6 +2059,17 @@ mod tests {
                 _ => bail!("unexpected historical follower read"),
             };
             Ok(Verified {
+                unclaimed: None,
+                payout_tip: request.lookup.requires_payout_tip().then(|| {
+                    crate::protocol::PayoutTip {
+                        payouts: commonware_clearing::bajillion::logs::Heads::empty::<
+                            crate::protocol::Key,
+                            Sha256,
+                        >()
+                        .payouts,
+                        finalized: None,
+                    }
+                }),
                 height: 1,
                 timestamp: 0,
                 record,

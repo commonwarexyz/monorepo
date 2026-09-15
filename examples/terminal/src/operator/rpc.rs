@@ -1,10 +1,9 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, CommittedEntry, Operator, SendOutcome},
+    actor::{CloseEvent, Operator, SendOutcome},
     store::MAX_INCOMING_PAGE,
 };
-pub(crate) use crate::protocol::WithdrawalEvidence as WithdrawalEvidenceResponse;
 use crate::{
     protocol::{Acceptance, Entry, Key, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
     rpc,
@@ -16,15 +15,15 @@ use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
     challenge::HigherEntryLookup,
-    commitment::VectorRoot,
+    logs::LogHead,
     payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
-    transition::{BatchId, EpochContext, WithdrawalClaim},
+    transition::{EpochContext, WithdrawalClaim},
     vector::OutEntry,
 };
 use commonware_codec::{
-    Buf, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
-    Write,
+    Buf, Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network};
@@ -41,11 +40,10 @@ pub(crate) const METHOD_WITHDRAWAL_OPENING: u8 = 4;
 pub(crate) const METHOD_APPLY_WITHDRAWAL: u8 = 5;
 pub(crate) const METHOD_START_CLOSE: u8 = 6;
 pub(crate) const METHOD_POLL_CLOSE: u8 = 7;
-pub(crate) const METHOD_WITHDRAWAL_EVIDENCE: u8 = 8;
-pub(crate) const METHOD_ACKNOWLEDGE_WITHDRAWAL: u8 = 9;
 pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 pub(crate) const METHOD_INCOMING_PAYMENTS: u8 = 13;
 pub(crate) const METHOD_COMMITTED_ENTRY: u8 = 14;
+pub(crate) const METHOD_PAYOUT_PROOF: u8 = 15;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
@@ -167,7 +165,6 @@ impl Read for PollCloseRequest {
 
 key_request!(PaymentHeadRequest);
 key_request!(WithdrawalOpeningRequest);
-key_request!(WithdrawalEvidenceRequest);
 
 /// One submitted batch: the payer-signed vector endpoint and its per-batch delta entries,
 /// strictly recipient-sorted and unique.
@@ -602,53 +599,6 @@ impl Read for CommittedEntryRequest {
     }
 }
 
-/// A locally certified close's identity, change root, and terminal-entry lookup.
-///
-/// Callers must bind `batch_id` and `change_root` to an authenticated admission before
-/// relying on `lookup`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedEntryResponse {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) change_root: VectorRoot<Digest>,
-    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
-}
-
-impl From<CommittedEntry> for CommittedEntryResponse {
-    fn from(evidence: CommittedEntry) -> Self {
-        Self {
-            batch_id: evidence.batch_id,
-            change_root: evidence.change_root,
-            lookup: evidence.lookup,
-        }
-    }
-}
-
-impl Write for CommittedEntryResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.change_root.write(buf);
-        self.lookup.write(buf);
-    }
-}
-
-impl EncodeSize for CommittedEntryResponse {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.change_root.encode_size() + self.lookup.encode_size()
-    }
-}
-
-impl Read for CommittedEntryResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            change_root: VectorRoot::read(buf)?,
-            lookup: HigherEntryLookup::read(buf)?,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalOpeningResponse {
     pub(crate) root: StateRoot<Digest>,
@@ -712,49 +662,6 @@ impl Read for WithdrawalAck {
 pub(crate) fn withdrawal_digest(request: &SignedWithdrawal<Key, Digest>) -> Digest {
     let encoded = request.encode();
     Sha256::hash(&[WITHDRAWAL_ACK_NAMESPACE, encoded.as_ref()])
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AcknowledgeWithdrawalRequest {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) account: Key,
-    pub(crate) claim: WithdrawalClaim<Digest>,
-}
-
-impl Write for AcknowledgeWithdrawalRequest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.account.write(buf);
-        self.claim.write(buf);
-    }
-}
-
-impl EncodeSize for AcknowledgeWithdrawalRequest {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.account.encode_size() + self.claim.encode_size()
-    }
-}
-
-impl Read for AcknowledgeWithdrawalRequest {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            account: Key::read(buf)?,
-            claim: WithdrawalClaim::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
-        })
-    }
-}
-
-impl From<&WithdrawalEvidenceResponse> for AcknowledgeWithdrawalRequest {
-    fn from(evidence: &WithdrawalEvidenceResponse) -> Self {
-        Self {
-            batch_id: evidence.batch_id(),
-            account: evidence.witness.request.account().clone(),
-            claim: evidence.witness.claim.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -942,7 +849,34 @@ fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PayoutProofRequest {
+    pub(crate) head: LogHead<Digest>,
+    pub(crate) index: u64,
+}
+impl Write for PayoutProofRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.head.write(buf);
+        self.index.write(buf);
+    }
+}
+impl EncodeSize for PayoutProofRequest {
+    fn encode_size(&self) -> usize {
+        self.head.encode_size() + self.index.encode_size()
+    }
+}
+impl Read for PayoutProofRequest {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            head: LogHead::read(buf)?,
+            index: u64::read(buf)?,
+        })
+    }
+}
+
 pub(crate) enum OperatorRequest {
+    PayoutProof(PayoutProofRequest),
     Status,
     PaymentHead(PaymentHeadRequest),
     AcceptSend(AcceptSendRequest),
@@ -951,8 +885,6 @@ pub(crate) enum OperatorRequest {
     ApplyWithdrawal(ApplyWithdrawalRequest),
     StartClose(StartCloseRequest),
     PollClose(PollCloseRequest),
-    WithdrawalEvidence(WithdrawalEvidenceRequest),
-    AcknowledgeWithdrawal(Box<AcknowledgeWithdrawalRequest>),
     IncomingPayments(IncomingPaymentsRequest),
     CommittedEntry(CommittedEntryRequest),
 }
@@ -960,6 +892,9 @@ pub(crate) enum OperatorRequest {
 pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
     let body = request.body;
     match request.method {
+        METHOD_PAYOUT_PROOF => PayoutProofRequest::decode(body)
+            .map(OperatorRequest::PayoutProof)
+            .context("decode payout proof request"),
         METHOD_STATUS => StatusRequest::decode(body)
             .map(|_| OperatorRequest::Status)
             .context("decode status request"),
@@ -990,19 +925,15 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_POLL_CLOSE => PollCloseRequest::decode(body)
             .map(OperatorRequest::PollClose)
             .context("decode poll-close request"),
-        METHOD_WITHDRAWAL_EVIDENCE => WithdrawalEvidenceRequest::decode(body)
-            .map(OperatorRequest::WithdrawalEvidence)
-            .context("decode withdrawal-evidence request"),
-        METHOD_ACKNOWLEDGE_WITHDRAWAL => AcknowledgeWithdrawalRequest::decode(body)
-            .map(Box::new)
-            .map(OperatorRequest::AcknowledgeWithdrawal)
-            .context("decode withdrawal-acknowledgement request"),
         method => bail!("unknown operator RPC method {method}"),
     }
 }
 
 fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> {
     match request {
+        OperatorRequest::PayoutProof(request) => {
+            Ok(operator.payout_proof(request.head, request.index)?.encode())
+        }
         OperatorRequest::Status => Ok(build_status(operator)?.encode()),
         OperatorRequest::PaymentHead(request) => {
             let head = operator
@@ -1052,15 +983,6 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
         OperatorRequest::PollClose(request) => {
             Ok(close_event(operator.poll_close(request.epoch).context("poll close")?)?.encode())
         }
-        OperatorRequest::WithdrawalEvidence(request) => {
-            let evidence = operator
-                .withdrawal_evidence(&request.account)
-                .context("read withdrawal evidence")?;
-            Ok(evidence.encode())
-        }
-        OperatorRequest::AcknowledgeWithdrawal(_) => {
-            bail!("settlement confirmation is required before acknowledging a withdrawal")
-        }
         OperatorRequest::IncomingPayments(request) => {
             let page = operator
                 .incoming_payments(&request.account, request.cursor, MAX_INCOMING_PAGE)
@@ -1081,7 +1003,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let evidence = operator
                 .committed_entry(&request.payer, &request.recipient, request.epoch)
                 .context("read committed entry evidence")?;
-            Ok(CommittedEntryResponse::from(evidence).encode())
+            Ok(evidence.encode())
         }
     }
 }
@@ -1132,19 +1054,6 @@ pub(crate) fn apply_withdrawal_confirmed(
 ) -> rpc::Response {
     match stage_withdrawal(operator, request, queued) {
         Ok(body) => rpc::Response::Success { body },
-        Err(error) => rpc::error_response(format!("{error:#}")),
-    }
-}
-
-pub(crate) fn acknowledge_withdrawal_confirmed(
-    operator: &mut Operator,
-    request: &AcknowledgeWithdrawalRequest,
-) -> rpc::Response {
-    match operator
-        .acknowledge_withdrawal_claim(request.batch_id, &request.account, &request.claim)
-        .context("acknowledge withdrawal claim")
-    {
-        Ok(()) => rpc::Response::Success { body: Bytes::new() },
         Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
@@ -1227,14 +1136,13 @@ pub(crate) async fn incoming_payments<E: Network + Clock>(
 
 /// Fetches retained activity evidence for one payer-recipient edge.
 ///
-/// The caller authenticates the admission identity and verifies the returned lookup against
-/// its change root. The operator only supplies the evidence.
+/// The caller verifies the lookup against an independently authenticated activity range.
 pub(crate) async fn committed_entry<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: CommittedEntryRequest,
-) -> Result<CommittedEntryResponse> {
-    CommittedEntryResponse::decode(
+) -> Result<HigherEntryLookup<Key, Digest>> {
+    HigherEntryLookup::decode(
         invoke(network, address, METHOD_COMMITTED_ENTRY, request.encode()).await?,
     )
     .context("decode committed entry evidence")
@@ -1302,37 +1210,16 @@ pub(crate) async fn poll_close<E: Network + Clock>(
     .context("decode close event")
 }
 
-pub(crate) async fn withdrawal_evidence<E: Network + Clock>(
+pub(crate) async fn payout_proof<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
-    request: WithdrawalEvidenceRequest,
-) -> Result<WithdrawalEvidenceResponse> {
-    WithdrawalEvidenceResponse::decode(
-        invoke(
-            network,
-            address,
-            METHOD_WITHDRAWAL_EVIDENCE,
-            request.encode(),
-        )
-        .await?,
+    request: PayoutProofRequest,
+) -> Result<WithdrawalClaim<Digest>> {
+    WithdrawalClaim::decode_cfg(
+        invoke(network, address, METHOD_PAYOUT_PROOF, request.encode()).await?,
+        &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
     )
-    .context("decode withdrawal evidence")
-}
-
-pub(crate) async fn acknowledge_withdrawal<E: Network + Clock>(
-    network: &E,
-    address: SocketAddr,
-    request: AcknowledgeWithdrawalRequest,
-) -> Result<()> {
-    let response = invoke(
-        network,
-        address,
-        METHOD_ACKNOWLEDGE_WITHDRAWAL,
-        request.encode(),
-    )
-    .await?;
-    anyhow::ensure!(response.is_empty(), "operator returned an unexpected body");
-    Ok(())
+    .context("decode payout proof")
 }
 
 #[cfg(test)]
@@ -1340,7 +1227,6 @@ mod tests {
     use super::*;
     use crate::protocol::{Protocol, identities, wallets};
     use bytes::BytesMut;
-    use commonware_codec::Decode as _;
     use commonware_cryptography::{Hasher, Sha256};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
@@ -1699,6 +1585,7 @@ mod tests {
                 PollCloseResponse::Finished(finished) => {
                     assert_eq!(finished.epoch, 0);
                     assert!(finished.rows > 0);
+                    assert_eq!(finished.withdrawal_total, 112);
                     break;
                 }
                 PollCloseResponse::Failed { error, .. } => {
@@ -1707,47 +1594,7 @@ mod tests {
             }
         }
 
-        let evidence = WithdrawalEvidenceResponse::decode(success_body(handle(
-            &mut operator,
-            request(
-                METHOD_WITHDRAWAL_EVIDENCE,
-                WithdrawalEvidenceRequest {
-                    account: payer_key.clone(),
-                }
-                .encode(),
-            ),
-        )))
-        .unwrap();
-        assert_eq!(evidence.witness.request.account().clone(), payer_key);
-        assert_eq!(evidence.witness.claim.output().amount(), 7);
-        assert_eq!(
-            evidence.witness.claim.output().destination().as_ref(),
-            payer_key.as_ref()
-        );
-    }
-
-    #[test]
-    fn unconfirmed_withdrawal_acknowledgement_keeps_evidence() {
-        let mut operator = operator();
-        let account = wallets()[0].public_key();
-        operator
-            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()))
-            .unwrap();
-        operator.start_close(0).unwrap();
-        operator.wait_for_closes().unwrap();
-        let evidence = operator.withdrawal_evidence(&account).unwrap();
-        let acknowledgement = AcknowledgeWithdrawalRequest {
-            batch_id: evidence.batch_id(),
-            account: evidence.witness.request.account().clone(),
-            claim: evidence.witness.claim,
-        };
-
-        let error = error_text(handle(
-            &mut operator,
-            request(METHOD_ACKNOWLEDGE_WITHDRAWAL, acknowledgement.encode()),
-        ));
-        assert!(error.contains("settlement confirmation"));
-        assert!(operator.withdrawal_evidence(&account).is_ok());
+        assert_eq!(operator.payment_head(&payer_key).unwrap().balance, 88);
     }
 
     #[test]

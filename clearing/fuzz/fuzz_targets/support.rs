@@ -2,13 +2,17 @@
 
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
+    logs::{self, Floors, Logs},
     qmdb::{self, State, account_key},
+    replica::{self, Replica},
     transition::{CloseContext, CloseLimits, EpochContext},
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, deterministic, utils::buffer::paged::CacheRef};
+use commonware_runtime::{
+    BufferPooler, Supervisor as _, deterministic, utils::buffer::paged::CacheRef,
+};
 use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
     qmdb::current::FixedConfig, translator::EightCap,
@@ -16,7 +20,7 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::NonZeroU64;
 
-pub type TestState = State<deterministic::Context, Sha256>;
+pub type TestState = Replica<deterministic::Context, Sha256, VerifyingKey>;
 
 pub fn config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<Sequential> {
     let page_cache = CacheRef::from_pooler(context, NZU16!(4092), NZUsize!(16));
@@ -45,6 +49,48 @@ pub fn config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<Sequent
     }
 }
 
+pub fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Config<Sequential> {
+    let activity = config(context, &format!("{prefix}-activity"));
+    let payouts = config(context, &format!("{prefix}-payouts"));
+    logs::Config {
+        activity: commonware_storage::qmdb::keyless::Config {
+            merkle: activity.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: activity.journal_config.partition,
+                items_per_section: commonware_utils::NZU64!(4096),
+                compression: None,
+                codec_config: (),
+                page_cache: activity.journal_config.page_cache,
+                write_buffer: commonware_utils::NZUsize!(4096),
+                replay_buffer: commonware_utils::NZUsize!(4096),
+            },
+        },
+        payouts: commonware_storage::qmdb::keyless::Config {
+            merkle: payouts.merkle_config,
+            log: commonware_storage::journal::contiguous::variable::Config {
+                partition: payouts.journal_config.partition,
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: commonware_codec::RangeCfg::new(0..=1024),
+                page_cache: payouts.journal_config.page_cache,
+                write_buffer: NZUsize!(4096),
+                replay_buffer: NZUsize!(4096),
+            },
+        },
+    }
+}
+
+pub async fn open_state(
+    context: deterministic::Context,
+    prefix: &str,
+) -> Result<TestState, replica::Error> {
+    let cfg = replica::Config {
+        state: config(&context, prefix),
+        logs: logs_config(&context, prefix),
+    };
+    Replica::open(context, cfg).await
+}
+
 pub async fn new_state(
     context: deterministic::Context,
     prefix: &str,
@@ -61,7 +107,12 @@ pub async fn new_state(
         .collect::<Vec<_>>();
     genesis.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     let config = config(&context, prefix);
-    State::init(context, config, genesis).await.unwrap()
+    let log_config = logs_config(&context, prefix);
+    let state = State::init(context.child("state"), config, genesis)
+        .await
+        .unwrap();
+    let logs = Logs::open(context, log_config).await.unwrap();
+    Replica::from_parts(state, logs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -70,12 +121,14 @@ pub fn close_context(
     epoch: u64,
     operator: VerifyingKey,
     state: &TestState,
+    predecessor_liability: u64,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
     admission: u64,
     challenge: u64,
     limits: CloseLimits,
     committee: Digest,
+    floors: Floors,
 ) -> CloseContext<VerifyingKey, Digest> {
     EpochContext::new::<Sha256>(
         deployment,
@@ -83,13 +136,13 @@ pub fn close_context(
         operator,
         deposits,
         withdrawals,
-        state.liability(),
+        predecessor_liability,
         admission,
         challenge,
         limits,
         committee,
     )
     .unwrap()
-    .bind::<Sha256, _, _>(state, deposits, withdrawals)
+    .bind::<Sha256, _, _>(state, deposits, withdrawals, floors)
     .unwrap()
 }

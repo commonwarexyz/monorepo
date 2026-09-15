@@ -136,8 +136,8 @@ async fn assert_guard(db: &Database<deterministic::Context>, deployment: &Digest
     let machine = machine_key(deployment);
     let successor = machine_guard_key(deployment);
     assert_eq!(&machine.as_ref()[..32], &successor.as_ref()[..32]);
-    assert_eq!(machine.as_ref()[32], 254);
-    assert_eq!(successor.as_ref()[32], 255);
+    assert_eq!(machine.as_ref()[40], 254);
+    assert_eq!(successor.as_ref()[40], 255);
     assert!(machine < successor);
     assert_eq!(Record::MachineGuard.encode().len(), 1);
     assert_eq!(
@@ -184,16 +184,13 @@ fn public_lookup_encodings_exclude_private_checkpoint_suffixes() {
         Lookup::Status,
         Lookup::Anchor { epoch: u64::MAX },
         Lookup::Admitted { epoch: u64::MAX },
-        Lookup::ClaimRoots { batch: digest },
+        Lookup::PayoutHead,
         Lookup::Deposit { id: digest },
         Lookup::Registration,
         Lookup::Withdrawal {
             account: account.clone(),
         },
-        Lookup::WithdrawalRelease {
-            batch: digest,
-            position: u32::MAX,
-        },
+        Lookup::Unclaimed { index: u64::MAX },
         Lookup::HardFault {
             account: account.clone(),
         },
@@ -209,7 +206,7 @@ fn public_lookup_encodings_exclude_private_checkpoint_suffixes() {
     ];
     for lookup in lookups {
         let request = ReadRequest::new(digest, lookup);
-        assert!(request.key().as_ref()[32] < 254);
+        assert!(request.key().as_ref()[40] < 254);
         assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
     }
 }
@@ -232,6 +229,7 @@ async fn check_absence(
             contains_checkpoint |= matches!(update.value, Record::Machine(_));
         }
         let response = CertifiedRead {
+            payout: None,
             finalization: certificate.finalization.clone(),
             block: certificate.block.clone(),
             proof: query::ReadProof::Absent { proof },

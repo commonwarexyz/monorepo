@@ -60,6 +60,9 @@ pub(crate) struct Verified {
     pub(crate) timestamp: u64,
     /// The verified value, or `None` for a verified absence.
     pub(crate) record: Option<Record>,
+    /// Authenticated coverage of a queried native payout index by an unclaimed interval.
+    pub(crate) unclaimed: Option<commonware_clearing::bajillion::settlement::UnclaimedInterval>,
+    pub(crate) payout_tip: Option<crate::protocol::PayoutTip>,
 }
 
 /// Verifies one certified read against the committee `scheme`.
@@ -110,9 +113,26 @@ where
             None
         }
     };
+    let payout_tip = match (request.lookup.requires_payout_tip(), &response.payout) {
+        (true, Some(payout)) => {
+            if !Qmdb::<E>::verify_key_value_proof(
+                crate::chain::state::payout_head_key(&request.deployment),
+                Record::PayoutHead(payout.tip),
+                &payout.proof,
+                &block.state_root,
+            ) {
+                return Err(Error::Proof);
+            }
+            Some(payout.tip)
+        }
+        (true, None) | (false, Some(_)) => return Err(Error::Proof),
+        (false, None) => None,
+    };
     Ok(Verified {
         height: block.height.get(),
         timestamp: block.timestamp,
+        unclaimed: response.proof.unclaimed(request),
+        payout_tip,
         record,
     })
 }

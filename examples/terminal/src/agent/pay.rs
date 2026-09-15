@@ -67,6 +67,7 @@ impl Agent {
         operator: SocketAddr,
         entries: &[(usize, u64)],
     ) -> Result<PaymentOutcome> {
+        self.observe_withdrawal_expiry(ctx, chain).await?;
         let (requested, total) = self.payment_entries(entries)?;
         self.pay_requested(ctx, chain, operator, requested, total)
             .await
@@ -199,6 +200,10 @@ impl Agent {
         requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
+        ensure!(
+            self.pending_withdrawal.is_none(),
+            "a withdrawal authorization is still active"
+        );
         if let Some(cache) = self.cache.clone() {
             // The local view is a lower bound, so a shortfall is not proof of
             // unaffordability: funds from a deposit, or from an epoch the floor
@@ -330,28 +335,62 @@ impl Agent {
         accepted: Option<operator_rpc::AcceptedBatchResponse>,
     ) -> Result<PendingOutcome> {
         let context = &staged.context;
-        let admitted = match receipt_epoch(ctx, chain, self.deployment, context).await? {
-            ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
-            ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
-            ReceiptEpoch::Live(None) => {
-                return match accepted {
-                    Some(accepted) => Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
-                        Box::new(self.record_payment(accepted, &staged, false)?),
-                    ))),
-                    None => Ok(PendingOutcome::Live(Box::new(staged))),
-                };
-            }
-            ReceiptEpoch::Live(Some(admitted))
-            | ReceiptEpoch::Finalized(admitted)
-            | ReceiptEpoch::Faulted(admitted) => admitted,
-        };
+        let (range, descriptor_finalized) =
+            match receipt_epoch(ctx, chain, self.deployment, context).await? {
+                ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
+                ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
+                ReceiptEpoch::Live(None) => {
+                    return match accepted {
+                        Some(accepted) => Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
+                            Box::new(self.record_payment(accepted, &staged, false)?),
+                        ))),
+                        None => Ok(PendingOutcome::Live(Box::new(staged))),
+                    };
+                }
+                ReceiptEpoch::Live(Some(admitted)) | ReceiptEpoch::Faulted(admitted) => {
+                    (admitted.activity_range(), false)
+                }
+                ReceiptEpoch::Finalized(admitted) => (admitted.activity_range(), true),
+                ReceiptEpoch::Retired => {
+                    let total = entry_total(&staged.entries)?;
+                    let accepted = match accepted {
+                        Some(accepted) => Some(accepted),
+                        None => operator_rpc::accepted_batch(
+                            ctx,
+                            operator,
+                            operator_rpc::AcceptSendRequest {
+                                authorization: staged.authorization.clone(),
+                                entries: staged.entries.clone(),
+                            },
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|accepted| Self::verify_accepted(accepted, &staged, total).is_ok()),
+                    }
+                    .context("finalized payment has no saved signed receipt")?;
+                    let outcome = self.record_payment(accepted, &staged, true)?;
+                    self.cache = None;
+                    if let Ok(status) = settlement_status(ctx, chain, self.deployment).await
+                        && let Ok(opening) = self
+                            .holders
+                            .validator_opening(ctx, chain, &self.account(), &status)
+                            .await
+                    {
+                        self.retain_head(&status.state_root, &opening)?;
+                    }
+                    return Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
+                        Box::new(outcome),
+                    )));
+                }
+            };
         let account = self.account();
         let lookup = self
             .holders
-            .committed_account(ctx, chain, &admitted, &account)
+            .committed_account_at(ctx, chain, context.epoch(), &range, &account)
             .await?;
         let (_, activity) = lookup
-            .resolve::<Sha256>(&admitted.roots.change, &account)
+            .resolve::<Sha256>(&range, &account)
             .context("verify admitted payer activity")?;
         let Some(activity) = activity.filter(|activity| activity.has_outgoing()) else {
             return self.abandon_staged(&staged);
@@ -378,11 +417,11 @@ impl Agent {
 
         // Activity is immutable, but evidence retrieval can cross finalization or a fault.
         // Only a fresh live verdict can authorize a newly acquired preconfirmation.
-        let finalized = if admitted.finalized {
+        let finalized = if descriptor_finalized {
             true
         } else {
             match receipt_epoch(ctx, chain, self.deployment, context).await? {
-                ReceiptEpoch::Finalized(_) => true,
+                ReceiptEpoch::Finalized(_) | ReceiptEpoch::Retired => true,
                 ReceiptEpoch::Live(_) if accepted.is_some() => false,
                 ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
                 _ => anyhow::bail!(
@@ -466,6 +505,7 @@ impl Agent {
                 && head.context.verify_anchor::<Sha256>(),
             "payment context is not bound to this deployment and operator"
         );
+        self.check_withdrawal_floor(status)?;
         let finalized_epoch = floor_epoch(status)?;
         let epoch = head.context.payment().epoch();
         let epoch = if epoch > finalized_epoch {
@@ -519,7 +559,7 @@ impl Agent {
         root: &StateRoot<Digest>,
         epoch: u64,
     ) -> Result<()> {
-        if self.pending_withdrawal.is_some() || self.pending_withdrawal_claim.is_some() {
+        if self.pending_withdrawal.is_some() {
             return self.store.check_signing_context(context);
         }
         self.store
@@ -642,6 +682,7 @@ impl Agent {
         total: u64,
     ) -> Result<(PaymentContext<Key, Digest>, StateRoot<Digest>)> {
         let status = staging_status(ctx, chain, self.deployment).await?;
+        self.check_withdrawal_floor(&status)?;
         let context = registered_context(ctx, chain, &self.operator).await?;
         let account = self.account();
         let finalized_epoch = floor_epoch(&status)?;
@@ -716,7 +757,7 @@ impl Agent {
         &mut self,
         accepted: operator_rpc::AcceptedBatchResponse,
         staged: &StagedSend,
-        finalized: bool,
+        retire_context: bool,
     ) -> Result<operator_rpc::AcceptedBatchResponse> {
         let receipt_count = self
             .store
@@ -731,7 +772,7 @@ impl Agent {
                     .checked_sub(entry_total(&staged.entries)?)
                     .context("payment delta exceeds epoch debit")?,
                 self.receipt_count,
-                finalized,
+                retire_context,
             )
             .context("commit accepted receipts")?;
         self.pending_payment = None;

@@ -1,25 +1,24 @@
-//! Validator-served evidence verified against caller-owned settlement roots.
+//! Custodian-served evidence verified against caller-owned settlement roots.
 //!
-//! Every validator retains the full close. Failed, absent, or malformed responses try the
-//! next validator; only authenticated inclusion or exclusion determines account state.
+//! Failed, absent, or malformed responses try the next configured custodian; only authenticated
+//! inclusion or exclusion determines account state.
 
 use crate::{
     chain::{
         client::{Chain as _, Client, Env},
-        query::{
-            Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest, EvidenceResponse,
-            METHOD_EVIDENCE,
-        },
+        query::{Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, METHOD_EVIDENCE},
         state::{AdmittedRootsResponse, StatusRecord},
     },
-    protocol::{Key, WithdrawalWitness},
+    protocol::Key,
     rpc,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, HigherEntryLookup},
+    logs::LogHead,
     qmdb::{StateLookup, StateOpening, StateRoot, account_key},
+    transition::{ActivityRange, WithdrawalClaim, WithdrawalOutput},
 };
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
@@ -31,10 +30,30 @@ use thiserror::Error;
 /// Maximum wait for one holder's answer before the next holder is asked.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The wallet's route to validator evidence.
+pub(super) fn verify_payout_proof(
+    head: &LogHead<Digest>,
+    index: u64,
+    expected: &WithdrawalOutput,
+    claim: WithdrawalClaim<Digest>,
+) -> Result<WithdrawalClaim<Digest>> {
+    ensure!(
+        claim.position() == index,
+        "payout proof has another position"
+    );
+    ensure!(
+        claim.output() == expected,
+        "payout proof has another output"
+    );
+    claim
+        .verify::<Sha256>(head)
+        .context("verify current payout proof")?;
+    Ok(claim)
+}
+
+/// The wallet's route to configured evidence custodians.
 ///
-/// Validators appear in genesis committee order. Account hashing spreads the first
-/// request across them, and subsequent reads start with the last successful server.
+/// Account hashing spreads the first request across the configured native custodians, and
+/// subsequent reads start with the last successful server.
 #[derive(Default)]
 pub(super) struct Holders {
     /// The holder that last served each account. A routing cache, so it is
@@ -59,7 +78,7 @@ pub(super) enum Decline {
     Failed(anyhow::Error),
 }
 
-/// Every validator declined one lookup.
+/// Every configured custodian declined one lookup.
 #[derive(Debug, Error)]
 #[error("no holder served the evidence ({})", describe(.declines))]
 pub(super) struct Exhausted {
@@ -76,10 +95,13 @@ fn describe(declines: &[(SocketAddr, Decline)]) -> String {
 }
 
 impl Holders {
-    /// The validators in the order this wallet asks them.
+    /// The configured custodians in the order this wallet asks them.
     pub(super) fn order(&self, chain: &Client, account: &Key) -> Result<Vec<SocketAddr>> {
         let mut holders = chain.genesis().holders()?;
-        ensure!(!holders.is_empty(), "the deployment has no validators");
+        ensure!(
+            !holders.is_empty(),
+            "the deployment has no evidence custodians"
+        );
         let served = self.served.lock().get(account).copied();
         let start = served
             .and_then(|served| holders.iter().position(|holder| *holder == served))
@@ -88,7 +110,7 @@ impl Holders {
         Ok(holders)
     }
 
-    /// Asks the validators for `lookup` until one serves
+    /// Asks the configured custodians for `lookup` until one serves
     /// evidence that `accept` verifies, remembering that holder for the
     /// account. Every other answer moves on to the next holder, and
     /// exhausting them is an [`Exhausted`] error naming every holder and its
@@ -129,23 +151,34 @@ impl Holders {
         account: &Key,
         status: &StatusRecord,
     ) -> Result<EvidenceLookup> {
-        let Some(finalized) = status.last_finalized else {
-            return Ok(EvidenceLookup::GenesisState {
-                account: account.clone(),
-            });
+        let operations = if let Some(finalized) = status.last_finalized {
+            let admitted = chain
+                .admitted(ctx, finalized)
+                .await?
+                .context("the current finalized close has no admission record")?;
+            ensure!(
+                admitted.finalized && admitted.roots.successor == status.state_root,
+                "the current finalized admission differs from the status root"
+            );
+            admitted.roots.successor_operations
+        } else {
+            let registered = chain.registered(ctx).await?;
+            let genesis = registered.deployment.genesis();
+            ensure!(
+                genesis.root() == status.state_root,
+                "the status root differs from the registered genesis state"
+            );
+            genesis.operations()
         };
-        let admitted = chain
-            .admitted(ctx, finalized)
-            .await?
-            .context("the finalized close has no certified admission record")?;
-        Ok(EvidenceLookup::SuccessorState {
-            batch: admitted.batch_id.into_digest(),
+        Ok(EvidenceLookup::State {
+            root: status.state_root,
+            operations,
             account: account.clone(),
         })
     }
 
-    /// `account`'s leaf at the certified head `status`, served by validators and verified against the status root: the head read that needs
-    /// no operator.
+    /// `account`'s leaf at the certified head `status`, served by a custodian and verified
+    /// against the status root: the head read that needs no operator.
     pub(super) async fn validator_opening<E: Env>(
         &self,
         ctx: &E,
@@ -185,8 +218,9 @@ impl Holders {
             chain,
             account,
             &admitted.roots.successor,
-            EvidenceLookup::SuccessorState {
-                batch: admitted.batch_id.into_digest(),
+            EvidenceLookup::State {
+                root: admitted.roots.successor,
+                operations: admitted.roots.successor_operations,
                 account: account.clone(),
             },
         )
@@ -204,165 +238,80 @@ impl Holders {
         lookup: EvidenceLookup,
     ) -> Result<Option<StateOpening<Key, Digest>>> {
         let accept = |evidence: Evidence| {
-            let opening = match evidence {
-                Evidence::Close {
-                    body: EvidenceBody::State(opening),
-                    ..
-                }
-                | Evidence::Genesis(opening) => opening,
-                Evidence::Close {
-                    body: EvidenceBody::StateAbsent(proof),
-                    ..
-                }
-                | Evidence::GenesisAbsent(proof) => {
-                    StateLookup::Absent(proof)
-                        .resolve::<Sha256>(root, &account_key(account)?)
-                        .context("verify Current balance exclusion")?;
-                    return Ok(None);
-                }
-                _ => bail!("served evidence is not a state opening"),
+            let Evidence::State(lookup) = evidence else {
+                bail!("served evidence is not a Current state lookup");
             };
-            check_opening(&opening, root, account)?;
-            Ok(Some(opening))
+            lookup
+                .resolve::<Sha256>(root, &account_key(account)?)
+                .context("verify Current balance lookup")?;
+            match lookup {
+                StateLookup::Present(value) => Ok(Some(StateOpening {
+                    account: account.clone(),
+                    balance: value.balance,
+                    proof: value.proof,
+                })),
+                StateLookup::Absent(_) => Ok(None),
+            }
         };
         self.fetch(ctx, chain, account, lookup, accept).await
     }
 
-    /// Authenticates the account's terminal epoch activity, including explicit absence.
-    pub(super) async fn committed_account<E: Env>(
+    /// Authenticates terminal activity under an independently authenticated native range.
+    pub(super) async fn committed_account_at<E: Env>(
         &self,
         ctx: &E,
         chain: &Client,
-        admitted: &AdmittedRootsResponse,
+        epoch: u64,
+        range: &ActivityRange<Digest>,
         account: &Key,
     ) -> Result<AccountLookup<Key, Digest>> {
         let request = EvidenceLookup::Account {
-            batch: admitted.batch_id.into_digest(),
+            epoch,
+            range: *range,
             account: account.clone(),
         };
         let accept = |evidence: Evidence| {
-            let Evidence::Close {
-                header,
-                body: EvidenceBody::Account(lookup),
-                ..
-            } = evidence
-            else {
+            let Evidence::Account(lookup) = evidence else {
                 bail!("served evidence is not an activity lookup");
             };
-            ensure!(
-                header.batch_id::<Sha256>() == admitted.batch_id,
-                "activity belongs to another batch"
-            );
             lookup
-                .resolve::<Sha256>(&admitted.roots.change, account)
+                .resolve::<Sha256>(range, account)
                 .context("verify committed payer activity")?;
             Ok(lookup)
         };
         self.fetch(ctx, chain, account, request, accept).await
     }
 
-    /// The payer's committed terminal entry for `recipient` in the admitted
-    /// close, verified against the admitted change root.
-    pub(super) async fn committed_entry<E: Env>(
-        &self,
-        ctx: &E,
-        chain: &Client,
-        admitted: &AdmittedRootsResponse,
-        payer: &Key,
-        recipient: &Key,
-    ) -> Result<HigherEntryLookup<Key, Digest>> {
-        let change = admitted.roots.change;
-        let lookup = EvidenceLookup::CommittedEntry {
-            batch: admitted.batch_id.into_digest(),
-            payer: payer.clone(),
-            recipient: recipient.clone(),
-        };
-        let accept = |evidence: Evidence| {
-            let Evidence::Close {
-                body: EvidenceBody::CommittedEntry(lookup),
-                ..
-            } = evidence
-            else {
-                bail!("served evidence is not a committed entry lookup");
-            };
-            lookup
-                .resolve::<Sha256>(&change, payer, recipient)
-                .context("resolve the committed entry against the admitted change root")?;
-            Ok(lookup)
-        };
-        self.fetch(ctx, chain, payer, lookup, accept).await
-    }
-
-    /// Authenticates the complete withdrawal boundary before deciding exact request membership.
-    pub(super) async fn carried_withdrawal<E: Env>(
+    /// Authenticates a terminal entry under an independently authenticated native range.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request binds one source range and one directed edge"
+    )]
+    pub(super) async fn committed_entry_at<E: Env>(
         &self,
         ctx: &E,
         chain: &Client,
         epoch: u64,
-        admitted: &AdmittedRootsResponse,
-        request: &commonware_clearing::bajillion::boundary::SignedWithdrawal<Key, Digest>,
-    ) -> Result<bool> {
-        self.fetch(
-            ctx,
-            chain,
-            request.account(),
-            EvidenceLookup::Dealing { epoch },
-            |evidence| {
-                let Evidence::Dealing(saved) = evidence else {
-                    bail!("served evidence is not a close dealing");
-                };
-                ensure!(
-                    saved.context.deployment() == &chain.deployment()
-                        && saved.context.payment().epoch() == epoch
-                        && saved.header.batch_id::<Sha256>() == admitted.batch_id
-                        && saved.roots == admitted.roots
-                        && saved.header.verify::<Sha256, Key>(
-                            &saved.context,
-                            &saved.roots,
-                            saved.withdrawal_total
-                        ),
-                    "withdrawal boundary differs from the certified close"
-                );
-                ensure!(
-                    saved.withdrawals.root::<Sha256>()?
-                        == *saved.context.epoch_context().withdrawal_root(),
-                    "withdrawal boundary root mismatch"
-                );
-                Ok(saved.withdrawals.request_for(request.account()) == Some(request))
-            },
-        )
-        .await
-    }
-
-    /// Verifies the account's request and output against the admitted close descriptor.
-    pub(super) async fn withdrawal_evidence<E: Env>(
-        &self,
-        ctx: &E,
-        chain: &Client,
-        admitted: &AdmittedRootsResponse,
-        account: &Key,
-        destination: &[u8],
-    ) -> Result<WithdrawalWitness> {
-        let lookup = EvidenceLookup::WithdrawalOutput {
-            batch: admitted.batch_id.into_digest(),
-            account: account.clone(),
+        range: &ActivityRange<Digest>,
+        payer: &Key,
+        recipient: &Key,
+    ) -> Result<HigherEntryLookup<Key, Digest>> {
+        let lookup = EvidenceLookup::CommittedEntry {
+            epoch,
+            range: *range,
+            payer: payer.clone(),
+            recipient: recipient.clone(),
         };
         let accept = |evidence: Evidence| {
-            let Evidence::Close {
-                body: EvidenceBody::WithdrawalOutput(witness),
-                ..
-            } = evidence
-            else {
-                bail!("served evidence is not a withdrawal claim");
+            let Evidence::CommittedEntry(lookup) = evidence else {
+                bail!("served evidence is not a committed entry lookup");
             };
-            ensure!(
-                witness.verify(&admitted.roots, &chain.deployment(), account, destination)?
-                    == admitted.batch_id,
-                "withdrawal descriptor names another admitted batch"
-            );
-            Ok(witness)
+            lookup
+                .resolve::<Sha256>(range, payer, recipient)
+                .context("resolve the committed entry against the admitted change root")?;
+            Ok(lookup)
         };
-        self.fetch(ctx, chain, account, lookup, accept).await
+        self.fetch(ctx, chain, payer, lookup, accept).await
     }
 }
 
@@ -410,10 +359,10 @@ pub(super) fn check_opening(
     Ok(())
 }
 
-/// Names both failed sources when neither the operator nor the validators
+/// Names both failed sources when neither the operator nor the configured custodians
 /// served a usable head.
-pub(super) fn unusable_head(operator: anyhow::Error, validators: anyhow::Error) -> anyhow::Error {
-    validators.context(format!(
-        "the operator served no usable head ({operator:#}) and the validators served none"
+pub(super) fn unusable_head(operator: anyhow::Error, custodians: anyhow::Error) -> anyhow::Error {
+    custodians.context(format!(
+        "the operator served no usable head ({operator:#}) and the configured custodians served none"
     ))
 }

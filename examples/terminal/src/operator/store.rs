@@ -6,7 +6,8 @@ use crate::{
     protocol::{
         Acceptance, AcceptedEntry, Account, AccountIdentity, Ack, DepositEvent, Entry, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES, MAX_ENTRIES,
-        MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult, encoded_artifacts,
+        MAX_RESULT_BYTES, MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult,
+        encoded_artifacts,
     },
     store::CommitUnknown,
 };
@@ -16,7 +17,7 @@ use commonware_clearing::bajillion::{
     commitment::Opening,
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE},
     qmdb::StateRoot,
-    transition::{BatchId, EpochContext, Header, RootBundle, WithdrawalClaim},
+    transition::{EpochContext, Header, RootBundle},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, FixedSize, RangeCfg};
@@ -35,7 +36,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 19;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
 /// one [`Receipt`] from a fixed-size acknowledgment and a bounded entry opening, so this
 /// page stays well under the RPC body limit.
@@ -43,11 +44,8 @@ pub(crate) const MAX_INCOMING_PAGE: usize = 128;
 /// Bounds one stored entry opening: a position and a BMT path over at most
 /// [`MAX_ACCEPTED_PAYMENTS`] vector leaves.
 const MAX_OPENING_BYTES: usize = 1_024;
-const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 const MAX_WITHDRAWAL_BYTES: usize = 512;
-const MAX_RESULT_BYTES: usize =
-    crate::rpc::MAX_BODY_SIZE + MAX_WITHDRAWALS * (MAX_CLAIM_BYTES + MAX_WITHDRAWAL_BYTES) + 4096;
 const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
             length(state.public_key), state.public_key,
             state.predecessor_balance, state.current_balance
@@ -195,6 +193,7 @@ pub(crate) struct EpochData {
     /// registration record. Durable because recovery must rebuild the exact
     /// registered context offline to validate the epoch's payment log.
     pub(crate) deadlines: Option<(u64, u64)>,
+    pub(crate) floors: Option<commonware_clearing::bajillion::logs::Floors>,
 }
 
 pub(crate) struct StoredWithdrawal {
@@ -643,6 +642,7 @@ impl Store {
 
              CREATE TABLE IF NOT EXISTS registrations (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
+                 floors BLOB CHECK(floors IS NULL OR length(floors) = 16),
                  admission_deadline INTEGER CHECK (admission_deadline >= 0),
                  challenge_deadline INTEGER CHECK (
                      challenge_deadline > admission_deadline
@@ -674,23 +674,7 @@ impl Store {
                  prepare_micros INTEGER NOT NULL CHECK (prepare_micros >= 0),
                  deal_micros INTEGER NOT NULL CHECK (deal_micros >= 0),
                  seal_micros INTEGER NOT NULL CHECK (seal_micros >= 0)
-             );
-
-             CREATE TABLE IF NOT EXISTS withdrawal_claims (
-                 batch_id BLOB NOT NULL CHECK (length(batch_id) = 32),
-                 position INTEGER NOT NULL CHECK (
-                     position BETWEEN 0 AND 4294967295
-                 ),
-                 account BLOB NOT NULL CHECK (length(account) = 32),
-                 proof BLOB NOT NULL CHECK (
-                     length(proof) > 0 AND length(proof) <= {max_claim_bytes}
-                 ),
-                 claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1)),
-                 PRIMARY KEY(batch_id, position),
-                 FOREIGN KEY(batch_id) REFERENCES settlements(batch_id)
-             );
-             CREATE INDEX IF NOT EXISTS withdrawal_claims_account_unclaimed
-                 ON withdrawal_claims(account) WHERE claimed = 0;",
+             );",
             max_result_bytes = MAX_RESULT_BYTES,
             ack_size = Ack::SIZE,
             max_opening_bytes = MAX_OPENING_BYTES,
@@ -698,7 +682,6 @@ impl Store {
             max_deposit_events = MAX_DEPOSIT_EVENTS,
             max_close_error_bytes = MAX_CLOSE_ERROR_BYTES,
             max_withdrawal_bytes = MAX_WITHDRAWAL_BYTES,
-            max_claim_bytes = MAX_CLAIM_BYTES,
         );
         connection.execute_batch(&schema)?;
 
@@ -1097,6 +1080,7 @@ impl Store {
     /// transaction. Deadlines may only move before the epoch's first receipt:
     /// every accepted send binds the registered context, and the anchor
     /// commits the deadlines.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn adopt_deadlines(
         &mut self,
         epoch: u64,
@@ -1104,6 +1088,7 @@ impl Store {
         replacement: &EpochPaymentContext,
         admission_deadline: u64,
         challenge_deadline: u64,
+        floors: commonware_clearing::bajillion::logs::Floors,
     ) -> Result<()> {
         mutate(&mut self.connection, "chain registration", |transaction| {
             ensure!(
@@ -1127,14 +1112,15 @@ impl Store {
                 "chain deadlines cannot move under an epoch with receipts"
             );
             transaction.execute(
-                "INSERT INTO registrations(epoch, admission_deadline, challenge_deadline)
-                 VALUES(?1, ?2, ?3)
+                "INSERT INTO registrations(epoch, admission_deadline, challenge_deadline, floors)
+                 VALUES(?1, ?2, ?3, ?4)
                  ON CONFLICT(epoch) DO UPDATE
-                 SET admission_deadline = ?2, challenge_deadline = ?3",
+                 SET admission_deadline = ?2, challenge_deadline = ?3, floors = ?4",
                 params![
                     epoch_sql,
                     sql_u64(admission_deadline, "admission deadline")?,
                     sql_u64(challenge_deadline, "challenge deadline")?,
+                    floors.encode().as_ref(),
                 ],
             )?;
             transaction.execute(
@@ -1372,6 +1358,16 @@ impl Store {
             )),
             None => None,
         };
+        let floors = connection
+            .query_row(
+                "SELECT floors FROM registrations WHERE epoch = ?1",
+                [epoch_sql],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(commonware_clearing::bajillion::logs::Floors::decode)
+            .transpose()?;
         Ok(EpochData {
             epoch,
             accounts,
@@ -1381,6 +1377,7 @@ impl Store {
             deposits,
             withdrawals,
             deadlines,
+            floors,
         })
     }
 
@@ -1960,51 +1957,6 @@ impl Store {
         result: &SettlementResult,
         genesis_root: StateRoot<Digest>,
     ) -> Result<()> {
-        ensure!(
-            result.withdrawal_claims.len() == result.withdrawals.requests().len(),
-            "finalized withdrawals do not have exact claim evidence"
-        );
-        let mut withdrawal_total = 0_u64;
-        let withdrawal_claims = result
-            .withdrawals
-            .requests()
-            .iter()
-            .zip(&result.withdrawal_claims)
-            .enumerate()
-            .map(|(position, (request, claim))| {
-                let position = u32::try_from(position).context("withdrawal position overflow")?;
-                ensure!(
-                    claim.position() == position,
-                    "withdrawal claim has the wrong request position"
-                );
-                let output = claim
-                    .verify::<Sha256>(&result.roots.withdrawal_outputs)
-                    .context("verify withdrawal claim")?;
-                ensure!(
-                    output.destination() == request.body().destination(),
-                    "withdrawal claim has the wrong request destination"
-                );
-                if let WithdrawalAction::Amount(amount) = request.body().action() {
-                    ensure!(
-                        output.amount() == 0 || output.amount() == amount.get(),
-                        "withdrawal claim has the wrong requested amount"
-                    );
-                }
-                withdrawal_total = withdrawal_total
-                    .checked_add(output.amount())
-                    .context("withdrawal claim total overflow")?;
-                let proof = claim.encode();
-                ensure!(
-                    proof.len() <= MAX_CLAIM_BYTES,
-                    "withdrawal claim exceeds the operator bound"
-                );
-                Ok((request.account().clone(), position, output, proof))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            withdrawal_total == result.withdrawal_total,
-            "withdrawal claims do not exhaust the finalized reserve"
-        );
         mutate(&mut self.connection, "close finalization", |transaction| {
             let epoch = sql_u64(result.context.payment().epoch(), "epoch")?;
             let status: Option<String> = transaction
@@ -2070,7 +2022,7 @@ impl Store {
                     header,
                     roots,
                     certificate,
-                    sql_usize(result.rows, "row count")?,
+                    sql_u64(result.roots.row_count, "row count")?,
                     sql_usize(result.dealing_bytes, "dealing bytes")?,
                     sql_u64(result.withdrawal_total, "withdrawal total")?,
                     sql_u128(result.prepare_micros, "prepare duration")?,
@@ -2078,21 +2030,6 @@ impl Store {
                     sql_u128(result.seal_micros, "seal duration")?,
                 ],
             )?;
-            let mut insert_withdrawal_claim = transaction.prepare_cached(
-                "INSERT INTO withdrawal_claims(batch_id, position, account, proof)
-                 VALUES(?1, ?2, ?3, ?4)",
-            )?;
-            for (account, position, output, proof) in withdrawal_claims {
-                if output.amount() == 0 {
-                    continue;
-                }
-                insert_withdrawal_claim.execute(params![
-                    result.header.batch_id::<Sha256>().digest().as_ref(),
-                    i64::from(position),
-                    account.as_ref(),
-                    proof.as_ref(),
-                ])?;
-            }
             transaction.execute(
                 "UPDATE close_jobs
              SET status = 'finalized', error = NULL
@@ -2102,113 +2039,6 @@ impl Store {
 
             Ok(())
         })
-    }
-
-    pub(crate) fn withdrawal_evidence(
-        &self,
-        account: &Key,
-    ) -> Result<(u64, WithdrawalClaim<Digest>)> {
-        let encoded = self
-            .connection
-            .query_row(
-                "SELECT settlements.epoch,
-                        withdrawal_claims.position,
-                        length(withdrawal_claims.proof), withdrawal_claims.proof
-                 FROM withdrawal_claims
-                 JOIN settlements USING(batch_id)
-                 WHERE withdrawal_claims.account = ?1 AND withdrawal_claims.claimed = 0
-                 ORDER BY settlements.epoch
-                 LIMIT 1",
-                [account.as_ref()],
-                |row| {
-                    let epoch =
-                        from_sql_u64(row.get(0)?, "withdrawal epoch").map_err(to_sqlite_error)?;
-                    let position = u32::try_from(row.get::<_, i64>(1)?).map_err(|_| {
-                        to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim position"))
-                    })?;
-                    let proof_len = usize::try_from(row.get::<_, i64>(2)?).map_err(|_| {
-                        to_sqlite_error(anyhow::anyhow!("invalid withdrawal claim length"))
-                    })?;
-                    if proof_len == 0 || proof_len > MAX_CLAIM_BYTES {
-                        return Err(to_sqlite_error(anyhow::anyhow!(
-                            "invalid withdrawal claim length"
-                        )));
-                    }
-                    Ok((epoch, position, row.get::<_, Vec<u8>>(3)?))
-                },
-            )
-            .optional()?
-            .context("there is no finalized withdrawal claim for this account")?;
-        let (epoch, position, encoded_claim) = encoded;
-        let claim = WithdrawalClaim::<Digest>::decode_cfg(
-            encoded_claim,
-            &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-        )
-        .context("decode withdrawal claim")?;
-        ensure!(
-            claim.position() == position,
-            "stored withdrawal claim has the wrong position"
-        );
-        Ok((epoch, claim))
-    }
-
-    pub(crate) fn acknowledge_withdrawal_claim(
-        &mut self,
-        batch_id: BatchId<Digest>,
-        account: &Key,
-        claim: &WithdrawalClaim<Digest>,
-    ) -> Result<()> {
-        let proof = claim.encode();
-        ensure!(
-            proof.len() <= MAX_CLAIM_BYTES,
-            "withdrawal claim exceeds the operator bound"
-        );
-        mutate(
-            &mut self.connection,
-            "withdrawal claim acknowledgement",
-            |transaction| {
-                let claimed = transaction
-                    .query_row(
-                        "SELECT withdrawal_claims.claimed
-                 FROM withdrawal_claims
-                 WHERE withdrawal_claims.batch_id = ?1
-                   AND withdrawal_claims.position = ?2
-                   AND withdrawal_claims.account = ?3
-                   AND withdrawal_claims.proof = ?4",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            account.as_ref(),
-                            proof.as_ref(),
-                        ],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .context("withdrawal acknowledgement does not match stored evidence")?;
-                if !claimed {
-                    let updated = transaction.execute(
-                        "UPDATE withdrawal_claims
-                 SET claimed = 1
-                 WHERE batch_id = ?1
-                   AND position = ?2
-                   AND account = ?3
-                   AND proof = ?4
-                   AND claimed = 0",
-                        params![
-                            batch_id.digest().as_ref(),
-                            i64::from(claim.position()),
-                            account.as_ref(),
-                            proof.as_ref(),
-                        ],
-                    )?;
-                    ensure!(
-                        updated == 1,
-                        "withdrawal acknowledgement changed concurrently"
-                    );
-                }
-                Ok(())
-            },
-        )
     }
 
     pub(crate) fn fail_close(&mut self, epoch: u64, error: &str) -> Result<()> {

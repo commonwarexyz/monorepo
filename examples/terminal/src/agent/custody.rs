@@ -1,8 +1,6 @@
 //! Custody flows: deposits, withdrawal authorization and escalation, and recovery.
 
-use super::{
-    Agent, evidence::unusable_head, store::PendingWithdrawalClaim, wallet::settlement_status,
-};
+use super::{Agent, evidence::unusable_head, wallet::settlement_status};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -56,7 +54,7 @@ pub(super) fn initial_deposit_nonce() -> u64 {
 }
 
 impl Agent {
-    /// The saved authorization remains the retry authority until its claim completes.
+    /// The active authorization remains the retry authority until its certified deadline.
     pub(crate) fn pending_withdrawal_action(&self) -> Option<WithdrawalAction> {
         self.pending_withdrawal
             .as_ref()
@@ -183,22 +181,8 @@ impl Agent {
                          validators opened none",
                     )?;
                 let Some(opening) = opening else {
-                    // State absence says nothing about a finalized withdrawal reserve. Only
-                    // complete finalized history can retire an uncached authorization.
-                    if self
-                        .pending_withdrawal_claim
-                        .as_ref()
-                        .is_some_and(|claim| claim.evidence.is_none())
-                        && let Some(request) = self.pending_withdrawal.clone()
-                        && self
-                            .carried_withdrawal_epoch(ctx, chain, &request, status.last_finalized)
-                            .await?
-                            .is_none()
-                    {
-                        self.store.discard_unused_withdrawal(&request)?;
-                        self.pending_withdrawal = None;
-                        self.pending_withdrawal_claim = None;
-                    }
+                    // State absence does not prove whether an active authorization was carried.
+                    // Preserve it for exact retry or a later healthy deadline observation.
                     return Ok(None);
                 };
                 opening
@@ -418,40 +402,15 @@ impl Agent {
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
-        ensure!(
-            self.pending_withdrawal_claim.is_none() || self.pending_withdrawal.is_some(),
-            "the pending withdrawal claim must complete before a new withdrawal"
-        );
+        self.observe_withdrawal_expiry(ctx, chain).await?;
         if let Some(request) = self.pending_withdrawal.clone() {
             ensure!(
                 request.body().action() == &action,
                 "the pending withdrawal claim must complete before a different withdrawal"
             );
-            let status = chain.recent_status(ctx).await?;
-            ensure!(
-                status.deployment == self.deployment,
-                "unexpected withdrawal deployment"
-            );
-            if status.height >= request.body().deadline() {
-                ensure!(
-                    !status.hard_faulted,
-                    "expired withdrawal requires hard-fault recovery"
-                );
-                // A healthy post-deadline state excludes every outstanding obligation.
-                // Finalized boundaries distinguish completed carriage from a request never used.
-                if let Some(epoch) = self
-                    .carried_withdrawal_epoch(ctx, chain, &request, status.last_finalized)
-                    .await?
-                {
-                    return Ok(WithdrawalOutcome::Applied { epoch, request });
-                }
-                self.store.discard_unused_withdrawal(&request)?;
-                self.pending_withdrawal = None;
-                self.pending_withdrawal_claim = None;
-            }
         }
-        let request = match &self.pending_withdrawal {
-            Some(pending) => pending.clone(),
+        match &self.pending_withdrawal {
+            Some(_) => {}
             None => {
                 // The signed deadline is an absolute block height, so it is
                 // chosen from a recency-bounded status read: a certified tip
@@ -469,6 +428,7 @@ impl Agent {
                     !status.hard_faulted,
                     "settlement is permanently hard-faulted"
                 );
+                self.check_withdrawal_floor(&status)?;
 
                 // Retain a head opening before signing. It is not sent anywhere: if the
                 // deployment later hard-faults while frozen at this root, recovery needs it.
@@ -521,11 +481,22 @@ impl Agent {
                     .stage_withdrawal(&request)
                     .context("persist signed withdrawal")?;
                 self.cache = None;
-                self.pending_withdrawal_claim = Some(PendingWithdrawalClaim { evidence: None });
-                self.pending_withdrawal = Some(request.clone());
-                request
+                self.pending_withdrawal = Some(request);
             }
-        };
+        }
+        self.retry_withdrawal(ctx, operator).await
+    }
+
+    /// Retries only the exact active authorization and never stages a replacement.
+    pub(crate) async fn retry_withdrawal<E: Env>(
+        &mut self,
+        ctx: &E,
+        operator: SocketAddr,
+    ) -> Result<WithdrawalOutcome> {
+        let request = self
+            .pending_withdrawal
+            .clone()
+            .context("no withdrawal authorization is active")?;
         let digest = operator_rpc::withdrawal_digest(&request);
         let applied = match operator_rpc::apply_withdrawal(
             ctx,
@@ -555,33 +526,6 @@ impl Agent {
             epoch: applied.epoch,
             request,
         })
-    }
-
-    /// Searches every finalized boundary before declaring a saved request uncarried.
-    async fn carried_withdrawal_epoch<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        request: &SignedWithdrawal<Key, Digest>,
-        last_finalized: Option<u64>,
-    ) -> Result<Option<u64>> {
-        if let Some(last) = last_finalized {
-            for epoch in 0..=last {
-                let admitted = chain
-                    .admitted(ctx, epoch)
-                    .await?
-                    .filter(|record| record.finalized)
-                    .context("finalized withdrawal history is unavailable")?;
-                if self
-                    .holders
-                    .carried_withdrawal(ctx, chain, epoch, &admitted, request)
-                    .await?
-                {
-                    return Ok(Some(epoch));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Escalates a signed withdrawal the operator would not carry directly to the chain.

@@ -50,9 +50,8 @@ use crate::{
         types::{Batch, Database, KEY_BYTES, Qmdb, Sealed, StateKey},
     },
     protocol::{
-        Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, SQLITE_U64_MAX,
-        Timing, committee, epoch_context_at, settlement_config,
-        verify_chain_registration_signature,
+        Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing, committee,
+        epoch_context_at, settlement_config, verify_chain_registration_signature,
     },
 };
 use bytes::{BufMut, Bytes};
@@ -62,8 +61,8 @@ use commonware_clearing::bajillion::{
     commitment::VectorRoot,
     qmdb::StateRoot,
     settlement::{
-        Bounds, ClaimError, DepositRefund, FinalizedClaims, HardFaultReason, HardFaultRelease,
-        HardFaultSettlement, Registered, SettlementChain, SettlementError,
+        Bounds, ClaimError, DepositRefund, HardFaultReason, HardFaultRelease, HardFaultSettlement,
+        Registered, SettlementChain, SettlementError, UnclaimedInterval,
     },
     transition::{BatchId, RootBundle, WithdrawalOutput},
 };
@@ -92,11 +91,11 @@ enum Domain {
     Status = 0,
     Anchor = 1,
     Admitted = 2,
-    ClaimRoots = 3,
+    PayoutHead = 3,
     Deposit = 4,
     Withdrawal = 5,
     Registration = 6,
-    WithdrawalRelease = 7,
+    Unclaimed = 7,
     HardFault = 9,
     Refund = 10,
     Fault = 11,
@@ -115,7 +114,7 @@ fn derive(deployment: &Digest, domain: Domain, payload: &[u8]) -> StateKey {
     let tag = [domain as u8];
     let digest = Sha256::hash(&[&tag[..], deployment.as_ref(), payload]);
     let mut bytes = [0u8; KEY_BYTES];
-    bytes[..KEY_BYTES - 1].copy_from_slice(digest.as_ref());
+    bytes[..32].copy_from_slice(digest.as_ref());
     bytes[KEY_BYTES - 1] = domain as u8;
     StateKey::new(bytes)
 }
@@ -135,9 +134,9 @@ pub(crate) fn admitted_key(deployment: &Digest, epoch: u64) -> StateKey {
     derive(deployment, Domain::Admitted, &epoch.to_be_bytes())
 }
 
-/// Key of one deployment's claim roots record for one finalized batch.
-pub(crate) fn claim_roots_key(deployment: &Digest, batch_id: &BatchId<Digest>) -> StateKey {
-    derive(deployment, Domain::ClaimRoots, &batch_id.encode())
+/// Key of the current finalized payout log head.
+pub(crate) fn payout_head_key(deployment: &Digest) -> StateKey {
+    derive(deployment, Domain::PayoutHead, &[])
 }
 
 /// Key of one deployment's custody record for one deposit id.
@@ -156,15 +155,20 @@ pub(crate) fn registration_key(deployment: &Digest) -> StateKey {
     derive(deployment, Domain::Registration, &[])
 }
 
-/// Key of one deployment's released withdrawal by (batch, position).
-pub(crate) fn withdrawal_release_key(
-    deployment: &Digest,
-    batch_id: &BatchId<Digest>,
-    position: u32,
-) -> StateKey {
-    let mut payload = batch_id.encode().to_vec();
-    payload.extend_from_slice(&position.to_be_bytes());
-    derive(deployment, Domain::WithdrawalRelease, &payload)
+/// Ordered key of an unclaimed range's inclusive start.
+pub(crate) fn unclaimed_key(deployment: &Digest, start: u64) -> StateKey {
+    let mut bytes = [0; KEY_BYTES];
+    bytes.copy_from_slice(derive(deployment, Domain::Unclaimed, &[]).as_ref());
+    bytes[32..40].copy_from_slice(&start.to_be_bytes());
+    StateKey::new(bytes)
+}
+
+/// Decodes a range start only inside this deployment's ordered key namespace.
+pub(crate) fn unclaimed_start(deployment: &Digest, key: &StateKey) -> Option<u64> {
+    let prefix = unclaimed_key(deployment, 0);
+    let bytes = key.as_ref();
+    (bytes[..32] == prefix.as_ref()[..32] && bytes[40] == Domain::Unclaimed as u8)
+        .then(|| u64::from_be_bytes(bytes[32..40].try_into().expect("fixed key width")))
 }
 
 /// Key of one deployment's hard-fault release by account.
@@ -191,7 +195,7 @@ pub(crate) fn machine_key(deployment: &Digest) -> StateKey {
     derive(deployment, Domain::Machine, &[])
 }
 
-/// The immediate successor of the private checkpoint key. No 33-byte key lies
+/// The immediate successor of the private checkpoint key. No state key lies
 /// between this pair, so an ordered absence proof cannot carry the checkpoint.
 /// The trailing bytes 254 and 255 are reserved for this pair.
 pub(crate) fn machine_guard_key(deployment: &Digest) -> StateKey {
@@ -389,6 +393,7 @@ pub(crate) struct RegistrationRecord {
 
     /// Root of the registered withdrawal batch.
     pub(crate) withdrawals_root: VectorRoot<Digest>,
+    pub(crate) floors: commonware_clearing::bajillion::logs::Floors,
     /// The admitted close, once one is admitted for this registration.
     pub(crate) admitted: Option<BatchId<Digest>>,
 }
@@ -403,6 +408,7 @@ impl Write for RegistrationRecord {
         self.deposits_root.write(buf);
 
         self.withdrawals_root.write(buf);
+        self.floors.write(buf);
         self.admitted.write(buf);
     }
 }
@@ -416,6 +422,7 @@ impl EncodeSize for RegistrationRecord {
             + self.challenge_deadline.encode_size()
             + self.deposits_root.encode_size()
             + self.withdrawals_root.encode_size()
+            + self.floors.encode_size()
             + self.admitted.encode_size()
     }
 }
@@ -433,68 +440,48 @@ impl Read for RegistrationRecord {
             deposits_root: VectorRoot::read(buf)?,
 
             withdrawals_root: VectorRoot::read(buf)?,
+            floors: commonware_clearing::bajillion::logs::Floors::read(buf)?,
             admitted: Option::<BatchId<Digest>>::read(buf)?,
-        })
-    }
-}
-
-/// The finalized batch identity authenticates the complete close descriptor; its output
-/// root verifies withdrawal openings before claimants cache operator-served evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ClaimRootsResponse {
-    pub(crate) withdrawal_outputs: VectorRoot<Digest>,
-    pub(crate) batch_id: BatchId<Digest>,
-}
-
-impl Write for ClaimRootsResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.withdrawal_outputs.write(buf);
-        self.batch_id.write(buf);
-    }
-}
-
-impl EncodeSize for ClaimRootsResponse {
-    fn encode_size(&self) -> usize {
-        self.withdrawal_outputs.encode_size() + self.batch_id.encode_size()
-    }
-}
-
-impl Read for ClaimRootsResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            withdrawal_outputs: VectorRoot::read(buf)?,
-            batch_id: BatchId::read(buf)?,
         })
     }
 }
 
 /// The identity and roots of the close admitted for one epoch.
 ///
-/// Receivers anchor reconciliation against this record, so operator-served
-/// or validator-served committed-side evidence is trusted only when it
-/// verifies under these roots: the change root for challenge lookups and
-/// claims, the successor root for state openings, the withdrawal-output
-/// root for withdrawal claims.
+/// The current finalized close and pending FIFO suffix retain these roots for
+/// challenges, native checkpoint recovery, and current-balance openings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdmittedRootsResponse {
     pub(crate) batch_id: BatchId<Digest>,
     /// The full root bundle the admitted header commits.
     pub(crate) roots: RootBundle<Digest>,
+    pub(crate) activity_start: u64,
     /// Whether FIFO settlement finalized the close.
     pub(crate) finalized: bool,
 }
 
 impl AdmittedRootsResponse {
+    /// The byte-sorted activity span authenticated by this admitted close.
+    pub(crate) const fn activity_range(
+        &self,
+    ) -> commonware_clearing::bajillion::transition::ActivityRange<Digest> {
+        commonware_clearing::bajillion::transition::ActivityRange {
+            start: self.activity_start,
+            end: self.activity_start + self.roots.row_count,
+            head: self.roots.change,
+        }
+    }
+
     pub(crate) const fn new(
         batch_id: BatchId<Digest>,
         roots: RootBundle<Digest>,
+        activity_start: u64,
         finalized: bool,
     ) -> Self {
         Self {
             batch_id,
             roots,
+            activity_start,
             finalized,
         }
     }
@@ -504,13 +491,17 @@ impl Write for AdmittedRootsResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.batch_id.write(buf);
         self.roots.write(buf);
+        self.activity_start.write(buf);
         self.finalized.write(buf);
     }
 }
 
 impl EncodeSize for AdmittedRootsResponse {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.roots.encode_size() + self.finalized.encode_size()
+        self.batch_id.encode_size()
+            + self.roots.encode_size()
+            + self.activity_start.encode_size()
+            + self.finalized.encode_size()
     }
 }
 
@@ -518,11 +509,26 @@ impl Read for AdmittedRootsResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self::new(
+        let admitted = Self::new(
             BatchId::read(buf)?,
             RootBundle::read(buf)?,
+            u64::read(buf)?,
             bool::read(buf)?,
-        ))
+        );
+        if admitted.activity_start == 0
+            || admitted.roots.row_count
+                > u64::from(commonware_clearing::bajillion::commitment::MAX_VECTOR_LENGTH)
+            || !admitted
+                .activity_start
+                .checked_add(admitted.roots.row_count)
+                .is_some_and(|end| end < admitted.roots.change.operations)
+        {
+            return Err(CodecError::Invalid(
+                "AdmittedRootsResponse",
+                "invalid account-row interval",
+            ));
+        }
+        Ok(admitted)
     }
 }
 
@@ -939,38 +945,6 @@ impl Read for FaultRecord {
     }
 }
 
-/// One released withdrawal, keyed by (batch, position).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WithdrawalReleaseRecord {
-    /// Digest of the exact claim that consumed the position.
-    pub(crate) claim: Digest,
-    pub(crate) released: WithdrawalResponse,
-}
-
-impl Write for WithdrawalReleaseRecord {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.claim.write(buf);
-        self.released.write(buf);
-    }
-}
-
-impl EncodeSize for WithdrawalReleaseRecord {
-    fn encode_size(&self) -> usize {
-        self.claim.encode_size() + self.released.encode_size()
-    }
-}
-
-impl Read for WithdrawalReleaseRecord {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            claim: Digest::read(buf)?,
-            released: WithdrawalResponse::read(buf)?,
-        })
-    }
-}
-
 /// One hard-fault release, keyed by account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HardFaultReleaseRecord {
@@ -1014,11 +988,11 @@ pub(crate) enum Record {
     Status(StatusRecord),
     Anchor(Digest),
     Admitted(AdmittedRootsResponse),
-    ClaimRoots(FinalizedClaims<Digest>),
+    PayoutHead(crate::protocol::PayoutTip),
     Deposit(DepositEvent),
     Withdrawal(SignedWithdrawal<Key, Digest>),
     Registration(RegistrationRecord),
-    WithdrawalRelease(WithdrawalReleaseRecord),
+    Unclaimed(u64),
     HardFault(HardFaultReleaseRecord),
     Refund(ClaimPendingDepositResponse),
     Fault(FaultRecord),
@@ -1060,7 +1034,7 @@ impl Write for Record {
                 2_u8.write(buf);
                 record.write(buf);
             }
-            Self::ClaimRoots(record) => {
+            Self::PayoutHead(record) => {
                 3_u8.write(buf);
                 record.write(buf);
             }
@@ -1076,7 +1050,7 @@ impl Write for Record {
                 6_u8.write(buf);
                 record.write(buf);
             }
-            Self::WithdrawalRelease(record) => {
+            Self::Unclaimed(record) => {
                 7_u8.write(buf);
                 record.write(buf);
             }
@@ -1111,11 +1085,11 @@ impl EncodeSize for Record {
             Self::Status(record) => record.encode_size(),
             Self::Anchor(anchor) => anchor.encode_size(),
             Self::Admitted(record) => record.encode_size(),
-            Self::ClaimRoots(record) => record.encode_size(),
+            Self::PayoutHead(record) => record.encode_size(),
             Self::Deposit(record) => record.encode_size(),
             Self::Withdrawal(record) => record.encode_size(),
             Self::Registration(record) => record.encode_size(),
-            Self::WithdrawalRelease(record) => record.encode_size(),
+            Self::Unclaimed(record) => record.encode_size(),
             Self::HardFault(record) => record.encode_size(),
             Self::Refund(record) => record.encode_size(),
             Self::Fault(record) => record.encode_size(),
@@ -1143,17 +1117,14 @@ impl Read for Record {
             0 => Ok(Self::Status(StatusRecord::read(buf)?)),
             1 => Ok(Self::Anchor(Digest::read(buf)?)),
             2 => Ok(Self::Admitted(AdmittedRootsResponse::read(buf)?)),
-            3 => Ok(Self::ClaimRoots(FinalizedClaims::read_cfg(
-                buf,
-                &(..=MAX_WITHDRAWALS).into(),
-            )?)),
+            3 => Ok(Self::PayoutHead(crate::protocol::PayoutTip::read(buf)?)),
             4 => Ok(Self::Deposit(DepositEvent::read(buf)?)),
             5 => Ok(Self::Withdrawal(SignedWithdrawal::read_cfg(
                 buf,
                 &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
             )?)),
             6 => Ok(Self::Registration(RegistrationRecord::read(buf)?)),
-            7 => Ok(Self::WithdrawalRelease(WithdrawalReleaseRecord::read(buf)?)),
+            7 => Ok(Self::Unclaimed(u64::read(buf)?)),
             9 => Ok(Self::HardFault(HardFaultReleaseRecord::read(buf)?)),
             10 => Ok(Self::Refund(ClaimPendingDepositResponse::read(buf)?)),
             11 => Ok(Self::Fault(FaultRecord::read(buf)?)),
@@ -1169,17 +1140,15 @@ impl Read for Record {
 
 /// The internal outcome of applying one transaction.
 ///
-/// Never persisted: acceptance is provable through the variant's effect
-/// record and a rejection is effect-free, so the typed reason exists only
-/// for execution tracing.
+/// Transient execution verdicts; authenticated state effects supply retry evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TxOutcome {
     /// The transaction mutated settlement state.
     Applied,
     /// A challenge adjudicated with no contradiction.
     NoContradiction,
-    /// The claimed batch is not claimable now. The exact claim may succeed
-    /// later and must not be discarded.
+    /// The claim needs a current proof or interval hint, or its source has not finalized.
+    /// The immutable withdrawal intent remains available for retry.
     Unavailable,
     /// The transaction was rejected for a typed reason.
     Rejected(Reject),
@@ -1217,8 +1186,7 @@ enum Reject {
     MissingQueuedWithdrawal,
     /// The registration signature failed authentication.
     Signature,
-    /// The claim was adjudicated against an immutable finalized batch and
-    /// rejected. The verdict can never change.
+    /// The authenticated output exceeds the aggregate reserve.
     ClaimInvalid,
     /// Terminal hard-fault settlement has not begun.
     FaultUnavailable,
@@ -1244,6 +1212,8 @@ struct Step {
     outcome: TxOutcome,
     /// Derived record writes for an applied transaction.
     writes: Vec<(StateKey, Option<Record>)>,
+    /// Proof-authenticated output credited in the same atomic state batch.
+    withdrawal: Option<WithdrawalResponse>,
 }
 
 impl Step {
@@ -1251,6 +1221,7 @@ impl Step {
         Self {
             outcome: TxOutcome::Rejected(reject),
             writes: Vec::new(),
+            withdrawal: None,
         }
     }
 
@@ -1258,6 +1229,7 @@ impl Step {
         Self {
             outcome,
             writes: Vec::new(),
+            withdrawal: None,
         }
     }
 
@@ -1265,6 +1237,7 @@ impl Step {
         Self {
             outcome: TxOutcome::Applied,
             writes,
+            withdrawal: None,
         }
     }
 }
@@ -1274,23 +1247,17 @@ enum Fired {
     /// The admitted close finalized.
     Finalized {
         epoch: u64,
-        batch_id: BatchId<Digest>,
-        roots: RootBundle<Digest>,
-        claims: FinalizedClaims<Digest>,
+        claims: Option<UnclaimedInterval>,
     },
     /// The deployment hard-faulted.
     Faulted { reason: HardFaultReasonResponse },
 }
 
-/// Maps one chain claim rejection onto the retry contract: an unavailable
-/// batch is the only state-dependent answer, and every adjudicated rejection
-/// is final for the exact claim.
+/// Invalid paths and stale range hints are refreshable against current finality.
 const fn claim_rejection(error: &ClaimError) -> TxOutcome {
     match error {
-        ClaimError::Unavailable => TxOutcome::Unavailable,
-        ClaimError::Context | ClaimError::Consumed | ClaimError::Reserve | ClaimError::Proof(_) => {
-            TxOutcome::Rejected(Reject::ClaimInvalid)
-        }
+        ClaimError::Unavailable | ClaimError::Proof(_) => TxOutcome::Unavailable,
+        ClaimError::Reserve => TxOutcome::Rejected(Reject::ClaimInvalid),
     }
 }
 
@@ -1460,6 +1427,10 @@ impl Machine {
         }
     }
 
+    pub(crate) const fn finalized_epoch(&self) -> Option<u64> {
+        self.chain.expected_epoch().checked_sub(1)
+    }
+
     /// Returns the live registered close: the bound context with the exact
     /// boundary batches the chain committed at registration.
     ///
@@ -1488,16 +1459,11 @@ impl Machine {
         let faulted_before = self.chain.hard_fault().is_some();
 
         // Finalize the admitted pipeline front once its inclusive challenge
-        // window has passed. The claim roots must be captured before
-        // finalization consumes the front.
-        let front = self.chain.pending().map(|batch| batch.roots);
+        // window has passed. Issued output positions become unclaimed in this batch.
         match self.chain.finalize(height) {
             Ok((finalized, claims)) => {
-                let roots = front.expect("finalization consumes the pipeline front");
                 fired.push(Fired::Finalized {
                     epoch: finalized.epoch,
-                    batch_id: finalized.batch_id,
-                    roots,
                     claims,
                 });
             }
@@ -1723,6 +1689,12 @@ impl Machine {
 
             withdrawals_root,
             admitted: None,
+            floors: self
+                .chain
+                .registered()
+                .expect("registration succeeded")
+                .context
+                .floors(),
         };
         Ok(Step::applied(vec![
             (
@@ -1773,6 +1745,14 @@ impl Machine {
         if registration.epoch != request.epoch {
             return Ok(Step::rejected(Reject::EpochSequence));
         }
+        let activity_start = self
+            .chain
+            .registered()
+            .expect("registered close checked")
+            .context
+            .predecessor_logs()
+            .activity
+            .operations;
         let batch_id = match self.chain.admit(
             height,
             request.header,
@@ -1791,6 +1771,7 @@ impl Machine {
                 Some(Record::Admitted(AdmittedRootsResponse::new(
                     batch_id,
                     request.roots,
+                    activity_start,
                     false,
                 ))),
             ),
@@ -1842,10 +1823,7 @@ impl Machine {
                 if view.registration(config.digest()).await?.is_some() {
                     writes.push((registration_key(config.digest()), None));
                 }
-                Ok(Step {
-                    outcome: TxOutcome::Applied,
-                    writes,
-                })
+                Ok(Step::applied(writes))
             }
         }
     }
@@ -1917,34 +1895,57 @@ impl Machine {
     where
         E: StorageContext + Spawner,
     {
-        let key = claim_roots_key(config.digest(), &request.batch_id);
-        let mut claims = match view.get(&key).await? {
-            Some(Record::ClaimRoots(claims)) => claims,
-            None => return Ok(Step::outcome(TxOutcome::Unavailable)),
-            Some(_) => unreachable!("the claim key holds a finalized claim record"),
-        };
-        let release =
-            match self
-                .chain
-                .claim_withdrawal(request.batch_id, &mut claims, &request.claim)
-            {
-                Ok(release) => release,
-                Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
+        // Earlier claims in this block may split the caller's containing range.
+        // The batch overlay owns those new intervals; committed hints are re-read below.
+        let index = request.claim.position();
+        let updated = view
+            .writes
+            .range(unclaimed_key(config.digest(), 0)..=unclaimed_key(config.digest(), index))
+            .rev()
+            .find_map(|(key, record)| match record {
+                Some(Record::Unclaimed(end)) if index < *end => Some((
+                    key.clone(),
+                    UnclaimedInterval {
+                        start: unclaimed_start(config.digest(), key).expect("range namespace"),
+                        end: *end,
+                    },
+                )),
+                _ => None,
+            });
+        let (key, interval) = if let Some(updated) = updated {
+            updated
+        } else {
+            let key = unclaimed_key(config.digest(), request.start);
+            let end = match view.get(&key).await? {
+                Some(Record::Unclaimed(end)) => end,
+                None => return Ok(Step::outcome(TxOutcome::Unavailable)),
+                Some(_) => unreachable!("unclaimed keys hold interval ends"),
             };
-        Ok(Step::applied(vec![
-            (key, Some(Record::ClaimRoots(claims))),
             (
-                withdrawal_release_key(
-                    config.digest(),
-                    &request.batch_id,
-                    request.claim.position(),
-                ),
-                Some(Record::WithdrawalRelease(WithdrawalReleaseRecord {
-                    claim: Sha256::hash(&[&request.claim.encode()]),
-                    released: release.into(),
-                })),
-            ),
-        ]))
+                key,
+                UnclaimedInterval {
+                    start: request.start,
+                    end,
+                },
+            )
+        };
+        let effect = match self.chain.claim_withdrawal(&interval, &request.claim) {
+            Ok(effect) => effect,
+            Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
+        };
+        let mut writes = vec![(key, None)];
+        for fragment in effect.fragments.into_iter().flatten() {
+            writes.push((
+                unclaimed_key(config.digest(), fragment.start),
+                Some(Record::Unclaimed(fragment.end)),
+            ));
+        }
+        let mut step = Step::applied(writes);
+        step.withdrawal = Some(WithdrawalResponse {
+            destination: effect.output.destination().clone(),
+            amount: effect.output.amount(),
+        });
+        Ok(step)
     }
 
     /// The status record for a block at `height` with `timestamp`.
@@ -1996,13 +1997,13 @@ where
 /// Native credits are derived only from successful, proof-authenticated clearing releases.
 fn released_credits(step: &Step) -> Vec<(Key, i128)> {
     let mut credits = Vec::new();
+    if let Some(release) = &step.withdrawal {
+        let account = Key::decode(release.destination.clone())
+            .expect("accepted destination is a canonical account key");
+        credits.push((account, i128::from(release.amount)));
+    }
     for (_, record) in &step.writes {
         match record {
-            Some(Record::WithdrawalRelease(record)) => {
-                let account = Key::decode(record.released.destination.clone())
-                    .expect("accepted destination is a canonical account key");
-                credits.push((account, i128::from(record.released.amount)));
-            }
             Some(Record::Refund(record)) => {
                 credits.push((record.account.clone(), i128::from(record.amount)))
             }
@@ -2305,6 +2306,10 @@ fn route(deployments: &[Digest], tx: &SettlementTx) -> Result<usize, TxOutcome> 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProofAction {
     Effect(StateKey),
+    Payout {
+        deployment: Digest,
+        index: u64,
+    },
     Challenge {
         deployment: Digest,
         batch_id: BatchId<Digest>,
@@ -2377,18 +2382,14 @@ where
             deployment: request.deployment,
             batch_id: request.batch_id,
         }),
-        SettlementTx::ClaimWithdrawal(request) => {
-            Some(ProofAction::Effect(withdrawal_release_key(
-                &request.deployment,
-                &request.batch_id,
-                request.claim.position(),
-            )))
-        }
-        SettlementTx::ClaimDeposit(request) => Some(ProofAction::Effect(withdrawal_release_key(
-            &request.claim.deployment,
-            &request.claim.batch_id,
-            request.claim.claim.position(),
-        ))),
+        SettlementTx::ClaimWithdrawal(request) => Some(ProofAction::Payout {
+            deployment: request.deployment,
+            index: request.claim.position(),
+        }),
+        SettlementTx::ClaimDeposit(request) => Some(ProofAction::Payout {
+            deployment: request.claim.deployment,
+            index: request.claim.claim.position(),
+        }),
         _ => None,
     };
     Ok(Preflight::Eligible { action })
@@ -2400,6 +2401,38 @@ where
 /// parent state's registry supplies every currently registered deployment. Block height is
 /// the clock; the certified timestamp supplies recency metadata only.
 ///
+/// Forecasts only the finalized payout heads that this exact parent and block clock will use.
+pub(crate) async fn payout_heads_at<E>(
+    batch: &Batch<E>,
+    height: Height,
+    timestamp: u64,
+    transactions: &[SettlementTx],
+) -> Result<
+    BTreeMap<Digest, commonware_clearing::bajillion::logs::LogHead<Digest>>,
+    QmdbError<mmr::Family>,
+>
+where
+    E: StorageContext + Spawner,
+{
+    let deployments = transactions
+        .iter()
+        .filter_map(|tx| match tx {
+            SettlementTx::ClaimWithdrawal(request) => Some(request.deployment),
+            SettlementTx::ClaimDeposit(request) => Some(request.claim.deployment),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut heads = BTreeMap::new();
+    for deployment in deployments {
+        if let Some(Record::Machine(encoded)) = batch.get(&machine_key(&deployment)).await? {
+            let mut machine = Machine::decode_cfg(encoded, &()).expect("persisted machine decodes");
+            machine.advance(height.get(), timestamp);
+            heads.insert(deployment, machine.chain.finalized_payouts());
+        }
+    }
+    Ok(heads)
+}
+
 /// The execution future is heap-owned so proposal and replay call chains do not accumulate
 /// its state machine's stack footprint.
 #[boxed]
@@ -2481,24 +2514,30 @@ where
                 source: Source::Batch(&batch),
             };
             let emitted = match &fired {
-                Fired::Finalized {
-                    epoch,
-                    batch_id,
-                    roots,
-                    claims,
-                } => {
-                    let mut emitted = vec![
-                        (
-                            claim_roots_key(deployment, batch_id),
-                            Some(Record::ClaimRoots(claims.clone())),
-                        ),
-                        (
-                            admitted_key(deployment, *epoch),
-                            Some(Record::Admitted(AdmittedRootsResponse::new(
-                                *batch_id, *roots, true,
-                            ))),
-                        ),
-                    ];
+                Fired::Finalized { epoch, claims } => {
+                    let mut emitted = vec![(
+                        admitted_key(deployment, *epoch),
+                        Some(Record::Admitted({
+                            let mut admitted = view
+                                .admitted(deployment, *epoch)
+                                .await?
+                                .expect("finalized batch was admitted");
+                            admitted.finalized = true;
+                            admitted
+                        })),
+                    )];
+
+                    if let Some(previous) = epoch.checked_sub(1) {
+                        emitted.push((admitted_key(deployment, previous), None));
+                        emitted.push((anchor_key(deployment, previous), None));
+                    }
+
+                    if let Some(interval) = claims {
+                        emitted.push((
+                            unclaimed_key(deployment, interval.start),
+                            Some(Record::Unclaimed(interval.end)),
+                        ));
+                    }
 
                     // Finalization retires the slot only when the singleton
                     // still belongs to the finalized epoch: a successor
@@ -2577,6 +2616,13 @@ where
             Some(Record::Machine(machine.encode())),
         );
         writes.insert(machine_guard_key(deployment), Some(Record::MachineGuard));
+        writes.insert(
+            payout_head_key(deployment),
+            Some(Record::PayoutHead(crate::protocol::PayoutTip {
+                payouts: machine.chain.finalized_payouts(),
+                finalized: machine.finalized_epoch(),
+            })),
+        );
     }
     let mut batch = batch;
     for (key, value) in writes {
@@ -2633,6 +2679,7 @@ mod codec_tests {
                 + deployment.operator.encode_size()
                 + committee().unwrap().encode_size()
                 + deployment.genesis().root().encode_size()
+                + machine.chain.finalized_logs().encode_size()
                 + 3 * u64::SIZE;
             assert_eq!(empty[ids_offset], 0);
             let mut malformed = empty[..ids_offset].to_vec();
@@ -2721,39 +2768,41 @@ mod codec_tests {
     #[test]
     fn anchored_record_codecs_round_trip() {
         let batch_id = BatchId::new(Sha256::hash(&[b"anchored-record-batch"]));
-        let change = VectorRoot {
-            digest: Sha256::hash(&[b"anchored-record-change"]),
-        };
-        let root = |name: &[u8]| VectorRoot {
-            digest: Sha256::hash(&[name]),
-        };
-        let roots = RootBundle {
-            change,
-            withdrawal_outputs: root(b"anchored-record-outputs"),
-            successor: StateRoot::new(Sha256::hash(&[b"anchored-record-successor"])),
-        };
+        let result = crate::chain::tests::epoch_fixture().result;
+        let roots = result.roots;
+        for (start, count) in [(0, 0), (u64::MAX, 1), (1, roots.change.operations)] {
+            let mut malformed = roots;
+            malformed.row_count = count;
+            let admitted = AdmittedRootsResponse::new(batch_id, malformed, start, false);
+            assert!(AdmittedRootsResponse::decode(admitted.encode()).is_err());
+        }
         for admitted in [
-            AdmittedRootsResponse::new(batch_id, roots, false),
-            AdmittedRootsResponse::new(batch_id, roots, true),
+            AdmittedRootsResponse::new(batch_id, roots, 1, false),
+            AdmittedRootsResponse::new(batch_id, roots, 1, true),
         ] {
             let mut expected = Vec::new();
             batch_id.write(&mut expected);
             roots.write(&mut expected);
+            admitted.activity_start.write(&mut expected);
             admitted.finalized.write(&mut expected);
             assert_eq!(admitted.encode().as_ref(), expected);
-            let decoded = AdmittedRootsResponse::decode(admitted.encode()).unwrap();
-            assert_eq!(decoded, admitted);
+            assert_eq!(
+                AdmittedRootsResponse::decode(admitted.encode()).unwrap(),
+                admitted
+            );
         }
-        let roots = ClaimRootsResponse {
-            withdrawal_outputs: VectorRoot {
-                digest: Sha256::hash(&[b"anchored-record-outputs"]),
-            },
-            batch_id,
-        };
-        assert_eq!(ClaimRootsResponse::decode(roots.encode()).unwrap(), roots);
-        let mut trailing = roots.encode().to_vec();
-        trailing.push(0xff);
-        assert!(ClaimRootsResponse::decode(Bytes::from(trailing)).is_err());
+        for record in [
+            Record::PayoutHead(crate::protocol::PayoutTip {
+                payouts: roots.withdrawal_outputs,
+                finalized: None,
+            }),
+            Record::Unclaimed(7),
+        ] {
+            assert_eq!(Record::decode(record.encode()).unwrap(), record);
+            let mut trailing = record.encode().to_vec();
+            trailing.push(0xff);
+            assert!(Record::decode(Bytes::from(trailing)).is_err());
+        }
     }
 
     #[test]

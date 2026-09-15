@@ -28,7 +28,7 @@
 //! | `QueueWithdrawal` | the account holder | the account signature inside [`SignedWithdrawal`], verified with its deployment and root context | account queue slot and withdrawal replay id (`WithdrawalConflict`) |
 //! | `RegisterEpoch` | the operator | the operator signature over exact boundary material and native fee | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
 //! | `Admit` | anyone holding a genuine certificate | the committee certificate over the exact header (exact quorum, verified aggregate) against the chain's own registration | registration admitted mark and admitted record (`AdmissionConflict`) |
-//! | `ClaimWithdrawal` | anyone holding bound evidence | the claim opening against the finalized batch's withdrawal-outputs root; funds go to the certified destination | consumed (batch, position) and its release record |
+//! | `ClaimWithdrawal` | anyone holding bound evidence | the output opening against the current finalized payout head; funds go to the certified destination | absence from the ordered unclaimed intervals |
 //! | `Challenge` | any holder of contradiction evidence (bearer, by design) | challenge adjudication over the admitted close | one proven challenge per batch (`ChallengeConflict`) |
 //! | `BeginHardFaultSettlement` | anyone, once a real deadline expired or a challenge proved | the chain's own hard-fault flag (block production observes every deadline) | idempotent snapshot, then `HardFaultAlreadySettled` |
 //! | `ClaimHardFault` | anyone holding the account's frozen-root opening; funds go to the opened account and its signed withdrawal | the state opening against the frozen root | consumed opening position and its release record (`PositionConflict`) |
@@ -704,21 +704,21 @@ impl Read for AdmitRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalClaimRequest {
     pub(crate) deployment: Digest,
-    pub(crate) batch_id: BatchId<Digest>,
+    pub(crate) start: u64,
     pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 impl Write for WithdrawalClaimRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
-        self.batch_id.write(buf);
+        self.start.write(buf);
         self.claim.write(buf);
     }
 }
 
 impl EncodeSize for WithdrawalClaimRequest {
     fn encode_size(&self) -> usize {
-        self.deployment.encode_size() + self.batch_id.encode_size() + self.claim.encode_size()
+        self.deployment.encode_size() + self.start.encode_size() + self.claim.encode_size()
     }
 }
 
@@ -728,7 +728,7 @@ impl Read for WithdrawalClaimRequest {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             deployment: Digest::read(buf)?,
-            batch_id: BatchId::read(buf)?,
+            start: u64::read(buf)?,
             claim: WithdrawalClaim::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
         })
     }
@@ -1111,10 +1111,10 @@ mod tests {
             commonware_runtime::deterministic::Runner::default(),
             |context| async move {
                 let strategy = commonware_parallel::Rayon::new(NonZeroUsize::MIN).unwrap();
-                let config = crate::protocol::state_config("bound-proof", &context, strategy);
-                let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
+                let state = crate::protocol::init_replica(
                     context,
-                    config,
+                    "bound-proof",
+                    strategy,
                     crate::protocol::genesis_balances(&crate::protocol::deployments()[0]).unwrap(),
                 )
                 .await
