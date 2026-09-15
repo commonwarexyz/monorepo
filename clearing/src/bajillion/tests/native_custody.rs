@@ -33,7 +33,22 @@ fn native_reopen_rebuilds_compact_account_and_outgoing_proofs() {
         let (replica, close) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
             .await
             .unwrap();
+        let (state, logs) = replica.into_parts();
+        let batch = logs
+            .prepare(
+                logs.head(),
+                ActivityInput::new(vec![], vec![]),
+                vec![],
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let replica = Replica::from_parts(state, logs.apply(batch).await.unwrap());
         let head = replica.head();
+        assert_ne!(head.logs.activity, range.head);
         let replica = Box::pin(replica.sync()).await.unwrap();
         drop(replica);
 
@@ -72,6 +87,15 @@ fn native_reopen_rebuilds_compact_account_and_outgoing_proofs() {
             .map(|seed| SigningKey::from_seed(seed).public_key())
             .find(|account| account.as_ref() > input.rows().last().unwrap().account().as_ref())
             .unwrap();
+        assert_eq!(
+            epoch
+                .account_lookup(reopened.logs(), &after)
+                .await
+                .unwrap()
+                .resolve::<Sha256>(&range, &after)
+                .unwrap(),
+            (0, None)
+        );
         let mixed = Epoch::at(reopened.logs(), EPOCH, mixed).await.unwrap();
         assert!(mixed.account_lookup(reopened.logs(), &after).await.is_err());
     });

@@ -3,11 +3,14 @@
 //! Certified close descriptors own the epoch and account-row interval. Positive outgoing
 //! amounts delimit each row's original entries by its terminal debit. Payout proofs use the
 //! payout log independently of this view.
+//!
+//! Native reads guide discovery. Returned rows come from typed native proofs, and reconstructed
+//! outgoing entries must match the payer root in the proven row.
 
 use crate::bajillion::{
     challenge::{AccountLookup, ChallengeError, ChangeAbsence, ChangeOpening, HigherEntryLookup},
     commitment::MAX_VECTOR_LENGTH,
-    logs::{ActivityOperation, ActivityRecord, Logs},
+    logs::{self, ActivityOperation, ActivityRecord, Logs},
     state::AccountChange,
     transition::{ActivityRange, TransitionError},
     vector::OutVector,
@@ -16,7 +19,7 @@ use alloc::{boxed::Box, vec::Vec};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_storage::Context;
+use commonware_storage::{Context, merkle::Location};
 use core::num::NonZeroU64;
 use thiserror::Error;
 
@@ -79,8 +82,13 @@ impl<D: Digest> Epoch<D> {
         P: PublicKey,
         S: Strategy,
     {
-        match logs.raw_activity_record_at(&self.range.head, index).await? {
-            ActivityOperation::Append(ActivityRecord::Row(row)) => Ok(row),
+        match logs
+            .activity_source()
+            .get(Location::new(index))
+            .await
+            .map_err(logs::Error::from)?
+        {
+            Some(ActivityRecord::Row(row)) => Ok(row),
             _ => Err(TransitionError::LogRange),
         }
     }
@@ -144,16 +152,16 @@ impl<D: Digest> Epoch<D> {
                     return Err(TransitionError::NonCanonicalRows);
                 }
                 if page.len() == 0 {
-                    let count = NonZeroU64::new((terminal - position).min(128))
-                        .expect("nonempty entry interval");
+                    let end = position + (terminal - position).min(128);
+                    let locations = (position..end).map(Location::new).collect::<Vec<_>>();
                     page = logs
-                        .activity_opening(&self.range.head, position, count)
-                        .await?
-                        .1
+                        .activity_source()
+                        .get_many(&locations)
+                        .await
+                        .map_err(logs::Error::from)?
                         .into_iter();
                 }
-                let Some(ActivityOperation::Append(ActivityRecord::Entry(entry))) = page.next()
-                else {
+                let Some(Some(ActivityRecord::Entry(entry))) = page.next() else {
                     return Err(TransitionError::NonCanonicalRows);
                 };
                 if entry.count == 0
@@ -197,34 +205,28 @@ impl<D: Digest> Epoch<D> {
         P: PublicKey,
         S: Strategy,
     {
-        let predecessor = if index > self.range.start {
-            Some(self.row(logs, index - 1).await?)
-        } else {
-            None
+        let has_predecessor = index > self.range.start;
+        let has_successor = index < self.range.end;
+        let count = u64::from(has_predecessor) + u64::from(has_successor);
+        let Some(count) = NonZeroU64::new(count) else {
+            return Ok(ChangeAbsence {
+                predecessor: None,
+                successor: None,
+                opening: None,
+            });
         };
-        let successor = if index < self.range.end {
-            Some(self.row(logs, index).await?)
-        } else {
-            None
-        };
-        let count = u64::from(predecessor.is_some()) + u64::from(successor.is_some());
-        let opening = if let Some(count) = NonZeroU64::new(count) {
-            Some(
-                logs.activity_opening(
-                    &self.range.head,
-                    index - u64::from(predecessor.is_some()),
-                    count,
-                )
-                .await?
-                .0,
-            )
-        } else {
-            None
+        let (opening, operations) = logs
+            .activity_opening(&self.range.head, index - u64::from(has_predecessor), count)
+            .await?;
+        let mut operations = operations.into_iter();
+        let mut next_row = || match operations.next() {
+            Some(ActivityOperation::Append(ActivityRecord::Row(row))) => Ok(row),
+            _ => Err(TransitionError::LogRange),
         };
         Ok(ChangeAbsence {
-            predecessor,
-            successor,
-            opening,
+            predecessor: has_predecessor.then(&mut next_row).transpose()?,
+            successor: has_successor.then(&mut next_row).transpose()?,
+            opening: Some(opening),
         })
     }
 
@@ -242,11 +244,15 @@ impl<D: Digest> Epoch<D> {
     {
         let lookup = match self.find(logs, account).await? {
             Ok(index) => {
-                let value = self.row(logs, index).await?.value();
-                let (proof, _) = logs
+                let (proof, operations) = logs
                     .activity_opening(&self.range.head, index, NonZeroU64::MIN)
                     .await
                     .map_err(TransitionError::from)?;
+                let [ActivityOperation::Append(ActivityRecord::Row(row))] = operations.as_slice()
+                else {
+                    return Err(TransitionError::LogRange.into());
+                };
+                let value = row.value();
                 AccountLookup::Present(Box::new(ChangeOpening { value, proof }))
             }
             Err(index) => AccountLookup::Absent(self.absence(logs, index).await?),
@@ -270,15 +276,18 @@ impl<D: Digest> Epoch<D> {
     {
         let lookup = match self.find(logs, payer).await? {
             Ok(index) => {
-                let row = self.row(logs, index).await?;
-                let vector = self.outgoing(logs, index, &row).await?;
+                let (proof, operations) = logs
+                    .activity_opening(&self.range.head, index, NonZeroU64::MIN)
+                    .await
+                    .map_err(TransitionError::from)?;
+                let [ActivityOperation::Append(ActivityRecord::Row(row))] = operations.as_slice()
+                else {
+                    return Err(TransitionError::LogRange.into());
+                };
+                let vector = self.outgoing(logs, index, row).await?;
                 let value = row.value().core();
                 let entry = vector
                     .lookup::<H, D>(recipient)
-                    .map_err(TransitionError::from)?;
-                let (proof, _) = logs
-                    .activity_opening(&self.range.head, index, NonZeroU64::MIN)
-                    .await
                     .map_err(TransitionError::from)?;
                 HigherEntryLookup::Present {
                     value,

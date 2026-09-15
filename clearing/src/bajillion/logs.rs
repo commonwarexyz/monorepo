@@ -1025,6 +1025,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bajillion::{custody::Epoch, transition::ActivityRange};
     use bytes::Bytes;
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
@@ -1872,7 +1873,7 @@ mod tests {
                 .unwrap();
             let account = SigningKey::from_seed(9).public_key();
             let row = activity_row(
-                account,
+                account.clone(),
                 0,
                 0,
                 commitment::empty_root::<Sha256>(commitment::VectorKind::OutEntry),
@@ -1911,6 +1912,24 @@ mod tests {
             let logs = TestLogs::from_parts(activity, payouts, (0..=4096).into());
             assert!(matches!(logs.activity_row_at(1).await, Err(Error::Row)));
             assert!(matches!(logs.payout_at(1).await, Err(Error::Row)));
+            let epoch = Epoch::at(
+                &logs,
+                0,
+                ActivityRange {
+                    start: 1,
+                    end: 2,
+                    head: logs.head().activity,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(epoch.account_lookup(&logs, &account).await.is_err());
+            assert!(
+                epoch
+                    .higher_entry_lookup(&logs, &account, &account)
+                    .await
+                    .is_err()
+            );
             logs.destroy().await.unwrap();
         });
     }
