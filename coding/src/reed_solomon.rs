@@ -58,6 +58,7 @@ fn check_chunk<H: Hasher>(
     shard: &Chunk<H::Digest>,
     digest: impl FnOnce() -> H::Digest,
 ) -> Result<CheckedChunk<H::Digest>, Error> {
+    // Reject inconsistent indices and tree sizes before requesting the shard digest.
     if index >= total {
         return Err(Error::InvalidIndex(index));
     }
@@ -67,11 +68,15 @@ fn check_chunk<H: Hasher>(
     if shard.index != index {
         return Err(Error::InvalidIndex(shard.index));
     }
+
+    // Bind the shard digest to its requested position and commitment.
     let digest = digest();
     shard
         .proof
         .verify_element_inclusion::<H>(&digest, u32::from(index), commitment)
         .map_err(|_| Error::InvalidProof)?;
+
+    // Cache the verified digest with the commitment and shard it authenticates.
     Ok(CheckedChunk::new(
         *commitment,
         shard.shard.clone(),
@@ -411,8 +416,8 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     shard_len: usize,
     /// Commitment that the reconstructed codeword must reproduce.
     root: &'a H::Digest,
-    /// Caller strategy used to hash reconstructed shards.
-    hash_strategy: &'a S,
+    /// Caller strategy used for reconstruction and shard hashing.
+    strategy: &'a S,
 }
 
 /// Striped Reed-Solomon: split every shard by byte range and run independent
@@ -597,16 +602,19 @@ mod striped {
     /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
     /// missing originals uses [`decode_reveal`]), confirm any provided recovery shards
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
-    pub(super) fn decode<'a, H: Hasher, S: Strategy, P: Strategy>(
+    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
-        stripe_strategy: &P,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            k, m, shard_len, ..
+            k,
+            m,
+            shard_len,
+            strategy,
+            ..
         } = ctx;
         assert!(ranges.len() > 1);
 
@@ -619,9 +627,11 @@ mod striped {
         let mut recovery_buf = vec![0u8; m * shard_len];
         let groups = stripe_columns(&mut recovery_buf, shard_len, &ranges);
         let stripes: Vec<_> = ranges.into_iter().zip(groups).collect();
-        stripe_strategy.try_map_collect_vec(stripes, |(range, out)| {
-            encode_recovery_into(k, m, range, &original_refs, out)
-        })?;
+        strategy
+            .manual()
+            .try_map_collect_vec(stripes, |(range, out)| {
+                encode_recovery_into(k, m, range, &original_refs, out)
+            })?;
         let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
         verify_reencoded::<H, S>(
             ctx,
@@ -639,16 +649,19 @@ mod striped {
     /// here and bound by the commitment root check like any other missing shard. No
     /// provided-recovery comparison is needed: every reconstructed shard is the unique RS
     /// output for the `k` inputs, and the root check alone binds it to the commitment.
-    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy, P: Strategy>(
+    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
-        stripe_strategy: &P,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
         provided_originals: Vec<(usize, &'a [u8])>,
         provided_recoveries: Vec<(usize, &'a [u8])>,
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            k, m, shard_len, ..
+            k,
+            m,
+            shard_len,
+            strategy,
+            ..
         } = ctx;
         assert!(ranges.len() > 1);
 
@@ -686,17 +699,19 @@ mod striped {
                 )
             })
             .collect();
-        stripe_strategy.try_map_collect_vec(stripes, |(range, out)| {
-            recover_all_into(
-                k,
-                m,
-                range,
-                &provided_originals,
-                &provided_recoveries,
-                missing,
-                out,
-            )
-        })?;
+        strategy
+            .manual()
+            .try_map_collect_vec(stripes, |(range, out)| {
+                recover_all_into(
+                    k,
+                    m,
+                    range,
+                    &provided_originals,
+                    &provided_recoveries,
+                    missing,
+                    out,
+                )
+            })?;
 
         let mut original_refs: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
@@ -731,7 +746,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         k,
         shard_len,
         root,
-        hash_strategy,
+        strategy,
         ..
     } = ctx;
     let data = extract_data(originals, k, shard_len)?;
@@ -753,7 +768,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         .unzip();
     for (i, digest) in missing_indices
         .into_iter()
-        .zip(H::hash_many(&missing_payloads, hash_strategy))
+        .zip(H::hash_many(&missing_payloads, strategy))
     {
         shard_digests[i] = Some(digest);
     }
@@ -940,8 +955,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let manual = strategy.manual();
-    let stripes = striped::ranges(shard_len, manual.parallelism());
+    let stripes = striped::ranges(shard_len, strategy.manual().parallelism());
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -1003,23 +1017,21 @@ fn decode<'a, H: Hasher, S: Strategy>(
             m,
             shard_len,
             root,
-            hash_strategy: strategy,
+            strategy,
         };
         // Recovery reads the missing originals and recoveries straight out of one decode;
         // with all originals present there is nothing to decode, so re-encode instead.
         if recovery_needed {
-            return striped::decode_reveal::<H, _, _>(
+            return striped::decode_reveal::<H, S>(
                 &ctx,
-                &manual,
                 ranges,
                 shard_digests,
                 provided_originals,
                 provided_recoveries,
             );
         }
-        return striped::decode::<H, _, _>(
+        return striped::decode::<H, S>(
             &ctx,
-            &manual,
             ranges,
             shard_digests,
             provided_originals,
@@ -1032,7 +1044,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         m,
         shard_len,
         root,
-        hash_strategy: strategy,
+        strategy,
     };
     sequential::decode::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
 }
