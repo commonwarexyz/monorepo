@@ -1,5 +1,6 @@
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
@@ -18,7 +19,7 @@ fn bench_prove_range(c: &mut Criterion) {
             builder.add(&element);
             elements.push(element);
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         // Prove range of proofs for random starting positions

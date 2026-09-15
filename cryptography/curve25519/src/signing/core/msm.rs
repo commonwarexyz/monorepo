@@ -271,7 +271,8 @@ pub(super) fn multiscalar_mul<B: Backend>(
         end: usize,
     }
 
-    let parallelism = strategy.manual().parallelism();
+    let strategy = strategy.manual();
+    let parallelism = strategy.parallelism();
     let total = total_terms(chunks);
     let windows = num_windows(width);
     let ranges = partition_ranges(total, range_count(total, windows, parallelism));

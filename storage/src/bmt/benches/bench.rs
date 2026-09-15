@@ -9,5 +9,5 @@ criterion_main!(
     build::benches,
     prove_single::benches,
     prove_multi::benches,
-    prove_range::benches
+    prove_range::benches,
 );

@@ -1,0 +1,72 @@
+[package]
+name = "commonware-clearing"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Settle actions at scale."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/clearing"
+documentation = "https://docs.rs/commonware-clearing"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
+bytes.workspace = true
+commonware-codec = { workspace = true, default-features = false }
+commonware-cryptography = { workspace = true, default-features = false, features = [ "bls12381" ] }
+commonware-macros.workspace = true
+commonware-parallel = { workspace = true, default-features = false }
+commonware-runtime = { workspace = true, optional = true }
+commonware-storage = { workspace = true, default-features = false }
+commonware-utils = { workspace = true, default-features = false }
+rand_core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+commonware-conformance.workspace = true
+commonware-cryptography.workspace = true
+commonware-cryptography-curve25519 = { workspace = true, features = [ "arbitrary", "std" ] }
+criterion.workspace = true
+stateright.workspace = true
+
+[features]
+default = [ "std" ]
+bench = [ "commonware-runtime/external", "std" ]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-cryptography/std",
+	"commonware-macros/std",
+	"commonware-parallel/std",
+	"commonware-storage/std",
+	"commonware-utils/std",
+	"dep:commonware-runtime",
+	"thiserror/std",
+]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-runtime?/arbitrary",
+	"commonware-storage/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"std",
+]
+
+[lib]
+bench = false
+
+[[example]]
+name = "bajillion_model"
+path = "stateright/explorer.rs"
+required-features = ["std"]
+
+[[bench]]
+name = "bajillion"
+harness = false
+path = "src/bajillion/benches/bench.rs"
+required-features = ["bench"]

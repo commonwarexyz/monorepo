@@ -1,0 +1,7210 @@
+mod app_contract;
+mod checkpoint_proofs;
+mod core_registry;
+mod fixture;
+mod ingress_qualification;
+mod native_reads;
+mod preflight;
+mod proof_restart;
+mod scripted;
+mod startup;
+mod virtual_balances;
+
+use super::{
+    app::{App, Finalized, MAX_TIMESTAMP_DRIFT, initial_sync_target},
+    client::{Chain as _, Client, EFFECT_ATTEMPTS, POLL, RECENCY_THRESHOLD, SUBMIT_ATTEMPTS},
+    da, harness, ingress, light,
+    native::{NativeGenesis, RegistryEntry},
+    node::{self, Node},
+    query::{
+        self, CertifiedRead, Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest,
+        EvidenceResponse, Lookup, ReadRequest, ReadResponse,
+    },
+    registry::RegistryView,
+    setup::{Genesis, ValidatorEntry},
+    state::{
+        FaultRecord, HardFaultReasonResponse, Record, admitted_key, anchor_key, claim_roots_key,
+        deposit_key, execute, fault_key, hard_fault_key, native_balance, refund_key,
+        registration_key, registry, registry_entry, registry_entry_key, status_key, withdrawal_key,
+    },
+    tx::{
+        AdmitRequest, BeginHardFaultSettlementRequest, ChallengeRequest, ClaimDepositRequest,
+        ClaimHardFaultRequest, ClaimPendingDepositRequest, DepositRequest, MAX_CHALLENGE_BYTES,
+        NativeTransferRequest, QueueWithdrawalRequest, RegisterDeploymentRequest,
+        RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
+    },
+    types::{Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, StateKey, now},
+    validator::{
+        MAX_MESSAGE_SIZE, NAMESPACE as CHAIN_NAMESPACE, NoopResolver, SHARING_MODE,
+        Scheme as Threshold, sync_config,
+    },
+};
+use crate::{
+    agent::{Agent, PaymentOutcome, WithdrawalOutcome},
+    operator::{Operator, rpc as operator_rpc},
+    protocol::{
+        Deployment, DepositEvent, INITIAL_BALANCE, Key, PreparedEpoch, Protocol, SettlementResult,
+        Timing, accounts, clearing_private, committee, dealt_participant, deployment,
+        deployment_of, identities, operator_ack_key, operator_ack_signer, operator_key,
+        operator_signer, wallets,
+    },
+    rpc,
+    service::{observe, observe_closes, prepare_request},
+};
+use anyhow::Context as _;
+use bytes::{Bytes, BytesMut};
+use commonware_broadcast::buffered;
+use commonware_clearing::bajillion::{
+    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    challenge::{AckWitness, Challenge, ChallengeKind},
+    commitment::{VectorKind, VectorRoot},
+    payment::{SendAuthorization, VectorAck, VectorSendBody},
+    qmdb::{Mutations, State as BalanceState, StateHead, StateOpening, StateRoot, account_key},
+    transition::{BatchId, Terminal, WithdrawalClaim},
+    vector::{OutEntry, OutVector},
+};
+use commonware_codec::{
+    Decode as _, DecodeExt as _, Encode as _, EncodeSize as _, Error as CodecError, RangeCfg,
+    Write as _,
+};
+use commonware_consensus::{
+    Reporters,
+    marshal::{
+        self,
+        core::Actor as MarshalActor,
+        resolver::p2p as marshal_resolver,
+        standard::{Deferred, Standard},
+    },
+    simplex::{
+        self,
+        config::{ForwardPolicy, SkipPolicy},
+        elector::RoundRobin,
+        mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
+        scheme::Scheme as CertScheme,
+        types::{Context, Finalization, Finalize, Proposal},
+    },
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+};
+use commonware_cryptography::{
+    Digest as _, Digestible as _, Hasher as _, Sha256, Signer as _,
+    bls12381::{
+        dkg::feldman_desmedt::deal,
+        primitives::{group::Share, ops::compute_public, variant::MinSig},
+    },
+    certificate::{ConstantProvider, Signers, mocks::Fixture as SchemeFixture},
+    ed25519,
+    sha256::Digest,
+};
+use commonware_cryptography_curve25519::signing::Signature;
+use commonware_glue::{
+    simulate::{
+        engine::{EngineDefinition, InitContext},
+        exit::ExitCondition,
+        plan::PlanBuilder,
+        processed::ProcessedHeight,
+        property::Property,
+        reporter::MonitorReporter,
+        tracker::ProgressTracker,
+    },
+    stateful::{
+        Application as _, Config as StatefulConfig, Input, Stateful as StatefulActor, SyncPlan,
+        db::{DatabaseSet, Merkleized as _},
+    },
+};
+use commonware_parallel::{Sequential, Strategy};
+use commonware_runtime::{
+    BufferPooler, Clock as _, Handle, Listener, Network as _, Quota, Runner as _, Spawner as _,
+    Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
+use commonware_storage::{
+    archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
+    merkle::full::Config as MerkleConfig, qmdb::current::VariableConfig, translator::TwoCap,
+};
+use commonware_utils::{
+    N3f1, NZU16, NZU32, NZU64, NZUsize, Participant, TestRng, iter::NonEmpty, non_empty_range,
+    ordered::Set, sync::Mutex, test_rng,
+};
+use std::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+    path::Path,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+const PAGE_SIZE: std::num::NonZeroU16 = NZU16!(1024);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
+const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
+
+/// Settlement QMDB config with partitions derived from `prefix`.
+fn config(
+    prefix: &str,
+    pooler: &impl BufferPooler,
+) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    VariableConfig {
+        merkle_config: MerkleConfig {
+            journal_partition: format!("{prefix}-chain-mmr-journal"),
+            metadata_partition: format!("{prefix}-chain-mmr-metadata"),
+            items_per_blob: NZU64!(11),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+            strategy: Sequential,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: VariableJournalConfig {
+            partition: format!("{prefix}-chain-log-journal"),
+            items_per_section: NZU64!(7),
+            compression: None,
+            codec_config: ((), ()),
+            page_cache,
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+        },
+        grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
+        translator: TwoCap,
+        init_cache_size: Some(NZUsize!(1024)),
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
+    }
+}
+
+/// Opens a fresh settlement database with partitions under `prefix`.
+pub(super) async fn open(
+    context: deterministic::Context,
+    prefix: &str,
+) -> Database<deterministic::Context> {
+    let config = config(prefix, &context);
+    <Database<deterministic::Context> as DatabaseSet<_>>::init(context, config).await
+}
+
+/// Executes one block against `db` under `timing` and applies it, returning
+/// the block's (canonical root, ops root). The height doubles as the
+/// timestamp, which keeps timestamps strictly monotonic.
+async fn seal_at(
+    db: &Database<deterministic::Context>,
+    height: u64,
+    timing: &Timing,
+    txs: &[SettlementTx],
+) -> (Digest, Digest) {
+    let batch = db.new_batches().await;
+    let sealed = execute(batch, Height::new(height), height, timing, &native(), txs)
+        .await
+        .expect("block execution succeeds");
+    let roots = (sealed.root(), sealed.ops_root());
+    db.apply(sealed).await;
+    roots
+}
+
+/// Executes one block against `db` under the default timing and applies it.
+async fn seal(
+    db: &Database<deterministic::Context>,
+    height: u64,
+    txs: &[SettlementTx],
+) -> (Digest, Digest) {
+    seal_at(db, height, &Timing::DEFAULT, txs).await
+}
+
+/// Executes one block against `db` under an explicit deployment set with the
+/// default timing and applies it.
+async fn seal_with(
+    db: &Database<deterministic::Context>,
+    height: u64,
+    configured: &[Deployment],
+    txs: &[SettlementTx],
+) -> (Digest, Digest) {
+    seal_native(db, height, &native_for(configured.to_vec()), txs).await
+}
+
+async fn seal_native(
+    db: &Database<deterministic::Context>,
+    height: u64,
+    native: &NativeGenesis,
+    txs: &[SettlementTx],
+) -> (Digest, Digest) {
+    let sealed = execute(
+        db.new_batches().await,
+        Height::new(height),
+        height,
+        &Timing::DEFAULT,
+        native,
+        txs,
+    )
+    .await
+    .expect("block execution succeeds");
+    let roots = (sealed.root(), sealed.ops_root());
+    db.apply(sealed).await;
+    roots
+}
+
+fn native_for(mut configured: Vec<Deployment>) -> NativeGenesis {
+    let (configured, empty) = deterministic::Runner::default().start(move |context| async move {
+        for deployment in &mut configured {
+            deployment.generate(context.child("genesis")).await.unwrap();
+        }
+        let empty = crate::protocol::empty_genesis(context.child("empty"))
+            .await
+            .unwrap();
+        (configured, empty)
+    });
+    super::setup::native_genesis(
+        configured
+            .into_iter()
+            .enumerate()
+            .map(|(index, deployment)| RegistryEntry {
+                deployment,
+                network_key: ed25519::PrivateKey::from_seed(77_777 + index as u64).public_key(),
+                max_dealing_bytes: 4 * 1024 * 1024,
+            })
+            .collect(),
+        &empty,
+    )
+}
+
+fn native() -> NativeGenesis {
+    native_for(deployments())
+}
+
+/// The two-deployment configuration the tenancy tests run: the compiled
+/// default deployment plus a second operator's deployment over the same
+/// account set.
+fn two_deployments() -> Vec<Deployment> {
+    let mut configs = vec![
+        Deployment::new(
+            deployment(),
+            operator_key(),
+            operator_ack_key(0),
+            accounts(),
+        ),
+        Deployment::new(
+            deployment_of(&operator_signer(1).public_key()),
+            operator_signer(1).public_key(),
+            operator_ack_key(1),
+            accounts(),
+        ),
+    ];
+    deterministic::Runner::default().start(move |context| async move {
+        for config in &mut configs {
+            config.generate(context.child("genesis")).await.unwrap();
+        }
+        configs
+    })
+}
+
+/// Reads one record from applied state.
+async fn read(db: &Database<deterministic::Context>, key: &StateKey) -> Option<Record> {
+    db.read().await.get(key).await.expect("state read succeeds")
+}
+
+/// One certified-read request against the compiled default deployment.
+fn req(lookup: Lookup) -> ReadRequest {
+    ReadRequest::new(deployment(), lookup)
+}
+
+/// Authenticates a fixture deposit with its named account's signing key.
+fn signed_deposit(chain: Digest, scoped: Digest, event: DepositEvent) -> DepositRequest {
+    let wallet = wallets()
+        .into_iter()
+        .find(|wallet| wallet.public_key() == event.account)
+        .expect("fixture deposit requires its owner's signer");
+    DepositRequest::sign(chain, scoped, event, wallet.signer())
+}
+
+fn deposit_tx(event: DepositEvent) -> SettlementTx {
+    SettlementTx::Deposit(signed_deposit(native().chain_id(), deployment(), event))
+}
+
+/// Reads the live registration record, panicking on a proven absence.
+async fn registration(db: &Database<deterministic::Context>) -> super::state::RegistrationRecord {
+    match read(db, &registration_key(&deployment())).await {
+        Some(Record::Registration(record)) => record,
+        record => panic!("expected the registration record, found {record:?}"),
+    }
+}
+
+/// Reads the status singleton.
+async fn status(db: &Database<deterministic::Context>) -> super::state::StatusRecord {
+    match read(db, &status_key(&deployment())).await {
+        Some(Record::Status(status)) => status,
+        record => panic!("expected the status record, found {record:?}"),
+    }
+}
+
+/// A test checkpoint obtained from canonical QMDB replay, including its retained proofs.
+#[derive(Clone)]
+struct TestState {
+    history: Vec<(StateRoot<Digest>, Mutations)>,
+    head: StateHead<Digest>,
+    accounts: Vec<crate::protocol::Account>,
+    openings: std::collections::BTreeMap<Key, StateOpening<Key, Digest>>,
+}
+async fn replay_state<S: Strategy>(
+    context: deterministic::Context,
+    config: commonware_clearing::bajillion::qmdb::Config<S>,
+    history: &[(StateRoot<Digest>, Mutations)],
+) -> BalanceState<deterministic::Context, Sha256, S> {
+    let mut state = BalanceState::open(context, config).await.unwrap();
+    for (root, mutations) in history {
+        let candidate = state
+            .prepare(state.head(), mutations.clone())
+            .await
+            .unwrap();
+        assert_eq!(candidate.root(), *root);
+        state = state.apply(candidate).await.unwrap();
+    }
+    state
+}
+
+impl TestState {
+    fn root(&self) -> StateRoot<Digest> {
+        self.head.root()
+    }
+    fn liability(&self) -> u64 {
+        self.head.liability()
+    }
+    fn opening(&self, key: &Key) -> anyhow::Result<StateOpening<Key, Digest>> {
+        self.openings.get(key).cloned().context("missing account")
+    }
+    async fn replay(
+        context: deterministic::Context,
+        history: Vec<(StateRoot<Digest>, Mutations)>,
+    ) -> Self {
+        let config = crate::protocol::state_config("checkpoint", &context, Sequential);
+        let state = replay_state(context, config, &history).await;
+        let mut accounts = accounts();
+        accounts.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut openings = std::collections::BTreeMap::new();
+        for account in &mut accounts {
+            account.balance = state
+                .get(&account_key(&account.key).unwrap())
+                .await
+                .unwrap()
+                .map_or(0, NonZeroU64::get);
+            if account.balance > 0 {
+                openings.insert(
+                    account.key.clone(),
+                    state.opening(account.key.clone()).await.unwrap(),
+                );
+            }
+        }
+        Self {
+            history,
+            head: *state.head(),
+            accounts,
+            openings,
+        }
+    }
+}
+fn genesis_cache() -> TestState {
+    deterministic::Runner::default().start(|context| async move {
+        let mut deployment = crate::protocol::deployments().remove(0);
+        deployment.generate(context.child("genesis")).await.unwrap();
+        let history = vec![(
+            deployment.genesis().root(),
+            crate::protocol::genesis_balances(&deployment)
+                .unwrap()
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect(),
+        )];
+        TestState::replay(context, history).await
+    })
+}
+fn deployments() -> Vec<Deployment> {
+    deterministic::Runner::default().start(|context| async move {
+        let mut configs = crate::protocol::deployments();
+        for config in &mut configs {
+            config.generate(context.child("genesis")).await.unwrap();
+        }
+        configs
+    })
+}
+
+/// One epoch's chain transactions: a unit deposit to the first predecessor
+/// account, the boundary-only signed registration, and the certified close
+/// admitting it.
+struct EpochTxs {
+    deposit: DepositEvent,
+    deposit_tx: SettlementTx,
+    register_tx: SettlementTx,
+    admit_tx: SettlementTx,
+    result: SettlementResult,
+    /// Account leaves after the close settles.
+    successor: TestState,
+}
+
+/// One epoch's fixture before certification: the chain transactions up to
+/// admission and the prepared close awaiting a certificate.
+struct EpochBuild {
+    deposit: DepositEvent,
+    deposit_tx: SettlementTx,
+    register_tx: SettlementTx,
+    prepared: PreparedEpoch,
+    /// Account leaves after the close settles.
+    successor: TestState,
+}
+
+/// The unit-deposit boundary every fixture registers over `predecessor`
+/// leaves: the deposit event, its transaction, and the boundary-only signed
+/// registration transaction (byte-identical regardless of the deadlines the
+/// chain later assigns at inclusion).
+fn fixture_boundary(
+    chain: Digest,
+    protocol: &Protocol,
+    epoch: u64,
+    predecessor: &TestState,
+    deposit_label: &'static [u8],
+) -> (DepositEvent, SettlementTx, SettlementTx) {
+    let account = predecessor.accounts[0].key.clone();
+    let liability = predecessor.liability();
+    let deposit = DepositEvent {
+        id: Sha256::hash(&[deposit_label]),
+        account: account.clone(),
+        amount: 1,
+    };
+    let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
+    let deposits_root = deposits.root::<Sha256>().unwrap();
+    let withdrawals = WithdrawalBatch::empty();
+    let signature =
+        protocol.sign_chain_registration(epoch, liability, &deposits_root, &withdrawals, 4096);
+    let register = RegisterEpochRequest {
+        fee: 4096,
+        deployment: protocol.deployment(),
+        epoch,
+        predecessor_liability: liability,
+        deposits_root,
+
+        withdrawals,
+        openings: Vec::new(),
+        signature,
+    };
+    (
+        deposit.clone(),
+        SettlementTx::Deposit(signed_deposit(chain, protocol.deployment(), deposit)),
+        SettlementTx::RegisterEpoch(register),
+    )
+}
+
+/// Builds one epoch's prepared fixture over `predecessor` leaves with
+/// explicit block-height deadlines (the pair the chain assigns at the
+/// registration's inclusion height), stopping before certification.
+fn build_fixture(
+    chain: Digest,
+    protocol: &Protocol,
+    epoch: u64,
+    predecessor: TestState,
+    deposit_label: &'static [u8],
+    admission_deadline: u64,
+    challenge_deadline: u64,
+) -> EpochBuild {
+    let account = predecessor.accounts[0].key.clone();
+    let liability = predecessor.liability();
+    let (deposit, deposit_tx, register_tx) =
+        fixture_boundary(chain, protocol, epoch, &predecessor, deposit_label);
+    let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
+    let withdrawals = WithdrawalBatch::empty();
+
+    let registration = protocol
+        .registration_at(
+            epoch,
+            deposits,
+            withdrawals,
+            liability,
+            admission_deadline,
+            challenge_deadline,
+        )
+        .unwrap();
+    let owned = protocol.clone();
+    let history = predecessor.history;
+    let (prepared, successor) = deterministic::Runner::default().start(move |context| async move {
+        let config = crate::protocol::state_config("prepare", &context, owned.strategy().clone());
+        let state = replay_state(context.child("state"), config, &history).await;
+        let prepared = owned.prepare(registration, Vec::new()).unwrap();
+        let (result, candidate) = owned
+            .complete(prepared.clone(), &state, &mut TestRng::new(91))
+            .await
+            .unwrap();
+        let mut next = history;
+        next.push((result.roots.successor, candidate.mutations().to_vec()));
+        let successor = TestState::replay(context.child("successor"), next).await;
+        (prepared, successor)
+    });
+    EpochBuild {
+        deposit_tx,
+        register_tx,
+        deposit,
+        prepared,
+        successor,
+    }
+}
+
+/// Builds one epoch's fixture over `predecessor` leaves with explicit
+/// block-height deadlines, certified through the in-process harness
+/// simulation, as the deposit, registration, and admission transactions.
+fn close_fixture(
+    chain: Digest,
+    protocol: &Protocol,
+    epoch: u64,
+    predecessor: TestState,
+    deposit_label: &'static [u8],
+    admission_deadline: u64,
+    challenge_deadline: u64,
+) -> EpochTxs {
+    let build = build_fixture(
+        chain,
+        protocol,
+        epoch,
+        predecessor.clone(),
+        deposit_label,
+        admission_deadline,
+        challenge_deadline,
+    );
+    let owned = protocol.clone();
+    let history = predecessor.history;
+    let result = deterministic::Runner::default().start(move |context| async move {
+        let config = crate::protocol::state_config("complete", &context, owned.strategy().clone());
+        let state = replay_state(context, config, &history).await;
+        owned
+            .complete(build.prepared, &state, &mut TestRng::new(91))
+            .await
+            .unwrap()
+            .0
+    });
+    EpochTxs {
+        deposit_tx: build.deposit_tx,
+        register_tx: build.register_tx,
+        admit_tx: SettlementTx::Admit(AdmitRequest::from(&result)),
+        deposit: build.deposit,
+        result,
+        successor: build.successor,
+    }
+}
+
+/// The epoch-0 fixture: a registration included at height 1, whose assigned
+/// deadlines under the default policy are the admission deadline at height
+/// 11 and the challenge deadline at height 12.
+struct EpochFixture {
+    deposit: DepositEvent,
+    deposit_tx: SettlementTx,
+    register_tx: SettlementTx,
+    admit_tx: SettlementTx,
+    result: SettlementResult,
+    state: TestState,
+    protocol: Protocol,
+}
+
+fn epoch_fixture() -> EpochFixture {
+    let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+    let state = genesis_cache();
+    let txs = close_fixture(
+        native().chain_id(),
+        &protocol,
+        0,
+        state.clone(),
+        b"chain-fixture-deposit",
+        11,
+        12,
+    );
+    EpochFixture {
+        deposit: txs.deposit,
+        deposit_tx: txs.deposit_tx,
+        register_tx: txs.register_tx,
+        admit_tx: txs.admit_tx,
+        result: txs.result,
+        state,
+        protocol,
+    }
+}
+
+/// An operator acknowledgment fork over the fixture's payment context,
+/// parameterized by the forked cumulative debits so distinct valid fraud
+/// evidence can be built against one close: two countersigned endpoints at
+/// one payer sequence number with different bodies.
+fn ack_fork(
+    result: &SettlementResult,
+    protocol: &Protocol,
+    amounts: (u64, u64),
+) -> Challenge<Key, Digest> {
+    let wallets = wallets();
+    let payer = &wallets[0];
+    let send_root = VectorRoot {
+        digest: Sha256::hash(&[b"chain-ack-fork-send-root"]),
+    };
+    let ack = |cumulative_debit: u64| {
+        let body = VectorSendBody::new(
+            result.context.payment(),
+            payer.public_key(),
+            0,
+            cumulative_debit,
+            send_root,
+        );
+        VectorAck::sign_by_authorities(body, payer.signer(), protocol.operator())
+    };
+    Challenge::AckFork {
+        left: Box::new(AckWitness::from_ack(&ack(amounts.0))),
+        right: Box::new(AckWitness::from_ack(&ack(amounts.1))),
+    }
+}
+
+/// A signed empty epoch-0 registration: the boundary alone, with the
+/// deadlines left to execution at the inclusion height.
+fn empty_register_tx() -> SettlementTx {
+    let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+    let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
+    let withdrawals = WithdrawalBatch::empty();
+    let signature = protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096);
+    SettlementTx::RegisterEpoch(RegisterEpochRequest {
+        fee: 4096,
+        deployment: protocol.deployment(),
+        epoch: 0,
+        predecessor_liability: 400,
+        deposits_root: root,
+
+        withdrawals,
+        openings: Vec::new(),
+        signature,
+    })
+}
+
+/// The harness serves validator evidence over the real wire from the closes
+/// the in-process simulation sealed: every account's state openings and the
+/// historical state proofs verify against the certified roots, routing advice
+/// matches the validators', and proofs remain available past the challenge deadline.
+#[test]
+fn harness_serves_validator_evidence() {
+    deterministic::Runner::default().start(|context| async move {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], 6_500));
+        let control = harness::start(&context.child("harness"), address, "harness-evidence").await;
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+
+        // The boundary transactions are deadline-independent, so the close is
+        // built once the chain has assigned the registration's deadlines.
+        let (_, deposit_tx, register_tx) = fixture_boundary(
+            native().chain_id(),
+            &protocol,
+            0,
+            &state,
+            b"harness-evidence-deposit",
+        );
+        control.submit(deposit_tx).await;
+        let registered_at = control.submit(register_tx).await;
+        let admission_deadline = registered_at + Timing::DEFAULT.admission_offset;
+        let challenge_deadline = admission_deadline + Timing::DEFAULT.challenge_duration;
+        let txs = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"harness-evidence-deposit",
+            admission_deadline,
+            challenge_deadline,
+        );
+        control.submit(txs.admit_tx.clone()).await;
+        assert!(matches!(
+            control
+                .record(admitted_key(&deployment(), 0))
+                .await,
+            Some(Record::Admitted(admitted)) if admitted.roots == txs.result.roots
+        ));
+        let batch = txs.result.header.batch_id::<Sha256>().into_digest();
+        let successor = txs.successor.clone();
+        assert_eq!(successor.root(), txs.result.roots.successor);
+
+        // Every account's state openings arrive through the wire, from the
+        // holders genesis routes to, and match the whole-tree openings.
+        let client = Client::new(
+            control.identity(),
+            deployment(),
+            vec![address],
+            context.child("client_rng"),
+        )
+        .unwrap();
+        let metric = "harness_balances_balances_apply_batch_calls_total ";
+        assert!(
+            commonware_runtime::Metrics::encode(&context)
+                .lines()
+                .any(|line| line.starts_with(metric))
+        );
+        assert_eq!(
+            client
+                .evidence(&context, EvidenceLookup::Dealing { epoch: 1 })
+                .await
+                .unwrap(),
+            EvidenceResponse::Unsealed
+        );
+        assert!(
+            commonware_runtime::Metrics::encode(&context)
+                .lines()
+                .any(|line| line.starts_with(metric)),
+            "unavailable evidence dropped its state owner"
+        );
+        for leaf in &state.accounts {
+            let account = leaf.key.clone();
+            for (lookup, cache, root) in [
+                (
+                    EvidenceLookup::PredecessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                    &state,
+                    *txs.result.context.predecessor_root(),
+                ),
+                (
+                    EvidenceLookup::SuccessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                    &successor,
+                    txs.result.roots.successor,
+                ),
+            ] {
+                let EvidenceResponse::Served(Evidence::Close {
+                    header,
+                    roots,
+                    body: EvidenceBody::State(opening),
+                }) = client.evidence(&context, lookup).await.unwrap()
+                else {
+                    panic!("the harness did not serve the state opening");
+                };
+                assert_eq!(header, txs.result.header);
+                assert_eq!(roots, txs.result.roots);
+                assert_eq!(opening, cache.opening(&account).unwrap());
+                opening.verify::<Sha256>(&root).unwrap();
+            }
+            let EvidenceResponse::Served(Evidence::Genesis(opening)) = client
+                .evidence(&context, EvidenceLookup::GenesisState { account })
+                .await
+                .unwrap()
+            else {
+                panic!("the harness did not serve the genesis opening");
+            };
+            assert_eq!(opening, state.opening(&leaf.key).unwrap());
+        }
+
+        let missing = crate::protocol::eve_identity().key;
+        let EvidenceResponse::Served(Evidence::Close {
+            body: EvidenceBody::StateAbsent(proof),
+            ..
+        }) = client
+            .evidence(
+                &context,
+                EvidenceLookup::SuccessorState {
+                    batch,
+                    account: missing.clone(),
+                },
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("authenticated absence")
+        };
+        assert_eq!(
+            commonware_clearing::bajillion::qmdb::StateLookup::Absent(proof)
+                .resolve::<Sha256>(&successor.root(), &account_key(&missing).unwrap())
+                .unwrap(),
+            None
+        );
+        let account = &state.accounts[0].key.clone();
+        assert_eq!(
+            client
+                .evidence(
+                    &context,
+                    EvidenceLookup::PredecessorState {
+                        batch: Sha256::hash(&[b"unknown-batch"]),
+                        account: account.clone(),
+                    },
+                )
+                .await
+                .unwrap(),
+            EvidenceResponse::Unsealed
+        );
+        assert_eq!(
+            control
+                .evidence(EvidenceRequest::new(
+                    Sha256::hash(&[b"foreign-deployment"]),
+                    EvidenceLookup::PredecessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                ))
+                .await,
+            EvidenceResponse::Unknown
+        );
+
+        let height = control.advance(0).await;
+        control.advance(challenge_deadline + 1 - height).await;
+        assert!(matches!(
+            client
+                .evidence(
+                    &context,
+                    EvidenceLookup::PredecessorState {
+                        batch,
+                        account: account.clone()
+                    }
+                )
+                .await
+                .unwrap(),
+            EvidenceResponse::Served(Evidence::Close {
+                body: EvidenceBody::State(_),
+                ..
+            })
+        ));
+    });
+}
+
+/// Native balances and deployment custody jointly own the fixed genesis supply.
+async fn assert_supply(
+    db: &Database<deterministic::Context>,
+    native: &NativeGenesis,
+    extra: &[Key],
+) {
+    let mut entries = Vec::new();
+    for deployment in registry(db, native).await.unwrap() {
+        entries.push(
+            registry_entry(db, native, &deployment)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let mut keys = native
+        .balances
+        .iter()
+        .map(|account| account.key.clone())
+        .chain(std::iter::once(native.fee_recipient.clone()))
+        .chain(extra.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for entry in &entries {
+        keys.insert(entry.deployment.operator.clone());
+        keys.extend(
+            entry
+                .deployment
+                .accounts
+                .iter()
+                .map(|account| account.key.clone()),
+        );
+    }
+    let mut actual = 0u64;
+    for key in keys {
+        actual += native_balance(db, native, &key).await.unwrap();
+    }
+    for entry in entries {
+        actual += match read(db, &status_key(entry.deployment.digest())).await {
+            Some(Record::Status(status)) => status.custody + status.claimable,
+            None => entry
+                .deployment
+                .accounts
+                .iter()
+                .map(|account| account.balance)
+                .sum(),
+            record => panic!("unexpected custody record: {record:?}"),
+        };
+    }
+    let initial = native
+        .balances
+        .iter()
+        .map(|account| account.balance)
+        .sum::<u64>()
+        + native
+            .deployments
+            .iter()
+            .flat_map(|entry| &entry.deployment.accounts)
+            .map(|account| account.balance)
+            .sum::<u64>();
+    assert_eq!(actual, initial);
+}
+
+#[test]
+fn transfers_and_deposits_authenticate_owners_and_preserve_supply() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("ownership"), "ownership").await;
+        let native = native();
+        let wallets = wallets();
+        let alice = &wallets[0];
+        let bob = &wallets[1];
+        let initial = native_balance(&db, &native, &alice.public_key())
+            .await
+            .unwrap();
+        let transfer = NativeTransferRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"transfer"]),
+            bob.public_key(),
+            11,
+            alice.signer(),
+        );
+        let mut invalid = Vec::new();
+        let mut wrong = transfer.clone();
+        wrong.amount += 1;
+        invalid.push(wrong);
+        let mut wrong = transfer.clone();
+        wrong.to = alice.public_key();
+        invalid.push(wrong);
+        let mut wrong = transfer.clone();
+        wrong.from = bob.public_key();
+        invalid.push(wrong);
+        let mut wrong = transfer.clone();
+        wrong.id = Sha256::hash(&[b"other-id"]);
+        invalid.push(wrong);
+        let mut wrong = transfer.clone();
+        wrong.chain_id = Sha256::hash(&[b"other-chain"]);
+        invalid.push(wrong);
+        let rejected = invalid
+            .into_iter()
+            .map(SettlementTx::NativeTransfer)
+            .collect::<Vec<_>>();
+        seal_native(&db, 1, &native, &rejected).await;
+        assert_eq!(
+            native_balance(&db, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial
+        );
+        assert_eq!(
+            native_balance(&db, &native, &bob.public_key())
+                .await
+                .unwrap(),
+            initial
+        );
+        let transfer = SettlementTx::NativeTransfer(transfer);
+        seal_native(&db, 2, &native, &[transfer.clone(), transfer.clone()]).await;
+        assert_eq!(
+            native_balance(&db, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial - 11
+        );
+        assert_eq!(
+            native_balance(&db, &native, &bob.public_key())
+                .await
+                .unwrap(),
+            initial + 11
+        );
+
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"owned-deposit"]),
+            account: alice.public_key(),
+            amount: 7,
+        };
+        let deposit = DepositRequest::sign(
+            native.chain_id(),
+            deployment(),
+            event.clone(),
+            alice.signer(),
+        );
+        let mut wrong_amount = deposit.clone();
+        wrong_amount.event.amount += 1;
+        let mut wrong_chain = deposit.clone();
+        wrong_chain.chain_id = Sha256::hash(&[b"other-chain"]);
+        let mut wrong_deployment = deposit.clone();
+        wrong_deployment.deployment = deployment_of(&operator_signer(1).public_key());
+        let wrong_owner =
+            DepositRequest::sign(native.chain_id(), deployment(), event.clone(), bob.signer());
+        seal_native(
+            &db,
+            3,
+            &native,
+            &[wrong_amount, wrong_chain, wrong_deployment, wrong_owner]
+                .into_iter()
+                .map(SettlementTx::Deposit)
+                .collect::<Vec<_>>(),
+        )
+        .await;
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &event.id)).await,
+            None
+        );
+        assert_eq!(
+            native_balance(&db, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial - 11
+        );
+        let deposit = SettlementTx::Deposit(deposit);
+        seal_native(
+            &db,
+            4,
+            &native,
+            &[deposit.clone(), deposit.clone(), transfer.clone()],
+        )
+        .await;
+        assert_eq!(status(&db).await.custody, 407);
+        assert_eq!(
+            native_balance(&db, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial - 18
+        );
+        let insufficient = SettlementTx::Deposit(DepositRequest::sign(
+            native.chain_id(),
+            deployment(),
+            DepositEvent {
+                id: Sha256::hash(&[b"insufficient"]),
+                amount: initial,
+                ..event.clone()
+            },
+            alice.signer(),
+        ));
+        let conflicting = SettlementTx::Deposit(DepositRequest::sign(
+            native.chain_id(),
+            deployment(),
+            DepositEvent { amount: 8, ..event },
+            alice.signer(),
+        ));
+        seal_native(&db, 5, &native, &[insufficient, conflicting]).await;
+        assert_eq!(status(&db).await.custody, 407);
+        assert_eq!(
+            native_balance(&db, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial - 18
+        );
+        assert_supply(&db, &native, &[]).await;
+        assert!(db.finalize().await.durable().await);
+        drop(db);
+        let reopened = open(context.child("reopened"), "ownership").await;
+        seal_native(&reopened, 6, &native, &[transfer, deposit]).await;
+        assert_eq!(status(&reopened).await.custody, 407);
+        assert_eq!(
+            native_balance(&reopened, &native, &alice.public_key())
+                .await
+                .unwrap(),
+            initial - 18
+        );
+        assert_supply(&reopened, &native, &[]).await;
+    });
+}
+
+#[test]
+fn deployment_registration_requires_funding_and_charges_fees_once() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("registration_fees"), "registration-fees").await;
+        let native = native();
+        let owner = operator_signer(10);
+        let wallet = wallets().remove(0);
+        let request = RegisterDeploymentRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"new-deployment"]),
+            operator_ack_key(10),
+            ed25519::PrivateKey::from_seed(88_888).public_key(),
+            1024,
+            10,
+            &owner,
+        );
+        let request = RegisterDeploymentRequest::decode(request.encode()).unwrap();
+        assert!(request.verify(&native.chain_id()));
+        let expected = request.entry(&native).unwrap();
+        assert!(expected.deployment.accounts.is_empty());
+        assert_eq!(RegistryEntry::decode(expected.encode()).unwrap(), expected);
+        let scoped = request.deployment_id();
+        let registration = SettlementTx::RegisterDeployment(request.clone());
+        seal_native(&db, 1, &native, std::slice::from_ref(&registration)).await;
+        assert_eq!(read(&db, &status_key(&scoped)).await, None);
+        assert_eq!(
+            native_balance(&db, &native, &native.fee_recipient)
+                .await
+                .unwrap(),
+            0
+        );
+        let funding = SettlementTx::NativeTransfer(NativeTransferRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"fund-operator"]),
+            owner.public_key(),
+            11,
+            wallet.signer(),
+        ));
+        let mut tampered = request.clone();
+        tampered.network_key = ed25519::PrivateKey::from_seed(99_999).public_key();
+        let wrong_fee = RegisterDeploymentRequest::sign(
+            native.chain_id(),
+            request.registration_id,
+            request.operator_ack,
+            request.network_key.clone(),
+            1024,
+            9,
+            &owner,
+        );
+        seal_native(
+            &db,
+            2,
+            &native,
+            &[
+                funding,
+                SettlementTx::RegisterDeployment(tampered),
+                SettlementTx::RegisterDeployment(wrong_fee),
+            ],
+        )
+        .await;
+        assert_eq!(read(&db, &status_key(&scoped)).await, None);
+        assert_eq!(registry(&db, &native).await.unwrap().len(), 1);
+        assert_eq!(native_balance(&db, &native, &native.fee_recipient).await.unwrap(), 0);
+        assert_eq!(
+            native_balance(&db, &native, &owner.public_key())
+                .await
+                .unwrap(),
+            11
+        );
+        seal_native(
+            &db,
+            3,
+            &native,
+            &[registration.clone(), registration.clone()],
+        )
+        .await;
+        let entries = registry(&db, &native).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&scoped));
+        let registered = registry_entry(&db, &native, &scoped).await.unwrap().unwrap();
+        assert_eq!(registered, expected);
+        assert!(registered.deployment.accounts.is_empty());
+        assert!(
+            matches!(read(&db, &status_key(&scoped)).await, Some(Record::Status(status)) if status.custody == 0)
+        );
+        assert_eq!(
+            native_balance(&db, &native, &owner.public_key())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            native_balance(&db, &native, &native.fee_recipient)
+                .await
+                .unwrap(),
+            10
+        );
+        let protocol = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            scoped,
+            owner.clone(),
+            operator_ack_signer(10),
+        )
+        .unwrap();
+        let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
+        let withdrawals = WithdrawalBatch::empty();
+        let epoch = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            deployment: scoped,
+            epoch: 0,
+            predecessor_liability: 0,
+            deposits_root: root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            fee: 1,
+            signature: protocol.sign_chain_registration(0, 0, &root, &withdrawals, 1),
+        });
+        seal_native(
+            &db,
+            4,
+            &native,
+            &[epoch.clone(), epoch.clone(), registration],
+        )
+        .await;
+        assert!(matches!(
+            read(&db, &registration_key(&scoped)).await,
+            Some(Record::Registration(_))
+        ));
+        assert_eq!(
+            native_balance(&db, &native, &owner.public_key())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            native_balance(&db, &native, &native.fee_recipient)
+                .await
+                .unwrap(),
+            11
+        );
+        assert_supply(&db, &native, &[]).await;
+    });
+}
+
+/// A certified seven-unit withdrawal from the first canonical genesis account.
+pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalClaimRequest) {
+    let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+    let state = genesis_cache();
+    let account = state.accounts[0].key.clone();
+    let wallet = wallets()
+        .into_iter()
+        .find(|wallet| wallet.public_key() == account)
+        .unwrap();
+    let request = SignedWithdrawal::sign(
+        deployment(),
+        state.root().digest,
+        account.encode(),
+        WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+        50,
+        wallet.signer(),
+    );
+    let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
+    let deposits = DepositBatch::empty();
+    let root = deposits.root::<Sha256>().unwrap();
+    let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+        deployment: deployment(),
+        epoch: 0,
+        predecessor_liability: 400,
+        deposits_root: root,
+
+        withdrawals: withdrawals.clone(),
+        openings: vec![state.opening(&account).unwrap()],
+        fee: 4096,
+        signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
+    });
+    let registration = protocol
+        .registration_at(0, deposits, withdrawals, 400, 11, 12)
+        .unwrap();
+    let result = deterministic::Runner::default().start(move |context| async move {
+        let config =
+            crate::protocol::state_config("withdrawal", &context, protocol.strategy().clone());
+        let balances = replay_state(context, config, &state.history).await;
+        let prepared = protocol.prepare(registration, Vec::new()).unwrap();
+        protocol
+            .complete(prepared, &balances, &mut TestRng::new(91))
+            .await
+            .unwrap()
+            .0
+    });
+    let claim = WithdrawalClaimRequest {
+        deployment: deployment(),
+        batch_id: result.header.batch_id::<Sha256>(),
+        claim: result.withdrawal_claims[0].clone(),
+    };
+    (
+        register,
+        SettlementTx::Admit(AdmitRequest::from(&result)),
+        claim,
+    )
+}
+
+#[test]
+fn cross_deployment_claim_deposit_is_atomic_and_replay_safe() {
+    for same_deployment in [false, true] {
+        deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("claim_deposit"), "claim-deposit").await;
+        let configured = two_deployments();
+        let native = native_for(configured.clone());
+        let target = *configured[usize::from(!same_deployment)].digest();
+        let (register, admit, claim) = withdrawal_fixture();
+        seal_native(&db, 1, &native, &[register, admit]).await;
+        for height in 2..=13 {
+            seal_native(&db, height, &native, &[]).await;
+        }
+        assert_eq!(status(&db).await.claimable, 7);
+        let account = Key::decode(claim.claim.output().destination().clone()).unwrap();
+        let wallet = wallets()
+            .into_iter()
+            .find(|wallet| wallet.public_key() == account)
+            .unwrap();
+        let initial = native_balance(&db, &native, &account).await.unwrap();
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"claim-deposit"]),
+            account: account.clone(),
+            amount: 7,
+        };
+        let deposit = DepositRequest::sign(native.chain_id(), target, event.clone(), wallet.signer());
+        let compound = ClaimDepositRequest {
+            claim: claim.clone(),
+            deposit,
+        };
+        let release_key = super::state::withdrawal_release_key(
+            &deployment(),
+            &claim.batch_id,
+            claim.claim.position(),
+        );
+        let claims_key = claim_roots_key(&deployment(), &claim.batch_id);
+        let original_claims = read(&db, &claims_key).await;
+        assert!(matches!(original_claims, Some(Record::ClaimRoots(_))));
+        let mut wrong_signature = compound.clone();
+        wrong_signature.deposit.event.amount = 8;
+        let mut insufficient = compound.clone();
+        insufficient.deposit = DepositRequest::sign(
+            native.chain_id(),
+            target,
+            DepositEvent {
+                amount: initial + 8,
+                ..event.clone()
+            },
+            wallet.signer(),
+        );
+        let mut unknown_target = compound.clone();
+        unknown_target.deposit = DepositRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"unknown-target"]),
+            event.clone(),
+            wallet.signer(),
+        );
+        let other = wallets()
+            .into_iter()
+            .find(|wallet| wallet.public_key() != account)
+            .unwrap();
+        let mut wrong_owner = compound.clone();
+        wrong_owner.deposit = DepositRequest::sign(
+            native.chain_id(),
+            target,
+            DepositEvent {
+                account: other.public_key(),
+                ..event.clone()
+            },
+            other.signer(),
+        );
+        assert!(wrong_owner.deposit.verify(&native.chain_id()));
+        seal_native(
+            &db,
+            14,
+            &native,
+            &[wrong_signature, insufficient, unknown_target, wrong_owner]
+                .into_iter()
+                .map(SettlementTx::ClaimDeposit)
+                .collect::<Vec<_>>(),
+        )
+        .await;
+        assert_eq!(read(&db, &release_key).await, None);
+        assert_eq!(read(&db, &claims_key).await, original_claims);
+        assert_eq!(read(&db, &deposit_key(&target, &event.id)).await, None);
+        assert_eq!(status(&db).await.claimable, 7);
+        assert_eq!(status(&db).await.custody, 393);
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial
+        );
+        assert_supply(&db, &native, &[]).await;
+        let compound = SettlementTx::ClaimDeposit(compound);
+        let fork = execute(db.new_batches().await, Height::new(15), 15, &Timing::DEFAULT, &native, std::slice::from_ref(&compound)).await.unwrap();
+        drop(fork);
+        assert_eq!(read(&db, &claims_key).await, original_claims);
+        assert_eq!(status(&db).await.claimable, 7);
+        seal_native(&db, 15, &native, &[compound.clone(), compound.clone()]).await;
+        assert!(matches!(
+            read(&db, &release_key).await,
+            Some(Record::WithdrawalRelease(_))
+        ));
+        assert_eq!(
+            read(&db, &deposit_key(&target, &event.id)).await,
+            Some(Record::Deposit(event))
+        );
+        assert_eq!(status(&db).await.custody, if same_deployment { 400 } else { 393 });
+        assert_eq!(status(&db).await.claimable, 0);
+        assert!(
+            matches!(read(&db, &status_key(&target)).await, Some(Record::Status(status)) if status.custody == if same_deployment { 400 } else { 407 })
+        );
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial
+        );
+        let consumed_claims = read(&db, &claims_key).await;
+        assert_ne!(consumed_claims, original_claims);
+        assert!(db.finalize().await.durable().await);
+        drop(db);
+        let db = open(context.child("reopened"), "claim-deposit").await;
+        assert_eq!(read(&db, &claims_key).await, consumed_claims);
+        seal_native(
+            &db,
+            16,
+            &native,
+            &[compound, SettlementTx::ClaimWithdrawal(claim)],
+        )
+        .await;
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial
+        );
+        assert_eq!(status(&db).await.custody, if same_deployment { 400 } else { 393 });
+        assert_eq!(read(&db, &claims_key).await, consumed_claims);
+        assert_supply(&db, &native, &[]).await;
+    });
+    }
+}
+
+#[test]
+fn unavailable_destination_preserves_the_source_claim() {
+    deterministic::Runner::default().start(|context| async move {
+        for faulted in [false, true] {
+            let prefix = if faulted {
+                "faulted_target"
+            } else {
+                "registered_target"
+            };
+            let db = open(context.child(prefix), prefix).await;
+            let native = native_for(two_deployments());
+            let target = *native.deployments[1].deployment.digest();
+            let (register, admit, claim) = withdrawal_fixture();
+            seal_native(&db, 1, &native, &[register, admit]).await;
+            for height in 2..=13 {
+                seal_native(&db, height, &native, &[]).await;
+            }
+            let protocol = Protocol::with_signer(
+                NonZeroUsize::MIN,
+                target,
+                operator_signer(1),
+                operator_ack_signer(1),
+            )
+            .unwrap();
+            let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
+            let withdrawals = WithdrawalBatch::empty();
+            let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                deployment: target,
+                epoch: 0,
+                predecessor_liability: 400,
+                deposits_root: root,
+
+                withdrawals: withdrawals.clone(),
+                openings: Vec::new(),
+                fee: 4096,
+                signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
+            });
+            seal_native(&db, 14, &native, &[registration]).await;
+            assert!(matches!(
+                read(&db, &registration_key(&target)).await,
+                Some(Record::Registration(_))
+            ));
+            let height = if faulted {
+                for height in 15..=25 {
+                    seal_native(&db, height, &native, &[]).await;
+                }
+                assert!(
+                    matches!(read(&db, &status_key(&target)).await, Some(Record::Status(status)) if status.hard_faulted)
+                );
+                26
+            } else {
+                15
+            };
+            let account = Key::decode(claim.claim.output().destination().clone()).unwrap();
+            let wallet = wallets()
+                .into_iter()
+                .find(|wallet| wallet.public_key() == account)
+                .unwrap();
+            let initial = native_balance(&db, &native, &account).await.unwrap();
+            let event = DepositEvent {
+                id: Sha256::hash(&[prefix.as_bytes()]),
+                account: account.clone(),
+                amount: 7,
+            };
+            let compound = SettlementTx::ClaimDeposit(ClaimDepositRequest {
+                claim: claim.clone(),
+                deposit: DepositRequest::sign(
+                    native.chain_id(),
+                    target,
+                    event.clone(),
+                    wallet.signer(),
+                ),
+            });
+            let mut misdirected = claim.clone();
+            misdirected.deployment = target;
+            seal_native(
+                &db,
+                height,
+                &native,
+                &[compound, SettlementTx::ClaimWithdrawal(misdirected)],
+            )
+            .await;
+            for scoped in [deployment(), target] {
+                assert_eq!(
+                    read(
+                        &db,
+                        &super::state::withdrawal_release_key(
+                            &scoped,
+                            &claim.batch_id,
+                            claim.claim.position()
+                        )
+                    )
+                    .await,
+                    None
+                );
+            }
+            assert_eq!(read(&db, &deposit_key(&target, &event.id)).await, None);
+            assert_eq!(status(&db).await.claimable, 7);
+            assert_eq!(
+                native_balance(&db, &native, &account).await.unwrap(),
+                initial
+            );
+            assert_supply(&db, &native, &[]).await;
+            let source_claim = SettlementTx::ClaimWithdrawal(claim);
+            seal_native(
+                &db,
+                height + 1,
+                &native,
+                &[source_claim.clone(), source_claim],
+            )
+            .await;
+            assert_eq!(status(&db).await.claimable, 0);
+            assert_eq!(
+                native_balance(&db, &native, &account).await.unwrap(),
+                initial + 7
+            );
+            assert_supply(&db, &native, &[]).await;
+        }
+    });
+}
+
+#[test]
+fn finalized_withdrawal_credits_its_destination_once() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("withdrawal_credit"), "withdrawal-credit").await;
+        let native = native();
+        let (register, admit, claim) = withdrawal_fixture();
+        let account = Key::decode(claim.claim.output().destination().clone()).unwrap();
+        let initial = native_balance(&db, &native, &account).await.unwrap();
+        let tx = SettlementTx::ClaimWithdrawal(claim);
+        seal_native(&db, 1, &native, &[register, admit, tx.clone()]).await;
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial
+        );
+        for height in 2..=13 {
+            seal_native(&db, height, &native, &[]).await;
+        }
+        seal_native(&db, 14, &native, &[tx.clone(), tx.clone()]).await;
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial + 7
+        );
+        seal_native(&db, 15, &native, &[tx]).await;
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial + 7
+        );
+        assert_eq!(status(&db).await.custody, 393);
+        assert_supply(&db, &native, &[]).await;
+    });
+}
+
+#[test]
+fn deposits_dedupe_by_id_and_conflicts_are_provable() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("deposit_dedupe"), "deposit-dedupe").await;
+        let account = identities()[0].key.clone();
+        let deposit = DepositEvent {
+            id: Sha256::hash(&[b"chain-deposit-id"]),
+            account,
+            amount: 7,
+        };
+        let tx = deposit_tx(deposit.clone());
+        seal(&db, 1, std::slice::from_ref(&tx)).await;
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &deposit.id)).await,
+            Some(Record::Deposit(deposit.clone()))
+        );
+        let after_first = status(&db).await;
+        assert_eq!(after_first.custody, 407);
+        assert_eq!(after_first.claimable, 0);
+
+        // An exact replay lands on the consumed id and mutates nothing.
+        seal(&db, 2, std::slice::from_ref(&tx)).await;
+        assert_eq!(status(&db).await.custody, 407);
+
+        // A reused id with another event is a conflict: the custody record
+        // stays bound to the original event and no custody moves.
+        let conflict = deposit_tx(DepositEvent {
+            amount: 8,
+            ..deposit.clone()
+        });
+        seal(&db, 3, std::slice::from_ref(&conflict)).await;
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &deposit.id)).await,
+            Some(Record::Deposit(deposit))
+        );
+        assert_eq!(status(&db).await.custody, 407);
+
+        // An account outside the configured identities is rejected with no
+        // effect: no custody record, no custody.
+        let unknown_wallet = crate::protocol::Wallet::from_seed("stranger", 999);
+        let unknown_event = DepositEvent {
+            id: Sha256::hash(&[b"chain-unknown-account"]),
+            account: unknown_wallet.public_key(),
+            amount: 1,
+        };
+        let unknown = SettlementTx::Deposit(DepositRequest::sign(
+            native().chain_id(),
+            deployment(),
+            unknown_event.clone(),
+            unknown_wallet.signer(),
+        ));
+        seal(&db, 4, std::slice::from_ref(&unknown)).await;
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &unknown_event.id)).await,
+            None
+        );
+        assert_eq!(status(&db).await.custody, 407);
+    });
+}
+
+#[test]
+fn admitted_close_finalizes_at_real_heights() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("finalize"), "finalize").await;
+        let txs = [fixture.deposit_tx.clone(), fixture.register_tx.clone()];
+        seal(&db, 1, &txs).await;
+        assert!(matches!(
+            read(&db, &anchor_key(&deployment(), 0)).await,
+            Some(Record::Anchor(_))
+        ));
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(_))
+        ));
+        assert!(matches!(
+            read(&db, &deposit_key(&deployment(), &fixture.deposit.id)).await,
+            Some(Record::Deposit(_))
+        ));
+
+        // The admission deadline (height 11) is a maximum: admission lands at
+        // deadline minus one after idle blocks without faulting.
+        for height in 2..=9 {
+            seal(&db, height, &[]).await;
+        }
+        seal(&db, 10, std::slice::from_ref(&fixture.admit_tx)).await;
+        let batch_id = fixture.result.header.batch_id::<Sha256>();
+        assert_eq!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(super::state::AdmittedRootsResponse::new(
+                batch_id,
+                fixture.result.roots,
+                false,
+            )))
+        );
+
+        // The close stays pending through the inclusive challenge deadline
+        // (height 12) and finalizes at height 13.
+        for height in 11..=12 {
+            seal(&db, height, &[]).await;
+        }
+        let pending = status(&db).await;
+        assert_eq!(pending.last_finalized, None);
+
+        seal(&db, 13, &[]).await;
+        let finalized = status(&db).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert_eq!(finalized.state_root, fixture.result.roots.successor);
+        assert_eq!(finalized.custody, 401);
+        assert!(!finalized.hard_faulted);
+        assert_eq!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(super::state::AdmittedRootsResponse::new(
+                batch_id,
+                fixture.result.roots,
+                true,
+            )))
+        );
+        let Some(Record::ClaimRoots(claims)) =
+            read(&db, &claim_roots_key(&deployment(), &batch_id)).await
+        else {
+            panic!("the finalized batch retains its claims");
+        };
+        assert_eq!(
+            claims.withdrawal_root(),
+            fixture.result.roots.withdrawal_outputs
+        );
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // An exact admission replay after finalization lands on the
+        // finalized admitted record: a harmless conflict that mutates
+        // nothing, with the effect record already proving the admission.
+        seal(&db, 14, std::slice::from_ref(&fixture.admit_tx)).await;
+        assert_eq!(status(&db).await.custody, 401);
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if admitted.batch_id == batch_id && admitted.finalized
+        ));
+
+        // A conflicting admission for the finalized epoch is rejected with
+        // no effect: the admitted record and custody are untouched.
+        let mut conflicting = match &fixture.admit_tx {
+            SettlementTx::Admit(request) => request.clone(),
+            _ => unreachable!(),
+        };
+        conflicting.withdrawal_total += 1;
+        let conflicting = SettlementTx::Admit(conflicting);
+        seal(&db, 15, std::slice::from_ref(&conflicting)).await;
+        assert_eq!(status(&db).await.custody, 401);
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if admitted.batch_id == batch_id && admitted.finalized
+        ));
+    });
+}
+
+#[test]
+fn proven_challenge_inside_the_window_faults_the_deployment() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("challenge"), "challenge").await;
+        seal(
+            &db,
+            1,
+            &[
+                fixture.deposit_tx.clone(),
+                fixture.register_tx.clone(),
+                fixture.admit_tx.clone(),
+            ],
+        )
+        .await;
+
+        let batch_id = fixture.result.header.batch_id::<Sha256>();
+        let evidence = ack_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
+        let challenge = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id,
+            evidence: evidence.clone(),
+        });
+        seal(&db, 2, std::slice::from_ref(&challenge)).await;
+        let faulted = status(&db).await;
+        assert!(faulted.hard_faulted);
+        assert_eq!(faulted.last_finalized, None);
+        let fault = read(&db, &fault_key(&deployment())).await;
+        assert!(matches!(
+            &fault,
+            Some(Record::Fault(super::state::FaultRecord::Faulted(
+                HardFaultReasonResponse::ProvenChallenge {
+                    kind: ChallengeKind::AckFork,
+                    ..
+                }
+            )))
+        ));
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // The exact evidence replays into the one-proven-per-batch guard,
+        // distinct valid evidence against the already-challenged close
+        // conflicts, and evidence that does not even decode is rejected by
+        // the chain: all three leave the fault record untouched.
+        seal(&db, 3, std::slice::from_ref(&challenge)).await;
+        assert_eq!(read(&db, &fault_key(&deployment())).await, fault);
+        let different = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id,
+            evidence: ack_fork(&fixture.result, &fixture.protocol, (4, 5)).encode(),
+        });
+        seal(&db, 4, std::slice::from_ref(&different)).await;
+        assert_eq!(read(&db, &fault_key(&deployment())).await, fault);
+        let mut tampered = evidence.to_vec();
+        tampered.push(0);
+        let tampered = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id,
+            evidence: Bytes::from(tampered),
+        });
+        seal(&db, 5, std::slice::from_ref(&tampered)).await;
+        assert_eq!(read(&db, &fault_key(&deployment())).await, fault);
+    });
+}
+
+#[test]
+fn staged_refund_retry_cannot_consume_a_terminal_refund() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("refund_phases"), "refund-phases").await;
+        seal(
+            &db,
+            1,
+            &[
+                fixture.deposit_tx.clone(),
+                fixture.register_tx.clone(),
+                fixture.admit_tx.clone(),
+            ],
+        )
+        .await;
+        let account = fixture.deposit.account.clone();
+        let later = deposit_tx(DepositEvent {
+            id: Sha256::hash(&[b"later-refund-deposit"]),
+            account: account.clone(),
+            amount: 3,
+        });
+        let challenge = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id: fixture.result.header.batch_id::<Sha256>(),
+            evidence: ack_fork(&fixture.result, &fixture.protocol, (2, 3)).encode(),
+        });
+        seal(&db, 2, &[later, challenge]).await;
+        let before = native_balance(&db, &native(), &account).await.unwrap();
+        let refund = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
+            deployment: deployment(),
+            account: account.clone(),
+            terminal: false,
+        });
+        seal(&db, 3, std::slice::from_ref(&refund)).await;
+        let staged = native_balance(&db, &native(), &account).await.unwrap();
+        assert_eq!(staged, before + 3);
+        let receipt = read(&db, &refund_key(&deployment(), &account, false)).await;
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: deployment(),
+        });
+        seal(&db, 4, &[begin]).await;
+        assert!(matches!(
+            read(&db, &fault_key(&deployment())).await,
+            Some(Record::Fault(FaultRecord::Settling(_)))
+        ));
+        seal(&db, 5, std::slice::from_ref(&refund)).await;
+        assert_eq!(
+            native_balance(&db, &native(), &account).await.unwrap(),
+            staged
+        );
+        assert_eq!(
+            read(&db, &refund_key(&deployment(), &account, false)).await,
+            receipt
+        );
+        assert_eq!(
+            read(&db, &refund_key(&deployment(), &account, true)).await,
+            None
+        );
+        let terminal = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
+            deployment: deployment(),
+            account: account.clone(),
+            terminal: true,
+        });
+        assert_ne!(terminal.encode(), refund.encode());
+        seal(&db, 6, std::slice::from_ref(&terminal)).await;
+        let settled = staged + fixture.deposit.amount;
+        assert_eq!(
+            native_balance(&db, &native(), &account).await.unwrap(),
+            settled
+        );
+        assert!(
+            matches!(read(&db, &refund_key(&deployment(), &account, true)).await,
+            Some(Record::Refund(record)) if record.amount == fixture.deposit.amount)
+        );
+        seal(&db, 7, &[refund, terminal]).await;
+        assert_eq!(
+            native_balance(&db, &native(), &account).await.unwrap(),
+            settled
+        );
+        assert_eq!(
+            read(&db, &refund_key(&deployment(), &account, false)).await,
+            receipt
+        );
+        assert_supply(&db, &native(), &[]).await;
+    });
+}
+
+#[test]
+fn hard_fault_claims_replay_idempotently() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("hard_fault"), "hard-fault").await;
+        seal(
+            &db,
+            1,
+            &[
+                fixture.deposit_tx.clone(),
+                fixture.register_tx.clone(),
+                fixture.admit_tx.clone(),
+            ],
+        )
+        .await;
+        let evidence = ack_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
+        let challenge = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id: fixture.result.header.batch_id::<Sha256>(),
+            evidence,
+        });
+        seal(&db, 2, std::slice::from_ref(&challenge)).await;
+        assert!(status(&db).await.hard_faulted);
+
+        // Begin terminal settlement and drain every account and the pending
+        // deposit.
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: deployment(),
+        });
+        let openings = fixture
+            .state
+            .accounts
+            .iter()
+            .map(|leaf| fixture.state.opening(&leaf.key).unwrap())
+            .collect::<Vec<_>>();
+        let claims = openings
+            .iter()
+            .map(|opening| {
+                SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+                    deployment: deployment(),
+                    opening: opening.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut txs = vec![begin.clone()];
+        txs.extend(claims.iter().cloned());
+        seal(&db, 3, &txs).await;
+        assert!(matches!(
+            read(&db, &fault_key(&deployment())).await,
+            Some(Record::Fault(super::state::FaultRecord::Settling(_)))
+        ));
+        for opening in &openings {
+            assert!(matches!(
+                read(&db, &hard_fault_key(&deployment(), &opening.account)).await,
+                Some(Record::HardFault(_))
+            ));
+        }
+        for opening in &openings {
+            let account = &opening.account;
+            let expected =
+                1_000_000_000 + INITIAL_BALANCE - u64::from(*account == fixture.deposit.account);
+            assert_eq!(
+                native_balance(&db, &native(), account).await.unwrap(),
+                expected
+            );
+        }
+        assert_supply(&db, &native(), &[]).await;
+        let drained = status(&db).await;
+        let releases = read(&db, &hard_fault_key(&deployment(), &openings[0].account)).await;
+
+        // Replays land on the fault and release records without mutating
+        // state, and a conflicting opening for a consumed account is
+        // rejected with the release record untouched.
+        let replays = [begin, claims[0].clone()];
+
+        seal(&db, 4, &replays).await;
+        assert_eq!(status(&db).await.custody, drained.custody);
+        let mut conflicting = openings[0].clone();
+        conflicting.balance = NonZeroU64::new(conflicting.balance.get() - 1).unwrap();
+        let conflicting = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+            deployment: deployment(),
+            opening: conflicting,
+        });
+        seal(&db, 5, std::slice::from_ref(&conflicting)).await;
+        assert_eq!(
+            read(&db, &hard_fault_key(&deployment(), &openings[0].account)).await,
+            releases
+        );
+        assert_eq!(status(&db).await.custody, drained.custody);
+
+        // The stranded deposit refund drains the last custody.
+        let refund = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
+            deployment: deployment(),
+            account: fixture.deposit.account.clone(),
+            terminal: true,
+        });
+        seal(&db, 6, std::slice::from_ref(&refund)).await;
+        assert!(matches!(
+            read(
+                &db,
+                &refund_key(&deployment(), &fixture.deposit.account, true)
+            )
+            .await,
+            Some(Record::Refund(_))
+        ));
+        assert_eq!(status(&db).await.custody, 0);
+        for opening in &openings {
+            assert_eq!(
+                native_balance(&db, &native(), &opening.account)
+                    .await
+                    .unwrap(),
+                1_000_000_000 + INITIAL_BALANCE
+            );
+        }
+        assert_supply(&db, &native(), &[]).await;
+
+        // The exact refund replays after full settlement with the refund
+        // record and custody untouched.
+        seal(&db, 7, std::slice::from_ref(&refund)).await;
+        assert!(matches!(
+            read(
+                &db,
+                &refund_key(&deployment(), &fixture.deposit.account, true)
+            )
+            .await,
+            Some(Record::Refund(_))
+        ));
+        assert_eq!(status(&db).await.custody, 0);
+        for opening in &openings {
+            assert_eq!(
+                native_balance(&db, &native(), &opening.account)
+                    .await
+                    .unwrap(),
+                1_000_000_000 + INITIAL_BALANCE
+            );
+        }
+        assert_supply(&db, &native(), &[]).await;
+    });
+}
+
+#[test]
+fn expired_registration_faults_the_deployment() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("registration_expiry"), "registration-expiry").await;
+        let register = empty_register_tx();
+        seal(&db, 1, std::slice::from_ref(&register)).await;
+        assert_eq!(registration(&db).await.epoch, 0);
+
+        // The assigned admission deadline (inclusion height 1 plus the
+        // ten-block offset) is inclusive: no fault through height 11, and
+        // height 12 observes the expiry and faults.
+        for height in 2..=11 {
+            seal(&db, height, &[]).await;
+        }
+        assert!(!status(&db).await.hard_faulted);
+        seal(&db, 12, &[]).await;
+        let faulted = status(&db).await;
+        assert!(faulted.hard_faulted);
+        assert!(matches!(
+            read(&db, &fault_key(&deployment())).await,
+            Some(Record::Fault(super::state::FaultRecord::Faulted(
+                HardFaultReasonResponse::ExpiredRegistration {
+                    epoch: 0,
+                    expired_at: 11,
+                    ..
+                }
+            )))
+        ));
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+    });
+}
+
+#[test]
+fn expired_deposit_faults_the_deployment() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("deposit_expiry"), "deposit-expiry").await;
+        let account = identities()[0].key.clone();
+        let deposit = deposit_tx(DepositEvent {
+            id: Sha256::hash(&[b"chain-expiring-deposit"]),
+            account: account.clone(),
+            amount: 7,
+        });
+        seal(&db, 1, std::slice::from_ref(&deposit)).await;
+
+        // The inclusion deadline is height 1 plus the configured timeout.
+        let timeout = crate::protocol::settlement_config(&Timing::DEFAULT)
+            .unwrap()
+            .deposit_inclusion_timeout
+            .get();
+        for height in 2..=timeout {
+            seal(&db, height, &[]).await;
+        }
+        assert!(!status(&db).await.hard_faulted);
+        seal(&db, timeout + 1, &[]).await;
+        assert!(status(&db).await.hard_faulted);
+        assert!(matches!(
+            read(&db, &fault_key(&deployment())).await,
+            Some(Record::Fault(super::state::FaultRecord::Faulted(
+                HardFaultReasonResponse::ExpiredDeposit {
+                    expired_at,
+                    ..
+                }
+            ))) if expired_at == timeout + 1
+        ));
+
+        // The stranded deposit refunds after the fault.
+        let refund = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
+            deployment: deployment(),
+            account: account.clone(),
+            terminal: false,
+        });
+        seal(&db, timeout + 2, std::slice::from_ref(&refund)).await;
+        assert!(matches!(
+            read(&db, &refund_key(&deployment(), &account, false)).await,
+            Some(Record::Refund(_))
+        ));
+        assert_eq!(status(&db).await.custody, 400);
+    });
+}
+
+#[test]
+fn expired_withdrawal_faults_the_deployment() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("withdrawal_expiry"), "withdrawal-expiry").await;
+        let state = genesis_cache();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let request = SignedWithdrawal::sign(
+            deployment(),
+            state.root().digest,
+            wallet.public_key().encode(),
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            50,
+            wallet.signer(),
+        );
+        let opening = state.opening(&account).unwrap();
+        let withdrawal = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: request.clone(),
+            opening,
+        });
+        seal(&db, 1, std::slice::from_ref(&withdrawal)).await;
+        assert_eq!(
+            read(&db, &withdrawal_key(&deployment(), &account)).await,
+            Some(Record::Withdrawal(request))
+        );
+
+        // The signed deadline is the absolute height 50.
+        for height in 2..=49 {
+            seal(&db, height, &[]).await;
+        }
+        assert!(!status(&db).await.hard_faulted);
+        seal(&db, 50, &[]).await;
+        assert!(matches!(
+            read(&db, &fault_key(&deployment())).await,
+            Some(Record::Fault(super::state::FaultRecord::Faulted(
+                HardFaultReasonResponse::ExpiredWithdrawal { expired_at: 50, .. }
+            )))
+        ));
+    });
+}
+
+#[test]
+fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
+    for timing in [Timing::DEFAULT, Timing::GENESIS] {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open(context.child("withdrawal_notice"), "withdrawal-notice").await;
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let wallet = wallets().remove(3);
+            let account = wallet.public_key();
+            let mut state = genesis_cache();
+            let opening = state.opening(&account).unwrap();
+            let deadline = 4 + crate::protocol::settlement_config(&timing)
+                .unwrap()
+                .minimum_withdrawal_notice
+                .get();
+            let request = SignedWithdrawal::sign(
+                deployment(),
+                state.root().digest,
+                account.encode(),
+                WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+                deadline,
+                wallet.signer(),
+            );
+            for (epoch, label) in [b"notice-0", b"notice-1", b"notice-2", b"notice-3"]
+                .into_iter()
+                .enumerate()
+            {
+                let height = epoch as u64 + 1;
+                let close = close_fixture(
+                    native().chain_id(),
+                    &protocol,
+                    epoch as u64,
+                    state,
+                    label,
+                    height + timing.admission_offset,
+                    height + timing.admission_offset + timing.challenge_duration,
+                );
+                state = close.successor;
+                let mut txs = vec![close.deposit_tx, close.register_tx, close.admit_tx];
+                if epoch == 3 {
+                    txs.push(SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+                        request: request.clone(),
+                        opening: opening.clone(),
+                    }));
+                }
+                seal_at(&db, height, &timing, &txs).await;
+            }
+            assert_eq!(
+                read(&db, &withdrawal_key(&deployment(), &account)).await,
+                Some(Record::Withdrawal(request.clone()))
+            );
+            for epoch in 0..4 {
+                assert!(
+                    matches!(read(&db, &admitted_key(&deployment(), epoch)).await,
+                    Some(Record::Admitted(admitted)) if !admitted.finalized)
+                );
+            }
+            let duration = timing.admission_offset + timing.challenge_duration + 1;
+            let registration_height = duration + 2;
+            for height in 5..registration_height {
+                seal_at(&db, height, &timing, &[]).await;
+                assert!(!status(&db).await.hard_faulted);
+            }
+            assert_eq!(status(&db).await.last_finalized, Some(0));
+            let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
+            let deposits = DepositBatch::empty();
+            let root = deposits.root::<Sha256>().unwrap();
+            let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                deployment: deployment(),
+                epoch: 4,
+                predecessor_liability: state.liability(),
+                deposits_root: root,
+                withdrawals: withdrawals.clone(),
+                openings: Vec::new(),
+                fee: 4096,
+                signature: protocol.sign_chain_registration(
+                    4,
+                    state.liability(),
+                    &root,
+                    &withdrawals,
+                    4096,
+                ),
+            });
+            let registration = protocol
+                .registration_at(
+                    4,
+                    deposits,
+                    withdrawals,
+                    state.liability(),
+                    registration_height + timing.admission_offset,
+                    registration_height + timing.admission_offset + timing.challenge_duration,
+                )
+                .unwrap();
+            let owned = protocol.clone();
+            let result = deterministic::Runner::default().start(move |context| async move {
+                let config =
+                    crate::protocol::state_config("carrying", &context, owned.strategy().clone());
+                let balances = replay_state(context, config, &state.history).await;
+                let prepared = owned.prepare(registration, Vec::new()).unwrap();
+                owned
+                    .complete(prepared, &balances, &mut TestRng::new(91))
+                    .await
+                    .unwrap()
+                    .0
+            });
+            seal_at(&db, registration_height, &timing, &[register]).await;
+            let finalization_height = registration_height + duration;
+            for height in registration_height + 1..=deadline {
+                let txs = if height == registration_height + timing.admission_offset {
+                    vec![SettlementTx::Admit(AdmitRequest::from(&result))]
+                } else {
+                    Vec::new()
+                };
+                seal_at(&db, height, &timing, &txs).await;
+                assert!(!status(&db).await.hard_faulted);
+                if height == finalization_height - 1 {
+                    assert_eq!(status(&db).await.last_finalized, Some(3));
+                }
+                if height == finalization_height {
+                    assert_eq!(status(&db).await.last_finalized, Some(4));
+                    assert_eq!(status(&db).await.claimable, 7);
+                }
+            }
+            assert!(finalization_height < deadline);
+            assert_eq!(status(&db).await.last_finalized, Some(4));
+        });
+    }
+}
+
+#[test]
+fn deployment_fault_is_isolated() {
+    deterministic::Runner::default().start(|context| async move {
+        let configured = two_deployments();
+        let alpha = *configured[0].digest();
+        let beta = *configured[1].digest();
+        let beta_protocol = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            beta,
+            operator_signer(1),
+            operator_ack_signer(1),
+        )
+        .unwrap();
+        let db = open(context.child("isolated"), "isolated").await;
+        let state = genesis_cache();
+
+        let deadline = 1 + crate::protocol::settlement_config(&Timing::DEFAULT)
+            .unwrap()
+            .minimum_withdrawal_notice
+            .get();
+        let beta_start = deadline - 2;
+        let beta_admission = beta_start + Timing::DEFAULT.admission_offset;
+        let beta_challenge = beta_admission + Timing::DEFAULT.challenge_duration;
+        // Queue A first, then start B shortly before A's deadline so B remains challengeable.
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let request = SignedWithdrawal::sign(
+            alpha,
+            state.root().digest,
+            wallet.public_key().encode(),
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            deadline,
+            wallet.signer(),
+        );
+        let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: request.clone(),
+            opening: state.opening(&account).unwrap(),
+        });
+        let first = close_fixture(
+            native_for(configured.clone()).chain_id(),
+            &beta_protocol,
+            0,
+            state.clone(),
+            b"isolated-beta-0",
+            beta_admission,
+            beta_challenge,
+        );
+        seal_with(&db, 1, &configured, &[queue]).await;
+        for height in 2..beta_start {
+            seal_with(&db, height, &configured, &[]).await;
+        }
+        seal_with(
+            &db,
+            beta_start,
+            &configured,
+            &[
+                first.deposit_tx.clone(),
+                first.register_tx.clone(),
+                first.admit_tx.clone(),
+            ],
+        )
+        .await;
+
+        // A's queued withdrawal lives under A's keys alone: B's scope proves
+        // the absence.
+        assert!(matches!(
+            read(&db, &withdrawal_key(&alpha, &account)).await,
+            Some(Record::Withdrawal(recorded)) if recorded == request
+        ));
+        assert_eq!(read(&db, &withdrawal_key(&beta, &account)).await, None);
+        assert_eq!(
+            read(&db, &deposit_key(&alpha, &first.deposit.id)).await,
+            None
+        );
+        assert!(matches!(
+            read(&db, &deposit_key(&beta, &first.deposit.id)).await,
+            Some(Record::Deposit(_))
+        ));
+
+        // A hard-faults at its withdrawal deadline while B's admitted close
+        // is still inside its challenge window: the fault is A's alone.
+        for height in beta_start + 1..=deadline {
+            seal_with(&db, height, &configured, &[]).await;
+        }
+        assert!(matches!(
+            read(&db, &fault_key(&alpha)).await,
+            Some(Record::Fault(super::state::FaultRecord::Faulted(
+                HardFaultReasonResponse::ExpiredWithdrawal { expired_at, .. }
+            ))) if expired_at == deadline
+        ));
+        assert_eq!(read(&db, &fault_key(&beta)).await, None);
+
+        // A's terminal settlement begins and its first hard-fault claim
+        // releases against A's frozen genesis root. The identical opening
+        // naming B is effect-free: both deployments configure the same
+        // accounts at the same balances, so only the named deployment
+        // separates them, and B is not faulted.
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: alpha,
+        });
+        let claim = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+            deployment: alpha,
+            opening: state.opening(&account).unwrap(),
+        });
+        let misdirected = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+            deployment: beta,
+            opening: state.opening(&account).unwrap(),
+        });
+        seal_with(&db, deadline + 1, &configured, &[begin, claim, misdirected]).await;
+        assert!(matches!(
+            read(&db, &hard_fault_key(&alpha, &account)).await,
+            Some(Record::HardFault(_))
+        ));
+        assert_eq!(read(&db, &hard_fault_key(&beta, &account)).await, None);
+        let beta_mid = match read(&db, &status_key(&beta)).await {
+            Some(Record::Status(status)) => status,
+            record => panic!("expected B's status record, found {record:?}"),
+        };
+        assert!(!beta_mid.hard_faulted);
+        assert_eq!(beta_mid.custody, 401);
+
+        // B's epoch 0 finalizes on schedule, untouched by A's fault.
+        for height in deadline + 2..=beta_challenge + 1 {
+            seal_with(&db, height, &configured, &[]).await;
+        }
+        assert!(matches!(
+            read(&db, &admitted_key(&beta, 0)).await,
+            Some(Record::Admitted(admitted)) if admitted.finalized
+        ));
+        let beta_settled = match read(&db, &status_key(&beta)).await {
+            Some(Record::Status(status)) => status,
+            record => panic!("expected B's status record, found {record:?}"),
+        };
+        assert_eq!(beta_settled.last_finalized, Some(0));
+        assert_eq!(beta_settled.state_root, first.result.roots.successor);
+        assert!(!beta_settled.hard_faulted);
+
+        // A's remaining recovery and B's next epoch can share a block.
+        let second = close_fixture(
+            native_for(configured.clone()).chain_id(),
+            &beta_protocol,
+            1,
+            first.successor.clone(),
+            b"isolated-beta-1",
+            beta_challenge + 2 + Timing::DEFAULT.admission_offset,
+            beta_challenge
+                + 2
+                + Timing::DEFAULT.admission_offset
+                + Timing::DEFAULT.challenge_duration,
+        );
+        let residual = wallets().remove(1);
+        let residual_claim = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+            deployment: alpha,
+            opening: state.opening(&residual.public_key()).unwrap(),
+        });
+        seal_with(
+            &db,
+            beta_challenge + 2,
+            &configured,
+            &[
+                residual_claim,
+                second.deposit_tx.clone(),
+                second.register_tx.clone(),
+                second.admit_tx.clone(),
+            ],
+        )
+        .await;
+        assert!(matches!(
+            read(&db, &hard_fault_key(&alpha, &residual.public_key())).await,
+            Some(Record::HardFault(_))
+        ));
+        for height in beta_challenge + 3
+            ..=beta_challenge
+                + 3
+                + Timing::DEFAULT.admission_offset
+                + Timing::DEFAULT.challenge_duration
+        {
+            seal_with(&db, height, &configured, &[]).await;
+        }
+        let beta_end = match read(&db, &status_key(&beta)).await {
+            Some(Record::Status(status)) => status,
+            record => panic!("expected B's status record, found {record:?}"),
+        };
+        assert_eq!(beta_end.last_finalized, Some(1));
+        assert_eq!(beta_end.state_root, second.result.roots.successor);
+        assert_eq!(beta_end.custody, 402);
+        assert!(!beta_end.hard_faulted);
+        assert_eq!(read(&db, &fault_key(&beta)).await, None);
+        let alpha_end = match read(&db, &status_key(&alpha)).await {
+            Some(Record::Status(status)) => status,
+            record => panic!("expected A's status record, found {record:?}"),
+        };
+        assert!(alpha_end.hard_faulted);
+        assert_eq!(alpha_end.last_finalized, None);
+        assert_eq!(alpha_end.custody, 200);
+        assert_supply(&db, &native_for(configured), &[]).await;
+    });
+}
+
+#[test]
+fn unconfigured_deployment_txs_are_rejected() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("unconfigured"), "unconfigured").await;
+        let foreign = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            deployment_of(&operator_signer(7).public_key()),
+            operator_signer(7),
+            operator_ack_signer(7),
+        )
+        .unwrap();
+
+        // A deposit naming an unconfigured deployment is diagnosed typed and
+        // rejected effect-free: no custody record under any scope, no
+        // custody moved.
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"unconfigured-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 7,
+        };
+        let deposit = SettlementTx::Deposit(signed_deposit(
+            native().chain_id(),
+            foreign.deployment(),
+            event.clone(),
+        ));
+
+        seal(&db, 1, std::slice::from_ref(&deposit)).await;
+        assert_eq!(
+            read(&db, &deposit_key(&foreign.deployment(), &event.id)).await,
+            None
+        );
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &event.id)).await,
+            None
+        );
+        assert_eq!(status(&db).await.custody, 400);
+
+        // A well-signed registration for the unconfigured deployment is
+        // rejected the same way: the signature is the foreign operator's own,
+        // but the deployment it names is not hosted here.
+        let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
+        let withdrawals = WithdrawalBatch::empty();
+        let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: foreign.deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root: root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            signature: foreign.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
+        });
+
+        seal(&db, 2, std::slice::from_ref(&register)).await;
+        assert_eq!(
+            read(&db, &registration_key(&foreign.deployment())).await,
+            None
+        );
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // A queued withdrawal signs its deployment, so naming an
+        // unconfigured one is derivable and rejected identically.
+        let wallet = wallets().remove(0);
+        let state = genesis_cache();
+        let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: SignedWithdrawal::sign(
+                foreign.deployment(),
+                state.root().digest,
+                wallet.public_key().encode(),
+                WithdrawalAction::Amount(NonZeroU64::new(1).unwrap()),
+                50,
+                wallet.signer(),
+            ),
+            opening: state.opening(&wallet.public_key()).unwrap(),
+        });
+
+        seal(&db, 3, std::slice::from_ref(&queue)).await;
+        assert_eq!(
+            read(
+                &db,
+                &withdrawal_key(&foreign.deployment(), &wallet.public_key())
+            )
+            .await,
+            None
+        );
+
+        // The terminal transitions name their deployment explicitly and are
+        // rejected before touching any machine.
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: foreign.deployment(),
+        });
+
+        seal(&db, 4, std::slice::from_ref(&begin)).await;
+        assert_eq!(read(&db, &fault_key(&foreign.deployment())).await, None);
+        assert_eq!(read(&db, &fault_key(&deployment())).await, None);
+        assert_eq!(status(&db).await.custody, 400);
+    });
+}
+
+#[test]
+fn rejections_are_effect_free() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("rejections"), "rejections").await;
+
+        // A registration with a tampered field fails authentication.
+        let mut register = match empty_register_tx() {
+            SettlementTx::RegisterEpoch(register) => register,
+            _ => unreachable!(),
+        };
+        register.predecessor_liability = 399;
+        let register = SettlementTx::RegisterEpoch(register);
+
+        // A structurally valid claim against an unknown batch is unavailable,
+        // not invalid. The claim is assembled over a genesis opening, since
+        // only its shape matters before the batch lookup.
+        let mut encoded = BytesMut::new();
+        wallets()[0].public_key().encode().write(&mut encoded);
+        7_u64.write(&mut encoded);
+        let mut builder = commonware_clearing::bajillion::commitment::Builder::<Sha256>::new(
+            VectorKind::WithdrawalOutput,
+            1,
+        )
+        .unwrap();
+        builder.add_encoded(&encoded).unwrap();
+        builder
+            .build(&Sequential)
+            .unwrap()
+            .opening(0)
+            .unwrap()
+            .write(&mut encoded);
+        let claim = WithdrawalClaim::<Digest>::decode_cfg(
+            encoded.freeze(),
+            &RangeCfg::new(0..=crate::protocol::MAX_DESTINATION_BYTES),
+        )
+        .expect("the synthesized claim decodes");
+        let batch_id = BatchId::new(Sha256::hash(&[b"chain-unknown-batch"]));
+        let position = claim.position();
+        let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+            deployment: deployment(),
+            batch_id,
+            claim,
+        });
+
+        // A challenge against an unknown batch is rejected by the chain.
+        let challenge = SettlementTx::Challenge(ChallengeRequest {
+            deployment: deployment(),
+            batch_id,
+            evidence: Bytes::from_static(&[0]),
+        });
+        let txs = [register, claim, challenge];
+        seal(&db, 1, &txs).await;
+
+        // Every rejection is effect-free: no registration record, no release
+        // record, no fault, and untouched custody. The typed reasons live in
+        // execution tracing, never in state.
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+        assert_eq!(read(&db, &anchor_key(&deployment(), 0)).await, None);
+        assert_eq!(
+            read(
+                &db,
+                &super::state::withdrawal_release_key(&deployment(), &batch_id, position)
+            )
+            .await,
+            None
+        );
+        assert_eq!(read(&db, &fault_key(&deployment())).await, None);
+        assert_eq!(status(&db).await.custody, 400);
+    });
+}
+
+/// A challenge transaction padded to the maximum evidence bound: the largest
+/// decodable settlement transaction, for byte-heavy proposal backlogs.
+fn heavy_tx(seed: u8) -> SettlementTx {
+    SettlementTx::Challenge(ChallengeRequest {
+        deployment: deployment(),
+        batch_id: BatchId::new(Sha256::hash(&[b"chain-heavy-tx".as_slice(), &[seed]])),
+        evidence: Bytes::from(vec![seed; MAX_CHALLENGE_BYTES]),
+    })
+}
+
+#[test]
+fn propose_bounds_block_bytes_and_requeues_the_remainder() {
+    deterministic::Runner::default().start(|context| async move {
+        // A full backlog of maximal transactions exceeds the block byte
+        // budget before the transaction-count bound binds.
+        let backlog = (0..MAX_BLOCK_TXS)
+            .map(|seed| heavy_tx(u8::try_from(seed).unwrap()))
+            .collect::<Vec<_>>();
+        let bytes = backlog.iter().map(|tx| tx.encode_size()).sum::<usize>();
+        assert!(bytes > MAX_BLOCK_BYTES);
+
+        #[derive(Clone)]
+        struct Backlog(Arc<Mutex<std::collections::VecDeque<SettlementTx>>>);
+        impl ingress::Provider for Backlog {
+            async fn drain(&mut self, max: usize, budget: usize) -> Vec<SettlementTx> {
+                assert_eq!((max, budget), (MAX_BLOCK_TXS, MAX_BLOCK_BYTES));
+                let mut queue = self.0.lock();
+                let mut result = Vec::new();
+                let mut bytes = 0;
+                while result.len() < max {
+                    let Some(tx) = queue.front() else { break };
+                    if bytes + tx.encode_size() > budget {
+                        break;
+                    }
+                    bytes += tx.encode_size();
+                    result.push(queue.pop_front().unwrap());
+                }
+                result
+            }
+        }
+        let mailbox = Backlog(Arc::new(Mutex::new(backlog.iter().cloned().collect())));
+
+        let db = open(context.child("db"), "propose-budget").await;
+        let leader = ed25519::PrivateKey::from_seed(0).public_key();
+        let genesis = Block::genesis(
+            leader.clone(),
+            native().chain_id(),
+            0,
+            initial_sync_target::<deterministic::Context>(),
+        );
+        let mut app: App<Scheme, Backlog> = App::new(
+            genesis.clone(),
+            Timing::DEFAULT,
+            native(),
+            Finalized::default(),
+        );
+        let block_context = Context {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader,
+            parent: (View::zero(), genesis.digest()),
+        };
+
+        // The first proposal drains under the byte budget, so the block fits
+        // the p2p frame and clears its own decode bound.
+        let first = app
+            .propose(
+                (context.child("first"), block_context.clone()),
+                marshal::ancestry::from_iter([Arc::new(genesis.clone())]),
+                db.new_batches().await,
+                Input {
+                    upstream: (),
+                    provider: mailbox.clone(),
+                },
+            )
+            .await
+            .expect("first proposal executes")
+            .block;
+        let aggregate = first
+            .transactions
+            .iter()
+            .map(|tx| tx.encode_size())
+            .sum::<usize>();
+        assert!(!first.transactions.is_empty());
+        assert!(first.transactions.len() < MAX_BLOCK_TXS);
+        assert!(aggregate <= MAX_BLOCK_BYTES);
+        assert!(first.encode_size() <= MAX_MESSAGE_SIZE as usize);
+        assert_eq!(Block::decode_cfg(first.encode(), &()).unwrap(), first);
+
+        // The un-drained transactions stayed queued, so the next proposal
+        // carries exactly the remainder in submission order.
+        let second = app
+            .propose(
+                (context.child("second"), block_context),
+                marshal::ancestry::from_iter([Arc::new(genesis.clone())]),
+                db.new_batches().await,
+                Input {
+                    upstream: (),
+                    provider: mailbox.clone(),
+                },
+            )
+            .await
+            .expect("second proposal executes")
+            .block;
+        assert!(!second.transactions.is_empty());
+        let mut combined = first.transactions.clone();
+        combined.extend(second.transactions.iter().cloned());
+        assert_eq!(combined, backlog);
+    });
+}
+
+#[test]
+fn verify_waits_out_a_future_dated_block() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("db"), "verify-drift").await;
+        let leader = ed25519::PrivateKey::from_seed(0).public_key();
+        let genesis = Block::genesis(
+            leader.clone(),
+            native().chain_id(),
+            500,
+            initial_sync_target::<deterministic::Context>(),
+        );
+        let mut app: App<Scheme, ingress::Mailbox> = App::new(
+            genesis.clone(),
+            Timing::DEFAULT,
+            native(),
+            Finalized::default(),
+        );
+        let block_context = Context {
+            round: Round::new(Epoch::zero(), View::new(1)),
+            leader,
+            parent: (View::zero(), genesis.digest()),
+        };
+
+        // A valid empty block dated beyond the drift bound: its roots are the
+        // real execution roots at that timestamp, so only the date is ahead.
+        let lead = 5_000;
+        let timestamp = now(&context)
+            .saturating_add(MAX_TIMESTAMP_DRIFT)
+            .saturating_add(lead);
+        let sealed = execute(
+            db.new_batches().await,
+            Height::new(1),
+            timestamp,
+            &Timing::DEFAULT,
+            &native(),
+            &[],
+        )
+        .await
+        .expect("block execution succeeds");
+        let block = Block {
+            context: block_context.clone(),
+            parent: genesis.digest(),
+            height: Height::new(1),
+            timestamp,
+            state_root: sealed.root(),
+            ops_root: sealed.ops_root(),
+            range: non_empty_range!(sealed.sync_boundary(), sealed.bounds().tip.size),
+            transactions: Vec::new(),
+        };
+        drop(sealed);
+
+        // Verification does not resolve until the local clock catches up to
+        // the claimed timestamp minus the drift bound, then votes the block
+        // valid. The deterministic runtime drives time through the wait.
+        let started = now(&context);
+        let verified = app
+            .verify(
+                (context.child("verify"), block_context.clone()),
+                marshal::ancestry::from_iter([Arc::new(block.clone()), Arc::new(genesis.clone())]),
+                db.new_batches().await,
+            )
+            .await;
+        assert!(verified.is_some(), "the future-dated block must verify");
+        let finished = now(&context);
+        assert!(finished >= started + lead, "verification resolved early");
+        assert!(finished.saturating_add(MAX_TIMESTAMP_DRIFT) >= timestamp);
+
+        // A block whose timestamp does not strictly exceed its parent's is
+        // permanently invalid: no wait, no execution.
+        let stale = Block {
+            timestamp: genesis.timestamp,
+            ..block
+        };
+        let rejected = app
+            .verify(
+                (context.child("verify_stale"), block_context),
+                marshal::ancestry::from_iter([Arc::new(stale), Arc::new(genesis)]),
+                db.new_batches().await,
+            )
+            .await;
+        assert!(rejected.is_none(), "a non-monotonic timestamp must reject");
+    });
+}
+
+#[test]
+fn block_decode_rejects_an_over_budget_encoding() {
+    // MAX_BLOCK_TXS maximal transactions clear the per-transaction and count
+    // bounds while their aggregate exceeds the block byte budget: exactly the
+    // shape the proposal drain can no longer build.
+    let mut block = Block::genesis(
+        ed25519::PrivateKey::from_seed(0).public_key(),
+        deployment(),
+        0,
+        initial_sync_target::<deterministic::Context>(),
+    );
+    block.transactions = (0..MAX_BLOCK_TXS)
+        .map(|seed| heavy_tx(u8::try_from(seed).unwrap()))
+        .collect();
+    let aggregate = |block: &Block| {
+        block
+            .transactions
+            .iter()
+            .map(|tx| tx.encode_size())
+            .sum::<usize>()
+    };
+    assert!(
+        block
+            .transactions
+            .iter()
+            .all(|tx| tx.encode_size() <= MAX_TX_BYTES)
+    );
+    assert!(aggregate(&block) > MAX_BLOCK_BYTES);
+    assert!(matches!(
+        Block::decode_cfg(block.encode(), &()),
+        Err(CodecError::Invalid(_, _))
+    ));
+
+    // Trimming under the budget restores decodability, pinning the rejection
+    // to the budget itself.
+    while aggregate(&block) > MAX_BLOCK_BYTES {
+        block.transactions.pop();
+    }
+    assert_eq!(Block::decode_cfg(block.encode(), &()).unwrap(), block);
+}
+
+#[test]
+fn node_read_waits_for_the_finalized_index() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("db"), "node-catchup").await;
+        let finalized = Finalized::default();
+        let (sender, _) = commonware_p2p::utils::mocks::inert_channel::<ed25519::PublicKey>([]);
+        let mut node = Node::new(
+            deployment(),
+            db.clone(),
+            finalized.clone(),
+            sender,
+            Vec::new(),
+        );
+
+        // The applied database runs ahead of the still-empty finalized index,
+        // and the delayed report closes the gap: the read must wait out the
+        // race instead of surfacing it.
+        seal(&db, 1, &[]).await;
+        let root = db.read().await.root();
+        context.child("report").spawn({
+            let finalized = finalized.clone();
+            move |context| async move {
+                context.sleep(Duration::from_millis(100)).await;
+                finalized.record(1, Digest::EMPTY, root, 1);
+            }
+        });
+        let verified = node
+            .read(&context, &req(Lookup::Status))
+            .await
+            .expect("the read waits out the empty finalized index");
+        assert_eq!(verified.height, 1);
+        assert!(matches!(verified.record, Some(Record::Status(_))));
+
+        // The mismatch arm of the same race: a newly applied block leaves the
+        // index one root behind until its delayed report lands.
+        seal(&db, 2, &[]).await;
+        let root = db.read().await.root();
+        context.child("report_next").spawn({
+            let finalized = finalized.clone();
+            move |context| async move {
+                context.sleep(Duration::from_millis(100)).await;
+                finalized.record(2, Digest::EMPTY, root, 2);
+            }
+        });
+        let verified = node
+            .read(&context, &req(Lookup::Status))
+            .await
+            .expect("the read waits out the lagging finalized index");
+        assert_eq!(verified.height, 2);
+
+        // An index that never catches up still fails, within the budget.
+        let (sender, _) = commonware_p2p::utils::mocks::inert_channel::<ed25519::PublicKey>([]);
+        let mut stalled = Node::new(
+            deployment(),
+            open(context.child("stalled"), "node-stalled").await,
+            Finalized::default(),
+            sender,
+            Vec::new(),
+        );
+        assert!(stalled.read(&context, &req(Lookup::Status)).await.is_err());
+    });
+}
+
+#[test]
+fn recent_read_retries_a_briefly_unreachable_validator() {
+    deterministic::Runner::default().start(|context| async move {
+        let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], 4_100));
+        let served = std::net::SocketAddr::from(([127, 0, 0, 1], 4_101));
+        let dead = std::net::SocketAddr::from(([127, 0, 0, 1], 4_102));
+        let control = harness::start(&context, upstream, "recent-retry").await;
+        control.advance(1).await;
+
+        // The served address answers only after a delay, relaying the query
+        // wire protocol to the harness: the first pass reaches no validator
+        // and must retry, never settle for an unverified answer.
+        context.child("proxy").spawn(move |context| async move {
+            context.sleep(Duration::from_millis(300)).await;
+            let mut listener = context.bind(served).await.expect("the proxy binds");
+            while let Ok((_, mut sink, mut stream)) = listener.accept().await {
+                let Ok(request) = rpc::recv_request(&mut stream).await else {
+                    continue;
+                };
+                let Ok(body) =
+                    rpc::invoke(&context, upstream, "query", request.method, request.body).await
+                else {
+                    continue;
+                };
+                let _ = rpc::send_response(&mut sink, &rpc::Response::Success { body }).await;
+            }
+        });
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![served],
+            context.child("client"),
+        )
+        .expect("the client accepts one query address");
+        let verified = chain
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect("the recency shortfall retries until the validator answers");
+        assert!(verified.height >= 1);
+        assert!(matches!(verified.record, Some(Record::Status(_))));
+
+        // A validator set that never answers still errors, and the error
+        // names the failing validator.
+        let mut unreachable = Client::new(
+            control.identity(),
+            deployment(),
+            vec![dead],
+            context.child("unreachable"),
+        )
+        .expect("the client accepts one query address");
+        let error = unreachable
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect_err("no pass can verify a response");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("no validator served a recent certified read"),
+            "{message}"
+        );
+        assert!(message.contains(&dead.to_string()), "{message}");
+    });
+}
+
+#[test]
+fn recent_read_rotates_past_a_stale_validator() {
+    deterministic::Runner::default().start(|context| async move {
+        let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], 4_110));
+        let stale = std::net::SocketAddr::from(([127, 0, 0, 1], 4_111));
+        let control = harness::start(&context, upstream, "recent-stale").await;
+        control.advance(1).await;
+
+        // The stale address relays its first response from the harness, then
+        // replays those exact bytes forever: an authentic certified read
+        // whose block only ages.
+        let replay: Arc<Mutex<Option<bytes::Bytes>>> = Arc::default();
+        {
+            let replay = replay.clone();
+            context.child("stale").spawn(move |context| async move {
+                let mut listener = context.bind(stale).await.expect("the stale proxy binds");
+                while let Ok((_, mut sink, mut stream)) = listener.accept().await {
+                    let Ok(request) = rpc::recv_request(&mut stream).await else {
+                        continue;
+                    };
+                    let cached = replay.lock().clone();
+                    let body = match cached {
+                        Some(body) => body,
+                        None => {
+                            let Ok(body) = rpc::invoke(
+                                &context,
+                                upstream,
+                                "query",
+                                request.method,
+                                request.body,
+                            )
+                            .await
+                            else {
+                                continue;
+                            };
+                            *replay.lock() = Some(body.clone());
+                            body
+                        }
+                    };
+                    let _ = rpc::send_response(&mut sink, &rpc::Response::Success { body }).await;
+                }
+            });
+        }
+
+        // While the replayed read is fresh, the stale-to-be validator serves
+        // it fine. This first read also pins the bytes the proxy replays.
+        let mut pinned = Client::new(
+            control.identity(),
+            deployment(),
+            vec![stale],
+            context.child("pinned"),
+        )
+        .expect("the client accepts one query address");
+        let first = pinned
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect("the replayed read is recent at capture time");
+
+        // Once the local clock outruns the captured timestamp by more than
+        // the threshold, the replayed old certificate fails the recency gate
+        // with the address and the observed lag named.
+        context
+            .sleep(Duration::from_millis(RECENCY_THRESHOLD + 1_000))
+            .await;
+        let error = pinned
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect_err("the replayed old certificate must fail the recency gate");
+        let message = format!("{error:#}");
+        assert!(message.contains(&stale.to_string()), "{message}");
+        assert!(message.contains("behind the local clock"), "{message}");
+
+        // A client that also knows the live validator rotates past the stale
+        // one and adopts a strictly newer tip.
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![stale, upstream],
+            context.child("client"),
+        )
+        .expect("the client accepts the address list");
+        let rotated = chain
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect("the client rotates past the stale validator");
+        assert!(rotated.height > first.height);
+        assert!(rotated.timestamp > first.timestamp);
+    });
+}
+
+#[test]
+fn node_recent_read_detects_a_stalled_tip() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("db"), "node-stall").await;
+        let finalized = Finalized::default();
+        let (sender, _) = commonware_p2p::utils::mocks::inert_channel::<ed25519::PublicKey>([]);
+        let mut node = Node::new(
+            deployment(),
+            db.clone(),
+            finalized.clone(),
+            sender,
+            Vec::new(),
+        );
+
+        // The follower applied a block whose timestamp matches the local
+        // clock: the tip is live and the read passes.
+        seal(&db, 1, &[]).await;
+        let root = db.read().await.root();
+        finalized.record(1, Digest::EMPTY, root, now(&context));
+        node.recent(&context, &req(Lookup::Status))
+            .await
+            .expect("a live local tip passes the recency gate");
+
+        // The chain stalls: the local clock advances past the threshold with
+        // no newer finalization, and the same gate surfaces the stall with
+        // the observed lag.
+        context
+            .sleep(Duration::from_millis(RECENCY_THRESHOLD + 500))
+            .await;
+        let error = node
+            .recent(&context, &req(Lookup::Status))
+            .await
+            .expect_err("a stalled local tip must be surfaced as stale");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("the local finalized tip is stale"),
+            "{message}"
+        );
+        assert!(message.contains("behind the local clock"), "{message}");
+    });
+}
+
+#[test]
+fn execution_is_deterministic_across_databases() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let first = open(context.child("determinism_a"), "determinism-a").await;
+        let second = open(context.child("determinism_b"), "determinism-b").await;
+        let mut blocks: Vec<Vec<SettlementTx>> = vec![vec![
+            fixture.deposit_tx.clone(),
+            fixture.register_tx.clone(),
+            fixture.admit_tx.clone(),
+        ]];
+        blocks.extend((2..=13).map(|_| Vec::new()));
+
+        for (index, txs) in blocks.iter().enumerate() {
+            let height = index as u64 + 1;
+            let left = seal(&first, height, txs).await;
+            let right = seal(&second, height, txs).await;
+            assert_eq!(left, right, "roots diverged at height {height}");
+        }
+        assert_eq!(status(&first).await, status(&second).await);
+        assert_eq!(status(&first).await.last_finalized, Some(0));
+    });
+}
+
+#[test]
+fn idle_deployment_never_faults() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("idle"), "idle").await;
+
+        // Deadlines are absolute heights fixed when an obligation is created,
+        // so a deployment with no obligations can idle forever.
+        for height in 1..=200 {
+            seal(&db, height, &[]).await;
+        }
+        let idle = status(&db).await;
+        assert!(!idle.hard_faulted);
+        assert_eq!(idle.last_finalized, None);
+        assert_eq!(idle.custody, 400);
+        assert_eq!(read(&db, &fault_key(&deployment())).await, None);
+    });
+}
+
+#[test]
+fn registration_deadlines_are_assigned_at_inclusion() {
+    deterministic::Runner::default().start(|context| async move {
+        // A deployment whose genesis fixes a non-default policy (offset 3,
+        // duration 2): the authority for the assignment is the genesis
+        // policy, not the compiled defaults.
+        let timing = Timing {
+            admission_offset: 3,
+            challenge_duration: 2,
+        };
+        let db = open(context.child("assigned"), "assigned").await;
+        let register = empty_register_tx();
+        seal_at(&db, 1, &timing, &[]).await;
+        seal_at(&db, 2, &timing, std::slice::from_ref(&register)).await;
+
+        // Execution assigned the deadlines from the inclusion height (2):
+        // admission at inclusion plus the offset, challenge at admission
+        // plus the duration, and the anchor derived over exactly that pair.
+        let record = match read(&db, &registration_key(&deployment())).await {
+            Some(Record::Registration(record)) => record,
+            record => panic!("expected the registration record, found {record:?}"),
+        };
+        assert_eq!(record.epoch, 0);
+        assert_eq!(record.admission_deadline, 5);
+        assert_eq!(record.challenge_deadline, 7);
+        let context = crate::protocol::epoch_context_at(
+            deployment(),
+            crate::protocol::operator_key(),
+            0,
+            &DepositBatch::empty(),
+            &WithdrawalBatch::empty(),
+            400,
+            5,
+            7,
+        )
+        .unwrap();
+        assert_eq!(&record.anchor, context.payment().anchor());
+        assert_eq!(
+            read(&db, &anchor_key(&deployment(), 0)).await,
+            Some(Record::Anchor(record.anchor))
+        );
+    });
+}
+
+#[test]
+fn early_admission_is_accepted() {
+    deterministic::Runner::default().start(|context| async move {
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+
+        // The registration at height 1 is assigned the admission deadline at
+        // height 11 (the genesis admission offset past inclusion). The
+        // deadline is only an upper bound: the certified close is admitted
+        // at height 3, eight blocks before it.
+        let epoch = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"chain-early-admission",
+            11,
+            12,
+        );
+        let db = open(context.child("early"), "early").await;
+        seal(
+            &db,
+            1,
+            &[epoch.deposit_tx.clone(), epoch.register_tx.clone()],
+        )
+        .await;
+        seal(&db, 2, &[]).await;
+        seal(&db, 3, std::slice::from_ref(&epoch.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+
+        // The challenge window still runs its real blocks to the assigned
+        // absolute deadline (height 12): the close stays pending through it
+        // and finalizes at height 13, with the admission obligation having
+        // completed well before its deadline could expire.
+        for height in 4..=12 {
+            seal(&db, height, &[]).await;
+        }
+        assert_eq!(status(&db).await.last_finalized, None);
+        seal(&db, 13, &[]).await;
+        let finalized = status(&db).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert_eq!(finalized.height, 13);
+        assert!(!finalized.hard_faulted);
+    });
+}
+
+#[test]
+fn back_to_back_early_epochs() {
+    deterministic::Runner::default().start(|context| async move {
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let db = open(context.child("cadence"), "cadence").await;
+
+        // A genesis policy with a one-block admission offset, so the chain
+        // assigns tight windows at every inclusion.
+        let timing = Timing {
+            admission_offset: 1,
+            challenge_duration: 1,
+        };
+
+        // Epoch 0 registers, admits, and certifies in one block at height 1:
+        // the assigned admission deadline is height 2 and its challenge
+        // window (through height 3) elapses at height 4.
+        let first = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"chain-cadence-0",
+            2,
+            3,
+        );
+        seal_at(
+            &db,
+            1,
+            &timing,
+            &[
+                first.deposit_tx.clone(),
+                first.register_tx.clone(),
+                first.admit_tx.clone(),
+            ],
+        )
+        .await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+        seal_at(&db, 2, &timing, &[]).await;
+        seal_at(&db, 3, &timing, &[]).await;
+
+        // Epoch 1 is accepted in the very block that finalizes epoch 0, and
+        // its assigned window anchors at that inclusion (heights 5 and 6):
+        // fast cadence is bounded only by certification, never by a grid.
+        let second = close_fixture(
+            native().chain_id(),
+            &protocol,
+            1,
+            first.successor.clone(),
+            b"chain-cadence-1",
+            5,
+            6,
+        );
+        seal_at(
+            &db,
+            4,
+            &timing,
+            &[
+                second.deposit_tx.clone(),
+                second.register_tx.clone(),
+                second.admit_tx.clone(),
+            ],
+        )
+        .await;
+        assert_eq!(status(&db).await.last_finalized, Some(0));
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 1)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+        for height in 5..=7 {
+            seal_at(&db, height, &timing, &[]).await;
+        }
+        let settled = status(&db).await;
+        assert_eq!(settled.last_finalized, Some(1));
+        assert_eq!(settled.state_root, second.result.roots.successor);
+        assert_eq!(settled.custody, 402);
+        assert!(!settled.hard_faulted);
+    });
+}
+
+// --- light client unit tests ---------------------------------------------
+
+/// Builds a certified read over `db` for `request`, signed by the first
+/// quorum of `schemes` over a block committing the database's roots.
+async fn certified_read(
+    db: &Database<deterministic::Context>,
+    schemes: &[Scheme],
+    leader: ed25519::PublicKey,
+    height: u64,
+    transactions: Vec<SettlementTx>,
+    request: &ReadRequest,
+) -> (CertifiedRead, Block) {
+    let batch = db.new_batches().await;
+    let sealed = execute(
+        batch,
+        Height::new(height),
+        height,
+        &Timing::DEFAULT,
+        &native(),
+        &transactions,
+    )
+    .await
+    .expect("block execution succeeds");
+    let block = Block {
+        context: Context {
+            round: Round::new(Epoch::zero(), View::new(height)),
+            leader,
+            parent: (View::zero(), Digest::EMPTY),
+        },
+        parent: Digest::EMPTY,
+        height: Height::new(height),
+        timestamp: height,
+        state_root: sealed.root(),
+        ops_root: sealed.ops_root(),
+        range: non_empty_range!(sealed.sync_boundary(), sealed.bounds().tip.size),
+        transactions,
+    };
+    db.apply(sealed).await;
+
+    let proposal = Proposal {
+        round: block.context.round,
+        parent: View::zero(),
+        payload: block.digest(),
+    };
+    let finalizes = schemes
+        .iter()
+        .take(3)
+        .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("mock scheme signs"))
+        .collect::<Vec<_>>();
+    let finalization = Finalization::from_finalizes(
+        &schemes[0],
+        NonEmpty::try_new(finalizes.iter()).expect("quorum is non-empty"),
+        &Sequential,
+    )
+    .expect("mock quorum assembles");
+
+    let key = request.key();
+    let guard = db.read().await;
+    let proof = match guard.get(&key).await.expect("state read succeeds") {
+        Some(record) => query::ReadProof::Present {
+            proof: guard
+                .key_value_proof(key)
+                .await
+                .expect("present key proves"),
+            record,
+        },
+        None => query::ReadProof::Absent {
+            proof: guard
+                .exclusion_proof(&key)
+                .await
+                .expect("absent key proves"),
+        },
+    };
+    (
+        CertifiedRead {
+            finalization: finalization.encode(),
+            block: block.encode(),
+            proof,
+        },
+        block,
+    )
+}
+
+#[test]
+fn light_client_verifies_certified_reads() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut rng = test_rng();
+        let SchemeFixture {
+            participants,
+            schemes,
+            ..
+        } = scheme_mocks::fixture(&mut rng, NAMESPACE, 4);
+        let db = open(context.child("light"), "light").await;
+        let account = identities()[0].key.clone();
+        let deposit = DepositEvent {
+            id: Sha256::hash(&[b"light-client-deposit"]),
+            account,
+            amount: 7,
+        };
+        let tx = deposit_tx(deposit.clone());
+
+        // A present record verifies with its value.
+        let request = req(Lookup::Deposit { id: deposit.id });
+        let (response, _) = certified_read(
+            &db,
+            &schemes,
+            participants[0].clone(),
+            1,
+            vec![tx.clone()],
+            &request,
+        )
+        .await;
+        let verified = light::verify_read::<deterministic::Context, Scheme>(
+            &mut rng,
+            &schemes[0],
+            &request,
+            &response,
+        )
+        .expect("valid response verifies");
+        assert_eq!(verified.height, 1);
+        assert_eq!(verified.record, Some(Record::Deposit(deposit)));
+
+        // A verified absence proves the key holds nothing: epoch 7 was never
+        // registered.
+        let absent = req(Lookup::Anchor { epoch: 7 });
+        let (absence, _) = certified_read(
+            &db,
+            &schemes,
+            participants[0].clone(),
+            2,
+            Vec::new(),
+            &absent,
+        )
+        .await;
+        let verified = light::verify_read::<deterministic::Context, Scheme>(
+            &mut rng,
+            &schemes[0],
+            &absent,
+            &absence,
+        )
+        .expect("valid absence verifies");
+        assert_eq!(verified.height, 2);
+        assert_eq!(verified.record, None);
+
+        // The wrong committee identity rejects the certificate.
+        let SchemeFixture {
+            schemes: other_schemes,
+            ..
+        } = scheme_mocks::fixture(&mut rng, NAMESPACE, 4);
+        assert!(matches!(
+            light::verify_read::<deterministic::Context, Scheme>(
+                &mut rng,
+                &other_schemes[0],
+                &request,
+                &response,
+            ),
+            Err(light::Error::Certificate)
+        ));
+
+        // Tampered block bytes break the certified commitment.
+        let mut tampered = response.clone();
+        let mut bytes = tampered.block.to_vec();
+        bytes[0] ^= 1;
+        tampered.block = Bytes::from(bytes);
+        assert!(matches!(
+            light::verify_read::<deterministic::Context, Scheme>(
+                &mut rng,
+                &schemes[0],
+                &request,
+                &tampered,
+            ),
+            Err(light::Error::Commitment)
+        ));
+
+        // A proof against the wrong root fails even under a valid
+        // certificate: the absence response at height 2 certifies a different
+        // root than the proof taken at height 1.
+        let mut wrong_root = absence;
+        wrong_root.proof = response.proof.clone();
+        assert!(matches!(
+            light::verify_read::<deterministic::Context, Scheme>(
+                &mut rng,
+                &schemes[0],
+                &request,
+                &wrong_root,
+            ),
+            Err(light::Error::Proof)
+        ));
+
+        // The monotonic gate accepts advancing heights and rejects a stale
+        // replay.
+        let mut latest = light::Latest::default();
+        latest.observe(1).expect("first height is accepted");
+        latest.observe(2).expect("advancing height is accepted");
+        assert!(matches!(
+            latest.observe(1),
+            Err(light::Error::Stale {
+                height: 1,
+                accepted: 2
+            })
+        ));
+    });
+}
+
+#[test]
+fn recency_passes_exactly_at_the_threshold() {
+    let verified = light::Verified {
+        height: 3,
+        timestamp: 1_000,
+        record: None,
+    };
+
+    // A lag exactly at the threshold passes, one millisecond beyond it is
+    // rejected with the observed lag named, and a timestamp ahead of the
+    // local clock (bounded proposer drift) never reads as stale.
+    assert!(light::recent(&verified, 1_000 + RECENCY_THRESHOLD, RECENCY_THRESHOLD).is_ok());
+    match light::recent(&verified, 1_001 + RECENCY_THRESHOLD, RECENCY_THRESHOLD) {
+        Err(light::Error::Lagging { lag, bound }) => {
+            assert_eq!(lag, RECENCY_THRESHOLD + 1);
+            assert_eq!(bound, RECENCY_THRESHOLD);
+        }
+        other => panic!("expected the lagging rejection, found {other:?}"),
+    }
+    assert!(light::recent(&verified, 0, RECENCY_THRESHOLD).is_ok());
+}
+
+// --- glue::simulate end-to-end test -------------------------------------
+
+const NAMESPACE: &[u8] = b"terminal_chain_e2e";
+const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1024));
+
+type Scheme = MockScheme<ed25519::PublicKey>;
+
+fn query_address(index: usize) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 6_000 + index as u16))
+}
+
+/// Type-erased state reader so validator state does not name actor types.
+type StateReader =
+    Arc<dyn Fn(StateKey) -> Pin<Box<dyn Future<Output = Option<Record>> + Send>> + Send + Sync>;
+
+/// Shared slot for the RPC client's verdict, written once by validator 0's
+/// client task.
+type ClientResult = Arc<Mutex<Option<Result<(), String>>>>;
+
+/// Per-operator driver verdicts, folded into one [`ClientResult`].
+type Verdicts = Arc<Mutex<Vec<Option<Result<(), String>>>>>;
+
+/// Per-validator state inspected by the exit condition and property. The
+/// mock-certified engines use the default scheme parameter, and the
+/// walkthrough engine instantiates it at the production threshold scheme.
+#[derive(Clone)]
+struct State<S: CertScheme<Digest> = Scheme> {
+    marshal: marshal::core::Mailbox<S, Standard<Block>>,
+    reader: StateReader,
+    finalized: Finalized,
+    client: ClientResult,
+}
+
+impl<S: CertScheme<Digest>> ProcessedHeight for State<S> {
+    async fn processed_height(&self) -> u64 {
+        self.marshal
+            .get_processed_height()
+            .await
+            .map_or(0, |height| height.get())
+    }
+}
+
+/// Submits one certified read and decodes the response.
+async fn certified(
+    context: &deterministic::Context,
+    address: std::net::SocketAddr,
+    request: &ReadRequest,
+) -> anyhow::Result<ReadResponse> {
+    let body = crate::rpc::invoke(
+        context,
+        address,
+        "query",
+        query::METHOD_READ,
+        request.encode(),
+    )
+    .await?;
+    Ok(ReadResponse::decode_cfg(body, &())?)
+}
+
+/// Polls certified reads for `request` until one is available and verifies
+/// it, returning the verified read and the raw response.
+async fn verified_read(
+    context: &mut deterministic::Context,
+    scheme: &Scheme,
+    address: std::net::SocketAddr,
+    request: &ReadRequest,
+) -> anyhow::Result<(light::Verified, CertifiedRead)> {
+    loop {
+        match certified(context, address, request).await {
+            Ok(ReadResponse::Certified(response)) => {
+                let verified = light::verify_read::<deterministic::Context, Scheme>(
+                    context, scheme, request, &response,
+                )
+                .map_err(|error| anyhow::anyhow!("verification failed: {error}"))?;
+                return Ok((verified, response));
+            }
+
+            // The server is still binding, or no snapshot is servable yet.
+            Ok(ReadResponse::Unavailable) | Err(_) => {
+                context.sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
+/// Submits exact bytes while the server binds or qualification is unavailable.
+async fn submit(
+    context: &deterministic::Context,
+    address: std::net::SocketAddr,
+    tx: &SettlementTx,
+) -> anyhow::Result<ingress::Submission> {
+    for _ in 0..SUBMIT_ATTEMPTS {
+        let request = crate::rpc::Request {
+            method: query::METHOD_SUBMIT_TX,
+            body: tx.encode(),
+        };
+        match crate::rpc::call(context, address, &request).await {
+            Ok(crate::rpc::Response::Success { body }) => {
+                let reply = ingress::Submission::decode_cfg(body, &())?;
+                if reply != ingress::Submission::Full {
+                    return Ok(reply);
+                }
+            }
+            Ok(crate::rpc::Response::Error { error }) => {
+                anyhow::bail!("submission rejected: {}", String::from_utf8_lossy(&error));
+            }
+            Err(_) => {}
+        }
+        context.sleep(POLL).await;
+    }
+    anyhow::bail!("submission remained unavailable")
+}
+
+/// Every validator settled epoch zero: the deposit is recorded, the close
+/// finalized, and custody reflects the deposit.
+#[derive(Clone)]
+struct Settled {
+    expected_root: StateRoot<Digest>,
+    deposit_id: Digest,
+}
+
+impl Property<ed25519::PublicKey, State> for Settled {
+    fn name(&self) -> &str {
+        "settlement finalized epoch zero"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                let status = match (state.reader)(status_key(&deployment())).await {
+                    Some(Record::Status(status)) => status,
+                    record => return Err(format!("expected a status record, found {record:?}")),
+                };
+                if status.last_finalized != Some(0) {
+                    return Err(format!(
+                        "epoch zero did not finalize: {:?}",
+                        status.last_finalized
+                    ));
+                }
+                if status.state_root != self.expected_root {
+                    return Err("finalized state root diverged from the close".into());
+                }
+                if status.custody != 401 || status.claimable != 0 || status.hard_faulted {
+                    return Err(format!(
+                        "unexpected settled balances: custody {} claimable {} faulted {}",
+                        status.custody, status.claimable, status.hard_faulted
+                    ));
+                }
+                if !matches!(
+                    (state.reader)(deposit_key(&deployment(), &self.deposit_id)).await,
+                    Some(Record::Deposit(_))
+                ) {
+                    return Err("the settled deposit record is missing".into());
+                }
+                if state.finalized.latest().is_none() {
+                    return Err("the finalized index is empty".into());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Block timestamps are strictly monotonic across the finalized run.
+#[derive(Clone)]
+struct Monotonic;
+
+impl<S: CertScheme<Digest>> Property<ed25519::PublicKey, State<S>> for Monotonic {
+    fn name(&self) -> &str {
+        "block timestamps are strictly monotonic"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State<S>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                let processed = state.processed_height().await;
+                let mut compared = 0_u64;
+                let mut previous = None;
+                for height in 0..=processed {
+                    // Marshal may have pruned early heights, so compare only
+                    // consecutive retained blocks and require enough
+                    // comparisons for the property to be non-vacuous.
+                    let Some(block) = state.marshal.get_block(Height::new(height)).await else {
+                        previous = None;
+                        continue;
+                    };
+                    if let Some(previous) = previous
+                        && block.timestamp <= previous
+                    {
+                        return Err(format!(
+                            "timestamp did not advance at height {height}: {} <= {previous}",
+                            block.timestamp
+                        ));
+                    }
+                    previous = Some(block.timestamp);
+                    compared += 1;
+                }
+                if compared < 10 {
+                    return Err(format!("only {compared} finalized blocks were comparable"));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Exit once the RPC client finished and every validator processed `height`.
+#[derive(Clone)]
+struct ClientDoneAt {
+    height: u64,
+}
+
+impl ExitCondition<ed25519::PublicKey, State> for ClientDoneAt {
+    fn name(&self) -> &str {
+        "client done and heights processed"
+    }
+
+    fn requires_polling(&self) -> bool {
+        true
+    }
+
+    fn reached<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State],
+        target_count: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async move {
+            if !states.iter().any(|state| state.client.lock().is_some()) {
+                return Ok(false);
+            }
+            let mut processed = 0;
+            for state in states {
+                if state.processed_height().await >= self.height {
+                    processed += 1;
+                }
+            }
+            Ok(processed >= target_count)
+        })
+    }
+}
+
+/// The RPC client completed the certified round trip successfully.
+#[derive(Clone)]
+struct ClientSucceeded;
+
+impl<S: CertScheme<Digest>> Property<ed25519::PublicKey, State<S>> for ClientSucceeded {
+    fn name(&self) -> &str {
+        "query round trip verified"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State<S>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(state) = states.first() else {
+                return Err("no validator states".into());
+            };
+            match state.client.lock().clone() {
+                Some(Ok(())) => Ok(()),
+                Some(Err(error)) => Err(format!("client failed: {error}")),
+                None => Err("client never finished".into()),
+            }
+        })
+    }
+}
+
+// --- distributed certification end-to-end tests ---------------------------
+
+/// The deposit label shared by the distributed fixture and its driver.
+const DISTRIBUTED_DEPOSIT: &[u8] = b"distributed-e2e-deposit";
+const DISTRIBUTED_DEPOSIT_1: &[u8] = b"distributed-e2e-deposit-1";
+
+/// The deposit label of one distributed epoch.
+fn deposit_label(epoch: u64) -> &'static [u8] {
+    match epoch {
+        0 => DISTRIBUTED_DEPOSIT,
+        1 => DISTRIBUTED_DEPOSIT_1,
+        epoch => panic!("the distributed engine closes at most two epochs, not {epoch}"),
+    }
+}
+
+/// How a validator's query server misbehaves for evidence requests.
+#[derive(Clone, Copy, Debug)]
+enum Impairment {
+    /// Every request is answered with undecodable bytes.
+    Garbage,
+    /// Every connection is accepted and never answered.
+    Silent,
+}
+
+/// A query server standing in for one validator's: it accepts every
+/// connection (counting each in `accepts`) and answers as `impairment`
+/// dictates, so a co-holder fetching a close from it must rotate past
+/// it. The validator's sealer keeps running (its mailbox is held here for
+/// the server's lifetime), so only the evidence it serves is broken, never
+/// its sealing or voting.
+fn impaired_query(
+    context: deterministic::Context,
+    address: std::net::SocketAddr,
+    impairment: Impairment,
+    sealer: Option<da::Mailbox>,
+    accepts: Arc<AtomicUsize>,
+) {
+    context.spawn(move |context| async move {
+        let _sealer = sealer;
+        let mut listener = context
+            .bind(address)
+            .await
+            .expect("the impaired query server binds");
+        loop {
+            let Ok((_, mut sink, mut stream)) = listener.accept().await else {
+                return;
+            };
+            accepts.fetch_add(1, Ordering::Relaxed);
+            context.child("connection").spawn(move |_| async move {
+                if rpc::recv_request(&mut stream).await.is_err() {
+                    return;
+                }
+                match impairment {
+                    Impairment::Garbage => {
+                        let response = rpc::Response::Success {
+                            body: Bytes::from_static(&[0xff]),
+                        };
+                        let _ = rpc::send_response(&mut sink, &response).await;
+                    }
+                    Impairment::Silent => std::future::pending::<()>().await,
+                }
+            });
+        }
+    });
+}
+
+/// The genesis validator list of the distributed engine: validator `i`'s
+/// dealt clearing key served at its query address.
+fn validator_entries() -> Vec<ValidatorEntry> {
+    let committee = committee().unwrap();
+    (0..4)
+        .map(|index| ValidatorEntry {
+            clearing: committee.members()[usize::from(dealt_participant(index).unwrap())],
+            query: query_address(index),
+        })
+        .collect()
+}
+
+/// Settlement transaction sender type on the simulated network.
+type TxSender = commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>;
+
+/// Four validators plus the operator as a registered p2p secondary: the
+/// operator drives a real distributed close over the settlement DA channel
+/// (dissemination, sealing, votes, exact-quorum certificate) and submits
+/// the certified admission over the transaction channel, completing against
+/// its own followed state.
+#[derive(Clone)]
+struct Distributed {
+    /// Four consensus validators, then the operator's network identity.
+    participants: Vec<ed25519::PublicKey>,
+    schemes: Vec<Scheme>,
+    finalized: Vec<Finalized>,
+    driver: ClientResult,
+    /// Validator indices that run no sealer and so never vote.
+    silent: std::collections::BTreeSet<usize>,
+    /// Connections the impaired query server accepted, so a rotation test
+    /// proves the fetch actually met the impairment.
+    impaired_accepts: Arc<AtomicUsize>,
+    /// Per epoch, the validator the operator leaves out of its deals: a
+    /// validator that misses that close.
+    undealt: std::collections::BTreeMap<u64, usize>,
+    /// The validator whose query server misbehaves for evidence, and how.
+    impaired: Option<(usize, Impairment)>,
+    /// Epochs the driver closes back to back.
+    epochs: u64,
+    /// The validator that missed epoch 0 and replays the retained close
+    /// before sealing epoch 1, whose fetched records the driver compares
+    /// against its co-holders'.
+    fetcher: Option<usize>,
+    /// Whether the driver expects the registration to expire into the
+    /// deadline fault instead of certifying.
+    expect_fault: bool,
+    /// The state root the last closed epoch settles.
+    expected_root: StateRoot<Digest>,
+    deposit_id: Digest,
+}
+
+impl Distributed {
+    /// Two back-to-back closes where the operator leaves validator 1 out of
+    /// epoch 0 and validator 2 out of epoch 1, so epoch 1 certifies only if
+    /// validator 1 replays epoch 0 from its co-holders and seals.
+    /// `impairment` breaks validator 3's query server.
+    fn recovering(impairment: Option<Impairment>) -> Self {
+        let mut engine = Self::new(&[], false);
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let first = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state,
+            DISTRIBUTED_DEPOSIT,
+            2,
+            3,
+        );
+        let second = close_fixture(
+            native().chain_id(),
+            &protocol,
+            1,
+            first.successor,
+            DISTRIBUTED_DEPOSIT_1,
+            5,
+            6,
+        );
+        engine.expected_root = second.result.roots.successor;
+        engine.undealt = [(0, 1), (1, 2)].into_iter().collect();
+        engine.impaired = impairment.map(|impairment| (3, impairment));
+        engine.epochs = 2;
+        engine.fetcher = Some(1);
+        engine
+    }
+
+    fn new(silent: &[usize], expect_fault: bool) -> Self {
+        let mut rng = test_rng();
+        let SchemeFixture {
+            mut participants,
+            schemes,
+            ..
+        } = scheme_mocks::fixture(&mut rng, NAMESPACE, 4);
+        let operator = ed25519::PrivateKey::from_seed(77_777).public_key();
+        participants.push(operator);
+
+        // The settled root and deposit id are deadline-independent, so a
+        // throwaway harness-certified fixture pins the expectations.
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let epoch = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state,
+            DISTRIBUTED_DEPOSIT,
+            2,
+            3,
+        );
+        let finalized = (0..participants.len())
+            .map(|_| Finalized::default())
+            .collect();
+        Self {
+            participants,
+            schemes,
+            finalized,
+            driver: ClientResult::default(),
+            silent: silent.iter().copied().collect(),
+            impaired_accepts: Arc::default(),
+            undealt: std::collections::BTreeMap::new(),
+            impaired: None,
+            epochs: 1,
+            fetcher: None,
+            expect_fault,
+            expected_root: epoch.result.roots.successor,
+            deposit_id: epoch.deposit.id,
+        }
+    }
+
+    /// Index of the operator node in the participant list.
+    const fn operator(&self) -> usize {
+        self.participants.len() - 1
+    }
+}
+
+impl EngineDefinition for Distributed {
+    type PublicKey = ed25519::PublicKey;
+    type Engine = Handle<()>;
+    type State = State;
+
+    fn participants(&self) -> Vec<Self::PublicKey> {
+        self.participants.clone()
+    }
+
+    fn channels(&self) -> Vec<(u64, Quota)> {
+        vec![
+            (0, TEST_QUOTA), // votes
+            (1, TEST_QUOTA), // certificates
+            (2, TEST_QUOTA), // resolver
+            (3, TEST_QUOTA), // backfill
+            (4, TEST_QUOTA), // broadcast
+            (5, TEST_QUOTA), // settlement transactions
+            (6, TEST_QUOTA), // settlement DA
+        ]
+    }
+
+    async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
+        let InitContext {
+            context,
+            index,
+            delayed: _,
+            public_key,
+            oracle,
+            channels,
+            participants: _,
+            monitor,
+        } = ctx;
+
+        let validators = self.participants[..self.operator()].to_vec();
+        let operator_key = self.participants[self.operator()].clone();
+        let partition_prefix = if index == self.operator() {
+            "operator".to_string()
+        } else {
+            format!("validator-{index}")
+        };
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let db_config = config(&partition_prefix, &context);
+
+        let mut channels = channels.into_iter();
+        let vote_network = channels.next().unwrap();
+        let certificate_network = channels.next().unwrap();
+        let resolver_network = channels.next().unwrap();
+        let backfill_network = channels.next().unwrap();
+        let broadcast_network = channels.next().unwrap();
+        let settlement_tx_network = channels.next().unwrap();
+        let settlement_da_network = channels.next().unwrap();
+
+        // The operator registers the secondary arrangement at a successor
+        // set id (peer sets are append-only): the validators stay primary
+        // and the operator is the tracked secondary, so mechanisms favor
+        // the committee but gossip to and answer the operator.
+        if index == self.operator() {
+            let mut manager = oracle.manager();
+            let primary =
+                commonware_utils::ordered::Set::from_iter_dedup(validators.iter().cloned());
+            let secondary = commonware_utils::ordered::Set::from_iter_dedup([public_key.clone()]);
+            let _ = commonware_p2p::Manager::track(
+                &mut manager,
+                1,
+                commonware_p2p::TrackedPeers::new(primary.clone(), secondary),
+            );
+            let peers = commonware_p2p::Provider::peer_set(&mut manager, 1)
+                .await
+                .expect("the tracked peer set is registered");
+            assert_eq!(peers.primary, primary);
+            assert!(peers.secondary.iter().any(|peer| peer == public_key));
+        }
+
+        // Marshal resolver.
+        let resolver = marshal_resolver::init(
+            context.child("marshal_resolver"),
+            marshal_resolver::Config {
+                public_key: public_key.clone(),
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            backfill_network,
+        );
+
+        // Buffered broadcast engine.
+        let (broadcast_engine, buffer) = buffered::Engine::new(
+            context.child("broadcast"),
+            buffered::Config {
+                public_key: public_key.clone(),
+                mailbox_size: NZUsize!(100),
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+                peer_provider: oracle.manager(),
+            },
+        );
+        broadcast_engine.start(broadcast_network);
+
+        // Prunable archives backing marshal.
+        let archive_config = |name: &str| prunable::Config {
+            translator: TwoCap,
+            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
+            key_partition: format!("{partition_prefix}-{name}-key"),
+            key_page_cache: page_cache.clone(),
+            value_partition: format!("{partition_prefix}-{name}-value"),
+            compression: None,
+            codec_config: (),
+            items_per_section: NZU64!(10),
+            key_write_buffer: IO_BUFFER_SIZE,
+            value_write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+        };
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config("finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks =
+            prunable::Archive::init(context.child("finalized_blocks"), archive_config("blocks"))
+                .await
+                .expect("failed to initialize blocks archive");
+
+        // Genesis block shared by every node, dated at the simulated
+        // deployment start.
+        let genesis_block = Block::genesis(
+            validators[0].clone(),
+            native().chain_id(),
+            0,
+            initial_sync_target::<deterministic::Context>(),
+        );
+
+        let startup = context.child("stateful_startup");
+        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+        let scheme = self.schemes[index.min(self.schemes.len() - 1)].clone();
+        let provider = ConstantProvider::new(scheme.clone());
+
+        // Marshal actor.
+        let (marshal_actor, marshal_mailbox, floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider: provider.clone(),
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
+                    partition_prefix: partition_prefix.clone(),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+
+        // The operator runs the follower stack: no ingress, no consensus
+        // engine, the certificate-channel feed in their place.
+        if index == self.operator() {
+            let finalized = self.finalized[index].clone();
+            let application: App<Scheme, ()> = App::new(
+                genesis_block.clone(),
+                Timing::DEFAULT,
+                native(),
+                finalized.clone(),
+            );
+            let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+                context.child("stateful"),
+                StatefulConfig {
+                    application,
+                    db_config,
+                    provider: (),
+                    marshal: (marshal_mailbox.clone(), floor),
+                    mailbox_size: NZUsize!(100),
+                    plan,
+                    resolvers: NoopResolver,
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let reader_mailbox = stateful_mailbox.clone();
+            let reader: StateReader = Arc::new(move |key: StateKey| {
+                let mailbox = reader_mailbox.clone();
+                Box::pin(async move {
+                    let databases = mailbox.subscribe_databases().await;
+                    let guard = databases.read().await;
+                    guard.get(&key).await.expect("state read must succeed")
+                })
+            });
+            let marshal_reporters =
+                MonitorReporter::new(public_key.clone(), monitor, stateful_mailbox.clone());
+            marshal_actor.start(marshal_reporters, buffer, resolver);
+            stateful_actor.start();
+            node::drain(context.child("vote_drain"), vote_network.1);
+            node::drain(context.child("resolver_drain"), resolver_network.1);
+            node::drain(context.child("tx_drain"), settlement_tx_network.1);
+            node::follow(
+                context.child("follow"),
+                provider,
+                marshal_mailbox.clone(),
+                certificate_network.1,
+            );
+
+            // The local chain backend and the close pipeline.
+            let db = stateful_mailbox.subscribe_databases().await;
+            let backend = Node::new(
+                deployment(),
+                db,
+                finalized.clone(),
+                settlement_tx_network.0,
+                (0..validators.len()).map(query_address).collect(),
+            );
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let (certifier, pipeline) = node::Certifier::new(
+                context.child("certifier"),
+                node::Config {
+                    verifier: protocol.verifier(),
+                    chain: backend.clone(),
+                    mailbox_size: NZUsize!(100),
+                },
+            );
+            let handle = certifier.start(settlement_da_network);
+
+            // The driver: the operator's close worker flow as one task.
+            let verdict = self.driver.clone();
+            let plan = Drive {
+                expect_fault: self.expect_fault,
+                silent: self.silent.clone(),
+                epochs: self.epochs,
+                undealt: self.undealt.clone(),
+                fetcher: self.fetcher,
+                impaired: self.impaired.map(|(index, _)| index),
+            };
+            let scheme_for_reads = scheme.clone();
+            context.child("driver").spawn(move |context| async move {
+                let result = Box::pin(drive(
+                    context,
+                    backend,
+                    pipeline,
+                    validators,
+                    scheme_for_reads,
+                    query_address(0),
+                    plan,
+                ))
+                .await
+                .map_err(|error| format!("{error:#}"));
+                *verdict.lock() = Some(result);
+            });
+
+            return (
+                handle,
+                State {
+                    marshal: marshal_mailbox,
+                    reader,
+                    finalized,
+                    client: self.driver.clone(),
+                },
+            );
+        }
+
+        // Validators run the full consensus stack plus the sealer (unless
+        // configured silent, which models a validator that never votes).
+        let (ingress_actor, ingress_mailbox) = ingress::Actor::new(
+            context.child("ingress"),
+            ingress::Config {
+                mailbox_size: NZUsize!(100),
+                capacity: NZUsize!(1_024),
+                bytes: NZUsize!(64 * 1024 * 1024),
+                lease: 5,
+                retention: 20,
+            },
+            RegistryView::new(native().deployments),
+        );
+
+        let finalized = self.finalized[index].clone();
+        let application: App<Scheme, ingress::Mailbox> = App::new(
+            genesis_block.clone(),
+            Timing::DEFAULT,
+            native(),
+            finalized.clone(),
+        );
+        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application,
+                db_config,
+                provider: ingress_mailbox.clone(),
+                marshal: (marshal_mailbox.clone(), floor),
+                mailbox_size: NZUsize!(100),
+                plan,
+                resolvers: NoopResolver,
+                sync_config: sync_config(),
+                prune_config: None,
+            },
+        );
+        let reader_mailbox = stateful_mailbox.clone();
+        let reader: StateReader = Arc::new(move |key: StateKey| {
+            let mailbox = reader_mailbox.clone();
+            Box::pin(async move {
+                let databases = mailbox.subscribe_databases().await;
+                let guard = databases.read().await;
+                guard.get(&key).await.expect("state read must succeed")
+            })
+        });
+
+        let deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox.clone(),
+            marshal_mailbox.clone(),
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+        let marshal_reporters = MonitorReporter::new(
+            public_key.clone(),
+            monitor,
+            Reporters::from((stateful_mailbox.clone(), ingress_mailbox.clone())),
+        );
+        marshal_actor.start(marshal_reporters, buffer, resolver);
+        stateful_actor.start();
+
+        // The sealing actor on the DA channel, keyed by the validator's
+        // dealt clearing committee key.
+        let db = stateful_mailbox.subscribe_databases().await;
+        ingress_actor.start(
+            settlement_tx_network,
+            db.clone(),
+            finalized.clone(),
+            native(),
+            Timing::DEFAULT,
+            Set::from_iter_dedup(self.participants[..4].iter().cloned()),
+        );
+        let sealer = if self.silent.contains(&index) {
+            node::drain(context.child("da_drain"), settlement_da_network.1);
+            None
+        } else {
+            let (sealer, mailbox) = da::Sealer::new(
+                context.child("sealer"),
+                da::Config {
+                    scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
+                        committee().unwrap(),
+                        clearing_private(index).unwrap(),
+                    )
+                    .unwrap(),
+                    registry: RegistryView::new(vec![RegistryEntry {
+                        deployment: deployments().remove(0),
+                        network_key: operator_key,
+                        max_dealing_bytes: 4 * 1024 * 1024,
+                    }]),
+                    db: db.clone(),
+                    partition: format!("{partition_prefix}-dealings"),
+                    validators: {
+                        let mut entries = validator_entries();
+                        if let Some((impaired, _)) = self.impaired {
+                            entries.rotate_left(impaired);
+                        }
+                        entries
+                    },
+                    fetch_timeout: Duration::from_millis(50),
+                },
+            );
+            sealer.start(settlement_da_network);
+            Some(mailbox)
+        };
+
+        // Certified query server over the applied database, or the impaired
+        // stand-in that answers evidence requests wrongly or never.
+        match self.impaired {
+            Some((impaired, impairment)) if impaired == index => {
+                impaired_query(
+                    context.child("query"),
+                    query_address(index),
+                    impairment,
+                    sealer,
+                    self.impaired_accepts.clone(),
+                );
+            }
+            _ => {
+                query::start(
+                    context.child("query"),
+                    query::Config {
+                        address: query_address(index),
+                        db,
+                        finalized: finalized.clone(),
+                        marshal: marshal_mailbox.clone(),
+                        ingress: ingress_mailbox,
+                        sealer,
+                    },
+                );
+            }
+        }
+
+        // Simplex engine.
+        let engine = simplex::Engine::new(
+            context,
+            simplex::Config {
+                scheme,
+                elector: RoundRobin::<Sha256>::default(),
+                blocker: oracle.control(public_key.clone()),
+                automaton: deferred.clone(),
+                relay: deferred,
+                reporter: marshal_mailbox.clone(),
+                strategy: Sequential,
+                partition: format!("{partition_prefix}-simplex"),
+                mailbox_size: NZUsize!(3),
+                epoch: Epoch::zero(),
+                floor: simplex::config::Floor::Genesis(genesis_block.digest()),
+                replay_buffer: IO_BUFFER_SIZE,
+                write_buffer: IO_BUFFER_SIZE,
+                page_cache,
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_millis(500),
+                view_retention: ViewDelta::new(10),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: simplex::SkipBudget::Participants,
+                },
+                fetch_timeout: Duration::from_secs(2),
+                forward: ForwardPolicy::Disabled,
+                track_historical_votes: false,
+            },
+        );
+        let handle = engine.start(vote_network, certificate_network, resolver_network);
+
+        (
+            handle,
+            State {
+                marshal: marshal_mailbox,
+                reader,
+                finalized,
+                client: self.driver.clone(),
+            },
+        )
+    }
+
+    fn start(engine: Self::Engine) -> Handle<()> {
+        engine
+    }
+}
+
+/// What the distributed driver closes and checks.
+struct Drive {
+    /// Whether epoch 0's registration is expected to expire into the
+    /// deadline fault instead of certifying.
+    expect_fault: bool,
+    /// Validator indices that run no sealer.
+    silent: std::collections::BTreeSet<usize>,
+    /// Epochs closed back to back.
+    epochs: u64,
+    /// Per epoch, the validator left out of the operator's deals.
+    undealt: std::collections::BTreeMap<u64, usize>,
+    /// The validator whose replayed epoch-0 close are compared
+    /// against its co-holders' after the run.
+    fetcher: Option<usize>,
+    /// The validator whose query server is impaired, skipped as a comparison
+    /// co-holder.
+    impaired: Option<usize>,
+}
+
+/// The operator's distributed close worker flow, driven end to end against
+/// its own followed state for each planned epoch: deposit, boundary-only
+/// registration and the certified read-back of its assigned deadlines,
+/// dealing dissemination and vote collection through the pipeline, certified
+/// admission, and finally the agent-visible certified reads over a
+/// validator's query server. When a validator was planned to miss epoch 0,
+/// its replayed epoch-0 close are then compared byte for byte
+/// against every healthy co-holder's.
+async fn drive(
+    mut context: deterministic::Context,
+    mut chain: Node<deterministic::Context, TxSender>,
+    pipeline: node::Mailbox,
+    validators: Vec<ed25519::PublicKey>,
+    scheme: Scheme,
+    query: std::net::SocketAddr,
+    plan: Drive,
+) -> anyhow::Result<()> {
+    let protocol = Protocol::new(NonZeroUsize::MIN)?;
+    let state = genesis_cache();
+    let mut latest = light::Latest::default();
+    let mut predecessor = state.clone();
+    let mut settled = Vec::new();
+    for epoch in 0..plan.epochs {
+        let label = deposit_label(epoch);
+
+        // Registration binds the deposited boundary, so custody must be
+        // certified before the registration is submitted.
+        let (deposit, deposit_tx, register_tx) =
+            fixture_boundary(native().chain_id(), &protocol, epoch, &predecessor, label);
+        let submitted = submit(&context, query, &deposit_tx).await?;
+        anyhow::ensure!(
+            matches!(
+                submitted,
+                ingress::Submission::Accepted | ingress::Submission::Duplicate
+            ),
+            "the epoch {epoch} deposit was not admitted: {submitted:?}"
+        );
+        let mut deposited = false;
+        for _ in 0..600 {
+            if chain.deposit(&context, deposit.id).await.ok().flatten() == Some(deposit.clone()) {
+                deposited = true;
+                break;
+            }
+            context.sleep(Duration::from_millis(200)).await;
+        }
+        anyhow::ensure!(
+            deposited,
+            "the epoch {epoch} deposit earned no custody record"
+        );
+        chain.deliver(&context, &register_tx).await?;
+
+        // Execution assigned the deadlines at the registration's inclusion
+        // height, so the close is built only after the local certified
+        // registration read reveals them: the operator's read-back flow.
+        let mut registered = None;
+        for _ in 0..600 {
+            if let Ok(Some(record)) = chain.registration(&context).await
+                && record.epoch == epoch
+            {
+                registered = Some(record);
+                break;
+            }
+            context.sleep(Duration::from_millis(200)).await;
+        }
+        let Some(record) = registered else {
+            anyhow::bail!("the registered epoch {epoch} left no certified record");
+        };
+        let build = build_fixture(
+            native().chain_id(),
+            &protocol,
+            epoch,
+            predecessor.clone(),
+            label,
+            record.admission_deadline,
+            record.challenge_deadline,
+        );
+        anyhow::ensure!(
+            build.deposit_tx == deposit_tx && build.register_tx == register_tx,
+            "the fixture boundary diverged from the submitted transactions"
+        );
+        let admission_deadline = record.admission_deadline;
+
+        // Disseminate one complete packet; a validator planned to miss this close is omitted.
+        let prepared = build.prepared.clone();
+        let mut deals = Vec::new();
+        for (index, peer) in validators.iter().enumerate() {
+            if plan.undealt.get(&epoch) == Some(&index) {
+                continue;
+            }
+            let participant = dealt_participant(index)?;
+            deals.push(node::Route {
+                participant,
+                peer: peer.clone(),
+            });
+        }
+
+        if plan.expect_fault {
+            // The expiry scenario requires each active sealer to retain the
+            // exact dealing while certification remains pending.
+            let expected_context = prepared.context().clone();
+            let expected_dealing = prepared.encoded().clone();
+            let certification: Arc<Mutex<Option<Result<(), String>>>> = Arc::default();
+            {
+                let certification = certification.clone();
+                context.child("certify").spawn(move |_| async move {
+                    let result = pipeline
+                        .certify(prepared, deals)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}"));
+                    *certification.lock() = Some(result);
+                });
+            }
+            let request = rpc::Request {
+                method: query::METHOD_EVIDENCE,
+                body: EvidenceRequest::new(deployment(), EvidenceLookup::Dealing { epoch })
+                    .encode(),
+            };
+            let expected_retained = validators
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !plan.silent.contains(index))
+                .count();
+            let mut retained = std::collections::BTreeSet::new();
+            for _ in 0..600 {
+                for index in 0..validators.len() {
+                    if plan.silent.contains(&index) || retained.contains(&index) {
+                        continue;
+                    }
+                    if let Ok(rpc::Response::Success { body }) =
+                        rpc::call(&context, query_address(index), &request).await
+                        && let Ok(EvidenceResponse::Served(Evidence::Dealing(saved))) =
+                            EvidenceResponse::decode(body)
+                    {
+                        anyhow::ensure!(
+                            saved.context.epoch_context() == &expected_context
+                                && saved.dealing == expected_dealing,
+                            "validator {index} retained a foreign dealing"
+                        );
+                        retained.insert(index);
+                    }
+                }
+                let fault = chain.fault(&context).await?;
+                if let Some(result) = certification.lock().as_ref() {
+                    match result {
+                        Ok(()) => anyhow::bail!("two silent validators assembled a certificate"),
+                        Err(error) => {
+                            anyhow::bail!("certification failed before expiry: {error}")
+                        }
+                    }
+                }
+                if let Some(FaultRecord::Faulted(reason)) = fault {
+                    match reason {
+                        HardFaultReasonResponse::ExpiredRegistration {
+                            epoch: 0,
+                            expired_at,
+                            ..
+                        } => {
+                            anyhow::ensure!(
+                                expired_at == admission_deadline,
+                                "the registration expired at {expired_at}, not its deadline"
+                            );
+                            anyhow::ensure!(
+                                retained.len() == expected_retained,
+                                "registration expired before every healthy validator retained the exact dealing"
+                            );
+                            return Ok(());
+                        }
+                        reason => anyhow::bail!("unexpected fault: {reason:?}"),
+                    }
+                }
+                context.sleep(Duration::from_millis(200)).await;
+            }
+            anyhow::bail!("the registration never expired into the deadline fault")
+        }
+
+        // Certification, local completion, and certified admission.
+        let result = commonware_macros::select! {
+            result = pipeline.certify(prepared, deals) => result?,
+            fault = async {
+                loop {
+                    let status = chain.status(&context).await?;
+                    if status.hard_faulted || status.height > admission_deadline {
+                        break Ok::<_, anyhow::Error>((status.height, status.hard_faulted));
+                    }
+                    context.sleep(Duration::from_millis(20)).await;
+                }
+            } => {
+                let (height, faulted) = fault?;
+                anyhow::bail!("epoch {epoch} certification pending at height {height}, deadline {admission_deadline}, faulted {faulted}");
+            },
+        };
+        pipeline
+            .admit(crate::chain::tx::AdmitRequest::from(&result))
+            .await?;
+
+        // The agents' certified reads see the distributed close: verified
+        // light client reads against a validator's query server.
+        loop {
+            let (verified, _) =
+                verified_read(&mut context, &scheme, query, &req(Lookup::Status)).await?;
+            latest
+                .observe(verified.height)
+                .map_err(|error| anyhow::anyhow!("status read regressed: {error}"))?;
+            let Some(Record::Status(status)) = verified.record else {
+                anyhow::bail!("status read returned no record");
+            };
+            anyhow::ensure!(!status.hard_faulted, "the deployment hard-faulted");
+            if status.last_finalized == Some(epoch) {
+                anyhow::ensure!(
+                    status.state_root == result.roots.successor,
+                    "finalized state root diverged from the distributed close"
+                );
+                break;
+            }
+            context.sleep(Duration::from_millis(200)).await;
+        }
+        settled.push(result.roots.successor);
+        predecessor = build.successor;
+    }
+    let deposit_request = req(Lookup::Deposit {
+        id: Sha256::hash(&[DISTRIBUTED_DEPOSIT]),
+    });
+    let (verified, _) = verified_read(&mut context, &scheme, query, &deposit_request).await?;
+    anyhow::ensure!(
+        matches!(verified.record, Some(Record::Deposit(_))),
+        "deposit record was not certified"
+    );
+    let absent_request = req(Lookup::Anchor { epoch: plan.epochs });
+    let (verified, _) = verified_read(&mut context, &scheme, query, &absent_request).await?;
+    anyhow::ensure!(
+        verified.record.is_none(),
+        "unregistered epoch anchor was certified present"
+    );
+
+    if let Some(fetcher) = plan.fetcher {
+        let root = *settled
+            .first()
+            .context("the catchup scenario closes epoch zero")?;
+        let request = rpc::Request {
+            method: query::METHOD_EVIDENCE,
+            body: EvidenceRequest::new(deployment(), EvidenceLookup::Dealing { epoch: 0 }).encode(),
+        };
+        let rpc::Response::Success { body } =
+            rpc::call(&context, query_address(fetcher), &request).await?
+        else {
+            anyhow::bail!("catchup history unavailable")
+        };
+        let EvidenceResponse::Served(Evidence::Dealing(record)) = EvidenceResponse::decode(body)?
+        else {
+            anyhow::bail!("catchup history absent")
+        };
+        anyhow::ensure!(
+            record.roots.successor == root,
+            "catchup selected wrong root"
+        );
+        let mut compared = 0;
+        for index in 0..validators.len() {
+            if index == fetcher || plan.impaired == Some(index) {
+                continue;
+            }
+            let rpc::Response::Success { body } =
+                rpc::call(&context, query_address(index), &request).await?
+            else {
+                continue;
+            };
+            if let EvidenceResponse::Served(Evidence::Dealing(held)) =
+                EvidenceResponse::decode(body)?
+            {
+                anyhow::ensure!(
+                    held.header == record.header
+                        && held.roots == record.roots
+                        && held.dealing == record.dealing,
+                    "catchup differs from healthy holder"
+                );
+                compared += 1;
+            }
+        }
+        anyhow::ensure!(
+            compared > 0,
+            "no healthy holder answered catchup comparison"
+        );
+    }
+
+    Ok(())
+}
+
+/// Every node observed the deadline fault: the registration expired with no
+/// quorum to certify its close.
+#[derive(Clone)]
+struct Faulted;
+
+impl Property<ed25519::PublicKey, State> for Faulted {
+    fn name(&self) -> &str {
+        "registration expired into the deadline fault"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                match (state.reader)(fault_key(&deployment())).await {
+                    Some(Record::Fault(FaultRecord::Faulted(
+                        HardFaultReasonResponse::ExpiredRegistration { epoch: 0, .. },
+                    ))) => {}
+                    record => return Err(format!("expected the expiry fault, found {record:?}")),
+                }
+                let status = match (state.reader)(status_key(&deployment())).await {
+                    Some(Record::Status(status)) => status,
+                    record => return Err(format!("expected a status record, found {record:?}")),
+                };
+                if !status.hard_faulted {
+                    return Err("the deployment did not hard-fault".into());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[test]
+fn distributed_certification_finalizes_epoch() {
+    let engine = Distributed::new(&[], false);
+    let expected_root = engine.expected_root;
+    let deposit_id = engine.deposit_id;
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ClientDoneAt { height: 35 })
+        .property(Settled {
+            expected_root,
+            deposit_id,
+        })
+        .property(Monotonic)
+        .property(ClientSucceeded)
+        .run()
+        .unwrap();
+}
+
+#[test]
+fn one_silent_validator_still_certifies() {
+    // n = 4 with quorum 3: one validator that never votes leaves the exact
+    // quorum reachable and the close still certifies and finalizes.
+    let engine = Distributed::new(&[1], false);
+    let expected_root = engine.expected_root;
+    let deposit_id = engine.deposit_id;
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ClientDoneAt { height: 35 })
+        .property(Settled {
+            expected_root,
+            deposit_id,
+        })
+        .property(ClientSucceeded)
+        .run()
+        .unwrap();
+}
+
+#[test]
+fn two_silent_validators_expire_the_registration() {
+    // With two silent validators the exact quorum is unreachable, no
+    // certificate assembles, and the registration expires into the deadline
+    // fault at its absolute height.
+    let engine = Distributed::new(&[1, 2], true);
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ClientDoneAt { height: 35 })
+        .property(Faulted)
+        .property(ClientSucceeded)
+        .run()
+        .unwrap();
+}
+
+/// Every validator settled epoch 1 behind the validator that missed epoch
+/// 0: two closes finalized, the second sealed over history that validator
+/// fetched from its co-holders.
+#[derive(Clone)]
+struct Recovered {
+    expected_root: StateRoot<Digest>,
+}
+
+impl Property<ed25519::PublicKey, State> for Recovered {
+    fn name(&self) -> &str {
+        "settlement finalized epoch one after canonical replay"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                let status = match (state.reader)(status_key(&deployment())).await {
+                    Some(Record::Status(status)) => status,
+                    record => return Err(format!("expected a status record, found {record:?}")),
+                };
+                if status.last_finalized != Some(1) {
+                    return Err(format!(
+                        "epoch one did not finalize: {:?}",
+                        status.last_finalized
+                    ));
+                }
+                if status.state_root != self.expected_root {
+                    return Err("finalized state root diverged from the second close".into());
+                }
+                if status.custody != 402 || status.claimable != 0 || status.hard_faulted {
+                    return Err(format!(
+                        "unexpected settled balances: custody {} claimable {} faulted {}",
+                        status.custody, status.claimable, status.hard_faulted
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Runs the two-epoch recovery scenario: validator 1 misses epoch 0, fetches
+/// the complete close from its co-holders over their query servers
+/// when epoch 1 is dealt, seals, and casts the third vote of the exact
+/// quorum (validator 2 is left out of epoch 1, and the silent-validator
+/// tests above show quorum has no slack). The driver then checks the fetched
+/// records against the healthy co-holders' byte for byte.
+fn recover(impairment: Option<Impairment>) {
+    let engine = Distributed::recovering(impairment);
+    let expected_root = engine.expected_root;
+    let impaired_accepts = engine.impaired_accepts.clone();
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ClientDoneAt { height: 45 })
+        .property(ClientSucceeded)
+        .property(Recovered { expected_root })
+        .run()
+        .unwrap();
+
+    // An impaired holder was actually asked: the rotation past it is what
+    // the variant exercises, not a fetch that happened to skip it.
+    assert_eq!(
+        impaired_accepts.load(Ordering::Relaxed) > 0,
+        impairment.is_some()
+    );
+}
+
+#[test]
+fn missed_close_validator_replays_history_and_seals() {
+    recover(None);
+}
+
+#[test]
+fn history_fetch_rotates_past_a_garbage_holder() {
+    // Validator 3 answers every evidence request with undecodable bytes: the
+    // fetch declines it and the other co-holder serves the complete close.
+    recover(Some(Impairment::Garbage));
+}
+
+#[test]
+fn history_fetch_rotates_past_a_silent_holder() {
+    // Validator 3 accepts every connection and never answers: each attempt
+    // on it times out on the runtime clock before the other co-holder is
+    // asked.
+    recover(Some(Impairment::Silent));
+}
+
+#[test]
+fn deposit_rejects_values_outside_the_operator_storage_domain() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("domain"), "domain").await;
+
+        let mut native = native();
+        native
+            .balances
+            .iter_mut()
+            .find(|account| account.key == identities()[0].key)
+            .unwrap()
+            .balance = crate::protocol::SQLITE_U64_MAX;
+
+        // The example operator persists monetary values in SQLite INTEGER
+        // columns, so custody beyond that domain is refused before it moves.
+        let oversized = deposit_tx(DepositEvent {
+            id: Sha256::hash(&[b"domain-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: crate::protocol::SQLITE_U64_MAX,
+        });
+        seal_native(&db, 1, &native, std::slice::from_ref(&oversized)).await;
+        assert_eq!(
+            read(
+                &db,
+                &deposit_key(&deployment(), &Sha256::hash(&[b"domain-deposit"]))
+            )
+            .await,
+            None
+        );
+        assert_eq!(status(&db).await.custody, 400);
+        assert_supply(&db, &native, &[]).await;
+
+        // The rejection is effect-free, so the typed reason surfaces only
+        // through the advisory dry-run.
+    });
+}
+
+#[test]
+fn registration_replays_and_fences_deposits() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("fence"), "fence").await;
+        let register = empty_register_tx();
+        seal(&db, 1, std::slice::from_ref(&register)).await;
+        let record = registration(&db).await;
+        assert_eq!(record.epoch, 0);
+
+        // The exact registration replays onto the registration record guard
+        // without consuming anything: the record is untouched, deadlines
+        // included.
+        seal(&db, 2, std::slice::from_ref(&register)).await;
+        assert_eq!(registration(&db).await, record);
+        assert_eq!(
+            native_balance(&db, &native(), &operator_key())
+                .await
+                .unwrap(),
+            1_000_000_000 - 4096
+        );
+        assert_eq!(
+            native_balance(&db, &native(), &native().fee_recipient)
+                .await
+                .unwrap(),
+            4096
+        );
+
+        // A deposit while the epoch is registered is fenced with no effect:
+        // no custody record, no custody moved. The bytes stay retryable.
+        let late_event = DepositEvent {
+            id: Sha256::hash(&[b"fenced-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 1,
+        };
+        let late = deposit_tx(late_event.clone());
+        seal(&db, 3, std::slice::from_ref(&late)).await;
+        assert_eq!(
+            read(&db, &deposit_key(&deployment(), &late_event.id)).await,
+            None
+        );
+        assert_eq!(status(&db).await.custody, 400);
+        assert_supply(&db, &native(), &[]).await;
+    });
+}
+
+#[test]
+fn registration_consumes_exactly_its_withdrawal_openings() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(
+            context.child("registration_openings"),
+            "registration_openings",
+        )
+        .await;
+        let canonical = empty_register_tx();
+        let mut unused = canonical.clone();
+        let SettlementTx::RegisterEpoch(request) = &mut unused else {
+            unreachable!()
+        };
+        request
+            .openings
+            .push(genesis_cache().opening(&wallets()[0].public_key()).unwrap());
+        seal(&db, 1, &[unused]).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+        seal(&db, 2, &[canonical]).await;
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(_))
+        ));
+    });
+}
+
+#[test]
+fn registration_requires_every_queued_withdrawal_and_fresh_extra_openings() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("carriage"), "carriage").await;
+        let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+
+        // One withdrawal queues directly on the chain.
+        let queued = SignedWithdrawal::sign(
+            deployment(),
+            state.root().digest,
+            wallet.public_key().encode(),
+            commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                std::num::NonZeroU64::new(7).unwrap(),
+            ),
+            60,
+            wallet.signer(),
+        );
+        let queue_tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: queued.clone(),
+            opening: state.opening(&account).unwrap(),
+        });
+        seal(&db, 1, std::slice::from_ref(&queue_tx)).await;
+        assert_eq!(
+            read(&db, &withdrawal_key(&deployment(), &account)).await,
+            Some(Record::Withdrawal(queued.clone()))
+        );
+
+        // A registration omitting the queued request is rejected without
+        // consuming the slot.
+        let root = commonware_clearing::bajillion::boundary::DepositBatch::<Key>::empty()
+            .root::<Sha256>()
+            .unwrap();
+        let empty = WithdrawalBatch::empty();
+        let omitting = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root: root,
+
+            withdrawals: empty.clone(),
+            openings: Vec::new(),
+            signature: protocol.sign_chain_registration(0, 400, &root, &empty, 4096),
+        });
+        seal(&db, 2, std::slice::from_ref(&omitting)).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+        assert_eq!(read(&db, &anchor_key(&deployment(), 0)).await, None);
+
+        // Only operator-collected extras carry predecessor openings. The exact
+        // queued request is skipped while preserving canonical withdrawal order.
+        let extras = wallets()
+            .into_iter()
+            .skip(1)
+            .take(2)
+            .map(|extra_wallet| {
+                SignedWithdrawal::sign(
+                    deployment(),
+                    state.root().digest,
+                    wallet.public_key().encode(),
+                    commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                        std::num::NonZeroU64::new(3).unwrap(),
+                    ),
+                    60,
+                    extra_wallet.signer(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let withdrawals = WithdrawalBatch::new(
+            std::iter::once(queued.clone())
+                .chain(extras.iter().cloned())
+                .collect(),
+        )
+        .unwrap();
+        let unopened = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root: root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
+        });
+        seal(&db, 3, std::slice::from_ref(&unopened)).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // The complete ordered list binds one opening to each fresh extra and
+        // none to exact chain-queued requests.
+        let opened = RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root: root,
+
+            withdrawals: withdrawals.clone(),
+            openings: withdrawals
+                .requests()
+                .iter()
+                .filter(|request| request.account() != &account)
+                .map(|request| state.opening(request.account()).unwrap())
+                .collect(),
+            signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
+        };
+        let mut variants = Vec::new();
+        let mut missing = opened.openings.clone();
+        missing.pop();
+        variants.push(missing);
+        let mut duplicate = opened.openings.clone();
+        duplicate[1] = duplicate[0].clone();
+        variants.push(duplicate);
+        let mut reversed = opened.openings.clone();
+        reversed.reverse();
+        variants.push(reversed);
+        let mut extra = opened.openings.clone();
+        extra.push(state.opening(&account).unwrap());
+        variants.push(extra);
+        let mut queued_instead = opened.openings.clone();
+        queued_instead[0] = state.opening(&account).unwrap();
+        variants.push(queued_instead);
+        let mut invalid_extra = opened.openings.clone();
+        let opening = &mut invalid_extra[0];
+        opening.balance = NonZeroU64::new(opening.balance.get() + 1).unwrap();
+        variants.push(invalid_extra);
+        for (index, openings) in variants.into_iter().enumerate() {
+            let mut request = opened.clone();
+            request.openings = openings;
+            seal(
+                &db,
+                4 + index as u64,
+                &[SettlementTx::RegisterEpoch(request)],
+            )
+            .await;
+            assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+            assert_eq!(
+                read(&db, &withdrawal_key(&deployment(), &account)).await,
+                Some(Record::Withdrawal(queued.clone()))
+            );
+        }
+        seal(&db, 10, &[SettlementTx::RegisterEpoch(opened)]).await;
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(_))
+        ));
+    });
+}
+
+#[test]
+fn successor_window_opens_at_admission() {
+    deterministic::Runner::default().start(|context| async move {
+        let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let db = open(context.child("window"), "window").await;
+
+        // Epoch 0 registers at height 1: the chain assigns its admission
+        // deadline at height 11 and its challenge deadline at height 12.
+        let first = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"chain-window-0",
+            11,
+            12,
+        );
+        seal(
+            &db,
+            1,
+            &[first.deposit_tx.clone(), first.register_tx.clone()],
+        )
+        .await;
+
+        // The successor's window has not opened yet: epoch 0 is registered
+        // but not admitted, so a successor registration is rejected on the
+        // epoch sequence with no effect: the live epoch-0 registration is
+        // untouched.
+        let second = close_fixture(
+            native().chain_id(),
+            &protocol,
+            1,
+            first.successor.clone(),
+            b"chain-window-1",
+            14,
+            15,
+        );
+        seal(&db, 2, std::slice::from_ref(&second.register_tx)).await;
+        let live = registration(&db).await;
+        assert_eq!(live.epoch, 0);
+        assert_eq!(live.admitted, None);
+        assert_eq!(read(&db, &anchor_key(&deployment(), 1)).await, None);
+
+        // Epoch 0's admission at height 3 immediately opens the successor's
+        // window: the exact same registration bytes land in the next block,
+        // while epoch 0's challenge window (through height 12) is still open,
+        // and the successor's deadlines anchor at ITS inclusion height
+        // (heights 14 and 15).
+        seal(&db, 3, std::slice::from_ref(&first.admit_tx)).await;
+        seal(
+            &db,
+            4,
+            &[second.deposit_tx.clone(), second.register_tx.clone()],
+        )
+        .await;
+        let registered = registration(&db).await;
+        assert_eq!(registered.epoch, 1);
+        assert_eq!(registered.admission_deadline, 14);
+        assert_eq!(registered.challenge_deadline, 15);
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+
+        // Epoch 1 admits behind epoch 0 while both challenge windows run.
+        seal(&db, 5, std::slice::from_ref(&second.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 1)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+
+        // Both finalize in order at their own real heights, and epoch 0's
+        // finalization leaves the successor's live registration record in
+        // place.
+        for height in 6..=12 {
+            seal(&db, height, &[]).await;
+        }
+        assert_eq!(status(&db).await.last_finalized, None);
+        seal(&db, 13, &[]).await;
+        assert_eq!(status(&db).await.last_finalized, Some(0));
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(record)) if record.epoch == 1
+        ));
+        for height in 14..=16 {
+            seal(&db, height, &[]).await;
+        }
+        let settled = status(&db).await;
+        assert_eq!(settled.last_finalized, Some(1));
+        assert_eq!(settled.state_root, second.result.roots.successor);
+        assert_eq!(settled.custody, 402);
+        assert!(!settled.hard_faulted);
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+    });
+}
+
+#[test]
+fn live_obligations_keep_registration_available() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(context.child("live"), "live").await;
+
+        // A recorded deposit and a queued withdrawal start liveness clocks,
+        // but neither prevents idle blocks from passing nor the later
+        // registration from landing.
+        let deposit_event = DepositEvent {
+            id: Sha256::hash(&[b"live-obligation-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 1,
+        };
+        let deposit = deposit_tx(deposit_event.clone());
+        let state = genesis_cache();
+        let wallet = wallets().remove(1);
+        let withdrawal = SignedWithdrawal::sign(
+            deployment(),
+            state.root().digest,
+            wallet.public_key().encode(),
+            commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                std::num::NonZeroU64::new(7).unwrap(),
+            ),
+            60,
+            wallet.signer(),
+        );
+        let queue_tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: withdrawal.clone(),
+            opening: state.opening(&wallet.public_key()).unwrap(),
+        });
+        seal(&db, 1, &[deposit.clone(), queue_tx.clone()]).await;
+        assert!(matches!(
+            read(&db, &deposit_key(&deployment(), &deposit_event.id)).await,
+            Some(Record::Deposit(_))
+        ));
+        assert!(matches!(
+            read(&db, &withdrawal_key(&deployment(), &wallet.public_key())).await,
+            Some(Record::Withdrawal(_))
+        ));
+        for height in 2..=5 {
+            seal(&db, height, &[]).await;
+        }
+        assert!(!status(&db).await.hard_faulted);
+
+        // The registration must carry the queued withdrawal verbatim, and the
+        // boundary must match the recorded custody.
+        let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
+        let deposits = commonware_clearing::bajillion::boundary::DepositBatch::new(vec![
+            commonware_clearing::bajillion::boundary::DepositRecord::new(
+                identities()[0].key.clone(),
+                1,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let deposits_root = deposits.root::<Sha256>().unwrap();
+        let withdrawals = WithdrawalBatch::new(vec![withdrawal]).unwrap();
+        let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            signature: protocol.sign_chain_registration(0, 400, &deposits_root, &withdrawals, 4096),
+        });
+        seal(&db, 6, std::slice::from_ref(&register)).await;
+        assert_eq!(registration(&db).await.epoch, 0);
+        assert!(!status(&db).await.hard_faulted);
+    });
+}
+
+#[test]
+fn out_of_order_registration_is_rejected_without_consuming_the_slot() {
+    deterministic::Runner::default().start(|context| async move {
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let db = open(context.child("order"), "order").await;
+
+        // A valid-shaped registration for epoch 2 while epoch 0 is expected:
+        // an empty boundary over the liability the chain will hold once
+        // epochs 0 and 1 settle their unit deposits.
+        let root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
+        let withdrawals = WithdrawalBatch::empty();
+        let premature = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 2,
+            predecessor_liability: 402,
+            deposits_root: root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            signature: protocol.sign_chain_registration(2, 402, &root, &withdrawals, 4096),
+        });
+
+        // The premature registration is rejected on the epoch sequence and
+        // consumes nothing: no registration record, no anchor.
+        seal(&db, 1, std::slice::from_ref(&premature)).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+        assert_eq!(read(&db, &anchor_key(&deployment(), 2)).await, None);
+
+        // Epoch 0 registers normally and admits, then epoch 1 follows, so
+        // epoch 2 becomes the next admissible extension of the pipeline.
+        let first = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"chain-order-0",
+            12,
+            13,
+        );
+        seal(
+            &db,
+            2,
+            &[first.deposit_tx.clone(), first.register_tx.clone()],
+        )
+        .await;
+        assert_eq!(registration(&db).await.epoch, 0);
+        seal(&db, 3, std::slice::from_ref(&first.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(_))
+        ));
+        let second = close_fixture(
+            native().chain_id(),
+            &protocol,
+            1,
+            first.successor.clone(),
+            b"chain-order-1",
+            14,
+            15,
+        );
+        seal(
+            &db,
+            4,
+            &[second.deposit_tx.clone(), second.register_tx.clone()],
+        )
+        .await;
+        assert_eq!(registration(&db).await.epoch, 1);
+        seal(&db, 5, std::slice::from_ref(&second.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 1)).await,
+            Some(Record::Admitted(_))
+        ));
+
+        // A rejection writes nothing, so the premature submission recovers
+        // by resubmitting the original bytes with no re-signing: the same
+        // transaction lands once its epoch becomes the next admissible
+        // extension, purely through the domain guards. The deadlines are
+        // assigned at this inclusion height (6 plus the default offset),
+        // not the first one.
+        seal(&db, 6, std::slice::from_ref(&premature)).await;
+        let record = registration(&db).await;
+        assert_eq!(record.epoch, 2);
+        assert_eq!(record.admission_deadline, 16);
+        assert_eq!(record.challenge_deadline, 17);
+        assert!(matches!(
+            read(&db, &anchor_key(&deployment(), 2)).await,
+            Some(Record::Anchor(_))
+        ));
+    });
+}
+
+#[test]
+fn invalid_registration_arms_reject_and_recover() {
+    deterministic::Runner::default().start(|context| async move {
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let db = open(context.child("recover"), "recover").await;
+
+        // The epoch-0 fixture the walk recovers to: registered at height 3,
+        // so its assigned deadlines are heights 13 and 14.
+        let epoch = close_fixture(
+            native().chain_id(),
+            &protocol,
+            0,
+            state.clone(),
+            b"chain-recover-0",
+            13,
+            14,
+        );
+
+        // The registration with one signature byte flipped fails
+        // authentication and consumes nothing.
+        let mut corrupted = match epoch.register_tx.clone() {
+            SettlementTx::RegisterEpoch(register) => register,
+            _ => unreachable!(),
+        };
+        let mut raw = corrupted.signature.encode().to_vec();
+        raw[0] ^= 1;
+        corrupted.signature = Signature::decode(raw).unwrap();
+        let corrupted = SettlementTx::RegisterEpoch(corrupted);
+        seal(&db, 1, std::slice::from_ref(&corrupted)).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // A deposit boundary must match the chain's custody records.
+        let divergent_root = DepositBatch::new(vec![
+            DepositRecord::new(identities()[0].key.clone(), 1).unwrap(),
+        ])
+        .unwrap()
+        .root::<Sha256>()
+        .unwrap();
+        let withdrawals = WithdrawalBatch::empty();
+        let divergent = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: 4096,
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root: divergent_root,
+
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            signature: protocol.sign_chain_registration(
+                0,
+                400,
+                &divergent_root,
+                &withdrawals,
+                4096,
+            ),
+        });
+        seal(&db, 2, std::slice::from_ref(&divergent)).await;
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+
+        // The correct registration lands on the untouched slot, admits, and
+        // finalizes at its real heights.
+        seal(
+            &db,
+            3,
+            &[epoch.deposit_tx.clone(), epoch.register_tx.clone()],
+        )
+        .await;
+        assert_eq!(registration(&db).await.epoch, 0);
+        seal(&db, 4, std::slice::from_ref(&epoch.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(_))
+        ));
+        for height in 5..=14 {
+            seal(&db, height, &[]).await;
+        }
+        assert_eq!(status(&db).await.last_finalized, None);
+        seal(&db, 15, &[]).await;
+        let finalized = status(&db).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert_eq!(finalized.custody, 401);
+        assert!(!finalized.hard_faulted);
+        assert_eq!(read(&db, &registration_key(&deployment())).await, None);
+    });
+}
+
+#[test]
+fn conflicting_registration_is_rejected_while_active() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("conflict"), "conflict").await;
+        seal(
+            &db,
+            1,
+            &[fixture.deposit_tx.clone(), fixture.register_tx.clone()],
+        )
+        .await;
+        let original = registration(&db).await;
+        assert_eq!(original.epoch, 0);
+        assert_eq!(original.admitted, None);
+
+        // A second, different valid-shaped registration for the registered
+        // epoch: an empty boundary instead of the fixture's unit deposit.
+        // The live registration record trips the state-level conflict guard,
+        // with no effect, and the advisory dry-run names the conflict.
+        let conflicting = empty_register_tx();
+
+        seal(&db, 2, std::slice::from_ref(&conflicting)).await;
+
+        // The original registration is untouched and proceeds to admission.
+        assert_eq!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(original.clone()))
+        );
+        seal(&db, 3, std::slice::from_ref(&fixture.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted)) if !admitted.finalized
+        ));
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(record)) if record.admitted.is_some()
+        ));
+    });
+}
+
+#[test]
+fn admit_requires_a_valid_committee_certificate() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("certificate"), "certificate").await;
+        seal(
+            &db,
+            1,
+            &[fixture.deposit_tx.clone(), fixture.register_tx.clone()],
+        )
+        .await;
+        let live = registration(&db).await;
+        assert_eq!(live.admitted, None);
+        let genuine = match &fixture.admit_tx {
+            SettlementTx::Admit(request) => request.clone(),
+            _ => unreachable!(),
+        };
+
+        // A garbage admission consumes nothing: after every forged variant
+        // below, the registration record survives byte-identical, no close
+        // is admitted, and custody is untouched.
+        let unconsumed = |db: &Database<deterministic::Context>, live: &Record| {
+            let db = db.clone();
+            let live = live.clone();
+            async move {
+                assert_eq!(read(&db, &admitted_key(&deployment(), 0)).await, None);
+                assert_eq!(
+                    read(&db, &registration_key(&deployment())).await,
+                    Some(live)
+                );
+                assert_eq!(status(&db).await.custody, 401);
+            }
+        };
+        let live = Record::Registration(live);
+
+        // Tampered aggregate signature bytes: the aggregate is the
+        // encoding's trailing bytes and its point decodes lazily, so the
+        // transaction still decodes and only certificate verification at
+        // execution rejects it.
+        let mut tampered = fixture.admit_tx.encode().to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        let tampered = SettlementTx::decode(Bytes::from(tampered)).unwrap();
+        assert_ne!(tampered, fixture.admit_tx);
+        seal(&db, 2, std::slice::from_ref(&tampered)).await;
+        unconsumed(&db, &live).await;
+
+        // A signer swapped inside the bitmap: the count still reads exactly
+        // quorum, but the aggregate no longer matches the named signers.
+        let signed = genuine.certificate.signers.iter().collect::<Vec<_>>();
+        let absent = (0..4)
+            .map(Participant::from_usize)
+            .find(|candidate| !signed.contains(candidate))
+            .expect("a 3-of-4 certificate leaves one validator unsigned");
+        let mut swapped = genuine.clone();
+        swapped.certificate.signers = Signers::new(
+            4,
+            std::iter::once(absent).chain(signed[1..].iter().copied()),
+        )
+        .unwrap();
+        let swapped = SettlementTx::Admit(swapped);
+        seal(&db, 3, std::slice::from_ref(&swapped)).await;
+        unconsumed(&db, &live).await;
+
+        // Fewer than quorum: assemble_exact cannot even construct one (see
+        // the certificate unit tests), so forge the encoding directly, which
+        // the codec permits. Exact-cardinality verification rejects it.
+        let mut subquorum = genuine.clone();
+        subquorum.certificate.signers = Signers::new(4, signed[..2].iter().copied()).unwrap();
+        let subquorum = SettlementTx::Admit(subquorum);
+        assert_eq!(SettlementTx::decode(subquorum.encode()).unwrap(), subquorum);
+        seal(&db, 4, std::slice::from_ref(&subquorum)).await;
+        unconsumed(&db, &live).await;
+
+        // A bitmap that is not the committee's exact length is refused at
+        // the transaction codec, before execution ever sees it.
+        let mut short = genuine.clone();
+        short.certificate.signers = Signers::new(3, [signed[0]]).unwrap();
+        assert!(matches!(
+            SettlementTx::decode(SettlementTx::Admit(short).encode()),
+            Err(CodecError::Invalid(_, _))
+        ));
+
+        // The untouched registration still accepts the genuine certificate.
+        seal(&db, 5, std::slice::from_ref(&fixture.admit_tx)).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted))
+                if admitted.batch_id == fixture.result.header.batch_id::<Sha256>()
+        ));
+        assert!(matches!(
+            read(&db, &registration_key(&deployment())).await,
+            Some(Record::Registration(record)) if record.admitted.is_some()
+        ));
+    });
+}
+
+#[test]
+fn begin_hard_fault_is_not_a_griefing_lever() {
+    deterministic::Runner::default().start(|context| async move {
+        let fixture = epoch_fixture();
+        let db = open(context.child("no_grief"), "no-grief").await;
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: deployment(),
+        });
+
+        // Live obligations, none expired: the permissionless begin is
+        // rejected with no effect, because the fault it observes is entered
+        // only by block production observing a real expired deadline (the
+        // expired_registration/deposit/withdrawal trio pins those arms) or a
+        // proven challenge (proven_challenge_inside_the_window pins that
+        // one), never by this transaction.
+        seal(
+            &db,
+            1,
+            &[
+                fixture.deposit_tx.clone(),
+                fixture.register_tx.clone(),
+                begin.clone(),
+            ],
+        )
+        .await;
+        assert!(!status(&db).await.hard_faulted);
+        assert_eq!(read(&db, &fault_key(&deployment())).await, None);
+        assert_eq!(registration(&db).await.admitted, None);
+
+        // Against the admitted close it stays inert, and the pipeline
+        // finalizes cleanly at its real heights.
+        seal(&db, 2, std::slice::from_ref(&fixture.admit_tx)).await;
+        seal(&db, 3, std::slice::from_ref(&begin)).await;
+        assert!(!status(&db).await.hard_faulted);
+        assert_eq!(read(&db, &fault_key(&deployment())).await, None);
+        for height in 4..=12 {
+            seal(&db, height, &[]).await;
+        }
+        seal(&db, 13, &[]).await;
+        let finalized = status(&db).await;
+        assert_eq!(finalized.last_finalized, Some(0));
+        assert!(!finalized.hard_faulted);
+    });
+}
+
+// --- full example walkthrough end-to-end test ------------------------------
+
+/// Deployment timing policy for the walkthrough deployment.
+///
+/// The walkthrough runs many client round trips between the registration's
+/// inclusion and the certified admission (the corrective payment retry, the
+/// receiver's anchored intake, and the close worker's dissemination and
+/// admission), and each certified poll advances simulated blocks, so the
+/// compiled grid's ten-block runway is too tight for this arc. The admission
+/// offset is deployment-chosen at genesis and bounded above by the wallet's
+/// withdrawal-deadline horizon (the carried withdrawal must finalize at
+/// offset plus duration plus one blocks after the registration's inclusion).
+/// Both fields deliberately differ from the compiled grid and the generated
+/// genesis defaults: genesis is the timing authority end to end, with
+/// execution assigning the deadlines from this policy. The
+/// walkthrough passing under a two-block duration pins that no chain-facing
+/// path enforces a compiled pair.
+const WALKTHROUGH_TIMING: Timing = Timing {
+    admission_offset: 30,
+    challenge_duration: 2,
+};
+
+/// Custody after epoch 0 settles: four genesis accounts at
+/// [`INITIAL_BALANCE`], plus Alice's deposit of ten, minus her claimed
+/// withdrawal of three. The end state adds [`UNREPORTED_DEPOSIT`].
+const WALKTHROUGH_CUSTODY: u64 = 407;
+
+/// Bob's signed deposit, relayed without notifying the operator and carried
+/// in the epoch 1 close after the follower observes the custody record.
+const UNREPORTED_DEPOSIT: u64 = 9;
+
+/// Query server address for one walkthrough validator.
+fn walkthrough_query(index: usize) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 7_000 + index as u16))
+}
+
+/// Agent-facing RPC address for one walkthrough operator.
+fn walkthrough_operator(op: usize) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 7_100 + op as u16))
+}
+
+/// Four validators under the production BLS threshold committee plus the
+/// production operator stack per configured operator: the SQLite
+/// [`Operator`] with the DA-channel close pipeline behind the production RPC
+/// service loop, and one driver per operator walking a payment arc with real
+/// [`Agent`] wallets whose guarantee-bearing reads all verify through
+/// [`Client`]. One operator runs the full scripted-walkthrough arc, and two
+/// operators run the concurrent-tenancy arc.
+#[derive(Clone)]
+struct Walkthrough {
+    /// Four consensus validators, then one network identity per operator.
+    participants: Vec<ed25519::PublicKey>,
+    /// Consensus threshold shares, aligned with the validators.
+    shares: Vec<Share>,
+    /// The dealt genesis identity every certified read verifies against,
+    /// carrying one deployment per operator.
+    genesis: Genesis,
+    finalized: Vec<Finalized>,
+    /// The combined verdict: Ok once every operator's driver succeeded, the
+    /// first failure otherwise.
+    driver: ClientResult,
+    /// Per-operator driver verdicts, folded into `driver` once all are in.
+    verdicts: Verdicts,
+    /// Alice's deposit id, written by the single-operator driver for the
+    /// end-state property.
+    deposit: Arc<Mutex<Option<Digest>>>,
+    automatic: Option<Arc<Mutex<scripted::Schedule>>>,
+}
+
+impl Walkthrough {
+    /// Number of consensus validators ahead of the operators.
+    const VALIDATORS: usize = 4;
+
+    fn new(operators: usize) -> Self {
+        let mut rng = test_rng();
+        let signers = (0..Self::VALIDATORS as u64)
+            .map(ed25519::PrivateKey::from_seed)
+            .collect::<Vec<_>>();
+        let players = Set::from_iter_dedup(signers.iter().map(|signer| signer.public_key()));
+        let (identity, dealt) = deal::<MinSig, _, N3f1>(&mut rng, SHARING_MODE, players.clone())
+            .expect("the walkthrough deal succeeds");
+        let mut participants = players.iter().cloned().collect::<Vec<_>>();
+        let shares = participants
+            .iter()
+            .map(|participant| {
+                dealt
+                    .get_value(participant)
+                    .cloned()
+                    .expect("the dealer shares every participant")
+            })
+            .collect();
+        let mut configured = (0..operators)
+            .map(|op| {
+                let op = u64::try_from(op).expect("the operator count fits u64");
+                participants.push(ed25519::PrivateKey::from_seed(77_777 + op).public_key());
+                crate::protocol::Deployment::new(
+                    deployment_of(&operator_signer(op).public_key()),
+                    operator_signer(op).public_key(),
+                    operator_ack_key(op),
+                    accounts(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let configured = deterministic::Runner::default().start(move |context| async move {
+            for deployment in &mut configured {
+                deployment.generate(context.child("genesis")).await.unwrap();
+            }
+            configured
+        });
+        let finalized = (0..participants.len())
+            .map(|_| Finalized::default())
+            .collect();
+
+        // Validator directory `index` holds clearing key `index` and serves
+        // evidence at its query address, exactly as setup writes genesis.
+        let validators = (0..Self::VALIDATORS)
+            .map(|index| ValidatorEntry {
+                clearing: compute_public::<MinSig>(&clearing_private(index).unwrap()),
+                query: walkthrough_query(index),
+            })
+            .collect();
+        Self {
+            participants,
+            shares,
+            genesis: Genesis::new(
+                identity,
+                0,
+                WALKTHROUGH_TIMING,
+                native_for(configured),
+                validators,
+            ),
+            finalized,
+            driver: ClientResult::default(),
+            verdicts: Arc::new(Mutex::new(vec![None; operators])),
+            deposit: Arc::default(),
+            automatic: None,
+        }
+    }
+
+    /// The operator index a participant runs, when it is an operator.
+    const fn operator(&self, index: usize) -> Option<usize> {
+        if index >= Self::VALIDATORS {
+            Some(index - Self::VALIDATORS)
+        } else {
+            None
+        }
+    }
+}
+
+/// Records one operator driver's verdict and folds the combined result once
+/// every driver finished: the first failure wins, otherwise Ok.
+fn finish_driver(
+    verdicts: &Verdicts,
+    combined: &ClientResult,
+    op: usize,
+    result: Result<(), String>,
+) {
+    let mut verdicts = verdicts.lock();
+    verdicts[op] = Some(result);
+    if verdicts.iter().all(Option::is_some) {
+        let folded = verdicts
+            .iter()
+            .enumerate()
+            .find_map(|(index, verdict)| {
+                let error = verdict.as_ref()?.as_ref().err()?;
+                Some(format!("operator {index}: {error}"))
+            })
+            .map_or(Ok(()), Err);
+        *combined.lock() = Some(folded);
+    }
+}
+
+impl EngineDefinition for Walkthrough {
+    type PublicKey = ed25519::PublicKey;
+    type Engine = Handle<()>;
+    type State = State<Threshold>;
+
+    fn participants(&self) -> Vec<Self::PublicKey> {
+        self.participants.clone()
+    }
+
+    fn channels(&self) -> Vec<(u64, Quota)> {
+        vec![
+            (0, TEST_QUOTA), // votes
+            (1, TEST_QUOTA), // certificates
+            (2, TEST_QUOTA), // resolver
+            (3, TEST_QUOTA), // backfill
+            (4, TEST_QUOTA), // broadcast
+            (5, TEST_QUOTA), // settlement transactions
+            (6, TEST_QUOTA), // settlement DA
+        ]
+    }
+
+    async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
+        let InitContext {
+            context,
+            index,
+            delayed: _,
+            public_key,
+            oracle,
+            channels,
+            participants: _,
+            monitor,
+        } = ctx;
+
+        let validators = self.participants[..Self::VALIDATORS].to_vec();
+        let operator = self.operator(index);
+        let partition_prefix = operator.map_or_else(
+            || format!("validator-{index}"),
+            |op| format!("operator-{op}"),
+        );
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let db_config = config(&partition_prefix, &context);
+
+        let mut channels = channels.into_iter();
+        let vote_network = channels.next().unwrap();
+        let certificate_network = channels.next().unwrap();
+        let resolver_network = channels.next().unwrap();
+        let backfill_network = channels.next().unwrap();
+        let broadcast_network = channels.next().unwrap();
+        let settlement_tx_network = channels.next().unwrap();
+        let settlement_da_network = channels.next().unwrap();
+
+        // The production certificate scheme: validators sign with their dealt
+        // threshold shares and the operators verify against the committee
+        // identity, so the wallets' [`Client`] verifies real certificates.
+        let scheme = if operator.is_some() {
+            Threshold::verifier(
+                CHAIN_NAMESPACE,
+                self.genesis.players().clone(),
+                self.genesis.public().clone(),
+            )
+        } else {
+            Threshold::signer(
+                CHAIN_NAMESPACE,
+                self.genesis.players().clone(),
+                self.genesis.public().clone(),
+                self.shares[index].clone(),
+            )
+            .expect("the dealt share matches the walkthrough committee")
+        };
+        let provider = ConstantProvider::new(scheme.clone());
+
+        // Each operator registers the secondary arrangement at its own
+        // successor set id, exactly as in the distributed engine. The
+        // simulated network honors only the latest tracked set, so every
+        // registration names the whole operator set as secondaries: the
+        // validators stay primary and no operator is ever dropped.
+        if let Some(op) = operator {
+            let mut manager = oracle.manager();
+            let primary = Set::from_iter_dedup(validators.iter().cloned());
+            let secondary =
+                Set::from_iter_dedup(self.participants.iter().skip(Self::VALIDATORS).cloned());
+            let _ = commonware_p2p::Manager::track(
+                &mut manager,
+                1 + op as u64,
+                commonware_p2p::TrackedPeers::new(primary, secondary),
+            );
+        }
+
+        // Marshal resolver.
+        let resolver = marshal_resolver::init(
+            context.child("marshal_resolver"),
+            marshal_resolver::Config {
+                public_key: public_key.clone(),
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            backfill_network,
+        );
+
+        // Buffered broadcast engine.
+        let (broadcast_engine, buffer) = buffered::Engine::new(
+            context.child("broadcast"),
+            buffered::Config {
+                public_key: public_key.clone(),
+                mailbox_size: NZUsize!(100),
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+                peer_provider: oracle.manager(),
+            },
+        );
+        broadcast_engine.start(broadcast_network);
+
+        // Prunable archives backing marshal.
+        let archive_config = |name: &str| prunable::Config {
+            translator: TwoCap,
+            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
+            key_partition: format!("{partition_prefix}-{name}-key"),
+            key_page_cache: page_cache.clone(),
+            value_partition: format!("{partition_prefix}-{name}-value"),
+            compression: None,
+            codec_config: (),
+            items_per_section: NZU64!(10),
+            key_write_buffer: IO_BUFFER_SIZE,
+            value_write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+        };
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config("finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks =
+            prunable::Archive::init(context.child("finalized_blocks"), archive_config("blocks"))
+                .await
+                .expect("failed to initialize blocks archive");
+
+        // Genesis block shared by every node.
+        let genesis_block = Block::genesis(
+            validators[0].clone(),
+            self.genesis.native.chain_id(),
+            self.genesis.timestamp,
+            initial_sync_target::<deterministic::Context>(),
+        );
+
+        let startup = context.child("stateful_startup");
+        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+
+        // Marshal actor.
+        let (marshal_actor, marshal_mailbox, floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider: provider.clone(),
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
+                    partition_prefix: partition_prefix.clone(),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+
+        // Each operator runs the production follower stack, RPC service
+        // loop, and close pipeline, plus its own driver.
+        if let Some(op) = operator {
+            let config = &self.genesis.native.deployments[op].deployment;
+            let digest = *config.digest();
+            let finalized = self.finalized[index].clone();
+            let application: App<Threshold, ()> = App::new(
+                genesis_block.clone(),
+                WALKTHROUGH_TIMING,
+                self.genesis.native.clone(),
+                finalized.clone(),
+            );
+            let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+                context.child("stateful"),
+                StatefulConfig {
+                    application,
+                    db_config,
+                    provider: (),
+                    marshal: (marshal_mailbox.clone(), floor),
+                    mailbox_size: NZUsize!(100),
+                    plan,
+                    resolvers: NoopResolver,
+                    sync_config: sync_config(),
+                    prune_config: None,
+                },
+            );
+            let reader_mailbox = stateful_mailbox.clone();
+            let reader: StateReader = Arc::new(move |key: StateKey| {
+                let mailbox = reader_mailbox.clone();
+                Box::pin(async move {
+                    let databases = mailbox.subscribe_databases().await;
+                    let guard = databases.read().await;
+                    guard.get(&key).await.expect("state read must succeed")
+                })
+            });
+            // The deposit observer joins the finalized-block reporter chain,
+            // exactly as `node::start` wires it: a deposit-carrying block is
+            // acknowledged only after its applied events are durably staged.
+            let (observer, mut observations) =
+                commonware_actor::mailbox::new(context.child("observations"), NZUsize!(100));
+            let marshal_reporters = MonitorReporter::new(
+                public_key.clone(),
+                monitor,
+                Reporters::from((
+                    stateful_mailbox.clone(),
+                    node::Observer::new(digest, observer),
+                )),
+            );
+            marshal_actor.start(marshal_reporters, buffer, resolver);
+            stateful_actor.start();
+            node::drain(context.child("vote_drain"), vote_network.1);
+            node::drain(context.child("resolver_drain"), resolver_network.1);
+            node::drain(context.child("tx_drain"), settlement_tx_network.1);
+            node::follow(
+                context.child("follow"),
+                provider,
+                marshal_mailbox.clone(),
+                certificate_network.1,
+            );
+
+            // The local chain backend and the close pipeline.
+            let db = stateful_mailbox.subscribe_databases().await;
+            let backend = Node::new(
+                digest,
+                db,
+                finalized.clone(),
+                settlement_tx_network.0,
+                self.genesis.holders().unwrap(),
+            );
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let (certifier, certify_mailbox) = node::Certifier::new(
+                context.child("certifier"),
+                node::Config {
+                    verifier: protocol.verifier(),
+                    chain: backend.clone(),
+                    mailbox_size: NZUsize!(100),
+                },
+            );
+            let handle = certifier.start(settlement_da_network);
+
+            // The production operator over its close pipeline, served through
+            // the production RPC loop. The listener binds before the driver
+            // starts so no wallet call races the service coming up.
+            let pipeline = node::Pipeline::new(certify_mailbox, &validators, *config.digest())
+                .expect("the walkthrough committee maps to network identities");
+            let clearing = operator_signer(u64::try_from(op).expect("the operator index fits u64"));
+            let ack = operator_ack_signer(u64::try_from(op).expect("the operator index fits u64"));
+            let sqlite = Arc::new(Mutex::new(
+                Operator::open_remote(
+                    Path::new(":memory:"),
+                    NZUsize!(1),
+                    pipeline,
+                    config,
+                    clearing,
+                    ack,
+                    4096,
+                )
+                .expect("the walkthrough operator opens"),
+            ));
+            context.child("observer").spawn({
+                let mut chain = backend.clone();
+                let operator = sqlite.clone();
+                move |context| async move {
+                    while let Some(observed) = observations.recv().await {
+                        observe(&context, &mut chain, &operator, observed)
+                            .await
+                            .expect("deposit observation stages durably");
+                    }
+                }
+            });
+            let address = walkthrough_operator(op);
+            let listener = context
+                .bind(address)
+                .await
+                .expect("the operator RPC address binds");
+            if self.automatic.is_some() {
+                crate::service::start_close_driver(
+                    &context,
+                    backend.clone(),
+                    sqlite.clone(),
+                    self.genesis.timing(),
+                );
+            }
+            context.child("operator_rpc").spawn({
+                let chain = backend.clone();
+                let automatic = self.automatic.clone();
+                let genesis = self.genesis.clone();
+                move |context| async move {
+                    if let Some(schedule) = automatic {
+                        scripted::serve(context, listener, sqlite, chain, genesis, schedule).await;
+                    } else {
+                        serve_operator(context, listener, sqlite, chain, genesis.timing()).await;
+                    }
+                }
+            });
+
+            // One driver per operator: the single-operator engine walks the
+            // whole example flow, and the multi-operator engine walks each
+            // deployment's payment arc concurrently.
+            let verdicts = self.verdicts.clone();
+            let combined = self.driver.clone();
+            let genesis = self.genesis.clone();
+            let deposit = self.deposit.clone();
+            let queries: Vec<std::net::SocketAddr> =
+                (0..validators.len()).map(walkthrough_query).collect();
+            let single = self.genesis.native.deployments.len() == 1;
+            let automatic = self.automatic.clone();
+            context.child("driver").spawn(move |context| async move {
+                let result = if let Some(schedule) = automatic {
+                    Box::pin(scripted::run(context, genesis, address, queries, schedule)).await
+                } else if single {
+                    Box::pin(walkthrough(context, genesis, address, queries, deposit)).await
+                } else {
+                    Box::pin(tenant(context, genesis, op, address, queries)).await
+                }
+                .map_err(|error| format!("{error:#}"));
+                finish_driver(&verdicts, &combined, op, result);
+            });
+
+            return (
+                handle,
+                State {
+                    marshal: marshal_mailbox,
+                    reader,
+                    finalized,
+                    client: self.driver.clone(),
+                },
+            );
+        }
+
+        // Validators run the full consensus stack plus the sealer and the
+        // certified query server.
+        let (ingress_actor, ingress_mailbox) = ingress::Actor::new(
+            context.child("ingress"),
+            ingress::Config {
+                mailbox_size: NZUsize!(100),
+                capacity: NZUsize!(1_024),
+                bytes: NZUsize!(64 * 1024 * 1024),
+                lease: 5,
+                retention: 20,
+            },
+            RegistryView::new(self.genesis.native.deployments.clone()),
+        );
+
+        let finalized = self.finalized[index].clone();
+        let application: App<Threshold, ingress::Mailbox> = App::new(
+            genesis_block.clone(),
+            WALKTHROUGH_TIMING,
+            self.genesis.native.clone(),
+            finalized.clone(),
+        );
+        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+            context.child("stateful"),
+            StatefulConfig {
+                application,
+                db_config,
+                provider: ingress_mailbox.clone(),
+                marshal: (marshal_mailbox.clone(), floor),
+                mailbox_size: NZUsize!(100),
+                plan,
+                resolvers: NoopResolver,
+                sync_config: sync_config(),
+                prune_config: None,
+            },
+        );
+        let reader_mailbox = stateful_mailbox.clone();
+        let reader: StateReader = Arc::new(move |key: StateKey| {
+            let mailbox = reader_mailbox.clone();
+            Box::pin(async move {
+                let databases = mailbox.subscribe_databases().await;
+                let guard = databases.read().await;
+                guard.get(&key).await.expect("state read must succeed")
+            })
+        });
+
+        let deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox.clone(),
+            marshal_mailbox.clone(),
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+        let marshal_reporters = MonitorReporter::new(
+            public_key.clone(),
+            monitor,
+            Reporters::from((stateful_mailbox.clone(), ingress_mailbox.clone())),
+        );
+        marshal_actor.start(marshal_reporters, buffer, resolver);
+        stateful_actor.start();
+
+        // The sealing actor on the DA channel, keyed by the validator's
+        // dealt clearing committee key and configured for every operator's
+        // deployment.
+        let db = stateful_mailbox.subscribe_databases().await;
+        ingress_actor.start(
+            settlement_tx_network,
+            db.clone(),
+            finalized.clone(),
+            self.genesis.native.clone(),
+            WALKTHROUGH_TIMING,
+            Set::from_iter_dedup(self.participants[..Self::VALIDATORS].iter().cloned()),
+        );
+        let (sealer, sealer_mailbox) = da::Sealer::new(
+            context.child("sealer"),
+            da::Config {
+                scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
+                    committee().unwrap(),
+                    clearing_private(index).unwrap(),
+                )
+                .unwrap(),
+                registry: RegistryView::new(self.genesis.native.deployments.clone()),
+                db: db.clone(),
+                partition: format!("{partition_prefix}-dealings"),
+                validators: self.genesis.validators.clone(),
+                fetch_timeout: Duration::from_secs(2),
+            },
+        );
+        sealer.start(settlement_da_network);
+
+        // Certified query server over the applied database, serving evidence
+        // from the sealer's retained dealings.
+        query::start(
+            context.child("query"),
+            query::Config {
+                address: walkthrough_query(index),
+                db,
+                finalized: finalized.clone(),
+                marshal: marshal_mailbox.clone(),
+                ingress: ingress_mailbox,
+                sealer: Some(sealer_mailbox),
+            },
+        );
+
+        // Simplex engine.
+        let engine = simplex::Engine::new(
+            context,
+            simplex::Config {
+                scheme,
+                elector: RoundRobin::<Sha256>::default(),
+                blocker: oracle.control(public_key.clone()),
+                automaton: deferred.clone(),
+                relay: deferred,
+                reporter: marshal_mailbox.clone(),
+                strategy: Sequential,
+                partition: format!("{partition_prefix}-simplex"),
+                mailbox_size: NZUsize!(3),
+                epoch: Epoch::zero(),
+                floor: simplex::config::Floor::Genesis(genesis_block.digest()),
+                replay_buffer: IO_BUFFER_SIZE,
+                write_buffer: IO_BUFFER_SIZE,
+                page_cache,
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_millis(500),
+                view_retention: ViewDelta::new(10),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: simplex::SkipBudget::Participants,
+                },
+                fetch_timeout: Duration::from_secs(2),
+                forward: ForwardPolicy::Disabled,
+                track_historical_votes: false,
+            },
+        );
+        let handle = engine.start(vote_network, certificate_network, resolver_network);
+
+        (
+            handle,
+            State {
+                marshal: marshal_mailbox,
+                reader,
+                finalized,
+                client: self.driver.clone(),
+            },
+        )
+    }
+
+    fn start(engine: Self::Engine) -> Handle<()> {
+        engine
+    }
+}
+
+/// Serves wallet RPCs for manually cut epochs. Close polls reconcile certified
+/// admission and finality before reporting the operator's local outcome.
+async fn serve_operator<L: Listener>(
+    context: deterministic::Context,
+    mut listener: L,
+    operator: Arc<Mutex<Operator>>,
+    mut chain: Node<deterministic::Context, TxSender>,
+    timing: Timing,
+) {
+    loop {
+        let Ok((_, mut sink, mut stream)) = listener.accept().await else {
+            context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
+            continue;
+        };
+        let Ok(request) = rpc::recv_request(&mut stream).await else {
+            continue;
+        };
+        let response = match operator_rpc::decode_request(request) {
+            Ok(request) => {
+                let prepared = if matches!(&request, operator_rpc::OperatorRequest::PollClose(_)) {
+                    observe_closes(&context, &mut chain, &operator)
+                        .await
+                        .map(|()| None)
+                } else {
+                    prepare_request(&context, &mut chain, &operator, &request, timing).await
+                };
+                match prepared {
+                    Ok(Some(response)) => response,
+                    Ok(None) => operator_rpc::handle_decoded(&mut operator.lock(), request),
+                    Err(error) => rpc::error_response(format!("{error:#}")),
+                }
+            }
+            Err(error) => rpc::error_response(format!("{error:#}")),
+        };
+        let _ = rpc::send_response(&mut sink, &response).await;
+    }
+}
+
+/// Polls the verified balance until the operator's observed credit shows,
+/// the wallet's only view of a staged deposit.
+async fn observed_balance(
+    context: &deterministic::Context,
+    agent: &mut Agent,
+    chain: &mut Client,
+    operator: std::net::SocketAddr,
+    expected: u64,
+) -> anyhow::Result<()> {
+    let mut last = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        match agent.balance(context, chain, operator).await {
+            Ok(balance) if balance == expected => return Ok(()),
+            outcome => last = Some(outcome.map_err(|error| format!("{error:#}"))),
+        }
+        context.sleep(POLL).await;
+    }
+    anyhow::bail!("the operator never credited the observed deposit (last read: {last:?})")
+}
+
+/// Cuts one epoch through the operator's production close worker and drives
+/// it to certified finalization, returning the finish event.
+async fn walkthrough_close(
+    context: &deterministic::Context,
+    agent: &mut Agent,
+    operator: std::net::SocketAddr,
+) -> anyhow::Result<operator_rpc::CloseFinishedResponse> {
+    let close = agent.start_close(context, operator).await?;
+    loop {
+        match agent.poll_close(context, operator, close.epoch).await? {
+            operator_rpc::PollCloseResponse::NoEvent => {
+                // The close worker is a real OS thread: the real pause lets it
+                // compute between polls, and the short virtual pause lets
+                // consensus seal the admission and its challenge window in
+                // real blocks without racing the block-height deadlines.
+                std::thread::sleep(Duration::from_millis(2));
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            operator_rpc::PollCloseResponse::Finished(finished) => {
+                anyhow::ensure!(
+                    finished.epoch == close.epoch,
+                    "the operator finished another epoch"
+                );
+                return Ok(finished);
+            }
+            operator_rpc::PollCloseResponse::Failed { epoch, error } => anyhow::bail!(
+                "epoch {epoch} close failed: {}",
+                String::from_utf8_lossy(&error)
+            ),
+        }
+    }
+}
+
+/// The entire example flow, driven with the production wallets against the
+/// running deployment: Alice's deposit, her carried fast-lane withdrawal,
+/// her payment to Bob with Bob's anchored intake gating acceptance before
+/// the close is cut, the distributed close of epoch 0 through real blocks to
+/// certified finalization, Alice's claim against the certified release
+/// record, Bob's reconciliation of epoch 0, the successor payment that
+/// registers epoch 1, its close, and the settled end state, every
+/// guarantee-bearing read verified through the light client.
+async fn walkthrough(
+    context: deterministic::Context,
+    genesis: Genesis,
+    operator: std::net::SocketAddr,
+    queries: Vec<std::net::SocketAddr>,
+    deposit_slot: Arc<Mutex<Option<Digest>>>,
+) -> anyhow::Result<()> {
+    let mut alice = Agent::new(0)?;
+    let mut bob = Agent::new(1)?;
+    let mut alice_chain = Client::new(
+        &genesis,
+        deployment(),
+        queries.clone(),
+        context.child("alice_rng"),
+    )?;
+    let mut bob_chain = Client::new(&genesis, deployment(), queries, context.child("bob_rng"))?;
+
+    // Alice deposits in one step: the Deposit transaction completes on the
+    // certified custody record alone. The operator is never told: its
+    // follower observes the finalized record and stages the credit itself,
+    // which the verified balance poll shows.
+    let deposit = alice.deposit(&context, &mut alice_chain, 10).await?;
+    anyhow::ensure!(deposit.amount == 10, "custody was taken for another amount");
+    *deposit_slot.lock() = Some(deposit.id);
+    observed_balance(&context, &mut alice, &mut alice_chain, operator, 110).await?;
+
+    // Alice authorizes the fast-lane withdrawal the operator carries in the
+    // close. It must precede her first payment: the first receipt registers
+    // the epoch on the chain, which permanently commits the boundary the
+    // close must reproduce.
+    let withdrawal = NonZeroU64::new(3).expect("the withdrawal amount is positive");
+    let mut applied = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        match alice
+            .withdraw(
+                &context,
+                &mut alice_chain,
+                operator,
+                WithdrawalAction::Amount(withdrawal),
+            )
+            .await?
+        {
+            WithdrawalOutcome::Applied { epoch, request } => {
+                anyhow::ensure!(epoch == 0, "the withdrawal staged a foreign epoch");
+                anyhow::ensure!(
+                    request.account() == &alice.account(),
+                    "the operator staged another account's withdrawal"
+                );
+                applied = true;
+                break;
+            }
+            WithdrawalOutcome::Signed { .. } => context.sleep(POLL).await,
+        }
+    }
+    anyhow::ensure!(applied, "the operator never carried the signed withdrawal");
+
+    // Alice pays Bob optimistically. The first receipt registers epoch 0 on
+    // the chain (the operator's service loop completes on the certified
+    // registration record and adopts the assigned deadlines), the wallet
+    // re-signs once from the corrective rejection, and the acceptance passes
+    // the certified anchor gate before the verified receipts are held.
+    let payment = match alice
+        .pay(&context, &mut alice_chain, operator, &[(1, 5)])
+        .await?
+    {
+        PaymentOutcome::Accepted(payment) => *payment,
+        PaymentOutcome::CommittedUnheld { epoch, .. } => {
+            anyhow::bail!("epoch {epoch} payment committed without receipts")
+        }
+    };
+    anyhow::ensure!(payment.epoch == 0, "the payment landed in a foreign epoch");
+    anyhow::ensure!(payment.total == 5, "the payment debited another total");
+    anyhow::ensure!(
+        payment.acceptance.entries.len() == 1 && alice.receipt_count() == 1,
+        "the payment's verified receipt is not held durably"
+    );
+    let receipt_id = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
+
+    // Bob's receiver intake fetches, verifies, and settlement-anchors the
+    // pair, and his acceptance gate answers from the durably held evidence
+    // BEFORE the close is cut.
+    bob.intake_incoming(&context, &mut bob_chain, operator)
+        .await?;
+    let held = bob.incoming();
+    anyhow::ensure!(
+        held.total == 5 && held.count == 1,
+        "the receiver ledger does not hold the verified pair"
+    );
+    anyhow::ensure!(
+        bob.has_receipt(&alice.account(), &receipt_id)?,
+        "the receiver holds no evidence for the accepted batch"
+    );
+
+    // The operator cuts and closes epoch 0: dissemination, sealing, votes,
+    // the exact-quorum certificate, the certified admission, and the
+    // challenge window in real blocks to certified finalization.
+    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
+    anyhow::ensure!(finished.rows > 0, "the close settled no account rows");
+    let settled = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        settled.last_finalized == Some(0) && !settled.hard_faulted,
+        "epoch 0 did not certifiably finalize"
+    );
+    anyhow::ensure!(
+        settled.custody == WALKTHROUGH_CUSTODY && settled.claimable == 3,
+        "finalization left unexpected custody {} and claimable {}",
+        settled.custody,
+        settled.claimable
+    );
+
+    // Alice claims the carried withdrawal against the certified release
+    // record at the finalized batch's exact position.
+    let release = alice
+        .claim_withdrawal(&context, &mut alice_chain, operator)
+        .await?;
+    anyhow::ensure!(
+        release.amount == 3 && release.destination == alice.account().encode(),
+        "settlement released another withdrawal"
+    );
+    let claimed = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        claimed.custody == WALKTHROUGH_CUSTODY && claimed.claimable == 0,
+        "the claim left unexpected custody {} and claimable {}",
+        claimed.custody,
+        claimed.claimable
+    );
+
+    // Bob reconciles epoch 0 against the certified admitted roots: every
+    // held credit is evidence-backed, marked RECONCILED durably.
+    let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
+    anyhow::ensure!(
+        summary.reconciled == vec![0]
+            && summary.convicted.is_empty()
+            && summary.protected.is_empty()
+            && summary.unenforceable.is_empty()
+            && summary.withheld.is_empty(),
+        "epoch 0 did not reconcile cleanly: {summary:?}"
+    );
+    anyhow::ensure!(
+        bob.last_reconciled_epoch() == Some(0),
+        "the RECONCILED mark is not durable"
+    );
+
+    // A relayer submits Bob's signed deposit without reporting it to the
+    // operator. The follower observes the finalized record and stages the
+    // credit for the next close.
+    let unreported = DepositEvent {
+        id: Sha256::hash(&[b"walkthrough-unreported-deposit"]),
+        account: bob.account(),
+        amount: UNREPORTED_DEPOSIT,
+    };
+    alice_chain
+        .deliver(
+            &context,
+            &SettlementTx::Deposit(signed_deposit(
+                genesis.native.chain_id(),
+                deployment(),
+                unreported.clone(),
+            )),
+        )
+        .await?;
+    let mut recorded = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if alice_chain
+            .deposit(&context, unreported.id)
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(&unreported)
+        {
+            recorded = true;
+            break;
+        }
+        context.sleep(POLL).await;
+    }
+    anyhow::ensure!(recorded, "the unreported deposit earned no custody record");
+    observed_balance(
+        &context,
+        &mut bob,
+        &mut bob_chain,
+        operator,
+        105 + UNREPORTED_DEPOSIT,
+    )
+    .await?;
+
+    // The successor payment registers epoch 1 at its first receipt, and
+    // Bob's intake holds its pair before that close is cut.
+    let successor = match alice
+        .pay(&context, &mut alice_chain, operator, &[(1, 1)])
+        .await?
+    {
+        PaymentOutcome::Accepted(payment) => *payment,
+        PaymentOutcome::CommittedUnheld { epoch, .. } => {
+            anyhow::bail!("epoch {epoch} successor payment committed without receipts")
+        }
+    };
+    anyhow::ensure!(
+        successor.epoch == 1 && alice.receipt_count() == 2,
+        "the successor payment did not land in epoch 1"
+    );
+    bob.intake_incoming(&context, &mut bob_chain, operator)
+        .await?;
+    let held = bob.incoming();
+    anyhow::ensure!(
+        held.total == 6 && held.count == 2,
+        "the receiver ledger does not hold both verified pairs"
+    );
+
+    // Close epoch 1 inside its admission runway and reconcile it: nothing
+    // registers afterwards, so the deployment idles safely.
+    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
+    let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
+    anyhow::ensure!(
+        summary.reconciled == vec![1],
+        "epoch 1 did not reconcile cleanly: {summary:?}"
+    );
+    anyhow::ensure!(
+        bob.last_reconciled_epoch() == Some(1),
+        "the RECONCILED mark did not advance"
+    );
+
+    // The walkthrough's end state, as certified reads: both epochs
+    // finalized, no live registration, custody and claimable settled, the
+    // custody records still proving both deposits, and no fault.
+    let mut retired = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if alice_chain.registration(&context).await?.is_none() {
+            retired = true;
+            break;
+        }
+        context.sleep(POLL).await;
+    }
+    anyhow::ensure!(retired, "a live registration outlived the walkthrough");
+    let end = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        end.last_finalized == Some(1)
+            && end.custody == WALKTHROUGH_CUSTODY + UNREPORTED_DEPOSIT
+            && end.claimable == 0
+            && !end.hard_faulted,
+        "the end state did not settle: {end:?}"
+    );
+    for epoch in [0, 1] {
+        let admitted = alice_chain
+            .admitted(&context, epoch)
+            .await?
+            .context("a finalized epoch lost its admitted record")?;
+        anyhow::ensure!(admitted.finalized, "epoch {epoch} is not finalized");
+    }
+    anyhow::ensure!(
+        alice_chain.deposit(&context, deposit.id).await? == Some(deposit),
+        "the certified custody record does not prove the deposit"
+    );
+    anyhow::ensure!(
+        alice_chain.deposit(&context, unreported.id).await? == Some(unreported),
+        "the certified custody record does not prove the unreported deposit"
+    );
+    anyhow::ensure!(
+        alice_chain.fault(&context).await?.is_none(),
+        "the walkthrough left a fault record"
+    );
+
+    // Alice's balances: the verified head read against the certified state
+    // root. Initial 100, plus the deposit of 10, minus the withdrawal of 3
+    // and the payments of 5 and 1. Bob holds his credits plus the observed
+    // unreported deposit.
+    let balance = alice.balance(&context, &mut alice_chain, operator).await?;
+    anyhow::ensure!(balance == 101, "Alice's verified balance is {balance}");
+    let balance = bob.balance(&context, &mut bob_chain, operator).await?;
+    anyhow::ensure!(
+        balance == 106 + UNREPORTED_DEPOSIT,
+        "Bob's verified balance is {balance}"
+    );
+    Ok(())
+}
+
+/// One tenant deployment's concurrent arc, driven against its own operator
+/// while the other operators run theirs on the same chain: Alice's deposit
+/// observed into the operator's staging, a payment to Bob whose first
+/// receipt registers epoch 0, Bob's anchored intake and acceptance gate, the
+/// distributed close of epoch 0 through real blocks, the successor payment
+/// and close of epoch 1, Bob's reconciliation of both epochs, and
+/// deployment-scoped certified reads: this deployment's records are absent
+/// under the other deployment's scope.
+async fn tenant(
+    context: deterministic::Context,
+    genesis: Genesis,
+    op: usize,
+    operator: std::net::SocketAddr,
+    queries: Vec<std::net::SocketAddr>,
+) -> anyhow::Result<()> {
+    let config = &genesis.native.deployments[op].deployment;
+    let scoped = *config.digest();
+    let mut alice = Agent::new_for(0, scoped, config.operator.clone())?;
+    let mut bob = Agent::new_for(1, scoped, config.operator.clone())?;
+    let mut alice_chain = Client::new(
+        &genesis,
+        scoped,
+        queries.clone(),
+        context.child("alice_rng"),
+    )?;
+    let mut bob_chain = Client::new(&genesis, scoped, queries.clone(), context.child("bob_rng"))?;
+
+    // Alice's deposit names this deployment, completes on its certified
+    // custody record, and the operator's follower stages only its own
+    // deployment's finalized deposits.
+    let deposit = alice.deposit(&context, &mut alice_chain, 10).await?;
+    anyhow::ensure!(deposit.amount == 10, "custody was taken for another amount");
+    observed_balance(&context, &mut alice, &mut alice_chain, operator, 110).await?;
+
+    // Epoch 0: the payment's first receipt registers this deployment's
+    // epoch on the shared chain, and Bob gates acceptance on his durably
+    // held, settlement-anchored pair before the close is cut.
+    let payment = match alice
+        .pay(&context, &mut alice_chain, operator, &[(1, 5)])
+        .await?
+    {
+        PaymentOutcome::Accepted(payment) => *payment,
+        PaymentOutcome::CommittedUnheld { epoch, .. } => {
+            anyhow::bail!("epoch {epoch} payment committed without receipts")
+        }
+    };
+    anyhow::ensure!(payment.epoch == 0, "the payment landed in a foreign epoch");
+    let receipt_id = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
+    bob.intake_incoming(&context, &mut bob_chain, operator)
+        .await?;
+    anyhow::ensure!(
+        bob.has_receipt(&alice.account(), &receipt_id)?,
+        "the receiver holds no evidence for the accepted batch"
+    );
+    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
+    let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
+    anyhow::ensure!(
+        summary.reconciled == vec![0]
+            && summary.convicted.is_empty()
+            && summary.protected.is_empty(),
+        "epoch 0 did not reconcile cleanly: {summary:?}"
+    );
+
+    // Epoch 1 interleaves with the other tenants' epochs across blocks.
+    let successor = match alice
+        .pay(&context, &mut alice_chain, operator, &[(1, 1)])
+        .await?
+    {
+        PaymentOutcome::Accepted(payment) => *payment,
+        PaymentOutcome::CommittedUnheld { epoch, .. } => {
+            anyhow::bail!("epoch {epoch} successor payment committed without receipts")
+        }
+    };
+    anyhow::ensure!(
+        successor.epoch == 1,
+        "the successor payment did not land in epoch 1"
+    );
+    bob.intake_incoming(&context, &mut bob_chain, operator)
+        .await?;
+    let finished = walkthrough_close(&context, &mut alice, operator).await?;
+    anyhow::ensure!(finished.epoch == 1, "the close finished a foreign epoch");
+    let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
+    anyhow::ensure!(
+        summary.reconciled == vec![1],
+        "epoch 1 did not reconcile cleanly: {summary:?}"
+    );
+
+    // The settled end state, as certified reads scoped to this deployment.
+    let end = alice_chain.status(&context).await?;
+    anyhow::ensure!(
+        end.deployment == scoped,
+        "the certified status names another deployment"
+    );
+    anyhow::ensure!(
+        end.last_finalized == Some(1)
+            && end.custody == 410
+            && end.claimable == 0
+            && !end.hard_faulted,
+        "the end state did not settle: {end:?}"
+    );
+    anyhow::ensure!(
+        alice_chain.deposit(&context, deposit.id).await? == Some(deposit.clone()),
+        "the certified custody record does not prove the deposit"
+    );
+
+    // Certified reads are deployment-scoped: one logical lookup (the epoch-0
+    // anchor) resolves under each deployment's own key to that deployment's
+    // own certified record. The anchor folds the deployment digest, so the
+    // two proven values can never coincide. The other tenant runs
+    // concurrently, so its anchor is polled within the shared effect budget.
+    let other = *genesis.native.deployments[(op + 1) % genesis.native.deployments.len()]
+        .deployment
+        .digest();
+    let mut foreign = Client::new(&genesis, other, queries, context.child("foreign_rng"))?;
+    let mine = alice_chain
+        .anchor(&context, 0)
+        .await?
+        .context("this deployment's epoch-0 anchor is missing")?;
+    let mut theirs = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(Some(anchor)) = foreign.anchor(&context, 0).await {
+            theirs = Some(anchor);
+            break;
+        }
+        context.sleep(POLL).await;
+    }
+    let theirs = theirs.context("the other deployment's epoch-0 anchor never appeared")?;
+    anyhow::ensure!(
+        mine != theirs,
+        "two deployment scopes served one anchor record"
+    );
+    let status = foreign.status(&context).await?;
+    anyhow::ensure!(
+        status.deployment == other,
+        "the foreign-scoped status names the wrong deployment"
+    );
+    Ok(())
+}
+
+/// Exit once the walkthrough driver finished and, on success, every node's
+/// applied state finalized epoch 1, so the end-state property reads a
+/// settled deployment everywhere.
+#[derive(Clone)]
+struct WalkthroughDone {
+    /// Every configured deployment must reach epoch 1 on every node.
+    deployments: Vec<Digest>,
+}
+
+impl ExitCondition<ed25519::PublicKey, State<Threshold>> for WalkthroughDone {
+    fn name(&self) -> &str {
+        "walkthrough done and epoch 1 finalized everywhere"
+    }
+
+    fn requires_polling(&self) -> bool {
+        true
+    }
+
+    fn reached<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State<Threshold>],
+        target_count: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let verdict = states.first().and_then(|state| state.client.lock().clone());
+            match verdict {
+                None => Ok(false),
+
+                // A failed driver exits immediately: ClientSucceeded reports it.
+                Some(Err(_)) => Ok(true),
+                Some(Ok(())) => {
+                    let mut settled = 0;
+                    for state in states {
+                        let mut done = true;
+                        for scoped in &self.deployments {
+                            if !matches!(
+                                (state.reader)(status_key(scoped)).await,
+                                Some(Record::Status(status)) if status.last_finalized == Some(1)
+                            ) {
+                                done = false;
+                                break;
+                            }
+                        }
+                        if done {
+                            settled += 1;
+                        }
+                    }
+                    Ok(settled >= target_count)
+                }
+            }
+        })
+    }
+}
+
+/// Every node settled the walkthrough end state.
+#[derive(Clone)]
+struct WalkthroughSettled {
+    deposit: Arc<Mutex<Option<Digest>>>,
+}
+
+impl Property<ed25519::PublicKey, State<Threshold>> for WalkthroughSettled {
+    fn name(&self) -> &str {
+        "walkthrough settled on every node"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State<Threshold>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(deposit) = *self.deposit.lock() else {
+                return Err("the driver recorded no deposit id".into());
+            };
+            for state in states {
+                let status = match (state.reader)(status_key(&deployment())).await {
+                    Some(Record::Status(status)) => status,
+                    record => return Err(format!("expected a status record, found {record:?}")),
+                };
+                if status.last_finalized != Some(1) {
+                    return Err(format!(
+                        "epoch 1 did not finalize: {:?}",
+                        status.last_finalized
+                    ));
+                }
+                if status.custody != WALKTHROUGH_CUSTODY + UNREPORTED_DEPOSIT
+                    || status.claimable != 0
+                    || status.hard_faulted
+                {
+                    return Err(format!(
+                        "unexpected settled balances: custody {} claimable {} faulted {}",
+                        status.custody, status.claimable, status.hard_faulted
+                    ));
+                }
+                if (state.reader)(registration_key(&deployment()))
+                    .await
+                    .is_some()
+                {
+                    return Err("a live registration survived the walkthrough".into());
+                }
+                if !matches!(
+                    (state.reader)(deposit_key(&deployment(), &deposit)).await,
+                    Some(Record::Deposit(_))
+                ) {
+                    return Err("the settled deposit record is missing".into());
+                }
+                if (state.reader)(fault_key(&deployment())).await.is_some() {
+                    return Err("the walkthrough left a fault record".into());
+                }
+                for epoch in [0, 1] {
+                    if !matches!(
+                        (state.reader)(admitted_key(&deployment(), epoch)).await,
+                        Some(Record::Admitted(admitted)) if admitted.finalized
+                    ) {
+                        return Err(format!("epoch {epoch} is not admitted and finalized"));
+                    }
+                }
+                if state.finalized.latest().is_none() {
+                    return Err("the finalized index is empty".into());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Every node settled every tenant deployment's end state, each scoped to
+/// its own records: two epochs finalized, custody holding the deposit, no
+/// live registration, and no fault.
+#[derive(Clone)]
+struct TenantsSettled {
+    deployments: Vec<Digest>,
+}
+
+impl Property<ed25519::PublicKey, State<Threshold>> for TenantsSettled {
+    fn name(&self) -> &str {
+        "every tenant deployment settled on every node"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State<Threshold>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                for scoped in &self.deployments {
+                    let status = match (state.reader)(status_key(scoped)).await {
+                        Some(Record::Status(status)) => status,
+                        record => {
+                            return Err(format!("expected a status record, found {record:?}"));
+                        }
+                    };
+                    if status.deployment != *scoped {
+                        return Err("a status record names another deployment".into());
+                    }
+                    if status.last_finalized != Some(1) {
+                        return Err(format!(
+                            "epoch 1 did not finalize: {:?}",
+                            status.last_finalized
+                        ));
+                    }
+                    if status.custody != 410 || status.claimable != 0 || status.hard_faulted {
+                        return Err(format!(
+                            "unexpected settled balances: custody {} claimable {} faulted {}",
+                            status.custody, status.claimable, status.hard_faulted
+                        ));
+                    }
+                    if (state.reader)(registration_key(scoped)).await.is_some() {
+                        return Err("a live registration survived the tenant arc".into());
+                    }
+                    if (state.reader)(fault_key(scoped)).await.is_some() {
+                        return Err("the tenant arc left a fault record".into());
+                    }
+                    for epoch in [0, 1] {
+                        if !matches!(
+                            (state.reader)(admitted_key(scoped, epoch)).await,
+                            Some(Record::Admitted(admitted)) if admitted.finalized
+                        ) {
+                            return Err(format!("epoch {epoch} is not admitted and finalized"));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[test]
+fn example_flow_end_to_end_onchain() {
+    let engine = Walkthrough::new(1);
+    let deposit = engine.deposit.clone();
+    PlanBuilder::new(engine)
+        .seed(0)
+        .timeout(Duration::from_secs(120))
+        .exit_condition(WalkthroughDone {
+            deployments: vec![deployment()],
+        })
+        .property(ClientSucceeded)
+        .property(WalkthroughSettled { deposit })
+        .property(Monotonic)
+        .run()
+        .unwrap();
+}
+
+/// THE concurrent-tenancy pin: two operators drive interleaved epochs on one
+/// chain (registrations, closes, certifications, and finalizations
+/// interleaving across blocks), agents on each deployment complete payments
+/// and receiver gates against their own operator, and every certified read
+/// is deployment-scoped.
+#[test]
+fn two_deployments_run_concurrently() {
+    let engine = Walkthrough::new(2);
+    let scoped = engine
+        .genesis
+        .native
+        .deployments
+        .iter()
+        .map(|configured| *configured.deployment.digest())
+        .collect::<Vec<_>>();
+    PlanBuilder::new(engine)
+        .seed(0)
+        .timeout(Duration::from_secs(120))
+        .exit_condition(WalkthroughDone {
+            deployments: scoped.clone(),
+        })
+        .property(ClientSucceeded)
+        .property(TenantsSettled {
+            deployments: scoped,
+        })
+        .property(Monotonic)
+        .run()
+        .unwrap();
+}

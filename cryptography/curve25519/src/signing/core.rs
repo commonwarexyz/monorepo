@@ -192,12 +192,10 @@ where
         return Some(Vec::new());
     }
 
+    let strategy = strategy.manual();
     const PARTITIONS_PER_WORKER: usize = 4;
     const MIN_UNITS_PER_PARTITION: usize = 8;
-    let target_partitions = strategy
-        .manual()
-        .parallelism()
-        .saturating_mul(PARTITIONS_PER_WORKER);
+    let target_partitions = strategy.parallelism().saturating_mul(PARTITIONS_PER_WORKER);
     let max_partitions = (units / MIN_UNITS_PER_PARTITION).max(1);
     let partition_count = target_partitions.min(max_partitions).min(units);
     let partition_len = units / partition_count;
@@ -278,10 +276,6 @@ fn verify_batch_inner<B: Backend>(
         return false;
     }
 
-    // Every phase has a fixed work shape derived from the available parallelism. Disable adaptive
-    // policy decisions and let the supplied strategy execute that shape directly.
-    let strategy = &strategy.manual();
-
     // Sorting and grouping use compact indices.
     if u32::try_from(n).is_err() {
         return false;
@@ -319,7 +313,7 @@ fn verify_batch_inner<B: Backend>(
     // The MSM window width is a per-batch choice (see [`msm::width_for`]) and every term must
     // be recoded at the same width, so it is fixed here, before any term is built: the term
     // count is every `R`, every distinct `A`, and the basepoint.
-    let width = msm::width_for(n + groups.len() + 1, strategy.parallelism());
+    let width = msm::width_for(n + groups.len() + 1, strategy.manual().parallelism());
     let resolve_r = |i: usize| {
         let (_, sig, _) = items[order[i].1 as usize];
         (sig.r, zr(i))

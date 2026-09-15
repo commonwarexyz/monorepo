@@ -110,6 +110,7 @@ pub mod test {
         mmb, mmr,
         qmdb::{
             Error,
+            any::test::colliding_digest,
             current::{
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
@@ -137,6 +138,57 @@ pub mod test {
     ) -> CurrentTest<F> {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
         CurrentTest::<F>::init(context, cfg).await.unwrap()
+    }
+
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_active_keys_collision_recovery() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "active-keys".to_string();
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition.clone()).await;
+            let keys = core::array::from_fn::<_, 3, _>(|i| colliding_digest(7, i as u64));
+            let value = Sha256::fill(1);
+            let replacement = Sha256::fill(2);
+            let mut values = [None; 3];
+            assert_eq!(db.active_keys(), 0);
+            assert_eq!(db.any.active_keys(), 0);
+
+            for (index, next, count) in [
+                (0, Some(value), 1),
+                (1, Some(value), 2),
+                (2, Some(value), 3),
+                (0, Some(replacement), 3),
+                (1, None, 2),
+                (1, None, 2),
+                (1, Some(replacement), 3),
+                (0, None, 2),
+                (1, None, 1),
+                (2, None, 0),
+            ] {
+                let batch = db
+                    .new_batch()
+                    .write(keys[index], next)
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                values[index] = next;
+                assert_eq!(db.active_keys(), count);
+                assert_eq!(db.any.active_keys(), count);
+
+                db = db.commit().await.unwrap();
+                let root = db.root();
+                drop(db);
+                db = open_db::<mmr::Family>(context.child("reopen"), partition.clone()).await;
+                assert_eq!(db.root(), root);
+                assert_eq!(db.active_keys(), count);
+                assert_eq!(db.any.active_keys(), count);
+                assert_eq!(db.is_empty(), count == 0);
+                for (key, expected) in keys.iter().zip(values) {
+                    assert_eq!(db.get(key).await.unwrap(), expected);
+                }
+            }
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("DEBUG")]

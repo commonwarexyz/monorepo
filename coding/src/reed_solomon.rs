@@ -382,7 +382,7 @@ fn encode<H: Hasher, S: Strategy>(
     for hash in &shard_hashes {
         builder.add(hash);
     }
-    let tree = builder.build();
+    let tree = builder.build(strategy);
     let root = tree.root();
 
     // Generate chunks with zero-copy shard views
@@ -769,7 +769,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         .for_each(|digest| {
             builder.add(&digest);
         });
-    let tree = builder.build();
+    let tree = builder.build(strategy);
     if tree.root() != *root {
         return Err(Error::Inconsistent);
     }
@@ -1236,7 +1236,7 @@ mod tests {
         for shard in shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
         let chunks = shards
             .iter()
@@ -1809,7 +1809,7 @@ mod tests {
         for shard in &shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         let pieces = [9u16, 8, 10, 11, 12, 13, 14, 15]
@@ -1942,7 +1942,7 @@ mod tests {
         for shard in &malicious_shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let malicious_tree = builder.build();
+        let malicious_tree = builder.build(&Sequential);
         let malicious_root = malicious_tree.root();
 
         // Generate chunks for min pieces, including the tampered recovery
@@ -1997,7 +1997,7 @@ mod tests {
         for shard in &shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let non_canonical_root = tree.root();
 
         let mut pieces = Vec::with_capacity(k);
@@ -2053,7 +2053,7 @@ mod tests {
         for shard in &oversized_shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let oversized_tree = builder.build();
+        let oversized_tree = builder.build(&Sequential);
         let oversized_root = oversized_tree.root();
 
         let (canonical_root, _) =
@@ -2092,7 +2092,7 @@ mod tests {
         for shard in &shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         let pieces = (0u16..=3u16)
@@ -2126,7 +2126,7 @@ mod tests {
         for shard in &shards {
             builder.add(&Sha256::hash(&[shard]));
         }
-        let tree = builder.build();
+        let tree = builder.build(&Sequential);
         let root = tree.root();
 
         let pieces = [0u16, 1u16, 3u16, 4u16]
