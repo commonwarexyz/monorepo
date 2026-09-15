@@ -872,7 +872,7 @@ pub trait SnapshotBuild<F: Family>:
 {
     /// The concurrency configuration the build consumes. Index types that always build serially
     /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + 'static;
+    type Concurrency: Copy + Send + Sync + 'static;
 
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
@@ -880,10 +880,7 @@ pub trait SnapshotBuild<F: Family>:
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
     /// build's `(location -> key)` cache (`None` disables it).
-    // In-crate callers await this future at concrete index types, so the flexibility an explicit
-    // `Send` bound on the returned future would add is unused.
-    #[allow(async_fn_in_trait)]
-    async fn build_snapshot<E, C>(
+    fn build_snapshot<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -891,12 +888,14 @@ pub trait SnapshotBuild<F: Family>:
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        async move {
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        }
     }
 }
 

@@ -10,7 +10,8 @@ use crate::{
         warm_read_loop,
     },
 };
-use commonware_runtime::{Blob as _, Storage as _, tokio::Context};
+use cfg_if::cfg_if;
+use commonware_runtime::{Blob as _, Storage as _};
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
@@ -21,6 +22,14 @@ use std::{
     },
     time::Instant,
 };
+
+cfg_if! {
+    if #[cfg(all(target_os = "linux", feature = "iouring"))] {
+        use commonware_runtime::iouring::Context;
+    } else {
+        use commonware_runtime::tokio::Context;
+    }
+}
 
 /// Storage partition used for all benchmark blobs.
 const PARTITION: &str = "storage-bench";

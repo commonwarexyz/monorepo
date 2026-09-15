@@ -1638,68 +1638,27 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 }
 
-impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
-    type Item = A;
-
-    fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
-    }
-
-    async fn read(&self, pos: u64) -> Result<A, Error> {
-        self.reader().read(pos).await
-    }
-
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        self.reader().read_many(positions).await
-    }
-
-    fn try_read_sync(&self, pos: u64) -> Option<A> {
-        self.reader().try_read_sync(pos)
-    }
-
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
-        self.reader().probe_items(positions)
-    }
-
-    async fn replay_range(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        let blobs = self.blobs.reader();
-        replay_stream(
-            &blobs,
-            self.bounds.clone(),
-            self.items_per_blob,
-            range,
-            buffer,
-            read_options,
-        )
-    }
-}
-
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        super::Contiguous::bounds(&*self.0)
+        self.0.bounds.clone()
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
-        super::Contiguous::read(&*self.0, pos).await
+        self.0.reader().read(pos).await
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        super::Contiguous::read_many(&*self.0, positions).await
+        self.0.reader().read_many(positions).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
-        super::Contiguous::try_read_sync(&*self.0, pos)
+        self.0.reader().try_read_sync(pos)
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<A>> {
-        super::Contiguous::try_read_many_sync(&*self.0, positions)
+        self.0.reader().probe_items(positions)
     }
 
     async fn replay_range(
@@ -1708,7 +1667,15 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        super::Contiguous::replay_range(&*self.0, range, buffer, read_options).await
+        let blobs = self.0.blobs.reader();
+        replay_stream(
+            &blobs,
+            self.0.bounds.clone(),
+            self.0.items_per_blob,
+            range,
+            buffer,
+            read_options,
+        )
     }
 }
 
@@ -1903,7 +1870,7 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
-            assert_eq!(journal.bounds(), 0..4);
+            assert_eq!(journal.bounds, 0..4);
             journal.destroy().await.unwrap();
         });
     }
@@ -1978,7 +1945,7 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
-            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.bounds, 0..2);
             journal.destroy().await.unwrap();
         });
     }
@@ -2017,7 +1984,7 @@ mod tests {
             // The failed advance never compromised the data: a reopen recovers it all and a
             // fresh sync succeeds.
             let journal = Box::new(make(faults).await.unwrap());
-            assert_eq!(journal.bounds(), 0..4);
+            assert_eq!(journal.bounds, 0..4);
             let journal = journal.sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
             journal.destroy().await.unwrap();
@@ -2100,7 +2067,7 @@ mod tests {
 
             let journal = make(faults).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
-            assert_eq!(journal.bounds(), 0..4);
+            assert_eq!(journal.bounds, 0..4);
             journal.destroy().await.unwrap();
         });
     }
