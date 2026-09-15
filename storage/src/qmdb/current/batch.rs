@@ -31,7 +31,10 @@ use ahash::AHashMap;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap::{self, Readable as _};
+use commonware_utils::{
+    Widen,
+    bitmap::{self, Readable as _},
+};
 use core::ops::Range;
 use std::sync::Arc;
 
@@ -80,9 +83,11 @@ impl<const N: usize> ChunkOverlay<N> {
     /// `capacity` estimates the number of distinct chunks the overlay will modify,
     /// including appended chunks.
     fn new<B: bitmap::Readable<N>>(base: &B, len: u64, capacity: usize) -> Self {
-        let parent = Dimensions::of(base);
         // Every dirty chunk is unpruned and below len, including the final partial chunk.
-        let max_chunks = (len.div_ceil(Self::CHUNK_BITS) - parent.pruned_chunks as u64) as usize;
+        let parent = Dimensions::of(base);
+        let max_chunks =
+            usize::try_from(len.div_ceil(Self::CHUNK_BITS) - Widen::widen(parent.pruned_chunks))
+                .unwrap_or(usize::MAX);
         Self {
             chunks: AHashMap::with_capacity(capacity.min(max_chunks)),
             len,
