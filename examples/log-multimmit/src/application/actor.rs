@@ -131,7 +131,7 @@ struct ProposalStart {
     ordered: bool,
 }
 
-/// Tracks signed local proposals to consensus finality and to ordered delivery.
+/// Tracks submitted local batches to consensus finality and to ordered delivery.
 ///
 /// Finality is the pool fact that places the block under a directly finalized leader. Ordering
 /// is the block's delivery in the total order. Marshal can deliver L-QC ancestry before the
@@ -165,7 +165,7 @@ impl ProposalLatency {
             benchmark_quorum: None,
             starts: context.counter(
                 "proposal_started",
-                "locally signed proposals tracked for latency",
+                "local input batches tracked for latency",
             ),
             outstanding: context.gauge(
                 "proposal_outstanding",
@@ -193,17 +193,17 @@ impl ProposalLatency {
             ),
             finality: context.histogram(
                 "proposal_finalization_latency",
-                "time from signed local proposal to first local consensus finality",
+                "time from batch submission to first local consensus finality",
                 WAN_LATENCY,
             ),
             ordering: context.histogram(
                 "proposal_ordering_latency",
-                "time from signed local proposal to delivery in the total order",
+                "time from batch submission to delivery in the total order",
                 WAN_LATENCY,
             ),
             input_finality: context.histogram(
                 "input_finalization_latency",
-                "time from the last input byte arriving to protocol finalization, including input queueing",
+                "time from scheduled batch submission to protocol finalization, including input queueing",
                 WAN_LATENCY,
             ),
             dropped: context.counter(
@@ -219,7 +219,7 @@ impl ProposalLatency {
 
     /// Enables unsampled INFO events and first-finality classification for a benchmark run.
     ///
-    /// Supply the consensus quorum before cloning this tracker. Samples cover locally signed
+    /// Supply the consensus quorum before cloning this tracker. Samples cover locally submitted
     /// blocks while retained in memory; restart, eviction, and missing staged ancestry can
     /// prevent observing finality. Logger or process loss must be checked against metric counts.
     pub const fn enable_benchmark(mut self, quorum: NonZeroUsize) -> Self {
@@ -252,7 +252,7 @@ impl ProposalLatency {
         };
         info!(
             benchmark_event = event,
-            latency_start = "signed_proposal",
+            latency_start = "batch_submission",
             reason,
             chain = start.block.chain().get(),
             height = start.block.height().get(),
@@ -311,7 +311,7 @@ impl ProposalLatency {
             finalized: false,
             ordered: false,
         };
-        self.sample(&start, "start", "signed", started_at, None);
+        self.sample(&start, "start", "submitted", started_at, None);
         started.push_back(start);
     }
 
@@ -323,8 +323,8 @@ impl ProposalLatency {
         view: View,
         staged: &Staged,
     ) {
-        // The voter reports starts and finality serially. Ordering removes only finalized
-        // starts, so pending height bounds remain valid after releasing the starts lock.
+        // Ordering removes only finalized starts. New submissions cannot be covered by
+        // this fact until their bodies have been staged and proposed.
         let oldest = {
             let started = self.started.lock();
             let mut oldest = BTreeMap::<ChainId, Height>::new();
@@ -505,7 +505,7 @@ impl ApplicationMetrics {
             ),
             input_queue: context.histogram(
                 "input_queue_latency",
-                "time from the last input byte arriving to the start of block construction",
+                "time from scheduled batch submission to the start of block construction",
                 WAN_LATENCY,
             ),
         }
@@ -608,6 +608,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let staged = self.staged.clone();
         let input_queue = self.metrics.input_queue.clone();
         let workload = self.workload.clone();
+        let proposal_latency = self.metrics.proposal_latency.clone();
         let input_ready_at = workload.as_ref().map(|workload| {
             workload
                 .lock()
@@ -651,6 +652,11 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 let body_digest = block.header().body_digest();
                 let block_digest = block.digest();
                 let reference = block.reference();
+                proposal_latency.start(
+                    reference,
+                    input_ready_at.unwrap_or(construction_at),
+                    input_ready_at,
+                );
                 let custody = select! {
                     _ = sender.closed() => return,
                     result = marshal.stage_block(Arc::clone(&block)) => result,
@@ -789,19 +795,6 @@ impl<E: Clock + Spawner> Reporter for Application<E> {
     type Activity = Activity<MinPk, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Activity::TransactionProposed { block } = &activity {
-            if Some(block.chain()) == self.producer_chain {
-                let now = self.context.current();
-                let input_ready_at = self
-                    .workload
-                    .as_ref()
-                    .and_then(|workload| workload.lock().ready_at(block.height().get(), now));
-                self.metrics
-                    .proposal_latency
-                    .start(*block, now, input_ready_at);
-            }
-            return Feedback::Ok;
-        }
         if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
             &activity
         {
@@ -976,8 +969,8 @@ mod tests {
             assert_eq!(events.len(), 7);
             let first = &events[0]["fields"];
             assert_eq!(first["benchmark_event"].as_str(), Some("start"));
-            assert_eq!(first["latency_start"].as_str(), Some("signed_proposal"));
-            assert_eq!(first["reason"].as_str(), Some("signed"));
+            assert_eq!(first["latency_start"].as_str(), Some("batch_submission"));
+            assert_eq!(first["reason"].as_str(), Some("submitted"));
             assert_eq!(first["started_at_us"].as_u64(), Some(10_000_000));
             assert_eq!(first["input_ready_at_us"].as_u64(), Some(8_000_000));
             assert_eq!(first["elapsed_us"].as_u64(), Some(0));
@@ -1183,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn input_finality_includes_queueing_and_records_finality_once() {
+    fn batch_finality_includes_queueing_and_records_finality_once() {
         deterministic::Runner::default().start(|context| async move {
             let latency = ProposalLatency::new(&context, NZUsize!(2));
             let staged = Staged::default();
@@ -1197,11 +1190,14 @@ mod tests {
             let started = SystemTime::now();
             let input = started - Duration::from_secs(1);
             latency.finalize(&[block(1)], &[Height::new(100)], 3, View::new(1), &staged);
+            latency.start(block(2), input, Some(input));
             latency.start(block(2), started, Some(input));
+            assert_eq!(latency.started.lock()[0].started_at, input);
             latency.finalize(&[block(2)], &[Height::new(100)], 3, View::new(1), &staged);
             latency.finalize(&[block(2)], &[Height::new(100)], 3, View::new(1), &staged);
             let encoded = context.encode();
             assert!(encoded.contains("input_finalization_latency_count 1\n"));
+            assert!(encoded.contains("proposal_finalization_latency_count 1\n"));
             let sum = |name: &str| {
                 encoded
                     .lines()
@@ -1211,11 +1207,11 @@ mod tests {
                     .parse::<f64>()
                     .unwrap()
             };
+            assert!(sum("proposal_finalization_latency_sum ") >= 1.0);
             assert!(
                 (sum("input_finalization_latency_sum ")
-                    - sum("proposal_finalization_latency_sum ")
-                    - 1.0)
-                    .abs()
+                    - sum("proposal_finalization_latency_sum "))
+                .abs()
                     < 1e-9
             );
         });

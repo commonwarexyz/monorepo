@@ -25,19 +25,21 @@ Press the arrows to scroll the total order and `esc` to quit.
 
 ## Proposal latency
 
-`application_proposal_finalization_latency` starts when the local machine accepts a completed
-transaction-block signature, before persisting its publication. It ends at the first local
-consensus finality observation covering that block, after resolving its retained ancestry.
-Late votes can advance that finality; each block contributes once. Ordered delivery is a
+`application_proposal_finalization_latency` measures batch submission to first local consensus
+finality, including queueing, body construction, custody, and signing. The offered-load generator
+submits a whole block's payload at each fixed arrival deadline. A delayed builder retains that
+submission timestamp. Without an offered-load schedule, submission occurs immediately before
+body construction.
+
+Finality is the first local consensus observation covering the block, after resolving retained
+ancestry. Late votes can advance finality; each block contributes once. Ordered delivery has a
 separate metric because marshal also waits for ordering proofs and materializes the output.
 
-These boundaries approximate Bluebottle's `transaction_committed_latency`: after local proposal
-construction/signing, through local commit processing, without application execution. Our payload
-custody precedes signing and is excluded; Bluebottle inserts its full block into storage after
-starting its timer. Both exclude input batching. The input-finality metric additionally includes
-the wait from availability of the last input byte. Raw benchmark events identify this start as
-`latency_start="signed_proposal"`; construction-start recordings have a different boundary.
-Samples remain per-block observations, not averages of per-node percentile gauges.
+This start boundary corresponds to BlueBottle's `latency_s`, which timestamps transactions in
+its generator before they enter consensus. Every transaction equivalent in our fixed-size batch
+shares its submission timestamp. Raw benchmark events use `latency_start="batch_submission"`;
+`started_at_us` identifies the submission cohort. Samples are per-block observations. Pending
+or evicted samples must be reported when computing completion rates and latency percentiles.
 
 # Key Material
 

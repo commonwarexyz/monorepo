@@ -114,12 +114,13 @@ enum Arrivals {
     Scheduled(Schedule),
 }
 
-/// A synthetic byte stream partitioned into fixed-size producer blocks.
+/// Fixed-size input batches submitted at deadlines derived from a byte arrival schedule.
 ///
 /// Heights identify input batches, so retrying a proposal does not consume new input.
 /// The first requested height anchors byte position zero, including after a restart.
 /// Constant load starts at that request; finite load uses its absolute start time.
-/// Backpressure leaves arrivals unchanged; no allocated transaction queue is needed.
+/// Each complete batch is submitted atomically at its deadline. Backpressure leaves
+/// submissions unchanged; no allocated transaction queue is needed.
 pub(super) struct Workload {
     arrivals: Arrivals,
     body_size: usize,
