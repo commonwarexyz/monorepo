@@ -12,11 +12,21 @@ use std::{future::Future, num::NonZeroU64};
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
     type JournalConfig;
+    /// Strategy for Merkle operations.
+    type Strategy: Strategy;
+
+    /// Configuration of the persisted operation tree, if this database stores one.
+    fn merkle_config(&self) -> Option<full::Config<Self::Strategy>>;
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
 impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T, J, S> {
     type JournalConfig = J;
+    type Strategy = S;
+
+    fn merkle_config(&self) -> Option<full::Config<S>> {
+        Some(self.merkle_config.clone())
+    }
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.journal_config.clone()
@@ -25,6 +35,11 @@ impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T
 
 impl<T: Translator, C: Clone, S: Strategy> Config for crate::qmdb::immutable::Config<T, C, S> {
     type JournalConfig = C;
+    type Strategy = S;
+
+    fn merkle_config(&self) -> Option<full::Config<S>> {
+        Some(self.merkle_config.clone())
+    }
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.log.clone()
@@ -33,6 +48,11 @@ impl<T: Translator, C: Clone, S: Strategy> Config for crate::qmdb::immutable::Co
 
 impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
     type JournalConfig = J;
+    type Strategy = S;
+
+    fn merkle_config(&self) -> Option<full::Config<S>> {
+        Some(self.merkle.clone())
+    }
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.log.clone()
@@ -41,6 +61,11 @@ impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
 
 impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::compact::Config<C, S> {
     type JournalConfig = ();
+    type Strategy = S;
+
+    fn merkle_config(&self) -> Option<full::Config<S>> {
+        None
+    }
 
     fn journal_config(&self) -> Self::JournalConfig {}
 }
@@ -51,9 +76,7 @@ pub trait Database: Sized + Send {
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
-    type Context: commonware_runtime::Storage
-        + commonware_runtime::Clock
-        + commonware_runtime::Metrics;
+    type Context: Context;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.

@@ -1,11 +1,11 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{Family, Location, hasher::Standard as StandardHasher},
+    merkle::{Family, Location, Position, full, hasher::Standard as StandardHasher},
     qmdb::{
         self,
         sync::{
             Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
-            database::Config as _,
+            database::Config as DatabaseConfig,
             error::EngineError,
             requests::{Id as RequestId, Requests},
             source::{FeedbackTx, Request, Response, Source},
@@ -27,6 +27,20 @@ use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64, sync::Arc};
 /// Type alias for sync engine errors
 type Error<DB, S> =
     qmdb::sync::Error<<DB as Database>::Family, <S as Source>::Error, <DB as Database>::Digest>;
+
+/// Operations and their authenticated leaf hashes, in matching location order.
+struct Fetched<DB: Database> {
+    operations: Vec<DB::Op>,
+    leaves: Vec<DB::Digest>,
+}
+
+/// The persisted operation tree used by a database's sync configuration.
+type Merkle<DB> = full::Merkle<
+    <DB as Database>::Family,
+    <DB as Database>::Context,
+    <DB as Database>::Digest,
+    <<DB as Database>::Config as DatabaseConfig>::Strategy,
+>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -154,8 +168,11 @@ where
     ///
     /// # Invariant
     ///
-    /// The vectors in the map are non-empty.
-    fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
+    /// The operations in each entry are non-empty.
+    fetched_operations: BTreeMap<Location<DB::Family>, Fetched<DB>>,
+
+    /// Persisted nodes for applied operations. Opened once the boundary pins are authenticated.
+    merkle: Option<Merkle<DB>>,
 
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
@@ -280,6 +297,7 @@ where
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
+            merkle: None,
             pinned_nodes,
             retained_roots: BTreeMap::new(),
             max_retained_roots: config.max_retained_roots,
@@ -345,7 +363,7 @@ where
             let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
                 .fetched_operations
                 .iter()
-                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
+                .map(|(&start_loc, operations)| (start_loc, operations.operations.len() as u64))
                 .collect();
 
             // Find the next gap in the sync range that needs to be fetched.
@@ -384,6 +402,12 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
+        // Persist operations before advancing the tree's pruning boundary. A restart can then
+        // replay a lagging tree without needing operations that resize is about to remove.
+        if let Some(merkle) = self.merkle.take() {
+            self.journal = self.journal.sync().await?;
+            drop(merkle.sync().await?);
+        }
         self.journal = self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
         // must be re-issued as a boundary request with the new target size.
@@ -455,16 +479,34 @@ where
         self.metrics.record_synced(self.journal.size());
     }
 
-    /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
+    /// Store verified operations and their digests. Empty batches are ignored.
     pub(crate) fn store_operations(
         &mut self,
         start_loc: Location<DB::Family>,
         operations: Vec<DB::Op>,
+        digests: Vec<(Position<DB::Family>, DB::Digest)>,
     ) {
         if operations.is_empty() {
             return;
         }
-        self.fetched_operations.insert(start_loc, operations);
+        // Extraction includes interior nodes and siblings outside the requested range. Keep
+        // only this response's leaves, indexed by location rather than traversal order.
+        let end_loc = start_loc.checked_add(operations.len() as u64).unwrap();
+        let mut leaves = vec![None; operations.len()];
+        for (pos, digest) in digests {
+            if let Some(loc) = DB::Family::position_to_location(pos)
+                && loc >= start_loc
+                && loc < end_loc
+            {
+                leaves[(*loc - *start_loc) as usize] = Some(digest);
+            }
+        }
+        let leaves = leaves
+            .into_iter()
+            .map(|leaf| leaf.expect("verified response includes every leaf"))
+            .collect();
+        self.fetched_operations
+            .insert(start_loc, Fetched { operations, leaves });
     }
 
     /// Apply fetched operations to the journal if we have them.
@@ -473,13 +515,20 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub(crate) async fn apply_operations(mut self) -> Result<Self, Error<DB, S>> {
+        // Keep verified responses intact until the pruned prefix can be reconstructed.
+        if !self.pinned_nodes_ready() {
+            return Ok(self);
+        }
+        self = self.prepare_merkle().await?;
         let mut next_loc = self.journal.size();
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
         self.fetched_operations.retain(|&start_loc, operations| {
-            assert!(!operations.is_empty());
-            let end_loc = start_loc.checked_add(operations.len() as u64 - 1).unwrap();
+            assert!(!operations.operations.is_empty());
+            let end_loc = start_loc
+                .checked_add(operations.operations.len() as u64 - 1)
+                .unwrap();
             end_loc >= next_loc
         });
 
@@ -490,9 +539,10 @@ where
                 self.fetched_operations
                     .iter()
                     .find_map(|(range_start, range_ops)| {
-                        assert!(!range_ops.is_empty());
-                        let range_end =
-                            range_start.checked_add(range_ops.len() as u64 - 1).unwrap();
+                        assert!(!range_ops.operations.is_empty());
+                        let range_end = range_start
+                            .checked_add(range_ops.operations.len() as u64 - 1)
+                            .unwrap();
                         if *range_start <= next_loc && next_loc <= range_end {
                             Some(*range_start)
                         } else {
@@ -506,16 +556,73 @@ where
             };
 
             // Remove the batch of operations that contains the next operation to apply.
-            let mut operations = self.fetched_operations.remove(&range_start_loc).unwrap();
+            let Fetched {
+                mut operations,
+                leaves,
+            } = self.fetched_operations.remove(&range_start_loc).unwrap();
             assert!(!operations.is_empty());
             // Skip operations that are before the next location. The containment check when
             // selecting the range (`next_loc <= range_end`) guarantees at least one operation
             // at or after it, so the batch is never empty.
-            operations.drain(..(next_loc - *range_start_loc) as usize);
+            let skip = (next_loc - *range_start_loc) as usize;
+            operations.drain(..skip);
             next_loc += operations.len() as u64;
+            let batch = self.merkle.as_ref().map(|merkle| {
+                let batch = leaves
+                    .into_iter()
+                    .skip(skip)
+                    .fold(merkle.new_batch(), |batch, leaf| {
+                        batch.add_leaf_digest(leaf)
+                    });
+                merkle.with_mem(|mem| batch.merkleize(mem, &self.hasher))
+            });
             self.journal = self.journal.append(operations).await?;
+            if let Some(batch) = batch {
+                let merkle = self.merkle.take().unwrap().apply_batch(&batch)?;
+                // Flush each applied response so node memory does not grow with the sync range.
+                self.merkle = Some(merkle.flush().await?);
+            }
         }
 
+        Ok(self)
+    }
+
+    /// Recover the operation tree to the journal tip before applying newly verified ranges.
+    async fn prepare_merkle(mut self) -> Result<Self, Error<DB, S>> {
+        if self.merkle.is_some() {
+            return Ok(self);
+        }
+        let Some(config) = self.config.merkle_config() else {
+            return Ok(self);
+        };
+        let mut merkle = full::Merkle::init_sync(
+            self.context.child("sync_merkle"),
+            full::SyncConfig {
+                config,
+                range: self.target.range.clone(),
+                pinned_nodes: self.pinned_nodes.clone(),
+            },
+        )
+        .await?;
+        let journal_size = self.journal.size();
+        if merkle.leaves() > journal_size {
+            let count = *merkle.leaves() - journal_size;
+            merkle = merkle.rewind(count as usize).await?;
+        }
+        while merkle.leaves() < journal_size {
+            let count = self
+                .apply_batch_size
+                .get()
+                .min(journal_size - *merkle.leaves());
+            let mut operations = Vec::with_capacity(count as usize);
+            for loc in *merkle.leaves()..*merkle.leaves() + count {
+                operations.push(self.journal.read_for_recovery(loc).await?);
+            }
+            let batch = merkle.new_batch().add_many(&self.hasher, &operations);
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &self.hasher));
+            merkle = merkle.apply_batch(&batch)?.flush().await?;
+        }
+        self.merkle = Some(merkle);
         Ok(self)
     }
 
@@ -600,13 +707,18 @@ where
                     return Ok(());
                 };
                 let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-                if !proof.verify_range_inclusion(&self.hasher, &elements, start_loc, root) {
+                let Ok(digests) = proof.verify_range_inclusion_and_extract_digests(
+                    &self.hasher,
+                    &elements,
+                    start_loc,
+                    root,
+                ) else {
                     return Self::reject_response(feedback_tx);
-                }
+                };
                 if let Some(feedback_tx) = feedback_tx {
                     feedback_tx.send_lossy(true);
                 }
-                self.store_operations(start_loc, operations);
+                self.store_operations(start_loc, operations, digests);
             }
             (
                 Request::Boundary { .. },
@@ -622,8 +734,8 @@ where
                     && self.pinned_nodes.is_none()
                     && start_loc == self.target.range.start();
                 let element = [op.encode()];
-                let valid = if need_pinned {
-                    proof.verify_proof_and_pinned_nodes(
+                let digests = if need_pinned {
+                    proof.verify_proof_and_pinned_nodes_and_extract_digests(
                         &self.hasher,
                         &element,
                         start_loc,
@@ -634,21 +746,28 @@ where
                     let Some(root) = self.verification_root(size) else {
                         return Ok(());
                     };
-                    proof.verify_range_inclusion(&self.hasher, &element, start_loc, root)
+                    proof
+                        .verify_range_inclusion_and_extract_digests(
+                            &self.hasher,
+                            &element,
+                            start_loc,
+                            root,
+                        )
+                        .ok()
                 };
-                if !valid {
+                let Some(digests) = digests else {
                     if need_pinned {
                         tracing::warn!("boundary response failed verification");
                     }
                     return Self::reject_response(feedback_tx);
-                }
+                };
                 if let Some(feedback_tx) = feedback_tx {
                     feedback_tx.send_lossy(true);
                 }
                 if need_pinned {
                     self.pinned_nodes = Some(pinned_nodes);
                 }
-                self.store_operations(start_loc, vec![op]);
+                self.store_operations(start_loc, vec![op], digests);
             }
             _ => return Self::reject_response(feedback_tx),
         }
@@ -776,6 +895,9 @@ where
     /// target.
     async fn complete(mut self) -> Result<DB, Error<DB, S>> {
         self.journal = self.journal.sync().await?;
+        if let Some(merkle) = self.merkle.take() {
+            drop(merkle.sync().await?);
+        }
 
         let database = DB::from_sync_result(
             self.context,
@@ -817,10 +939,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Family as MmrFamily, Proof};
+    use crate::{
+        journal::contiguous::{fixed, variable},
+        merkle::{
+            mmb,
+            mmr::{Family as MmrFamily, Proof},
+        },
+        qmdb::keyless,
+    };
     use commonware_cryptography::{Sha256, sha256};
-    use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, non_empty_range};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Metrics as _, Runner as _, buffer::paged::CacheRef, deterministic};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
@@ -828,6 +958,237 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+
+    type NodeDb<F> = keyless::variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
+    type NodeConfig =
+        keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential>;
+
+    fn node_config(context: &deterministic::Context, name: &str) -> NodeConfig {
+        let page_cache = CacheRef::from_pooler(context, NZU16!(128), NZUsize!(16));
+        keyless::Config {
+            merkle: full::Config {
+                journal_partition: format!("{name}-nodes"),
+                metadata_partition: format!("{name}-pins"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            log: variable::Config {
+                partition: format!("{name}-ops"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((0..=1024).into(), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+        }
+    }
+
+    async fn node_source<F: Family>(context: deterministic::Context) -> Arc<NodeDb<F>> {
+        let db = NodeDb::<F>::init(context.child("source"), node_config(&context, "source"))
+            .await
+            .unwrap();
+        let mut batch = db.new_batch();
+        for i in 0..80u8 {
+            batch = batch.append(vec![i; 1024]);
+        }
+        let batch = batch.merkleize(&db, None, Location::new(0)).await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        Arc::new(db.sync().await.unwrap())
+    }
+
+    fn node_engine_config<F: Family>(
+        context: deterministic::Context,
+        db_config: NodeConfig,
+        source: Arc<NodeDb<F>>,
+    ) -> Config<NodeDb<F>, Arc<NodeDb<F>>> {
+        Config {
+            context,
+            target: Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(7), source.bounds().end),
+            },
+            source,
+            db_config,
+            max_outstanding_requests: 4,
+            fetch_batch_size: NZU64!(9),
+            apply_batch_size: NZU64!(5),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 2,
+        }
+    }
+
+    /// Persist different prefixes of the two journals to model crashes between their writes.
+    async fn verified_node_recovery<F: Family>(context: deterministic::Context) {
+        let source = node_source::<F>(context.child("setup")).await;
+        for case in ["nodes_behind", "nodes_ahead", "torn_nodes", "aligned"] {
+            let context = context.child(case);
+            let cfg = node_config(&context, &format!("destination-{case}"));
+            let mut engine = Engine::new(node_engine_config(
+                context.child("sync"),
+                cfg.clone(),
+                source.clone(),
+            ))
+            .await
+            .unwrap();
+            while engine.journal.size() < 35 {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed early"),
+                };
+            }
+            let tip = engine.journal.size();
+            assert!(tip < *source.bounds().end);
+            assert_eq!(*engine.merkle.as_ref().unwrap().leaves(), tip);
+            engine.journal = engine.journal.sync().await.unwrap();
+            let tree = engine.merkle.take().unwrap().sync().await.unwrap();
+            drop(tree);
+            drop(engine);
+
+            match case {
+                "nodes_behind" | "torn_nodes" => {
+                    let size = if case == "nodes_behind" {
+                        *Position::try_from(Location::<F>::new(15)).unwrap()
+                    } else {
+                        // Leave a partial append that ends at an invalid tree size.
+                        let loc = (15..tip)
+                            .find(|&loc| F::parent_heights(Location::new(loc)).next().is_some())
+                            .unwrap();
+                        *Position::try_from(Location::<F>::new(loc)).unwrap() + 1
+                    };
+                    let nodes = fixed::Journal::<_, sha256::Digest>::init(
+                        context.child("truncate_nodes"),
+                        fixed::Config {
+                            partition: cfg.merkle.journal_partition.clone(),
+                            items_per_blob: cfg.merkle.items_per_blob,
+                            page_cache: cfg.merkle.page_cache.clone(),
+                            write_buffer: cfg.merkle.write_buffer,
+                            replay_buffer: cfg.merkle.replay_buffer,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    drop(nodes.rewind(size).await.unwrap().sync().await.unwrap());
+                }
+                "nodes_ahead" => {
+                    let ops =
+                        variable::Journal::<_, keyless::variable::Operation<F, Vec<u8>>>::init(
+                            context.child("truncate_ops"),
+                            cfg.log.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    drop(ops.rewind(15).await.unwrap().sync().await.unwrap());
+                }
+                "aligned" => {}
+                _ => unreachable!(),
+            }
+
+            let db = Engine::new(node_engine_config(
+                context.child("resume"),
+                cfg.clone(),
+                source.clone(),
+            ))
+            .await
+            .unwrap()
+            .sync()
+            .await
+            .unwrap();
+            assert_eq!(db.root(), source.root());
+            if case == "aligned" {
+                // Matching persisted prefixes require no operation replay on resume.
+                let metrics = context.encode();
+                assert!(
+                    metrics
+                        .lines()
+                        .any(|line| line == "aligned_resume_journal_journal_read_calls_total 1"),
+                    "{metrics}"
+                );
+            }
+            drop(db);
+            let db = NodeDb::<F>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), source.root());
+            db.destroy().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn mmr_verified_node_recovery() {
+        deterministic::Runner::default().start(verified_node_recovery::<MmrFamily>);
+    }
+
+    #[test]
+    fn mmb_verified_node_recovery() {
+        deterministic::Runner::default().start(verified_node_recovery::<mmb::Family>);
+    }
+
+    /// Deliver overlapping responses in reverse order, then complete with no operation replay.
+    async fn verified_nodes_out_of_order<F: Family>(context: deterministic::Context) {
+        let source = node_source::<F>(context.child("setup")).await;
+        let cfg = node_config(&context, "destination");
+        let mut engine = Engine::new(node_engine_config(
+            context.child("client"),
+            cfg,
+            source.clone(),
+        ))
+        .await
+        .unwrap();
+        engine.outstanding_requests = Requests::new();
+        for (start, count) in [(30, 52), (15, 20), (8, 12), (7, 1)] {
+            let request = if start == 7 {
+                Request::Boundary {
+                    size: source.bounds().end,
+                    start: Location::new(start),
+                }
+            } else {
+                Request::Operations {
+                    size: source.bounds().end,
+                    start: Location::new(start),
+                    max_ops: NonZeroU64::new(count).unwrap(),
+                }
+            };
+            let id = engine.outstanding_requests.insert(request, |_| pending());
+            let result = source.serve(request).await;
+            engine
+                .handle_fetch_result(IndexedFetchResult { id, result })
+                .unwrap();
+            engine = engine.apply_operations().await.unwrap();
+            if start != 7 {
+                assert_eq!(engine.journal.size(), 7);
+            }
+        }
+        assert_eq!(engine.journal.size(), *source.bounds().end);
+        assert_eq!(
+            engine.merkle.as_ref().unwrap().leaves(),
+            source.bounds().end
+        );
+        let db = engine.sync().await.unwrap();
+        assert_eq!(db.root(), source.root());
+        let metrics = context.encode();
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "client_journal_journal_read_calls_total 1"),
+            "{metrics}"
+        );
+    }
+
+    #[test]
+    fn mmr_verified_nodes_out_of_order() {
+        deterministic::Runner::default().start(verified_nodes_out_of_order::<MmrFamily>);
+    }
+
+    #[test]
+    fn mmb_verified_nodes_out_of_order() {
+        deterministic::Runner::default().start(verified_nodes_out_of_order::<mmb::Family>);
+    }
 
     #[derive(Clone)]
     struct TestConfig {
@@ -837,6 +1198,11 @@ mod tests {
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
         type JournalConfig = u64;
+        type Strategy = commonware_parallel::Sequential;
+
+        fn merkle_config(&self) -> Option<full::Config<Self::Strategy>> {
+            None
+        }
 
         fn journal_config(&self) -> Self::JournalConfig {
             self.journal_size
@@ -872,6 +1238,10 @@ mod tests {
 
         fn size(&self) -> u64 {
             self.size
+        }
+
+        async fn read_for_recovery(&self, _loc: u64) -> Result<Self::Op, Self::Error> {
+            unreachable!()
         }
 
         async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {

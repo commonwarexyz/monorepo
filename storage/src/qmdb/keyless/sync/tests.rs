@@ -312,6 +312,16 @@ where
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
+        // Completion reads only the final commit to obtain the inactivity floor. The operation
+        // tree is already populated by verification, so no operation replay is necessary.
+        let metrics = context.encode();
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "client_journal_journal_read_calls_total 1"),
+            "{metrics}"
+        );
+
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, target_oldest_retained_loc);

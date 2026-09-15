@@ -170,8 +170,8 @@ where
         let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
         // Pass empty operations vectors which should not cause panics
-        client.store_operations(Location::new(0), vec![]);
-        client.store_operations(Location::new(5), vec![]);
+        client.store_operations(Location::new(0), vec![], vec![]);
+        client.store_operations(Location::new(5), vec![], vec![]);
 
         // Apply operations which also shouldn't panic
         client.apply_operations().await.unwrap();

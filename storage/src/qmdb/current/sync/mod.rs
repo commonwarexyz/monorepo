@@ -80,6 +80,11 @@ pub(crate) mod tests;
 
 impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
     type JournalConfig = J;
+    type Strategy = S;
+
+    fn merkle_config(&self) -> Option<full::Config<S>> {
+        Some(self.merkle_config.clone())
+    }
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.journal_config.clone()

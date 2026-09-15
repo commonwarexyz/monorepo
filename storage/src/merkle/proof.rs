@@ -348,23 +348,27 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
-            .is_some()
+        self.verify_proof_and_pinned_nodes_and_extract_digests(
+            hasher,
+            elements,
+            start_loc,
+            pinned_nodes,
+            root,
+        )
+        .is_some()
     }
 
     /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
     ///
-    /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
-    /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
-    /// `bool` via `.is_some()`.
-    fn try_verify_proof_and_pinned_nodes<H, E>(
+    /// Returns the authenticated digests if both the proof and pins are valid.
+    pub(crate) fn verify_proof_and_pinned_nodes_and_extract_digests<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
-    ) -> Option<()>
+    ) -> Option<Vec<(Position<F>, D)>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
@@ -375,7 +379,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .ok()?;
 
         if elements.is_empty() {
-            return pinned_nodes.is_empty().then_some(());
+            return pinned_nodes.is_empty().then_some(collected);
         }
 
         if !start_loc.is_valid() || start_loc > self.leaves {
@@ -416,7 +420,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             }
         }
 
-        let extracted: BTreeMap<Position<F>, D> = collected.into_iter().collect();
+        let extracted: BTreeMap<Position<F>, D> = collected.iter().copied().collect();
 
         // Verify prefix active peaks that were not folded.
         for sub in &bp.prefix_active_peaks {
@@ -439,7 +443,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         // Every pin must have been consumed by one of the two reconstructions above.
-        pinned_map.is_empty().then_some(())
+        pinned_map.is_empty().then_some(collected)
     }
 
     /// Reconstruct a root from range-proof digests and optionally collect authenticated nodes.

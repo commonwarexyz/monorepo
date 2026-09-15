@@ -1,5 +1,10 @@
 //! Shared sync types and functionality for authenticated databases.
 //!
+//! Verified leaf hashes stay with buffered responses until their operations can be applied in
+//! order. Sync reuses these hashes to build and persist the operation tree without replaying the
+//! downloaded operations. After interruption, the operation journal remains the source of truth:
+//! excess nodes are rewound and missing nodes are replayed.
+//!
 //! # Trust Model
 //!
 //! Sources are untrusted, and their responses are verified against the requested target. The

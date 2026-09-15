@@ -43,6 +43,12 @@ pub trait Journal<F: Family>: Sized + Send {
     /// The size of the journal, including pruned operations.
     fn size(&self) -> u64;
 
+    /// Read an operation retained by the journal.
+    fn read_for_recovery(
+        &self,
+        loc: u64,
+    ) -> impl Future<Output = Result<Self::Op, Self::Error>> + Send;
+
     /// Append a non-empty batch of operations.
     fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
@@ -81,6 +87,10 @@ where
 
     fn size(&self) -> u64 {
         Contiguous::bounds(self).end
+    }
+
+    async fn read_for_recovery(&self, loc: u64) -> Result<Self::Op, Self::Error> {
+        Contiguous::read(self, loc).await
     }
 
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
@@ -151,6 +161,10 @@ where
         Contiguous::bounds(self).end
     }
 
+    async fn read_for_recovery(&self, loc: u64) -> Result<Self::Op, Self::Error> {
+        Contiguous::read(self, loc).await
+    }
+
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
         let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
@@ -211,6 +225,13 @@ where
 
     fn size(&self) -> u64 {
         *self.start + self.ops.len() as u64
+    }
+
+    async fn read_for_recovery(&self, _loc: u64) -> Result<Self::Op, Self::Error> {
+        // Memory journals have no persisted tree to recover.
+        Err(crate::qmdb::Error::DataCorrupted(
+            "memory journal cannot replay",
+        ))
     }
 
     async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
