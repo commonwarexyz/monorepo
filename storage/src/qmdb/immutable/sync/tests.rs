@@ -1167,7 +1167,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let sync_root = H::db_root(&db);
         drop(db);
         let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
-            || context.child("journal"),
+            context.child("journal"),
             qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
         )
