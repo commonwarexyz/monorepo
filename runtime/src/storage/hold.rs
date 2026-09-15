@@ -85,8 +85,8 @@ impl Hold {
 
 /// A blob's file bundled with the hold on its storage directory.
 ///
-/// Each request retains this owner, keeping the directory hold alive while any
-/// blob or request still owns the file.
+/// Each open retains this owner and each request retains its open, keeping the
+/// directory hold alive while any blob or request still owns the file.
 pub(crate) struct Held {
     /// Open file shared by every request on the blob.
     file: File,
