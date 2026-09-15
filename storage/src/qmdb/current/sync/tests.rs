@@ -618,7 +618,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
             crate::merkle::mmr::Family,
         >>::new(
-            || context.child("journal"),
+            context.child("journal"),
             crate::qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
         )
