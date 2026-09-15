@@ -131,7 +131,6 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
-    use bytes::BufMut;
     use commonware_actor::Feedback;
     use commonware_codec::{
         Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
@@ -195,9 +194,10 @@ mod test {
     type Scheme = MockScheme<ed25519::PublicKey>;
     type Variant = Standard<Block>;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
     struct Block {
         context: SimplexContext<Sha256Digest, ed25519::PublicKey>,
+        #[codec(encode_with = { value.get().write(buf); }, encode_size = 8)]
         height: Height,
         digest: Sha256Digest,
     }
@@ -213,20 +213,6 @@ mod test {
                 height: Height::new(height),
                 digest: Sha256Digest::from([digest_byte; 32]),
             }
-        }
-    }
-
-    impl Write for Block {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.context.write(buf);
-            buf.put_u64(self.height.get());
-            buf.put_slice(self.digest.as_ref());
-        }
-    }
-
-    impl EncodeSize for Block {
-        fn encode_size(&self) -> usize {
-            self.context.encode_size() + 8 + 32
         }
     }
 

@@ -1,11 +1,10 @@
 use crate::Scheme;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
-use commonware_runtime::BufMut;
 
 /// Enum representing the valid formats for blocks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Write, Read, EncodeSize)]
 #[allow(clippy::large_enum_variant)]
 pub enum BlockFormat<D: Digest> {
     /// A random set of arbitrary data.
@@ -15,53 +14,10 @@ pub enum BlockFormat<D: Digest> {
     Bridge(Finalization<Scheme, D>),
 }
 
-impl<D: Digest> Write for BlockFormat<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Random(random) => {
-                0u8.write(buf);
-                random.write(buf);
-            }
-            Self::Bridge(finalization) => {
-                1u8.write(buf);
-                finalization.write(buf);
-            }
-        }
-    }
-}
-
-impl<D: Digest> Read for BlockFormat<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => {
-                let random = u128::read(buf)?;
-                Ok(Self::Random(random))
-            }
-            1 => {
-                let finalization = Finalization::read(buf)?;
-                Ok(Self::Bridge(finalization))
-            }
-            _ => Err(Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl<D: Digest> EncodeSize for BlockFormat<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Random(random) => random.encode_size(),
-            Self::Bridge(finalization) => finalization.encode_size(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, DecodeFixed, Encode, FixedSize};
+    use commonware_codec::{DecodeExt, DecodeFixed, Encode, Error, FixedSize};
     use commonware_consensus::{
         simplex::types::Proposal,
         types::{Epoch, Round, View},

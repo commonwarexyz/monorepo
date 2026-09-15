@@ -268,15 +268,29 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) struct MockBlock<D: Digest, C, Dir = Unit> {
     context: C,
     parent: D,
     height: Height,
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size()
+    )]
     timestamp: u64,
+    #[codec(
+        encode_with = {
+            value.is_some().write(buf);
+            if let Some(payload) = value.as_ref() {
+                payload.write(buf);
+            }
+        },
+        encode_size = value.is_some().encode_size() + value.as_ref().map_or(0, EncodedPayload::encode_size)
+    )]
     payload: Option<EncodedPayload>,
     digest: D,
+    #[codec(encode_with = {}, encode_size = 0)]
     _directory: PhantomData<Dir>,
 }
 
@@ -418,20 +432,6 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
     }
 }
 
-impl<D: Digest, C: Write, Dir> Write for MockBlock<D, C, Dir> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.context.write(writer);
-        self.parent.write(writer);
-        self.height.write(writer);
-        UInt(self.timestamp).write(writer);
-        self.payload.is_some().write(writer);
-        if let Some(log) = &self.payload {
-            log.write(writer);
-        }
-        self.digest.write(writer);
-    }
-}
-
 impl<D: Digest, C: Read<Cfg = ()>, Dir> Read for MockBlock<D, C, Dir> {
     type Cfg = ();
 
@@ -449,18 +449,6 @@ impl<D: Digest, C: Read<Cfg = ()>, Dir> Read for MockBlock<D, C, Dir> {
             digest: D::read(reader)?,
             _directory: PhantomData,
         })
-    }
-}
-
-impl<D: Digest, C: EncodeSize, Dir> EncodeSize for MockBlock<D, C, Dir> {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.payload.is_some().encode_size()
-            + self.payload.as_ref().map_or(0, EncodedPayload::encode_size)
-            + self.digest.encode_size()
     }
 }
 

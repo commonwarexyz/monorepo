@@ -2,10 +2,7 @@
 
 use crate::config::NetworkConfig;
 use commonware_actor::Feedback;
-use commonware_codec::{
-    Buf, Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _,
-    Write,
-};
+use commonware_codec::{Decode as _, DecodeExt as _, Encode, EncodeSize, Read, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
     marshal::Update,
@@ -32,7 +29,7 @@ use commonware_glue::{
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
+use commonware_runtime::{Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
@@ -107,13 +104,14 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(crate) parent: sha256::Digest,
     pub(crate) height: Height,
     pub(crate) state_root: sha256::Digest,
     pub(crate) range: NonEmptyRange<Location>,
+    #[codec(cfg = &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))]
     pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
 }
 
@@ -136,46 +134,6 @@ impl Block {
             range: target.range,
             payload: Some(Payload::EpochInfo(info)),
         }
-    }
-}
-
-impl Write for Block {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.state_root.write(buf);
-        self.range.write(buf);
-        self.payload.write(buf);
-    }
-}
-
-impl EncodeSize for Block {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.state_root.encode_size()
-            + self.range.encode_size()
-            + self.payload.encode_size()
-    }
-}
-
-impl Read for Block {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            state_root: sha256::Digest::read(buf)?,
-            range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
-                buf,
-                &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
-            )?,
-        })
     }
 }
 
