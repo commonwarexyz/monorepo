@@ -204,7 +204,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let &index = self.index.get(key)?;
         let slot = &mut self.slots[index];
-        slot.referenced.store(true, Ordering::Relaxed);
+        *slot.referenced.get_mut() = true;
         Some(&mut slot.value)
     }
 
@@ -216,7 +216,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
         if let Some(&index) = self.index.get(&key) {
             let slot = &mut self.slots[index];
-            slot.referenced.store(true, Ordering::Relaxed);
+            *slot.referenced.get_mut() = true;
             return Some(core::mem::replace(&mut slot.value, value));
         }
         self.insert_value(key, value);
@@ -232,7 +232,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn get_or_insert_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
-                self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                *self.slots[slot].referenced.get_mut() = true;
                 slot
             }
             None => self.insert_value(key, f()),
@@ -253,7 +253,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     ) -> Result<&V, E> {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
-                self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                *self.slots[slot].referenced.get_mut() = true;
                 slot
             }
             None => self.insert_value(key, f()?),
@@ -277,13 +277,13 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (usize, &mut V) {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
-                self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                *self.slots[slot].referenced.get_mut() = true;
                 slot
             }
             None => match self.take_slot() {
                 Some(slot) => {
                     self.slots[slot].key = key.clone();
-                    self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                    *self.slots[slot].referenced.get_mut() = true;
                     self.slots[slot].live = true;
                     self.index.insert(key, slot);
                     slot
@@ -304,7 +304,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn remove(&mut self, key: &K) -> bool {
         match self.index.remove(key) {
             Some(slot) => {
-                self.slots[slot].referenced.store(false, Ordering::Relaxed);
+                *self.slots[slot].referenced.get_mut() = false;
                 self.slots[slot].live = false;
                 self.free.push(slot);
                 true
@@ -323,7 +323,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         index.retain(|key, &mut slot| {
             let keep = keep(key, &slots[slot].value);
             if !keep {
-                slots[slot].referenced.store(false, Ordering::Relaxed);
+                *slots[slot].referenced.get_mut() = false;
                 slots[slot].live = false;
                 free.push(slot);
             }
@@ -361,7 +361,7 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
             Some(slot) => {
                 self.slots[slot].key = key.clone();
                 self.slots[slot].value = value;
-                self.slots[slot].referenced.store(true, Ordering::Relaxed);
+                *self.slots[slot].referenced.get_mut() = true;
                 self.slots[slot].live = true;
                 self.index.insert(key, slot);
                 slot
@@ -384,10 +384,8 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         }
 
         let len = self.slots.len();
-        while self.slots[self.hand].referenced.load(Ordering::Relaxed) {
-            self.slots[self.hand]
-                .referenced
-                .store(false, Ordering::Relaxed);
+        while *self.slots[self.hand].referenced.get_mut() {
+            *self.slots[self.hand].referenced.get_mut() = false;
             self.hand = (self.hand + 1) % len;
         }
         let slot = self.hand;

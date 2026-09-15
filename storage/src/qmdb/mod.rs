@@ -449,7 +449,7 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+        let matches = if let Some(k) = cache.as_deref_mut().and_then(|c| c.get_mut(&*loc)) {
             *k == *key
         } else {
             let op = reader.read(*loc).await?;
