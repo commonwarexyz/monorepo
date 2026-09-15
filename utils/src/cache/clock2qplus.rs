@@ -113,6 +113,11 @@ struct ResidentSlot {
 
 impl ResidentSlot {
     #[inline]
+    const fn has_location(&self, location: Location) -> bool {
+        self.location_and_admission & !ADMISSION_GENERATION_MASK == location.pack(0)
+    }
+
+    #[inline]
     fn location(&self) -> Location {
         match self.location_and_admission >> LOCATION_SHIFT {
             0 => Location::Free,
@@ -212,7 +217,7 @@ impl SlotState {
     #[inline]
     fn record_hit_mut(&mut self) {
         let current = self.0.get_mut();
-        if *current & CORRELATED == 0 {
+        if *current & (CORRELATED | REFERENCED) == 0 {
             *current |= REFERENCED;
         }
     }
@@ -287,7 +292,7 @@ impl SmallQueue {
         let old_head = self.head;
         {
             let entry = &mut slots[slot];
-            assert_eq!(entry.location(), Location::Free);
+            assert!(entry.has_location(Location::Free));
             entry.prev = UNLINKED;
             entry.next = old_head.unwrap_or(UNLINKED);
             entry.location_and_admission = Location::Small.pack(self.admissions);
@@ -323,7 +328,7 @@ impl SmallQueue {
     /// Detaches a resident and repairs the queue and correlation boundary.
     #[inline]
     fn unlink(&mut self, slots: &mut [ResidentSlot], slot: Slot) {
-        assert_eq!(slots[slot].location(), Location::Small);
+        assert!(slots[slot].has_location(Location::Small));
         let prev = slots[slot].prev;
         let next = slots[slot].next;
         if prev != UNLINKED {
@@ -407,7 +412,7 @@ impl MainRing {
             // A one-entry ring links the resident to itself and points the hand
             // at that sole eviction candidate.
             let entry = &mut slots[slot];
-            assert_eq!(entry.location(), Location::Free);
+            assert!(entry.has_location(Location::Free));
             entry.prev = slot;
             entry.next = slot;
             entry.location_and_admission = Location::Main.pack(0);
@@ -422,7 +427,7 @@ impl MainRing {
         assert_ne!(prev, UNLINKED);
         {
             let entry = &mut slots[slot];
-            assert_eq!(entry.location(), Location::Free);
+            assert!(entry.has_location(Location::Free));
             entry.prev = prev;
             entry.next = hand;
             entry.location_and_admission = Location::Main.pack(0);
@@ -435,7 +440,7 @@ impl MainRing {
     /// Detaches a resident and advances the hand when necessary.
     #[inline]
     fn unlink(&mut self, slots: &mut [ResidentSlot], slot: Slot) {
-        assert_eq!(slots[slot].location(), Location::Main);
+        assert!(slots[slot].has_location(Location::Main));
         if self.len == 1 {
             assert_eq!(self.hand, Some(slot));
             self.hand = None;
@@ -848,7 +853,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
             _ => unreachable!("cache claim must match the insertion plan"),
         };
 
-        assert_eq!(self.slots[slot].location(), Location::Free);
+        assert!(self.slots[slot].has_location(Location::Free));
         if let InsertionPlan::PromoteThenEvict { promoted, .. } = plan {
             // Claim has detached the Main victim from the cache index and the
             // previous arm has detached it from the ring. Move the retained
