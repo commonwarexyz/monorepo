@@ -853,7 +853,12 @@ impl IoBufsMut {
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.is_empty(),
+            IoBufsMutInner::Pair([a, b]) => a.is_empty() && b.is_empty(),
+            IoBufsMutInner::Triple([a, b, c]) => a.is_empty() && b.is_empty() && c.is_empty(),
+            IoBufsMutInner::Chunked(bufs) => bufs.iter().all(IoBufMut::is_empty),
+        }
     }
 
     /// Whether this contains a single contiguous buffer.
@@ -1041,6 +1046,11 @@ impl From<IoBufsMut> for IoBufs {
 }
 
 impl bytes::Buf for IoBufsMut {
+    #[inline]
+    fn has_remaining(&self) -> bool {
+        !self.is_empty()
+    }
+
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
@@ -2573,6 +2583,35 @@ mod tests {
         bufs.advance(2);
         assert!(bufs.is_single());
         assert_eq!(bufs.chunk(), b"cd");
+    }
+
+    #[test]
+    fn test_iobufsmut_emptiness_with_reserved_capacity() {
+        for count in 0..=8 {
+            for readable in 0..=count {
+                let mut chunks = Vec::new();
+                for index in 0..count {
+                    let mut chunk = IoBufMut::with_capacity(4);
+                    if index == readable {
+                        chunk.put_u8(7);
+                    }
+                    chunks.push(chunk);
+                }
+                let mut bufs = IoBufsMut::from(chunks);
+                assert_eq!(bufs.is_empty(), readable == count);
+                assert_eq!(bufs.has_remaining(), readable != count);
+                if readable != count {
+                    bufs.advance(1);
+                    assert!(bufs.is_empty());
+                    assert!(!bufs.has_remaining());
+                }
+                if bufs.remaining_mut() > 0 {
+                    bufs.put_slice(&[9]);
+                    assert!(!bufs.is_empty());
+                    assert!(bufs.has_remaining());
+                }
+            }
+        }
     }
 
     #[test]
