@@ -90,6 +90,7 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
+    pub mod open;
 });
 stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
@@ -354,7 +355,7 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
+    /// Removal liveness is per-open, not per-handle: clones taken before or after removal keep
     /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
     async fn test_read_after_remove_handle_clones<S>(storage: &S)
     where
@@ -372,11 +373,6 @@ pub(crate) mod tests {
             .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
-        // Opened independently: a distinct handle to the same blob, not a clone.
-        let (independent, _) = storage
-            .open("read_after_remove_clones", b"name")
-            .await
-            .unwrap();
 
         storage
             .remove("read_after_remove_clones", Some(b"name"))
@@ -387,7 +383,7 @@ pub(crate) mod tests {
         let third = first.clone();
         drop(first);
 
-        for handle in [&second, &third, &independent] {
+        for handle in [&second, &third] {
             let read = handle
                 .read_at(0, data.len(), ReadOptions::default())
                 .await

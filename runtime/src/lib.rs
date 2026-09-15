@@ -178,6 +178,8 @@ stability_scope!(BETA {
         PartitionMissing(String),
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
+        #[error("blob already open: {0}/{1}")]
+        BlobAlreadyOpen(String, String),
         #[error("blob open failed: {0}/{1} error: {2}")]
         BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
@@ -705,10 +707,19 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
-        /// Multiple instances of the same blob can be opened concurrently, however,
-        /// writing to the same blob concurrently may lead to undefined behavior.
+        /// Storage implementations may reject a second open while any handle from
+        /// an earlier open is alive, unless the blob has since been removed. Clone
+        /// the returned blob to share it. If multiple opens are permitted,
+        /// independently opened handles are not expected to coordinate, and writing
+        /// through them concurrently is undefined.
         ///
         /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// # Errors
+        ///
+        /// An implementation that enforces one open returns
+        /// [Error::BlobAlreadyOpen] if a handle from an earlier open is still alive
+        /// and the blob has not been removed since.
         ///
         /// # Versions
         ///
@@ -855,11 +866,12 @@ stability_scope!(BETA {
     /// To support blob implementations that enable concurrent reads and
     /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// Cloning a blob is similar to wrapping a single file descriptor in
-    /// a lock whereas opening a new blob (of the same name) is similar to
-    /// opening a new file descriptor. If multiple blobs are opened with the same
-    /// name, they are not expected to coordinate access to underlying storage
-    /// and writing to both is undefined behavior.
+    /// Cloning a blob shares one open, similar to wrapping one file descriptor
+    /// in a lock. A storage implementation may reject another open for the same
+    /// name while any clone remains alive, unless the blob has since been
+    /// removed. If it permits multiple opens, independently opened handles are
+    /// not expected to coordinate, and writing through them concurrently is
+    /// undefined.
     ///
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
@@ -913,10 +925,16 @@ stability_scope!(BETA {
         /// If the length is less than the current length, the blob is resized.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Ensure all pending data is durably persisted.
+        /// Make every write and resize that completed before this call durable.
+        ///
+        /// A write still in flight on another clone is covered by its own
+        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. A runtime may
+        /// return at once when every completed mutation is already covered, so
+        /// callers may sync freely.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Request that all pending data is durably persisted.
+        /// Request that every write and resize that completed before this call is
+        /// made durable.
         ///
         /// Awaiting this future waits until the runtime accepts responsibility for
         /// the sync. It continues even if the returned [`Handle`] is dropped.

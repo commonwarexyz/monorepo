@@ -1,7 +1,5 @@
 //! Mock implementations of runtime primitives for testing.
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
     Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
@@ -9,22 +7,93 @@ use crate::{
     telemetry::metrics::{Metric, Registered},
 };
 use bytes::{Bytes, BytesMut};
-#[cfg(any(test, feature = "test-utils"))]
-use commonware_utils::sync::AsyncMutex;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
-#[cfg(any(test, feature = "test-utils"))]
-use std::collections::BTreeMap;
 use std::{
     future::{Future, poll_fn},
     mem,
     sync::Arc,
     task::Poll,
 };
+
+/// In-memory storage with exclusive logical opens and durable snapshot inspection.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct MemoryStorage {
+    inner: crate::storage::memory::Storage,
+    opens: Arc<crate::storage::open::Opens>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl MemoryStorage {
+    /// Create an empty memory storage backend.
+    pub fn new(pool: BufferPool) -> Self {
+        Self {
+            inner: crate::storage::memory::Storage::new(pool),
+            opens: Arc::default(),
+        }
+    }
+
+    /// Compute a SHA-256 digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 32] {
+        self.inner.audit()
+    }
+
+    /// Return a copy of a blob's durable raw contents without interpreting its container header.
+    pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.raw_blob(partition, name)
+    }
+
+    /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
+    /// its container header does not resolve.
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.durable(partition, name)
+    }
+
+    /// Install durable raw contents without validating the blob's container header.
+    ///
+    /// This retires the prior incarnation and permits a new open while old handles remain alive.
+    pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
+        self.opens
+            .replace(partition, Some(name), || {
+                self.inner.set_raw_blob(partition, name, content);
+                Ok(())
+            })
+            .expect("installing a raw memory image cannot fail");
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Storage for MemoryStorage {
+    type Blob = crate::storage::open::Blob<crate::storage::memory::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let opened = self.opens.open(
+            partition,
+            name,
+            self.inner.open_versioned(partition, name, versions),
+        )?;
+        Ok(opened.finish())
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.opens
+            .remove(partition, name, self.inner.remove(partition, name))
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -505,148 +574,6 @@ macro_rules! forward_context {
 
         impl<E: TryCryptoRng> TryCryptoRng for $wrapper<E> {}
     };
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-type VisibleFiles = BTreeMap<(String, Vec<u8>), (VisibleBlob, BlobVersion)>;
-
-/// Deterministic storage whose unsynced bytes remain visible across opens.
-///
-/// All opens in one runtime share a blob incarnation. Durability still belongs to the
-/// wrapped deterministic storage: discard this context and its blobs before restarting
-/// from a checkpoint. Access each partition through this wrapper for mutations; direct
-/// opens through the inner context may be used to inspect its durable contents.
-/// Storage fault injection must be disabled, and mutations must complete before reopening.
-#[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
-pub struct VisibleContext<E> {
-    inner: E,
-    files: Arc<AsyncMutex<VisibleFiles>>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl<E> VisibleContext<E> {
-    /// Share visible blob incarnations across clones and children of `inner`.
-    pub fn new(inner: E) -> Self {
-        Self {
-            inner,
-            files: Arc::new(AsyncMutex::new(BTreeMap::new())),
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-forward_context!(VisibleContext, files);
-
-#[cfg(any(test, feature = "test-utils"))]
-impl<E: Storage<Blob = <crate::deterministic::Context as Storage>::Blob>> Storage
-    for VisibleContext<E>
-{
-    type Blob = VisibleBlob;
-
-    async fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
-    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
-        let mut files = self.files.lock().await;
-        let key = (partition.to_owned(), name.to_vec());
-        if let Some((blob, version)) = files.get(&key) {
-            if !versions.contains(version) {
-                return Err(Error::BlobVersionMismatch {
-                    expected: versions,
-                    found: *version,
-                });
-            }
-            let len = *blob.len.lock().await;
-            return Ok((blob.clone(), len, *version));
-        }
-        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
-        let blob = VisibleBlob {
-            inner,
-            len: Arc::new(AsyncMutex::new(len)),
-        };
-        files.insert(key, (blob.clone(), version));
-        Ok((blob, len, version))
-    }
-
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        let mut files = self.files.lock().await;
-        self.inner.remove(partition, name).await?;
-        files.retain(|(stored_partition, stored_name), _| {
-            stored_partition != partition || name.is_some_and(|name| stored_name != name)
-        });
-        Ok(())
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
-}
-
-/// A shared deterministic blob with its current visible length.
-#[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
-pub struct VisibleBlob {
-    inner: <crate::deterministic::Context as Storage>::Blob,
-    len: Arc<AsyncMutex<u64>>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl Blob for VisibleBlob {
-    async fn read_at_buf(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        self.inner.read_at_buf(offset, len, bufs, options).await
-    }
-
-    async fn read_at(
-        &self,
-        offset: u64,
-        len: usize,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        self.inner.read_at(offset, len, options).await
-    }
-
-    async fn write_at(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
-        options: WriteOptions,
-    ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let count = u64::try_from(bufs.len()).map_err(|_| Error::OffsetOverflow)?;
-        let end = offset.checked_add(count).ok_or(Error::OffsetOverflow)?;
-        let mut len = self.len.lock().await;
-        self.inner.write_at(offset, bufs, options).await?;
-        if count != 0 || !options.contains(WriteOptions::SYNC) {
-            *len = (*len).max(end);
-        }
-        Ok(())
-    }
-
-    async fn resize(&self, size: u64) -> Result<(), Error> {
-        let mut len = self.len.lock().await;
-        self.inner.resize(size).await?;
-        *len = size;
-        Ok(())
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        let _len = self.len.lock().await;
-        self.inner.sync().await
-    }
-
-    async fn start_sync(&self) -> Handle<()> {
-        let _len = self.len.lock().await;
-        self.inner.start_sync().await
-    }
 }
 
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].

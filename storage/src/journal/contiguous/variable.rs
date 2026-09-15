@@ -2605,8 +2605,8 @@ mod tests {
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, VisibleContext,
-            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
@@ -3070,85 +3070,6 @@ mod tests {
                     }
                 });
             }
-        }
-    }
-
-    #[test]
-    fn test_unbounded_recovery_finish_is_durable() {
-        // A u64 frame is nine bytes, so it fills a nine-byte page or half an eighteen-byte page.
-        fn config(context: &deterministic::Context, page_size: NonZeroU16) -> Config<()> {
-            Config {
-                partition: "recovery-finish-durable".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(context, page_size, NZUsize!(16)),
-                write_buffer: NZUsize!(9),
-                replay_buffer: NZUsize!(2048),
-            }
-        }
-        for page_size in [NZU16!(9), NZU16!(18)] {
-            let ((), checkpoint) =
-                deterministic::Runner::default().start_and_recover(|context| async move {
-                    let cfg = config(&context, page_size);
-                    let visible = VisibleContext::new(context.child("visible"));
-                    let journal = Journal::<_, u64>::init(visible.child("seed"), cfg.clone())
-                        .await
-                        .unwrap();
-                    let (journal, _) = journal.append(&42).await.unwrap();
-                    let (journal, reader) = journal.snapshot().await.unwrap();
-                    assert_eq!(reader.read(0).await.unwrap(), 42);
-                    drop(reader);
-                    drop(journal);
-
-                    let recovery = <Journal<_, u64> as authenticated::Backing<_>>::recover(
-                        visible.child("recover"),
-                        cfg.clone(),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                    assert_eq!(authenticated::BackingRecovery::bounds(&recovery), 0..1);
-                    assert_eq!(
-                        authenticated::BackingRecovery::read(&recovery, 0)
-                            .await
-                            .unwrap(),
-                        42
-                    );
-
-                    // The retained frame is visible across opens but has not survived a sync.
-                    let (blob, durable_len) = context
-                        .open(&cfg.data_partition(), &0u64.to_be_bytes())
-                        .await
-                        .unwrap();
-                    assert_eq!(durable_len, 0);
-                    drop(blob);
-                    let (blob, durable_len) = context
-                        .open(
-                            &format!("{}-blobs", cfg.offsets_partition()),
-                            &0u64.to_be_bytes(),
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(durable_len, 0);
-                    drop(blob);
-
-                    let journal = authenticated::BackingRecovery::finish(recovery, 1)
-                        .await
-                        .unwrap();
-                    assert_eq!(journal.read(0).await.unwrap(), 42);
-                    drop(journal);
-                    drop(visible);
-                });
-            deterministic::Runner::from(checkpoint).start(|context| async move {
-                let cfg = config(&context, page_size);
-                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
-                    .await
-                    .unwrap();
-                assert_eq!(journal.bounds(), 0..1);
-                assert_eq!(journal.read(0).await.unwrap(), 42);
-                journal.destroy().await.unwrap();
-            });
         }
     }
 
@@ -5658,10 +5579,10 @@ mod tests {
             data_blobs.sort();
             assert_eq!(data_blobs.len(), 3);
             for name in &data_blobs[..2] {
-                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                let (_, size) = context.open(&data_partition, name).await.unwrap();
                 assert!(size > 0);
             }
-            let (_blob, size) = context.open(&data_partition, &data_blobs[2]).await.unwrap();
+            let (_, size) = context.open(&data_partition, &data_blobs[2]).await.unwrap();
             assert_eq!(size, 0);
 
             let cfg = Config {
