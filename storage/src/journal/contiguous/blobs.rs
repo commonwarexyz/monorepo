@@ -620,6 +620,14 @@ impl<'a, B: RBlob> Blob<'a, B> {
             Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
         }
     }
+
+    /// Read sorted, non-overlapping byte ranges into one owned buffer, in range order.
+    pub(super) async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
+        match self {
+            Self::Writer(writer) => Ok(writer.read_ranges(ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges(ranges).await?),
+        }
+    }
 }
 
 impl<B: RBlob> FrameReader for Blob<'_, B> {

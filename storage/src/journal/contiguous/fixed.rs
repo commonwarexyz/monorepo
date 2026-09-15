@@ -1430,11 +1430,16 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             positions.is_sorted_by(|a, b| a < b),
             "positions must be strictly increasing"
         );
+        let items_per_blob = self.items_per_blob.get();
+        // Count groups during validation to reserve space for every read future without relocating it.
+        let mut group_count = 1;
+        let mut previous_blob = super::position_to_blob(positions[0], items_per_blob);
         for &pos in positions {
             self.validate_readable(pos)?;
+            let blob = super::position_to_blob(pos, items_per_blob);
+            group_count += usize::from(blob != previous_blob);
+            previous_blob = blob;
         }
-
-        let items_per_blob = self.items_per_blob.get();
 
         // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
         // maximal runs that share one blob. Each group goes through the blob's batched read,
@@ -1445,7 +1450,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
         // The buffer is pre-sized for every position, so each group can own a disjoint slice and
         // all groups can read concurrently.
-        let mut reads = Vec::new();
+        let mut reads = Vec::with_capacity(group_count);
         let mut remaining_buf = buf.as_mut_slice();
         for group in positions.chunk_by(|a, b| {
             super::position_to_blob(*a, items_per_blob)
