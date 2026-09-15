@@ -41,7 +41,7 @@
     deprecated,
     reason = "tracked by https://github.com/commonwarexyz/monorepo/issues/4414"
 )]
-mod cpu_features {
+pub(crate) mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -50,9 +50,9 @@ mod cpu_features {
     cpufeatures::new!(has_neon, "neon");
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub(super) use self::{has_avx2::get as avx2, has_ssse3::get as ssse3};
+    pub(crate) use self::{has_avx2::get as avx2, has_ssse3::get as ssse3};
     #[cfg(target_arch = "aarch64")]
-    pub(super) use has_neon::get as neon;
+    pub(crate) use has_neon::get as neon;
 }
 
 #[cfg(target_arch = "aarch64")]
