@@ -1,4 +1,7 @@
-use super::{Verifier, verifier::ProposalState};
+use super::{
+    Verifier,
+    verifier::{ProposalState, Verification},
+};
 use crate::{
     Reporter,
     simplex::{
@@ -364,20 +367,24 @@ impl<
     /// Batch verifies the first kind of vote worth verifying (notarizes, then
     /// nullifies, then finalizes), or `None` if no kind is worthwhile.
     ///
-    /// Returns the number of votes processed and the signers that failed
-    /// verification.
+    /// Returns the batch outcome, recording any optimistically recovered certificate
+    /// before returning it to the caller.
     pub async fn try_verify<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
-    ) -> Option<(usize, Vec<Participant>)> {
-        if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
-            return Some(result);
+    ) -> Option<Verification<Certificate<S, D>>> {
+        let result = if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
+            result
+        } else if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
+            result
+        } else {
+            self.verifier.try_verify_finalizes(rng, strategy).await?
+        };
+        if let Some(certificate) = &result.certificate {
+            self.record_certificate(certificate);
         }
-        if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
-            return Some(result);
-        }
-        self.verifier.try_verify_finalizes(rng, strategy).await
+        Some(result)
     }
 
     /// Returns whether `signer` has a nullify vote.
