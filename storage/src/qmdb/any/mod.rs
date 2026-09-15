@@ -428,6 +428,7 @@ pub(crate) mod test {
         let op_count = db.size();
         let inactivity_floor_loc = db.inactivity_floor_loc();
 
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -443,6 +444,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -458,6 +460,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
         assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
@@ -472,6 +475,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
+        drop(db);
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
         assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
@@ -507,6 +511,7 @@ pub(crate) mod test {
     {
         let root = db.root();
 
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
@@ -521,6 +526,7 @@ pub(crate) mod test {
             }
             let _merkleized = batch.merkleize(&db, None).await.unwrap();
         }
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);

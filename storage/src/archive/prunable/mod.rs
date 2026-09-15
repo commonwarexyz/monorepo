@@ -1435,18 +1435,10 @@ mod tests {
             let physical_page_size = page_size + 12;
             let record_size = u64::SIZE + FixedBytes::<64>::SIZE + u64::SIZE + u32::SIZE;
             assert!(record_size < page_size);
-            let (index, size) = context
-                .open(&cfg.key_partition, &0u64.to_be_bytes())
-                .await
+            let old_page = context
+                .durable(&cfg.key_partition, &0u64.to_be_bytes())
                 .unwrap();
-            assert_eq!(size, physical_page_size as u64);
-            let old_page = index
-                .read_at(0, physical_page_size, ReadOptions::default())
-                .await
-                .unwrap()
-                .coalesce();
-            let old_page = old_page.as_ref().to_vec();
-            drop(index);
+            assert_eq!(old_page.len(), physical_page_size);
             let old_len =
                 u16::from_be_bytes(old_page[page_size..page_size + 2].try_into().unwrap()) as usize;
             let old_crc =

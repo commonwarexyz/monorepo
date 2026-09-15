@@ -1202,6 +1202,14 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
+        drop(db);
+        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
+            || context.child("journal"),
+            qmdb::sync::DatabaseConfig::journal_config(&config),
+            non_empty_range!(local_start, local_end),
+        )
+        .await
+        .unwrap();
 
         let stale_target = Target {
             root: sync_root,
@@ -1212,7 +1220,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
-                &db.journal.journal,
+                &journal,
             )
             .await
             .unwrap()
@@ -1228,14 +1236,13 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
-                &db.journal.journal,
+                &journal,
             )
             .await
             .unwrap()
             .is_some()
         );
-
-        H::destroy(db).await;
+        drop(journal);
     });
 }
 
@@ -1700,6 +1707,7 @@ mod compact_variable_mmr {
             assert!(good_rx.await.unwrap());
             assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(vec![7]));
+            drop(synced);
 
             let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await

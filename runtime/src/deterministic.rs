@@ -1125,6 +1125,17 @@ impl Context {
         self.storage.inner().inner().inner().audit()
     }
 
+    /// Return a copy of a blob's durable logical contents without opening it, or `None` when
+    /// the blob is missing.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.storage
+            .inner()
+            .inner()
+            .inner()
+            .durable(partition, name)
+    }
+
     /// Access the storage fault configuration.
     ///
     /// Changes to the returned [`FaultConfig`] take effect immediately for

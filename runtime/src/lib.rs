@@ -1534,6 +1534,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
+            drop(blob);
             let (blob, len) = context
                 .open(partition, name)
                 .await
@@ -1668,6 +1669,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
@@ -1679,6 +1681,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
@@ -1701,6 +1704,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
+            drop(blob);
             let (blob, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 
