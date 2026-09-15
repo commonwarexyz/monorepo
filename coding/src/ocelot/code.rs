@@ -39,7 +39,7 @@
 //! `f(x) = (f * L)'(x) / L'(x)`.
 
 use super::transform::{Shards, Tables, Transform};
-use commonware_math::algebra::{Additive, Field, Ring};
+use commonware_math::algebra::{Additive, Field};
 use commonware_parallel::Strategy;
 use commonware_utils::Cached;
 use std::{ops::Range, sync::Arc};
@@ -59,6 +59,9 @@ const STRIPE_BYTES: usize = 16 * 1024;
 /// Target total size of the encoder's transform buffers per worker.
 const ENCODE_WORK_BYTES: usize = 512 * 1024;
 
+/// Target total size of the decoder's transform buffer per worker.
+const DECODE_WORK_BYTES: usize = 512 * 1024;
+
 pub(super) fn stripe_bytes<I: Impl>() -> usize {
     const {
         assert!(I::ALIGN > 0);
@@ -68,18 +71,33 @@ pub(super) fn stripe_bytes<I: Impl>() -> usize {
     (STRIPE_BYTES / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN
 }
 
-/// Split shard-major output buffers into disjoint mutable columns, one per
-/// stripe. Tasks write these slices directly, without gathering stripe results.
-fn stripe_columns(outputs: &mut [Vec<u8>], stripe_bytes: usize) -> Vec<Vec<&mut [u8]>> {
+fn decode_stripe_bytes<I: Impl>(count: usize) -> usize {
+    let workspace = (DECODE_WORK_BYTES / count / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN;
+    let width = stripe_bytes::<I>().min(workspace);
+    let skew = (128 / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN;
+    // Avoid shard strides that map the derivative's simultaneous accesses to
+    // the same cache sets. Keep every stripe boundary aligned to the layout.
+    if width.is_multiple_of(4096) && width > skew {
+        width - skew
+    } else {
+        width
+    }
+}
+
+/// Split shard-major output buffers into disjoint mutable slices in stripe-major
+/// order. Tasks write these slices directly, without gathering stripe results.
+fn stripe_columns<T: AsMut<[u8]>>(outputs: &mut [T], stripe_bytes: usize) -> Vec<&mut [u8]> {
+    let output_count = outputs.len();
     let stripes = outputs
-        .first()
-        .map_or(0, |output| output.len().div_ceil(stripe_bytes));
-    let mut columns: Vec<_> = (0..stripes)
-        .map(|_| Vec::with_capacity(outputs.len()))
-        .collect();
-    for output in outputs {
-        for (column, stripe) in columns.iter_mut().zip(output.chunks_mut(stripe_bytes)) {
-            column.push(stripe);
+        .first_mut()
+        .map_or(0, |output| output.as_mut().len().div_ceil(stripe_bytes));
+    let slots = stripes
+        .checked_mul(output_count)
+        .expect("stripe metadata length overflow");
+    let mut columns: Vec<&mut [u8]> = std::iter::repeat_with(|| &mut [][..]).take(slots).collect();
+    for (output_index, output) in outputs.iter_mut().enumerate() {
+        for (stripe, shard) in output.as_mut().chunks_mut(stripe_bytes).enumerate() {
+            columns[stripe * output_count + output_index] = shard;
         }
     }
     columns
@@ -147,6 +165,50 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// This must support both individual shards and concatenations of shards.
     fn add_into(self, dst: &mut [u8], src: &[u8]);
 
+    /// Differentiate four consecutive shard groups in place.
+    ///
+    /// Each quarter contains the same number of bytes. For quarters
+    /// `[a, b, c, d]`, this computes `[b + c, d, d, 0]`.
+    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
+        let [a, b, c, d] = quarters;
+        assert_eq!(a.len(), b.len(), "quarter lengths differ");
+        assert_eq!(a.len(), c.len(), "quarter lengths differ");
+        assert_eq!(a.len(), d.len(), "quarter lengths differ");
+        a.copy_from_slice(b);
+        self.add_into(a, c);
+        b.copy_from_slice(d);
+        c.copy_from_slice(d);
+        d.fill(0);
+    }
+
+    /// Differentiate sixteen equal-length consecutive shard groups in place.
+    ///
+    /// Output block `i` is the sum of input blocks `i | (1 << bit)` for every
+    /// bit not set in `i`.
+    fn derivative_sixteen(self, mut blocks: [&mut [u8]; 16]) {
+        let len = blocks[0].len();
+        assert!(
+            blocks.iter().all(|block| block.len() == len),
+            "block lengths differ"
+        );
+        for output in 0..16 {
+            let (done, sources) = blocks.split_at_mut(output + 1);
+            let dst = &mut *done[output];
+            let mut contributors = (0..4).filter_map(|bit| {
+                let mask = 1 << bit;
+                (output & mask == 0).then(|| (output | mask) - output - 1)
+            });
+            if let Some(source) = contributors.next() {
+                dst.copy_from_slice(sources[source]);
+                for source in contributors {
+                    self.add_into(dst, sources[source]);
+                }
+            } else {
+                dst.fill(0);
+            }
+        }
+    }
+
     /// `dst -= src`, elementwise.
     ///
     /// This has the same layout requirements as [`Self::add_into`].
@@ -154,6 +216,12 @@ pub trait Impl: Copy + Send + Sync + 'static {
 
     /// `dst += c * src`, elementwise, for one shard.
     fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element);
+
+    /// `dst = c * src`, elementwise, for one shard.
+    fn mul_into(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+        dst.fill(0);
+        self.mul_add(dst, src, c);
+    }
 
     /// `dst -= c * src`, elementwise, for one shard.
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
@@ -301,6 +369,31 @@ impl<I: Impl> Encoder<I> {
         recovery: usize,
         strategy: &impl Strategy,
     ) -> Vec<Vec<u8>> {
+        let (m, len) = Self::validate(original, recovery);
+        if recovery == 0 {
+            return Vec::new();
+        }
+        let mut output = vec![vec![0; len]; recovery];
+        self.encode_into_validated(original, &mut output, m, len, strategy);
+        output
+    }
+
+    /// Fill caller-owned recovery shards using `strategy`.
+    pub(super) fn encode_into<T: AsMut<[u8]>>(
+        &self,
+        original: &[&[u8]],
+        output: &mut [T],
+        strategy: &impl Strategy,
+    ) {
+        let (m, len) = Self::validate(original, output.len());
+        assert!(
+            output.iter_mut().all(|shard| shard.as_mut().len() == len),
+            "recovery shard lengths differ"
+        );
+        self.encode_into_validated(original, output, m, len, strategy);
+    }
+
+    fn validate(original: &[&[u8]], recovery: usize) -> (usize, usize) {
         let k = original.len();
         assert!(k > 0, "no original shards");
         let m = recovery
@@ -316,22 +409,30 @@ impl<I: Impl> Encoder<I> {
             original.iter().all(|s| s.len() == len),
             "shard lengths differ"
         );
-        if recovery == 0 {
-            return Vec::new();
-        }
+        (m, len)
+    }
 
-        if len == 0 {
-            return vec![Vec::new(); recovery];
+    fn encode_into_validated<T: AsMut<[u8]>>(
+        &self,
+        original: &[&[u8]],
+        output: &mut [T],
+        m: usize,
+        len: usize,
+        strategy: &impl Strategy,
+    ) {
+        let recovery = output.len();
+        if recovery == 0 || len == 0 {
+            return;
         }
+        let k = original.len();
         let buffers = 1 + usize::from(k > m);
         let workspace_stripe =
             (ENCODE_WORK_BYTES / buffers / m / I::STRIPE_ALIGN).max(1) * I::STRIPE_ALIGN;
         let stripe_bytes = stripe_bytes::<I>().min(workspace_stripe);
         let work_bytes = stripe_bytes.min(len);
-        let mut output = vec![vec![0; len]; recovery];
-        let columns = stripe_columns(&mut output, stripe_bytes);
+        let mut columns = stripe_columns(output, stripe_bytes);
         strategy.map_collect_vec_with_multiplier(
-            columns.into_iter().enumerate(),
+            columns.chunks_mut(recovery).enumerate(),
             work_bytes.saturating_mul(k + m),
             |(stripe, column)| {
                 let mut acc = Cached::take(
@@ -384,12 +485,11 @@ impl<I: Impl> Encoder<I> {
                     }
                 }
                 self.transform.fft(&mut acc, recovery);
-                for (dst, src) in column.into_iter().zip(acc.shards()) {
+                for (dst, src) in column.iter_mut().zip(acc.shards()) {
                     dst.copy_from_slice(src);
                 }
             },
         );
-        output
     }
 }
 
@@ -446,12 +546,14 @@ impl<I: Impl> Decoder<I> {
     ///
     /// # Complexity
     ///
-    /// For `n` padded codeword positions and `e` erasures (including unused
-    /// recovery positions), locator evaluation takes `O(n * e)` scalar field
-    /// operations. Shard transforms take `O(n log n)` operations on whole
-    /// shards. Work is split into aligned byte stripes; each strategy partition
-    /// reuses one workspace of `n` stripe shards and writes directly into a
-    /// disjoint range of the returned data.
+    /// For `e` erasures partitioned into `b` aligned dyadic blocks and `q`
+    /// consumed codeword positions, locator evaluation takes `O(e + q * b)`
+    /// operations, with `b <= e`. For fields up to 16 bits, fragmented sets use
+    /// `O(n log n)` integer operations after lazily building field-sized tables.
+    /// Shard transforms take `O(n log n)` operations on whole shards for `n`
+    /// padded positions. Work is split into aligned byte
+    /// stripes; each strategy partition reuses one workspace of `n` stripe
+    /// shards and writes directly into a disjoint range of the returned data.
     pub fn decode(
         &self,
         original: &[Option<&[u8]>],
@@ -601,37 +703,9 @@ impl<I: Impl> Decoder<I> {
             .chain(missing.iter().map(|i| m + i))
             .collect();
         debug_assert_eq!(erased.len(), m);
-        // Skipping the zero factor at an erased position evaluates L' there;
-        // elsewhere this is L. Cantor coordinates add by XOR.
-        let mut locator = vec![I::Element::zero(); m + k];
-        let mut evaluate_locator = |i| {
-            locator[i] = erased
-                .iter()
-                .filter(|&&e| e != i)
-                .fold(I::Element::one(), |acc, &e| {
-                    acc * &self.transform.tables.points[i ^ e]
-                });
-        };
-        if recover_recovery {
-            for i in 0..recovery.len() {
-                evaluate_locator(i);
-            }
-        } else {
-            for i in recovery[..recovery_end]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, shard)| shard.is_some().then_some(i))
-            {
-                evaluate_locator(i);
-            }
-        }
-        for i in m..m + k {
-            evaluate_locator(i);
-        }
 
         let imp = self.transform.imp;
         let mut inputs = Vec::with_capacity(k);
-        let mut nonzero = 0;
         for (i, shard) in recovery
             .iter()
             .take(recovery_end)
@@ -639,27 +713,38 @@ impl<I: Impl> Decoder<I> {
             .chain(original.iter().enumerate().map(|(i, shard)| (m + i, shard)))
         {
             if let Some(shard) = shard {
-                inputs.push((i, *shard, locator[i]));
-                nonzero = i + 1;
+                inputs.push((i, *shard, I::Element::zero()));
             }
         }
         debug_assert_eq!(inputs.len(), k);
-        let inverses: Vec<_> = missing
-            .iter()
-            .map(|&i| locator[m + i].inv())
-            .chain(missing_recovery.iter().map(|&i| locator[i].inv()))
-            .collect();
+        let nonzero = inputs.last().map_or(0, |&(i, _, _)| i + 1);
+        let mut locators = self
+            .transform
+            .locator(
+                &erased,
+                inputs
+                    .iter()
+                    .map(|&(i, _, _)| i)
+                    .chain(missing.iter().map(|&i| m + i))
+                    .chain(missing_recovery.iter().copied()),
+            )
+            .into_iter();
+        for (_, _, locator) in &mut inputs {
+            *locator = locators.next().expect("locator count matches inputs");
+        }
+        let inverses: Vec<_> = locators.map(|locator| locator.inv()).collect();
+        debug_assert_eq!(inverses.len(), missing.len() + missing_recovery.len());
         let needed = missing
             .last()
             .map(|&i| m + i + 1)
             .or_else(|| missing_recovery.last().map(|&i| i + 1))
             .expect("output requested");
-        let stripe_bytes = stripe_bytes::<I>();
+        let stripe_bytes = decode_stripe_bytes::<I>(n);
         let work_bytes = stripe_bytes.min(len);
         let mut output = vec![vec![0; len]; inverses.len()];
-        let columns = stripe_columns(&mut output, stripe_bytes);
+        let mut columns = stripe_columns(&mut output, stripe_bytes);
         strategy.map_collect_vec_with_multiplier(
-            columns.into_iter().enumerate(),
+            columns.chunks_mut(inverses.len()).enumerate(),
             n * work_bytes,
             |(stripe, column)| {
                 let mut work = Cached::take(
@@ -677,7 +762,7 @@ impl<I: Impl> Decoder<I> {
                 work.resize(width);
                 work.data_mut().fill(0);
                 for &(i, shard, coefficient) in &inputs {
-                    imp.mul_add(
+                    imp.mul_into(
                         &mut work.data_mut()[i * width..(i + 1) * width],
                         &shard[start..end],
                         coefficient,
@@ -686,14 +771,14 @@ impl<I: Impl> Decoder<I> {
                 self.transform.ifft(&mut work, nonzero, 0);
                 derivative(imp, work.data_mut(), width);
                 self.transform.fft(&mut work, needed);
-                for (output_index, (dst, &inverse)) in column.into_iter().zip(&inverses).enumerate()
+                for (output_index, (dst, &inverse)) in column.iter_mut().zip(&inverses).enumerate()
                 {
                     let i = if output_index < missing.len() {
                         m + missing[output_index]
                     } else {
                         missing_recovery[output_index - missing.len()]
                     };
-                    imp.mul_add(dst, &work.data()[i * width..(i + 1) * width], inverse);
+                    imp.mul_into(dst, &work.data()[i * width..(i + 1) * width], inverse);
                 }
             },
         );
@@ -715,6 +800,38 @@ fn derivative<I: Impl>(imp: I, data: &mut [u8], len: usize) {
     // For f = a + s_j * b, f' = a' + b + s_j * b', since s_j' = 1
     // in the Cantor basis. Preserve b until it has been added to a'.
     let (a, b) = data.split_at_mut(data.len() / 2);
+    // Amortize the larger leaf's setup over at least eight native vectors.
+    if a.len() == 8 * len && len >= 512 {
+        let (a0, a1) = a.split_at_mut(4 * len);
+        let (b0, b1) = b.split_at_mut(4 * len);
+        let (a00, a01) = a0.split_at_mut(2 * len);
+        let (a10, a11) = a1.split_at_mut(2 * len);
+        let (b00, b01) = b0.split_at_mut(2 * len);
+        let (b10, b11) = b1.split_at_mut(2 * len);
+        let (q0, q1) = a00.split_at_mut(len);
+        let (q2, q3) = a01.split_at_mut(len);
+        let (q4, q5) = a10.split_at_mut(len);
+        let (q6, q7) = a11.split_at_mut(len);
+        let (q8, q9) = b00.split_at_mut(len);
+        let (q10, q11) = b01.split_at_mut(len);
+        let (q12, q13) = b10.split_at_mut(len);
+        let (q14, q15) = b11.split_at_mut(len);
+        imp.derivative_sixteen([
+            q0, q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12, q13, q14, q15,
+        ]);
+        return;
+    }
+    if a.len() == len {
+        a.copy_from_slice(b);
+        b.fill(0);
+        return;
+    }
+    if a.len() == 2 * len {
+        let (q0, q1) = a.split_at_mut(len);
+        let (q2, q3) = b.split_at_mut(len);
+        imp.derivative_four([q0, q1, q2, q3]);
+        return;
+    }
     derivative(imp, a, len);
     imp.add_into(a, b);
     derivative(imp, b, len);
@@ -953,8 +1070,10 @@ pub mod test_suites {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoder, Encoder, Impl, STRIPE_BYTES};
-    use crate::ocelot::{Impl8, field::gf8::GF8, kernel::portable::Portable};
+    use super::{
+        Decoder, Encoder, Impl, STRIPE_BYTES, decode_stripe_bytes, derivative, stripe_bytes,
+    };
+    use crate::ocelot::{Impl8, field::gf8::GF8, impl16::Impl16, kernel::portable::Portable};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use rand::Rng as _;
@@ -962,6 +1081,49 @@ mod tests {
         ops::Range,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    fn derivative_reference<I: Impl>(imp: I, data: &mut [u8], len: usize) {
+        if data.len() == len {
+            data.fill(0);
+            return;
+        }
+        let (a, b) = data.split_at_mut(data.len() / 2);
+        if a.len() == len {
+            a.copy_from_slice(b);
+            b.fill(0);
+            return;
+        }
+        derivative_reference(imp, a, len);
+        imp.add_into(a, b);
+        derivative_reference(imp, b, len);
+    }
+
+    fn compare_derivative<I: Impl>(imp: I, lengths: &[usize]) {
+        for count in [1, 2, 4, 8, 16, 32] {
+            for &len in lengths {
+                let mut actual = vec![0; count * len];
+                for (i, byte) in actual.iter_mut().enumerate() {
+                    *byte = (i.wrapping_mul(157) ^ i.rotate_left(3) ^ 0xa5) as u8;
+                }
+                let mut expected = actual.clone();
+                derivative(imp, &mut actual, len);
+                derivative_reference(imp, &mut expected, len);
+                assert_eq!(actual, expected, "count={count} len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn fused_derivative_leaf_matches_recursive_schedule() {
+        compare_derivative(
+            Impl8::new(Portable),
+            &[1, 3, 63, 64, 65, 129, 511, 512, 513],
+        );
+        compare_derivative(
+            Impl16::new(Portable),
+            &[2, 6, 126, 128, 130, 258, 510, 512, 514],
+        );
+    }
 
     #[test]
     fn recovers_across_stripe_boundary() {
@@ -986,6 +1148,43 @@ mod tests {
         assert_eq!(
             recovered,
             vec![(0, original[0].clone()), (2, original[2].clone())]
+        );
+    }
+
+    #[test]
+    fn decode_capped_stripes_with_short_tail() {
+        const OCELOT16: Impl16<Portable> = Impl16::new(Portable);
+        let original_count = 17usize;
+        let recovery_count = 17usize;
+        let m = recovery_count.next_power_of_two();
+        let n = (m + original_count).next_power_of_two();
+        let capped_stripe = decode_stripe_bytes::<Impl16<Portable>>(n);
+        assert!(capped_stripe < stripe_bytes::<Impl16<Portable>>());
+
+        let len = capped_stripe + Impl16::<Portable>::ALIGN;
+        let mut original = vec![vec![0; len]; original_count];
+        for (shard, data) in original.iter_mut().enumerate() {
+            for (offset, byte) in data.iter_mut().enumerate() {
+                *byte = (shard.wrapping_mul(157) ^ offset.wrapping_mul(41)) as u8;
+            }
+        }
+        let original_refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
+        let recovery = Encoder::new(OCELOT16).encode(&original_refs, recovery_count, &Sequential);
+        let mut encoded_original: Vec<_> = original
+            .iter()
+            .map(|shard| Some(shard.as_slice()))
+            .collect();
+        encoded_original[8] = None;
+        let encoded_recovery: Vec<_> = recovery
+            .iter()
+            .map(|shard| Some(shard.as_slice()))
+            .collect();
+
+        assert_eq!(
+            Decoder::new(OCELOT16)
+                .decode(&encoded_original, &encoded_recovery, &Sequential)
+                .unwrap(),
+            vec![(8, original[8].clone())]
         );
     }
 
@@ -1042,6 +1241,7 @@ mod tests {
             }
         }
 
+        compare_derivative(CountingImpl, &[512, 514]);
         let original = [[1; 16], [2; 16], [3; 16]];
         let original_refs: Vec<_> = original.iter().map(<[u8; 16]>::as_slice).collect();
         let recovery = Encoder::new(OCELOT8).encode(&original_refs, 4, &Sequential);
