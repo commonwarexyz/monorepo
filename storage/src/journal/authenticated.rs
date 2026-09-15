@@ -766,19 +766,6 @@ where
         Ok(self)
     }
 
-    /// Rewind the journal and Merkle structure.
-    #[boxed]
-    pub async fn rewind(mut self, size: u64) -> Result<Self, Error<F>> {
-        self.journal = self.journal.rewind(size).await?;
-
-        let leaves = *self.merkle.leaves();
-        if leaves > size {
-            self.merkle = self.merkle.rewind((leaves - size) as usize).await?;
-        }
-
-        Ok(self)
-    }
-
     /// Prune both the Merkle structure and journal to the given location.
     ///
     /// # Returns
@@ -1105,10 +1092,6 @@ where
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))
-    }
-
-    async fn rewind(self, size: u64) -> Result<Self, JournalError> {
-        Self::rewind(self, size).await.map_err(Self::map_error)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {

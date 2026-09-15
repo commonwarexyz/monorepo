@@ -102,9 +102,8 @@
 //!
 //! - The watermark only takes values the barrier has held (never an in-flight size).
 //! - The barrier advances only on an observed sync success.
-//! - Operations that move blob state backward (truncate, clear) durably lower the watermark
-//!   before touching blob state (draining any in-flight watermark write that could exceed
-//!   the surviving data), then lower the barrier.
+//! - Initialization recovery persists a lower watermark before discarding a suffix. Live
+//!   handles never move their retained end backward.
 //!
 //! # Consistency
 //!
@@ -1282,44 +1281,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(self.bounds.end - 1)
     }
 
-    /// See [Journal::rewind].
-    pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
-        match size.cmp(&self.bounds.end) {
-            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
-            std::cmp::Ordering::Equal => return Ok(self),
-            std::cmp::Ordering::Less => {}
-        }
-
-        if size < self.bounds.start {
-            return Err(Error::ItemPruned(size));
-        }
-
-        let blob = super::position_to_blob(size, self.items_per_blob.get());
-        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
-        let byte_offset = Self::items_to_bytes(pos_in_blob)?;
-
-        // Persist a lowered recovery watermark before blob state moves backward.
-        if self.checkpoint.lower_watermark(size) {
-            self.checkpoint = self.checkpoint.sync().await?;
-        }
-
-        if blob == self.blobs.tail_blob_index() {
-            self.blobs.rewind_tail(byte_offset).await?;
-        } else {
-            self.blobs.rewind_into_sealed(blob, byte_offset).await?;
-        }
-
-        self.bounds.end = size;
-        self.barrier.truncate(size);
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok(self)
-    }
-
     /// Return the location before which all items have been pruned.
     pub const fn pruning_boundary(&self) -> u64 {
         self.bounds.start
@@ -1385,6 +1346,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         new_size: u64,
     ) -> Result<Box<Self>, Error> {
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
+        }
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
@@ -1428,6 +1392,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
+        }
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
         }
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
         Ok(self)
@@ -1541,8 +1508,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// If the journal later rewinds or truncates into the returned reader's range, subsequent reads
-    /// from that range may observe unspecified contents.
+    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -1590,25 +1556,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ) -> Result<(Self, u64), Error> {
         let position = self.0.append_prepared(prepared).await?;
         Ok((self, position))
-    }
-
-    /// Rewind the journal to `size` items, discarding items from the end.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is larger than current size.
-    /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
-    ///
-    /// # Warnings
-    ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
-    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
-    /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
-    pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
-        self.0 = self.0.rewind(size).await?;
-        Ok(self)
     }
 
     /// Return the location before which all items have been pruned.
@@ -1981,10 +1928,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
-    }
-
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        Self::rewind(self, size).await
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
