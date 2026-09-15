@@ -77,6 +77,9 @@ impl<const N: usize> ChunkOverlay<N> {
 
     /// Create an overlay of `len` total bits on top of `base`. The `base` handed to later
     /// `set_bit` / `clear_bit` / `chunk_mut` calls must be the bitmap given here.
+    ///
+    /// `capacity` estimates the number of distinct chunks the overlay will modify,
+    /// including appended chunks.
     fn new<B: bitmap::Readable<N>>(base: &B, len: u64, capacity: usize) -> Self {
         let parent = Dimensions::of(base);
         // Every dirty chunk is unpruned and below len, including the final partial chunk.
