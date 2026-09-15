@@ -430,10 +430,36 @@ mod tests {
     /// of what the fuzz generators happen to sample.
     #[test]
     fn test_hash_pair_bmt_node_shape_matches_streaming() {
-        fn node(fill: u8) -> Vec<Vec<u8>> {
-            vec![vec![fill; 32], vec![fill + 1; 32]]
+        fn assert_pair(left: [&[u8]; 2], right: [&[u8]; 2]) {
+            let expected = |parts: &[&[u8]]| {
+                let mut hasher = Sha256::default();
+                for part in parts {
+                    hasher.update(part);
+                }
+                hasher.finalize().1
+            };
+            let (left_digest, right_digest) = Sha256::hash_pair(&left, &right);
+            let expected_left = expected(&left);
+            let expected_right = expected(&right);
+            assert_eq!(Sha256::hash(&left), expected_left);
+            assert_eq!(Sha256::hash(&right), expected_right);
+            assert_eq!(left_digest, expected_left);
+            assert_eq!(right_digest, expected_right);
         }
-        crate::fuzz::Plan::<Sha256>::new(node(0x11), node(0x33)).run();
+
+        let zero = [0u8; 32];
+        let ff = [0xff; 32];
+        let ascending: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let descending: [u8; 32] = core::array::from_fn(|i| 0xff - i as u8);
+        assert_pair([&zero, &zero], [&zero, &zero]);
+        assert_pair([&ff, &ff], [&ff, &ff]);
+        assert_pair([&ascending, &descending], [&ff, &zero]);
+
+        let backing: Vec<u8> = (0..96).map(|i| i as u8).collect();
+        assert_pair(
+            [&backing[1..33], &backing[17..49]],
+            [&backing[2..34], &backing[18..50]],
+        );
     }
 
     #[test]
