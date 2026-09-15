@@ -157,7 +157,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
     /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
     /// later mutations.
-    pub(crate) mem: Arc<Mem<F, D>>,
+    mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -915,16 +915,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
-    /// Borrow the committed Mem for the duration of the closure.
-    pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        f(&self.mem)
+    /// The committed [`Mem`].
+    pub fn mem(&self) -> &Mem<F, D> {
+        &self.mem
     }
 
     /// Return a zero-copy, immutable snapshot of the committed Mem.
     ///
     /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
-    /// alive. Use this to move committed node fallback into a job running off the calling task
-    /// (see [`Merkle::mem`]); prefer [`Merkle::with_mem`] when a borrow suffices.
+    /// alive. Use this to move committed node fallback into a job running off the calling task;
+    /// prefer [`Merkle::mem()`] when a borrow suffices.
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
@@ -1228,7 +1228,7 @@ mod tests {
         .await
         .unwrap();
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         assert_eq!(mmr.size(), 1);
         mmr = mmr.sync().await.unwrap();
@@ -1263,7 +1263,7 @@ mod tests {
 
         // Confirm empty proof no longer verifies after adding an element.
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(!empty_proof.verify_range_inclusion(
@@ -1306,7 +1306,7 @@ mod tests {
         .unwrap();
 
         let batch = mmr.new_batch().add(&hasher, &test_digest(0));
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         assert!(matches!(
@@ -1345,7 +1345,7 @@ mod tests {
         for i in 0u64..32 {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.prune(Location::<F>::new(8)).await.unwrap();
         let leaves_before = mmr.leaves();
@@ -1380,7 +1380,7 @@ mod tests {
         for i in 0u64..8 {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         mmr = mmr.sync().await.unwrap();
         assert!(matches!(mmr.rewind(9).await, Err(Error::Empty)));
@@ -1427,7 +1427,7 @@ mod tests {
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
@@ -1483,7 +1483,7 @@ mod tests {
         for i in 0..LEAF_COUNT {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         mmr = mmr.sync().await.unwrap();
         mmr = mmr.prune(Location::<F>::new(50)).await.unwrap();
@@ -1491,7 +1491,7 @@ mod tests {
         for i in LEAF_COUNT..LEAF_COUNT + 10 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         // Partition by what `get_node` reports, so both APIs are judged against the same
@@ -1580,7 +1580,7 @@ mod tests {
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         let root = mmr.root(&hasher, 0).unwrap();
@@ -1590,7 +1590,7 @@ mod tests {
         assert_eq!(Position::<F>::new(mmr.journal.size()), expected_size);
         assert_eq!(mmr.size(), expected_size);
         assert_eq!(
-            mmr.with_mem(|mem| mem.bounds().start),
+            mmr.mem().bounds().start,
             Location::<F>::new(LEAF_COUNT as u64)
         );
 
@@ -1651,7 +1651,7 @@ mod tests {
             for i in 0..50usize {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
             let mut mmr = mmr.sync().await.unwrap();
             let synced_size = mmr.size();
@@ -1660,7 +1660,7 @@ mod tests {
             for i in 50..100usize {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
             mmr = mmr.flush().await.unwrap();
             assert_eq!(Position::<F>::new(mmr.journal.size()), mmr.size());
@@ -1719,7 +1719,7 @@ mod tests {
             for i in 0..100usize {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
             mmr = mmr.flush().await.unwrap();
             let mmr = mmr.sync().await.unwrap();
@@ -1776,7 +1776,7 @@ mod tests {
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
@@ -1879,13 +1879,13 @@ mod tests {
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mut batch = pruned_mmr.new_batch();
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(pruned_mmr.mem(), &hasher);
         pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
@@ -1902,10 +1902,10 @@ mod tests {
             leaves.push(digest);
             let last_leaf = leaves.last().unwrap();
             let batch = pruned_mmr.new_batch().add(&hasher, last_leaf);
-            let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(pruned_mmr.mem(), &hasher);
             pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
             let batch = mmr.new_batch().add(&hasher, last_leaf);
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
             assert_eq!(
                 pruned_mmr.root(&hasher, 0).unwrap(),
@@ -1948,12 +1948,12 @@ mod tests {
         // Close structure after adding a new node without syncing and make sure state is as
         // expected on reopening.
         let batch = mmr.new_batch().add(&hasher, &test_digest(LEAF_COUNT));
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let batch = pruned_mmr
             .new_batch()
             .add(&hasher, &test_digest(LEAF_COUNT));
-        let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(pruned_mmr.mem(), &hasher);
         pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
         pruned_mmr.sync().await.unwrap();
@@ -1988,7 +1988,7 @@ mod tests {
             let batch = pruned_mmr
                 .new_batch()
                 .add(&hasher, &test_digest(LEAF_COUNT));
-            let batch = pruned_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(pruned_mmr.mem(), &hasher);
             pruned_mmr = pruned_mmr.apply_batch(&batch).unwrap();
         }
         pruned_mmr = pruned_mmr.prune_all().await.unwrap();
@@ -2030,7 +2030,7 @@ mod tests {
         for leaf in &leaves {
             batch = batch.add(&hasher, leaf);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
         assert_eq!(mmr.size(), expected_size);
@@ -2063,7 +2063,7 @@ mod tests {
                     .new_batch()
                     .add(&hasher, leaves.last().unwrap())
                     .add(&hasher, leaves.last().unwrap());
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
@@ -2071,7 +2071,7 @@ mod tests {
                     .new_batch()
                     .add(&hasher, leaves.last().unwrap())
                     .add(&hasher, leaves.last().unwrap());
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
             }
             let end_size = mmr.size();
@@ -2119,7 +2119,7 @@ mod tests {
         for elt in &elements {
             batch = batch.add(&hasher, elt);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let original_leaves = mmr.leaves();
 
@@ -2156,7 +2156,7 @@ mod tests {
         for elt in &elements[10..20] {
             batch = batch.add(&hasher, elt);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let new_historical_proof = mmr
             .historical_range_proof(
@@ -2204,7 +2204,7 @@ mod tests {
         for elt in &elements {
             batch = batch.add(&hasher, elt);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         // Prune to leaf 16 (position 30)
@@ -2232,7 +2232,7 @@ mod tests {
         for elt in elements.iter().take(41) {
             batch = batch.add(&hasher, elt);
         }
-        let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(ref_mmr.mem(), &hasher);
         ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let historical_root = ref_mmr.root(&hasher, 0).unwrap();
@@ -2301,7 +2301,7 @@ mod tests {
         for elt in &elements {
             batch = batch.add(&hasher, elt);
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let range = Location::<F>::new(30)..Location::<F>::new(61);
@@ -2328,7 +2328,7 @@ mod tests {
         for elt in elements.iter().take(*range.end as usize) {
             batch = batch.add(&hasher, elt);
         }
-        let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(ref_mmr.mem(), &hasher);
         ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
         let historical_leaves = ref_mmr.leaves();
         let expected_root = ref_mmr.root(&hasher, 0).unwrap();
@@ -2371,7 +2371,7 @@ mod tests {
 
         let element = test_digest(0);
         let batch = mmr.new_batch().add(&hasher, &element);
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         // Test single element proof at historical position
@@ -2433,7 +2433,7 @@ mod tests {
         // Should be able to add new elements
         let new_element = test_digest(999);
         let batch = sync_mmr.new_batch().add(&hasher, &new_element);
-        let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(sync_mmr.mem(), &hasher);
         sync_mmr = sync_mmr.apply_batch(&batch).unwrap();
 
         // Root should be computable
@@ -2470,7 +2470,7 @@ mod tests {
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
         let original_size = mmr.size();
@@ -2550,7 +2550,7 @@ mod tests {
         for i in 0..30 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
         let mmr = mmr.prune(Location::<F>::new(6)).await.unwrap();
@@ -2631,7 +2631,7 @@ mod tests {
         for i in 0..20 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         let target_root = merkle.root(&hasher, 0).unwrap();
         let restart = Location::<F>::new(7);
@@ -2641,7 +2641,7 @@ mod tests {
         for i in 20..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         let merkle = merkle.sync().await.unwrap();
         drop(merkle);
@@ -2695,7 +2695,7 @@ mod tests {
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         let target_root = merkle.root(&hasher, 0).unwrap();
         let restart = Location::<F>::new(7);
@@ -2721,7 +2721,7 @@ mod tests {
         for i in 7..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
         merkle.destroy().await.unwrap();
@@ -2757,7 +2757,7 @@ mod tests {
             for i in 0..40 {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
             let merkle = merkle.prune(Location::new(30)).await.unwrap();
@@ -2778,7 +2778,7 @@ mod tests {
             for i in 0..20 {
                 batch = batch.add(&hasher, &test_digest(1_000 + i));
             }
-            let batch = target.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(target.mem(), &hasher);
             target = target.apply_batch(&batch).unwrap();
             let target_root = target.root(&hasher, 0).unwrap();
             let restart = Location::new(7);
@@ -2798,7 +2798,7 @@ mod tests {
             for i in 7..20 {
                 batch = batch.add(&hasher, &test_digest(1_000 + i));
             }
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
             let merkle = merkle.sync().await.unwrap();
@@ -2861,7 +2861,7 @@ mod tests {
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
@@ -2930,7 +2930,7 @@ mod tests {
         for i in 0..12 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         let merkle = merkle.sync().await.unwrap();
         let merkle = merkle.prune(Location::new(12)).await.unwrap();
@@ -2995,7 +2995,7 @@ mod tests {
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
@@ -3066,7 +3066,7 @@ mod tests {
         for i in 0..100 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
@@ -3127,7 +3127,7 @@ mod tests {
         for i in 0..64 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(16);
@@ -3152,7 +3152,7 @@ mod tests {
         for i in 0..8 {
             batch = batch.add(&hasher, &test_digest(10_000 + i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         let mmr = mmr.apply_batch(&batch).unwrap();
 
         let requested = mmr.leaves();
@@ -3192,7 +3192,7 @@ mod tests {
         for i in 0..20 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let historical_leaves = Location::<F>::new(10);
@@ -3203,7 +3203,7 @@ mod tests {
             .new_batch()
             .add(&hasher, &test_digest(100))
             .add(&hasher, &test_digest(101));
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let proof = mmr
@@ -3248,7 +3248,7 @@ mod tests {
         for i in 0..64 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
@@ -3294,7 +3294,7 @@ mod tests {
         for i in 0..30 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(10);
@@ -3360,7 +3360,7 @@ mod tests {
         for i in 0..20 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         mmr = mmr.prune_all().await.unwrap();
@@ -3390,7 +3390,7 @@ mod tests {
         for i in 0..11 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         let keep_loc = end - 1;
@@ -3439,7 +3439,7 @@ mod tests {
         for i in 0..8 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let requested = mmr.leaves() + 1;
 
@@ -3482,7 +3482,7 @@ mod tests {
         for i in 0..32 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let valid_range = Location::<F>::new(0)..Location::<F>::new(1);
@@ -3571,7 +3571,7 @@ mod tests {
         for i in 0..16 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let end = mmr.leaves();
@@ -3637,7 +3637,7 @@ mod tests {
         for i in 0..3 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let valid_size = mmr.size();
         let valid_root = mmr.root(&hasher, 0).unwrap();
@@ -3707,9 +3707,9 @@ mod tests {
 
         // Create two batches from the same base.
         let batch_a = mmr.new_batch().add(&hasher, b"leaf-a");
-        let batch_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &hasher));
+        let batch_a = batch_a.merkleize(mmr.mem(), &hasher);
         let batch_b = mmr.new_batch().add(&hasher, b"leaf-b");
-        let batch_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
+        let batch_b = batch_b.merkleize(mmr.mem(), &hasher);
 
         // Apply A -- should succeed.
         mmr = mmr.apply_batch(&batch_a).unwrap();
@@ -3784,7 +3784,7 @@ mod tests {
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
         }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
