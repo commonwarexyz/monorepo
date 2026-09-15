@@ -9,7 +9,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tracing::debug;
 
 /// A proposal staged for its relay broadcast: the block and the ack that
@@ -210,7 +210,7 @@ pub(crate) async fn forward<T, U>(
 /// A ready verdict is published on `tx`. [`GateOutcome::Recover`] or a dropped sender triggers
 /// `fallback`, whose receiver is awaited and published instead. A consensus-dropped receiver
 /// (`tx.closed()`) abandons the work.
-pub(crate) async fn drive<D, F, Fut>(
+pub(crate) async fn drive<D, F>(
     mut tx: oneshot::Sender<bool>,
     task: oneshot::Receiver<GateOutcome>,
     round: Round,
@@ -218,8 +218,7 @@ pub(crate) async fn drive<D, F, Fut>(
     fallback: F,
 ) where
     D: Digest,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = oneshot::Receiver<bool>>,
+    F: FnOnce() -> oneshot::Receiver<bool>,
 {
     let result = select! {
         _ = tx.closed() => {
@@ -241,7 +240,7 @@ pub(crate) async fn drive<D, F, Fut>(
                 ?id,
                 "certification gate requires recovery, falling back to embedded context"
             );
-            let fallback = fallback().await;
+            let fallback = fallback();
             let result = select! {
                 _ = tx.closed() => {
                     debug!(
@@ -265,7 +264,6 @@ mod tests {
     use crate::types::{Epoch, View};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-    use std::future::ready;
 
     type D = Sha256Digest;
     type TestGates = Gates<D, u64>;
@@ -279,7 +277,7 @@ mod tests {
         rx
     }
 
-    fn no_fallback() -> std::future::Ready<oneshot::Receiver<bool>> {
+    fn no_fallback() -> oneshot::Receiver<bool> {
         unreachable!("certification must not fall back")
     }
 
@@ -448,7 +446,7 @@ mod tests {
             task_tx.send_lossy(GateOutcome::Recover);
             let (fallback_tx, fallback_rx) = oneshot::channel();
             fallback_tx.send_lossy(true);
-            drive(tx, task_rx, round(1), digest, || ready(fallback_rx)).await;
+            drive(tx, task_rx, round(1), digest, || fallback_rx).await;
             assert!(rx.await.expect("fallback verdict published"));
         });
     }
@@ -463,7 +461,7 @@ mod tests {
             drop(task_tx);
             let (fallback_tx, fallback_rx) = oneshot::channel();
             fallback_tx.send_lossy(false);
-            drive(tx, task_rx, round(1), digest, || ready(fallback_rx)).await;
+            drive(tx, task_rx, round(1), digest, || fallback_rx).await;
             assert!(!rx.await.expect("fallback verdict published"));
         });
     }
