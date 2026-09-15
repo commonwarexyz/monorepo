@@ -437,7 +437,7 @@ pub trait BufsMut: BufMut {
 mod tests {
     use super::*;
     use crate::{
-        Error, FixedArray,
+        Error, FixedArray, FixedSize, Read, Write,
         extensions::{DecodeExt, ReadExt},
     };
     use bytes::Bytes;
@@ -493,26 +493,8 @@ mod tests {
         let _: [u8; 5] = 42u32.encode_fixed();
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read, FixedSize)]
     struct FixedBytes([u8; 2]);
-
-    impl Write for FixedBytes {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
-    }
-
-    impl Read for FixedBytes {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
-        }
-    }
-
-    impl FixedSize for FixedBytes {
-        const SIZE: usize = 2;
-    }
 
     #[test]
     fn test_fixed_array() {
@@ -550,27 +532,9 @@ mod tests {
         let _ = FixedBytes::decode_fixed([1, 2, 3]);
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read, FixedSize)]
     #[fixed_array(infallible)]
     struct InfallibleFixedBytes([u8; 2]);
-
-    impl Write for InfallibleFixedBytes {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
-    }
-
-    impl Read for InfallibleFixedBytes {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
-        }
-    }
-
-    impl FixedSize for InfallibleFixedBytes {
-        const SIZE: usize = 2;
-    }
 
     #[test]
     fn test_fixed_array_infallible() {
@@ -596,27 +560,9 @@ mod tests {
         ));
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read, FixedSize)]
     #[fixed_array(bytes([u8; N]))]
     struct GenericFixed<const N: usize>([u8; N]);
-
-    impl<const N: usize> Write for GenericFixed<N> {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
-    }
-
-    impl<const N: usize> Read for GenericFixed<N> {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self(<[u8; N]>::read(buf)?))
-        }
-    }
-
-    impl<const N: usize> FixedSize for GenericFixed<N> {
-        const SIZE: usize = N;
-    }
 
     #[test]
     fn test_fixed_array_generic() {
@@ -638,27 +584,9 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write, Read, FixedSize)]
     #[fixed_array(infallible, bytes([u8; N]))]
     struct GenericInfallible<const N: usize>([u8; N]);
-
-    impl<const N: usize> Write for GenericInfallible<N> {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
-    }
-
-    impl<const N: usize> Read for GenericInfallible<N> {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self(<[u8; N]>::read(buf)?))
-        }
-    }
-
-    impl<const N: usize> FixedSize for GenericInfallible<N> {
-        const SIZE: usize = N;
-    }
 
     #[test]
     fn test_fixed_array_generic_infallible() {
@@ -687,17 +615,12 @@ mod tests {
 
     impl FixedArrayBound for Bounded {}
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write)]
     #[fixed_array(bytes([u8; 2]))]
     struct BoundedGeneric<T> {
+        #[codec(encode_with = {})]
         marker: PhantomData<T>,
         raw: [u8; 2],
-    }
-
-    impl<T: FixedArrayBound> Write for BoundedGeneric<T> {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.raw.write(buf);
-        }
     }
 
     impl<T: FixedArrayBound> Read for BoundedGeneric<T> {
@@ -740,17 +663,12 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[derive(Debug, Eq, PartialEq, FixedArray, Write)]
     #[fixed_array(bytes([u8; 2]))]
     struct LifetimeFixed<'a> {
+        #[codec(encode_with = {})]
         marker: PhantomData<&'a ()>,
         raw: [u8; 2],
-    }
-
-    impl Write for LifetimeFixed<'_> {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.raw.write(buf);
-        }
     }
 
     impl Read for LifetimeFixed<'_> {

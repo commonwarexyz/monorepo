@@ -3,7 +3,7 @@ use crate::algebra::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
@@ -20,9 +20,11 @@ use std::borrow::Cow;
 const MIN_POINTS_FOR_MSM: usize = 2;
 
 /// A polynomial, with coefficients in `K`.
-#[derive(Clone)]
+#[derive(Clone, Write, EncodeSize, Read)]
+#[read_cfg((RangeCfg<NonZeroU32>, <K as Read>::Cfg))]
 pub struct Poly<K> {
     // Invariant: (1..=u32::MAX).contains(coeffs.len())
+    #[codec(cfg = &(cfg.0.into(), cfg.1.clone()))]
     coeffs: NonEmptyVec<K>,
 }
 
@@ -188,28 +190,6 @@ impl<K: Debug> Debug for Poly<K> {
         }
         write!(f, ")")?;
         Ok(())
-    }
-}
-
-impl<K: EncodeSize> EncodeSize for Poly<K> {
-    fn encode_size(&self) -> usize {
-        self.coeffs.encode_size()
-    }
-}
-
-impl<K: Write> Write for Poly<K> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.coeffs.write(buf);
-    }
-}
-
-impl<K: Read> Read for Poly<K> {
-    type Cfg = (RangeCfg<NonZeroU32>, <K as Read>::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            coeffs: NonEmptyVec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
-        })
     }
 }
 

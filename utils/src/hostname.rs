@@ -2,10 +2,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
-use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write};
 use thiserror::Error;
 
 /// Maximum length of a hostname (253 characters per RFC 1035).
@@ -46,8 +43,11 @@ pub enum Error {
 /// - Labels contain only ASCII letters, digits, and hyphens
 /// - Labels do not start or end with a hyphen
 /// - No empty labels (no consecutive dots, leading dots, or trailing dots)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Hostname(String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
+pub struct Hostname(
+    #[codec(encode_with = { value.as_bytes().write(buf); }, encode_size = value.as_bytes().encode_size())]
+     String,
+);
 
 impl Hostname {
     /// Create a new hostname, validating it according to RFC 1035/1123.
@@ -136,20 +136,6 @@ impl TryFrom<&str> for Hostname {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
-    }
-}
-
-impl CodecWrite for Hostname {
-    #[inline]
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.as_bytes().write(buf);
-    }
-}
-
-impl EncodeSize for Hostname {
-    #[inline]
-    fn encode_size(&self) -> usize {
-        self.0.as_bytes().encode_size()
     }
 }
 

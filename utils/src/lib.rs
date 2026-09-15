@@ -81,9 +81,9 @@ commonware_macros::stability_scope!(BETA {
     /// Participant indices are used to identify validators in attestations,
     /// votes, and certificates. The index corresponds to the position of the
     /// validator's public key in the ordered participant set.
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
     #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-    pub struct Participant(u32);
+    pub struct Participant(#[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())] u32);
 
     impl Participant {
         /// Creates a new participant from a u32 index.
@@ -124,18 +124,6 @@ commonware_macros::stability_scope!(BETA {
         fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
             let value: u32 = UInt::read(buf)?.into();
             Ok(Self(value))
-        }
-    }
-
-    impl Write for Participant {
-        fn write(&self, buf: &mut impl bytes::BufMut) {
-            UInt(self.0).write(buf);
-        }
-    }
-
-    impl EncodeSize for Participant {
-        fn encode_size(&self) -> usize {
-            UInt(self.0).encode_size()
         }
     }
 

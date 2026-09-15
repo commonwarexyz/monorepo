@@ -263,18 +263,8 @@ mod test {
     use proptest::prelude::*;
 
     /// A byte that's always <= 100
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Write, FixedSize)]
     struct Small(u8);
-
-    impl FixedSize for Small {
-        const SIZE: usize = 1;
-    }
-
-    impl Write for Small {
-        fn write(&self, buf: &mut impl bytes::BufMut) {
-            self.0.write(buf);
-        }
-    }
 
     impl Read for Small {
         type Cfg = ();

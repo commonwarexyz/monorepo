@@ -75,7 +75,6 @@ mod prunable;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use container::Container;
 use core::ops::Range;
@@ -125,7 +124,7 @@ const fn combine(key: u64, index: u16) -> u64 {
 ///     println!("{}", value);
 /// }
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Write, EncodeSize)]
 pub struct Bitmap {
     /// Map from high 48 bits to container storing low 16 bits.
     containers: BTreeMap<u64, Container>,
@@ -329,18 +328,6 @@ impl FromIterator<u64> for Bitmap {
         let mut bitmap = Self::new();
         bitmap.extend(iter);
         bitmap
-    }
-}
-
-impl Write for Bitmap {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.containers.write(buf);
-    }
-}
-
-impl EncodeSize for Bitmap {
-    fn encode_size(&self) -> usize {
-        self.containers.encode_size()
     }
 }
 
