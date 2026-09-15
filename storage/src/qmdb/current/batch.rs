@@ -18,8 +18,8 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
-        batch_chain::Bounds,
         bitmap::{Shared, fill_from},
+        chain::Bounds,
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,

@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
     },
 };
 use commonware_codec::EncodeShared;
@@ -51,7 +51,7 @@ where
 ///
 /// Reads through the chain, constructing child batches, and applying the batch later are
 /// only valid while every batch applied to the DB since this batch was merkleized is an
-/// ancestor of this batch (see [`crate::qmdb::batch_chain`] for more details).
+/// ancestor of this batch (see [`crate::qmdb::chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -64,7 +64,7 @@ where
     pub(super) parent: Option<Weak<Self>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F, D>,
+    pub(super) bounds: chain::Bounds<F, D>,
 }
 
 /// Read a single operation from the parent chain at the given location.
@@ -259,9 +259,9 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -285,7 +285,7 @@ where
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.
-        let ancestors = batch_chain::collect_ancestor_bounds(
+        let ancestors = chain::collect_ancestor_bounds(
             live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
@@ -294,7 +294,7 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
                 tip: Commitment::new(total_size, root),
@@ -311,7 +311,7 @@ where
 {
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
