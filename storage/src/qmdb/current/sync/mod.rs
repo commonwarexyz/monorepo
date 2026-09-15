@@ -17,8 +17,8 @@
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
 //! grafted root, and any pending or partial chunk digests.
 //!
-//! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
-//! root** (not the canonical root) because that is what the sync engine verifies against.
+//! The sync target's root is the **ops root** (not the canonical root) because that is what the
+//! sync engine verifies against.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -209,8 +209,11 @@ impl<F, E, C, I, H, U, const N: usize, S> Database for db::Db<F, E, C, I, H, U, 
 where
     F: Graftable,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
-        + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as crate::qmdb::sync::Journal<F>>::Config,
+        > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     <C as crate::qmdb::sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
@@ -231,6 +234,10 @@ where
         <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::current::init(context, config).await
+    }
 
     async fn from_sync_result(
         context: Self::Context,
@@ -276,8 +283,9 @@ where
 
         // The inactivity floor is carried by the last commit operation rather than
         // being the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+        let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end())
+            .await?
+            .ok_or(qmdb::Error::HistoricalFloorPruned(target.range.end()))?;
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
@@ -288,10 +296,11 @@ where
         .await
     }
 
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops tree.
-    fn root(&self) -> Self::Digest {
-        self.any.root()
+    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+        qmdb::sync::Target {
+            root: self.any.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
     }
 }
 
