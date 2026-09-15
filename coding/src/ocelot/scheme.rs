@@ -655,10 +655,6 @@ impl<I: Impl, H: Hasher> OcelotX<I, H> {
         }
     }
 
-    fn topology(config: &Config) -> Result<(usize, usize, usize), Error> {
-        topology::<I>(config)
-    }
-
     #[allow(clippy::type_complexity)]
     pub fn encode(
         &self,
@@ -770,14 +766,6 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
         }
     }
 
-    fn topology(config: &Config) -> Result<(usize, usize, usize), Error> {
-        topology::<I>(config)
-    }
-
-    fn shard_len(data_bytes: usize, original: usize) -> Result<usize, Error> {
-        shard_len::<I>(data_bytes, original)
-    }
-
     fn transcript(
         namespace: &[u8],
         config: &Config,
@@ -858,8 +846,8 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
         shard: &StrongShard<H::Digest>,
         strategy: &impl Strategy,
     ) -> Result<CheckingData<H::Digest>, Error> {
-        let (original, recovery, _) = Self::topology(config)?;
-        let shard_len = Self::shard_len(shard.data_bytes as usize, original)?;
+        let (original, recovery, _) = topology::<I>(config)?;
+        let shard_len = shard_len::<I>(shard.data_bytes as usize, original)?;
         let expected_checksum_len = original
             .checked_mul(CHECKSUM_BYTES)
             .ok_or(Error::InvalidStrongShard)?;
@@ -1026,208 +1014,743 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        OcelotHinted8 as Ocelot8, OcelotHinted16 as Ocelot16, PhasedScheme,
-        ocelot::{
-            Impl8,
-            field::gf8::GF8,
-            kernel::{Kernel, WithKernel, portable::Portable, with_kernel},
-        },
-    };
+    use crate::ocelot::{Impl8, Impl16, field::gf8::GF8, kernel::portable::Portable};
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{NZU16, NZUsize, test_rng};
+    use std::num::NonZeroU16;
 
     const CONFIG: Config = Config {
         minimum_shards: NZU16!(3),
         extra_shards: NZU16!(4),
     };
+    const STRATEGY: Sequential = Sequential;
+    const FUZZ_CASES: u64 = 64;
+    const FUZZ_MAX_DATA_LEN: usize = 256;
+
+    type Basic = OcelotX<Impl8<Portable>, Sha256>;
+    type Hinted = OcelotHintedX<Impl8<Portable>, Sha256, CHECKSUMS>;
+    type Hinted16 = OcelotHintedX<Impl16<Portable>, Sha256, { CHECKSUMS * 2 }>;
+
+    fn config(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<(Config, usize, usize)> {
+        let original = u.int_in_range(2u16..=4)?;
+        let recovery = u.int_in_range(original..=6)?;
+        Ok((
+            Config {
+                minimum_shards: NonZeroU16::new(original).unwrap(),
+                extra_shards: NonZeroU16::new(recovery).unwrap(),
+            },
+            usize::from(original),
+            usize::from(recovery),
+        ))
+    }
+
+    fn data(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+        let len = u.int_in_range(0..=FUZZ_MAX_DATA_LEN)?;
+        Ok(u.bytes(len)?.to_vec())
+    }
+
+    fn shuffled_indices(
+        u: &mut arbitrary::Unstructured<'_>,
+        total: usize,
+        count: usize,
+    ) -> arbitrary::Result<Vec<usize>> {
+        let mut indices: Vec<_> = (0..total).collect();
+        for i in 0..count {
+            let selected = i + u.choose_index(total - i)?;
+            indices.swap(i, selected);
+        }
+        indices.truncate(count);
+        Ok(indices)
+    }
+
+    fn prove_codeword(
+        codeword: Vec<Vec<u8>>,
+    ) -> (
+        <Sha256 as Hasher>::Digest,
+        Vec<WeakShard<<Sha256 as Hasher>::Digest>>,
+    ) {
+        let mut builder = Builder::<Sha256>::new(codeword.len());
+        for shard in &codeword {
+            builder.add(&Sha256::hash(&[shard]));
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let shards = codeword
+            .into_iter()
+            .enumerate()
+            .map(|(index, shard)| WeakShard {
+                shard: shard.into(),
+                index: index as u16,
+                proof: tree.proof(index as u32).unwrap(),
+            })
+            .collect();
+        (root, shards)
+    }
+
+    fn check_basic(
+        scheme: &Basic,
+        config: &Config,
+        root: &<Sha256 as Hasher>::Digest,
+        shards: &[WeakShard<<Sha256 as Hasher>::Digest>],
+    ) -> Vec<BasicCheckedShard<<Sha256 as Hasher>::Digest>> {
+        shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                scheme
+                    .check(config, root, index as u16, shard, &STRATEGY)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn assert_basic_decode(
+        scheme: &Basic,
+        config: &Config,
+        root: &<Sha256 as Hasher>::Digest,
+        checked: &[BasicCheckedShard<<Sha256 as Hasher>::Digest>],
+        indices: &[usize],
+        expected: &[u8],
+    ) {
+        let decoded = scheme
+            .decode(
+                config,
+                root,
+                indices.iter().map(|&index| &checked[index]),
+                &STRATEGY,
+            )
+            .unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            scheme
+                .encode(config, decoded.as_slice(), &STRATEGY)
+                .unwrap()
+                .0,
+            *root,
+            "decode accepted a non-canonical commitment"
+        );
+    }
+
+    fn fuzz_basic(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+        let (config, original, recovery) = config(u)?;
+        let data = data(u)?;
+        let total = original + recovery;
+        let scheme = Basic::new(Impl8::new(Portable));
+        let (root, shards) = scheme.encode(&config, data.as_slice(), &STRATEGY).unwrap();
+        let checked = check_basic(&scheme, &config, &root, &shards);
+
+        let random_count = u.int_in_range(original..=total)?;
+        let random = shuffled_indices(u, total, random_count)?;
+        let systematic: Vec<_> = (0..original).collect();
+        let mixed: Vec<_> = (1..original).chain([original]).collect();
+        let recovery_only: Vec<_> = (original..2 * original).collect();
+        let all_reversed: Vec<_> = (0..total).rev().collect();
+        for indices in [&systematic, &mixed, &recovery_only, &all_reversed, &random] {
+            assert_basic_decode(&scheme, &config, &root, &checked, indices, &data);
+        }
+
+        assert!(matches!(
+            scheme.decode(&config, &root, checked.iter().take(original - 1), &STRATEGY),
+            Err(Error::InsufficientShards(_, _))
+        ));
+        assert!(matches!(
+            scheme.decode(
+                &config,
+                &root,
+                [&checked[0], &checked[0]].into_iter(),
+                &STRATEGY
+            ),
+            Err(Error::DuplicateIndex(0))
+        ));
+
+        let target = u.choose_index(total)?;
+        let mut corrupt = shards[target].clone();
+        let offset = u.choose_index(corrupt.shard.len())?;
+        let mut bytes = corrupt.shard.to_vec();
+        bytes[offset] ^= 1;
+        corrupt.shard = bytes.into();
+        assert!(matches!(
+            scheme.check(&config, &root, target as u16, &corrupt, &STRATEGY),
+            Err(Error::InvalidWeakShard)
+        ));
+
+        let mut wrong_proof = shards[target].clone();
+        wrong_proof.proof.siblings[0] = Sha256::hash(&[b"corrupt proof".as_slice()]);
+        assert!(matches!(
+            scheme.check(&config, &root, target as u16, &wrong_proof, &STRATEGY),
+            Err(Error::InvalidWeakShard)
+        ));
+        assert!(matches!(
+            scheme.check(&config, &root, total as u16, &shards[target], &STRATEGY),
+            Err(Error::InvalidIndex(_))
+        ));
+        let mut wrong_index = shards[target].clone();
+        wrong_index.index = ((target + 1) % total) as u16;
+        assert!(matches!(
+            scheme.check(&config, &root, target as u16, &wrong_index, &STRATEGY),
+            Err(Error::InvalidIndex(_))
+        ));
+
+        let mut wrong_namespace = checked[0].clone();
+        wrong_namespace.namespace = b"other field";
+        let mut wrong_config = checked[0].clone();
+        wrong_config.config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let mut wrong_commitment = checked[0].clone();
+        wrong_commitment.commitment = Sha256::hash(&[b"other commitment".as_slice()]);
+        for mismatched in [&wrong_namespace, &wrong_config, &wrong_commitment] {
+            assert!(matches!(
+                scheme.decode(
+                    &config,
+                    &root,
+                    [mismatched]
+                        .into_iter()
+                        .chain(checked.iter().skip(1).take(original - 1)),
+                    &STRATEGY
+                ),
+                Err(Error::CommitmentMismatch)
+            ));
+        }
+
+        // A committed recovery shard must agree with the systematic codeword.
+        let honest: Vec<Vec<u8>> = shards.iter().map(|shard| shard.shard.to_vec()).collect();
+        let mut bad_with_originals = honest.clone();
+        bad_with_originals[original][0] ^= 1;
+        let (bad_root, bad_shards) = prove_codeword(bad_with_originals);
+        let bad_checked = check_basic(&scheme, &config, &bad_root, &bad_shards);
+        assert!(matches!(
+            scheme.decode(&config, &bad_root, bad_checked.iter(), &STRATEGY),
+            Err(Error::InvalidData)
+        ));
+
+        // Surplus shards are omitted from interpolation but remain bound by the root.
+        let mut bad_surplus = honest;
+        bad_surplus[total - 1][0] ^= 1;
+        let (bad_root, bad_shards) = prove_codeword(bad_surplus);
+        let bad_checked = check_basic(&scheme, &config, &bad_root, &bad_shards);
+        assert!(matches!(
+            scheme.decode(&config, &bad_root, bad_checked.iter().skip(1), &STRATEGY),
+            Err(Error::InvalidData)
+        ));
+        Ok(())
+    }
 
     #[test]
-    fn ocelot16_roundtrip_above_256_shards() {
+    fn minifuzz_basic_roundtrip_and_rejection_properties() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(FUZZ_CASES)
+            .test(fuzz_basic);
+    }
+
+    fn assert_hinted_decode(
+        scheme: &Hinted,
+        config: &Config,
+        commitment: &Summary,
+        checking_data: &CheckingData<<Sha256 as Hasher>::Digest>,
+        checked: &[CheckedShard],
+        indices: &[usize],
+        expected: &[u8],
+    ) {
+        let decoded = scheme
+            .decode(
+                config,
+                commitment,
+                checking_data.clone(),
+                indices.iter().map(|&index| &checked[index]),
+                &STRATEGY,
+            )
+            .unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    fn assert_recovered_checksums(
+        imp: Impl8<Portable>,
+        checking_data: &CheckingData<<Sha256 as Hasher>::Digest>,
+        checked: &[CheckedShard],
+        original: usize,
+        indices: &[usize],
+    ) {
+        let mut input = vec![None; checked.len()];
+        for &index in indices {
+            input[index] = Some(checked[index].shard.as_ref());
+        }
+        for (index, shard) in Decoder::new(imp)
+            .decode(&input[..original], &input[original..], &STRATEGY)
+            .unwrap()
+        {
+            let mut checksum = [0; CHECKSUMS];
+            imp.checksum_range(
+                &shard,
+                &checking_data.coefficients,
+                0..shard.len(),
+                &mut checksum,
+            );
+            assert_eq!(checksum.as_slice(), checking_data.encoded_checksum[index]);
+        }
+    }
+
+    fn fuzz_hinted(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+        let (config, original, recovery) = config(u)?;
+        let data = data(u)?;
+        let total = original + recovery;
+        let imp = Impl8::new(Portable);
+        let scheme = Hinted::new(imp);
+        let namespace = b"scheme property";
+        let (commitment, shards) = scheme
+            .encode(namespace, &config, data.as_slice(), &STRATEGY)
+            .unwrap();
+        let owner = u.choose_index(total)?;
+        let codec = CodecConfig {
+            maximum_shard_size: shards[owner].weak.shard.len(),
+        };
+        let owner_shard = StrongShard::read_cfg(&mut shards[owner].encode(), &codec).unwrap();
+        let (checking_data, _, _) = scheme
+            .weaken(
+                namespace,
+                &config,
+                &commitment,
+                owner as u16,
+                owner_shard,
+                &STRATEGY,
+            )
+            .unwrap();
+        let checked: Vec<_> = shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                scheme
+                    .check(
+                        &config,
+                        &commitment,
+                        &checking_data,
+                        index as u16,
+                        shard.weak.clone(),
+                        &STRATEGY,
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        let random_count = u.int_in_range(original..=total)?;
+        let random = shuffled_indices(u, total, random_count)?;
+        let systematic: Vec<_> = (0..original).collect();
+        let mixed: Vec<_> = (1..original).chain([original]).collect();
+        let recovery_only: Vec<_> = (original..2 * original).collect();
+        let all_reversed: Vec<_> = (0..total).rev().collect();
+        for indices in [&systematic, &mixed, &recovery_only, &all_reversed, &random] {
+            assert_hinted_decode(
+                &scheme,
+                &config,
+                &commitment,
+                &checking_data,
+                &checked,
+                indices,
+                &data,
+            );
+        }
+        for indices in [&mixed, &recovery_only, &random] {
+            assert_recovered_checksums(imp, &checking_data, &checked, original, indices);
+        }
+
+        assert!(matches!(
+            scheme.decode(
+                &config,
+                &commitment,
+                checking_data.clone(),
+                checked.iter().take(original - 1),
+                &STRATEGY
+            ),
+            Err(Error::InsufficientShards(_, _))
+        ));
+        assert!(matches!(
+            scheme.decode(
+                &config,
+                &commitment,
+                checking_data.clone(),
+                [&checked[0], &checked[0]].into_iter(),
+                &STRATEGY
+            ),
+            Err(Error::DuplicateIndex(0))
+        ));
+
+        let target = u.choose_index(total)?;
+        let mut corrupt = shards[target].weak.clone();
+        let offset = u.choose_index(corrupt.shard.len())?;
+        let mut bytes = corrupt.shard.to_vec();
+        bytes[offset] ^= 1;
+        corrupt.shard = bytes.into();
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &checking_data,
+                target as u16,
+                corrupt,
+                &STRATEGY
+            ),
+            Err(Error::InvalidWeakShard)
+        ));
+
+        let mut wrong_proof = shards[target].weak.clone();
+        wrong_proof.proof.siblings[0] = Sha256::hash(&[b"corrupt proof".as_slice()]);
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &checking_data,
+                target as u16,
+                wrong_proof,
+                &STRATEGY
+            ),
+            Err(Error::InvalidWeakShard)
+        ));
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &checking_data,
+                total as u16,
+                shards[target].weak.clone(),
+                &STRATEGY
+            ),
+            Err(Error::InvalidIndex(_))
+        ));
+        let mut wrong_index = shards[target].weak.clone();
+        wrong_index.index = ((target + 1) % total) as u16;
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &checking_data,
+                target as u16,
+                wrong_index,
+                &STRATEGY
+            ),
+            Err(Error::InvalidIndex(_))
+        ));
+
+        let mut short = shards[target].weak.clone();
+        short.shard.truncate(short.shard.len() - 1);
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &checking_data,
+                target as u16,
+                short,
+                &STRATEGY
+            ),
+            Err(Error::InvalidWeakShard)
+        ));
+        let mut short_checksum = shards[owner].clone();
+        short_checksum
+            .checksum
+            .truncate(short_checksum.checksum.len() - 1);
+        assert!(matches!(
+            scheme.weaken(
+                namespace,
+                &config,
+                &commitment,
+                owner as u16,
+                short_checksum,
+                &STRATEGY
+            ),
+            Err(Error::InvalidStrongShard)
+        ));
+        assert!(matches!(
+            scheme.weaken(
+                b"other namespace",
+                &config,
+                &commitment,
+                owner as u16,
+                shards[owner].clone(),
+                &STRATEGY
+            ),
+            Err(Error::InvalidStrongShard)
+        ));
+
+        let other_commitment = scheme
+            .encode(b"other namespace", &config, data.as_slice(), &STRATEGY)
+            .unwrap()
+            .0;
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &other_commitment,
+                &checking_data,
+                target as u16,
+                shards[target].weak.clone(),
+                &STRATEGY
+            ),
+            Err(Error::CommitmentMismatch)
+        ));
+
+        let mut wrong_checked = checked[0].clone();
+        wrong_checked.commitment = other_commitment;
+        assert!(matches!(
+            scheme.decode(
+                &config,
+                &commitment,
+                checking_data.clone(),
+                [&wrong_checked]
+                    .into_iter()
+                    .chain(checked.iter().skip(1).take(original - 1)),
+                &STRATEGY
+            ),
+            Err(Error::CommitmentMismatch)
+        ));
+        let mut wrong_checking_namespace = checking_data.clone();
+        wrong_checking_namespace.namespace = b"other field";
+        assert!(matches!(
+            scheme.decode(
+                &config,
+                &commitment,
+                wrong_checking_namespace,
+                checked.iter().take(original),
+                &STRATEGY
+            ),
+            Err(Error::CommitmentMismatch)
+        ));
+        let mut wrong_checking_config = checking_data;
+        wrong_checking_config.config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        assert!(matches!(
+            scheme.check(
+                &config,
+                &commitment,
+                &wrong_checking_config,
+                target as u16,
+                shards[target].weak.clone(),
+                &STRATEGY
+            ),
+            Err(Error::InvalidWeakShard)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn minifuzz_hinted_roundtrip_and_rejection_properties() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(FUZZ_CASES)
+            .test(fuzz_hinted);
+    }
+
+    #[test]
+    fn topology_and_length_limits_are_rejected() {
+        let max8 = Config {
+            minimum_shards: NZU16!(128),
+            extra_shards: NZU16!(128),
+        };
+        assert_eq!(topology::<Impl8<Portable>>(&max8).unwrap(), (128, 128, 256));
+        assert!(matches!(
+            topology::<Impl8<Portable>>(&Config {
+                minimum_shards: NZU16!(129),
+                extra_shards: NZU16!(128),
+            }),
+            Err(Error::InvalidShardCount)
+        ));
+        assert!(matches!(
+            topology::<Impl8<Portable>>(&Config {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(129),
+            }),
+            Err(Error::InvalidShardCount)
+        ));
+
+        let max16 = Config {
+            minimum_shards: NZU16!(32768),
+            extra_shards: NZU16!(32768),
+        };
+        assert_eq!(
+            topology::<Impl16<Portable>>(&max16).unwrap(),
+            (32768, 32768, 65536)
+        );
+        assert!(matches!(
+            topology::<Impl16<Portable>>(&Config {
+                minimum_shards: NZU16!(32769),
+                ..max16
+            }),
+            Err(Error::InvalidShardCount)
+        ));
+
+        assert_eq!(coefficient_count(6, 2).unwrap(), 3 * CHECKSUMS);
+        assert!(matches!(coefficient_count(5, 2), Err(Error::InvalidData)));
+        assert!(matches!(
+            coefficient_count(usize::MAX, 1),
+            Err(Error::InvalidData)
+        ));
+        assert!(matches!(
+            shard_len::<Impl8<Portable>>(usize::MAX, 1),
+            Err(Error::InvalidData)
+        ));
+
+        let scheme = Hinted::new(Impl8::new(Portable));
+        let (commitment, mut shards) = scheme
+            .encode(b"test", &CONFIG, &b"length"[..], &STRATEGY)
+            .unwrap();
+        shards[0].data_bytes = u32::MAX;
+        assert!(matches!(
+            scheme.weaken(
+                b"test",
+                &CONFIG,
+                &commitment,
+                0,
+                shards.remove(0),
+                &STRATEGY
+            ),
+            Err(Error::InvalidStrongShard)
+        ));
+    }
+
+    #[test]
+    fn hinted16_roundtrip_above_gf8_order() {
+        let scheme = Hinted16::new(Impl16::new(Portable));
         let config = Config {
             minimum_shards: NZU16!(257),
             extra_shards: NZU16!(8),
         };
-        let mut data = vec![0; 1027];
-        test_rng().fill_bytes(&mut data);
-        let (commitment, shards) =
-            Ocelot16::<Sha256>::encode(b"test", &config, &data[..], &Sequential).unwrap();
-        let cfg = CodecConfig {
-            maximum_shard_size: 16,
-        };
-        let owner = StrongShard::read_cfg(&mut shards[0].encode(), &cfg).unwrap();
-        assert_eq!(owner.checksum.len(), 257 * 32);
-        let (checking_data, _, _) =
-            Ocelot16::<Sha256>::weaken(b"test", &config, &commitment, 0, owner, &Sequential)
-                .unwrap();
+        let data: Vec<_> = (0..1027).map(|i| i as u8).collect();
+        let (commitment, shards) = scheme
+            .encode(b"test", &config, data.as_slice(), &STRATEGY)
+            .unwrap();
+        assert_eq!(shards[0].checksum.len(), 257 * CHECKSUMS * 2);
+        let (checking_data, _, _) = scheme
+            .weaken(
+                b"test",
+                &config,
+                &commitment,
+                0,
+                shards[0].clone(),
+                &STRATEGY,
+            )
+            .unwrap();
         let checked: Vec<_> = shards
             .iter()
             .enumerate()
             .skip(8)
             .map(|(index, shard)| {
-                let weak = WeakShard::read_cfg(&mut shard.weak.encode(), &cfg).unwrap();
-                Ocelot16::<Sha256>::check(
-                    &config,
-                    &commitment,
-                    &checking_data,
-                    index as u16,
-                    weak,
-                    &Sequential,
-                )
-                .unwrap()
+                scheme
+                    .check(
+                        &config,
+                        &commitment,
+                        &checking_data,
+                        index as u16,
+                        shard.weak.clone(),
+                        &STRATEGY,
+                    )
+                    .unwrap()
             })
             .collect();
         assert_eq!(
-            Ocelot16::<Sha256>::decode(
-                &config,
-                &commitment,
-                checking_data,
-                checked.iter(),
-                &Sequential,
-            )
-            .unwrap(),
-            data,
-        );
-        assert!(matches!(
-            Ocelot8::<Sha256>::encode(b"test", &config, &data[..], &Sequential),
-            Err(Error::InvalidShardCount),
-        ));
-    }
-
-    #[test]
-    fn ocelot16_rejects_malformed_shards() {
-        let (commitment, shards) =
-            Ocelot16::<Sha256>::encode(b"test", &CONFIG, &b"odd length!"[..], &Sequential).unwrap();
-        let (checking_data, _, _) = Ocelot16::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            0,
-            shards[0].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        for byte in [0, shards[3].weak.shard.len() / 2] {
-            let mut weak = shards[3].weak.clone();
-            let mut corrupt = weak.shard.to_vec();
-            corrupt[byte] ^= 1;
-            weak.shard = corrupt.into();
-            assert!(matches!(
-                Ocelot16::<Sha256>::check(
-                    &CONFIG,
+            scheme
+                .decode(
+                    &config,
                     &commitment,
-                    &checking_data,
-                    3,
-                    weak,
-                    &Sequential,
-                ),
-                Err(Error::InvalidWeakShard),
-            ));
-        }
-        let mut weak = shards[3].weak.clone();
-        weak.shard.truncate(weak.shard.len() - 1);
-        assert!(matches!(
-            Ocelot16::<Sha256>::check(&CONFIG, &commitment, &checking_data, 3, weak, &Sequential,),
-            Err(Error::InvalidWeakShard),
-        ));
-        let mut strong = shards[0].clone();
-        strong.checksum.truncate(strong.checksum.len() - 1);
-        assert!(matches!(
-            Ocelot16::<Sha256>::weaken(b"test", &CONFIG, &commitment, 0, strong, &Sequential,),
-            Err(Error::InvalidStrongShard),
-        ));
+                    checking_data,
+                    checked.iter(),
+                    &STRATEGY,
+                )
+                .unwrap(),
+            data
+        );
     }
 
     #[test]
-    fn ocelot_variants_are_domain_separated() {
-        let (commitment, shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &b"variant"[..], &Sequential).unwrap();
-        let (checking_data, checked, weak) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            0,
-            shards[0].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        assert!(matches!(
-            Ocelot16::<Sha256>::weaken(
+    fn parallel_checksums_cross_stripe_boundaries() {
+        let scheme = Hinted::new(Impl8::new(Portable));
+        let len = stripe_bytes::<Impl8<Portable>>() + 65;
+        let mut rng = test_rng();
+        let mut shards = vec![vec![0; len]; 2];
+        for shard in &mut shards {
+            rng.fill_bytes(shard);
+        }
+        let mut coefficients = vec![0; CHECKSUMS * len];
+        rng.fill_bytes(&mut coefficients);
+        let shards: Vec<_> = shards.iter().map(Vec::as_slice).collect();
+        let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let sequential = scheme.checksum(&shards, &coefficients, &STRATEGY).unwrap();
+        let parallel = scheme.checksum(&shards, &coefficients, &rayon).unwrap();
+        assert_eq!(parallel, sequential);
+
+        for (shard, actual) in shards.iter().zip(parallel.as_chunks::<CHECKSUMS>().0) {
+            for (output, &actual) in actual.iter().enumerate() {
+                let coefficients = &coefficients[output * len..(output + 1) * len];
+                let expected = shard
+                    .iter()
+                    .zip(coefficients)
+                    .fold(GF8::from(0), |sum, (&value, &coefficient)| {
+                        sum + GF8::from(value) * GF8::from(coefficient)
+                    });
+                assert_eq!(actual, u8::from(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn hinted_variants_are_domain_separated() {
+        let ocelot8 = Hinted::new(Impl8::new(Portable));
+        let ocelot16 = Hinted16::new(Impl16::new(Portable));
+        let (commitment, shards) = ocelot8
+            .encode(b"test", &CONFIG, &b"variant"[..], &STRATEGY)
+            .unwrap();
+        let (checking_data, checked, weak) = ocelot8
+            .weaken(
                 b"test",
                 &CONFIG,
                 &commitment,
                 0,
                 shards[0].clone(),
-                &Sequential,
+                &STRATEGY,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ocelot16.weaken(
+                b"test",
+                &CONFIG,
+                &commitment,
+                0,
+                shards[0].clone(),
+                &STRATEGY,
             ),
-            Err(Error::InvalidStrongShard),
+            Err(Error::InvalidStrongShard)
         ));
         assert!(matches!(
-            Ocelot16::<Sha256>::check(&CONFIG, &commitment, &checking_data, 0, weak, &Sequential,),
-            Err(Error::CommitmentMismatch),
+            ocelot16.check(&CONFIG, &commitment, &checking_data, 0, weak, &STRATEGY,),
+            Err(Error::CommitmentMismatch)
         ));
-        let mut checked = vec![checked];
-        for (index, shard) in shards.iter().enumerate().take(3).skip(1) {
-            checked.push(
-                Ocelot8::<Sha256>::check(
-                    &CONFIG,
-                    &commitment,
-                    &checking_data,
-                    index as u16,
-                    shard.weak.clone(),
-                    &Sequential,
-                )
-                .unwrap(),
-            );
-        }
         assert!(matches!(
-            Ocelot16::<Sha256>::decode(
+            ocelot16.decode(
                 &CONFIG,
                 &commitment,
                 checking_data,
-                checked.iter(),
-                &Sequential,
+                [&checked, &checked, &checked].into_iter(),
+                &STRATEGY,
             ),
-            Err(Error::CommitmentMismatch),
+            Err(Error::CommitmentMismatch)
         ));
     }
 
     #[test]
-    fn ocelot16_topology_limits() {
-        type Scheme = OcelotHintedX<crate::ocelot::Impl16<Portable>, Sha256, 32>;
-        let valid = Config {
-            minimum_shards: NZU16!(32768),
-            extra_shards: NZU16!(32768),
-        };
-        assert_eq!(Scheme::topology(&valid).unwrap(), (32768, 32768, 65536));
-        let invalid = Config {
-            minimum_shards: NZU16!(32769),
-            ..valid
-        };
-        assert!(matches!(
-            Scheme::topology(&invalid),
-            Err(Error::InvalidShardCount)
-        ));
-        let padded_overflow = Config {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(32769),
-        };
-        assert!(matches!(
-            Scheme::topology(&padded_overflow),
-            Err(Error::InvalidShardCount)
-        ));
-    }
-
-    #[test]
-    fn ocelot16_preserves_bytes_across_layout_and_stripe_boundaries() {
-        let len = stripe_bytes::<crate::ocelot::Impl16<Portable>>() + 130;
-        let mut data = vec![0; 3 * len - u32::SIZE];
+    fn hinted16_parallel_roundtrip_crosses_layout_and_stripe_boundaries() {
+        let imp = Impl16::new(Portable);
+        let scheme = Hinted16::new(imp);
+        let shard_len = stripe_bytes::<Impl16<Portable>>() + 130;
+        let mut data = vec![0; 3 * shard_len - u32::SIZE];
         test_rng().fill_bytes(&mut data);
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-        let (commitment, shards) =
-            Ocelot16::<Sha256>::encode(b"test", &CONFIG, &data[..], &strategy).unwrap();
+        let (commitment, shards) = scheme
+            .encode(b"test", &CONFIG, data.as_slice(), &strategy)
+            .unwrap();
         let original_bytes: Vec<_> = shards[..3]
             .iter()
             .flat_map(|shard| shard.weak.shard.iter().copied())
@@ -1238,356 +1761,59 @@ mod tests {
         );
         assert_eq!(&original_bytes[u32::SIZE..], data);
 
-        let (checking_data, own_checked, _) = Ocelot16::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            3,
-            shards[3].clone(),
-            &strategy,
-        )
-        .unwrap();
-        let mut checked = vec![own_checked];
-        for (index, shard) in shards.iter().enumerate().take(6).skip(4) {
-            checked.push(
-                Ocelot16::<Sha256>::check(
-                    &CONFIG,
-                    &commitment,
-                    &checking_data,
-                    index as u16,
-                    shard.weak.clone(),
-                    &strategy,
-                )
-                .unwrap(),
-            );
-        }
-        assert_eq!(
-            Ocelot16::<Sha256>::decode(
-                &CONFIG,
-                &commitment,
-                checking_data,
-                checked.iter(),
-                &strategy,
-            )
-            .unwrap(),
-            data,
-        );
-    }
-
-    #[test]
-    fn roundtrip_from_recovery_shards() {
-        let data = b"ocelot phased coding roundtrip";
-        let (commitment, shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &data[..], &Sequential).unwrap();
-        let read_cfg = CodecConfig {
-            maximum_shard_size: 1024,
-        };
-        let owner = 3;
-        let owner_shard = StrongShard::read_cfg(&mut shards[owner].encode(), &read_cfg).unwrap();
-        let (checking_data, own_checked, _) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            owner as u16,
-            owner_shard,
-            &Sequential,
-        )
-        .unwrap();
-        let mut checked = vec![own_checked];
-        for (index, shard) in shards.iter().enumerate().take(6).skip(4) {
-            let (_, _, weak) = Ocelot8::<Sha256>::weaken(
+        let (checking_data, owner, _) = scheme
+            .weaken(
                 b"test",
                 &CONFIG,
                 &commitment,
-                index as u16,
-                shard.clone(),
-                &Sequential,
+                3,
+                shards[3].clone(),
+                &strategy,
             )
             .unwrap();
-            let weak = WeakShard::read_cfg(&mut weak.encode(), &read_cfg).unwrap();
+        for (index, shard) in shards.iter().enumerate() {
+            let mut checksum = [0; CHECKSUMS * 2];
+            imp.checksum_range(
+                &shard.weak.shard,
+                &checking_data.coefficients,
+                0..shard.weak.shard.len(),
+                &mut checksum,
+            );
+            assert_eq!(checksum.as_slice(), checking_data.encoded_checksum[index]);
+        }
+        let mut checked = vec![owner];
+        for (index, shard) in shards.iter().enumerate().take(6).skip(4) {
             checked.push(
-                Ocelot8::<Sha256>::check(
-                    &CONFIG,
-                    &commitment,
-                    &checking_data,
-                    index as u16,
-                    weak,
-                    &Sequential,
-                )
-                .unwrap(),
+                scheme
+                    .check(
+                        &CONFIG,
+                        &commitment,
+                        &checking_data,
+                        index as u16,
+                        shard.weak.clone(),
+                        &strategy,
+                    )
+                    .unwrap(),
             );
         }
-        let decoded = Ocelot8::<Sha256>::decode(
-            &CONFIG,
-            &commitment,
-            checking_data,
-            checked.iter(),
-            &Sequential,
-        )
-        .unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn check_rejects_corrupt_shard() {
-        let data = b"checksum rejection";
-        let (commitment, shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &data[..], &Sequential).unwrap();
-        let (checking_data, _, _) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            0,
-            shards[0].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        let (_, _, mut weak) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            3,
-            shards[3].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        let mut corrupt = weak.shard.to_vec();
-        corrupt[0] ^= 1;
-        weak.shard = corrupt.into();
-        assert!(matches!(
-            Ocelot8::<Sha256>::check(&CONFIG, &commitment, &checking_data, 3, weak, &Sequential),
-            Err(Error::InvalidWeakShard)
-        ));
-    }
-
-    struct TestChecksumRanges;
-
-    impl WithKernel for TestChecksumRanges {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let len = if cfg!(miri) {
-                129
-            } else {
-                stripe_bytes::<Impl8<K>>() + 65
-            };
-            let mut rng = test_rng();
-            let mut backing = vec![0; len + K::LANES];
-            rng.fill_bytes(&mut backing);
-            let offset = (K::LANES - backing.as_ptr() as usize % K::LANES) % K::LANES + 1;
-            let shard = &backing[offset..offset + len];
-            let mut coefficients = vec![0; CHECKSUMS * len];
-            rng.fill_bytes(&mut coefficients);
-            let ranges = [
-                0..0,
-                0..63,
-                1..64,
-                0..64,
-                0..65,
-                63..64,
-                63..65,
-                64..65,
-                1..len,
-                len - 65..len,
-                0..len,
-            ];
-            for range in ranges {
-                let mut portable = [255; CHECKSUMS];
-                Impl8::new(Portable).checksum_range(
-                    shard,
-                    &coefficients,
-                    range.clone(),
-                    &mut portable,
-                );
-                let mut actual = [255; CHECKSUMS];
-                Impl8::new(kernel).checksum_range(shard, &coefficients, range.clone(), &mut actual);
-                assert_eq!(actual, portable);
-                for (actual, coefficients) in
-                    actual.iter().zip(coefficients.chunks_exact(shard.len()))
-                {
-                    let expected = shard[range.clone()]
-                        .iter()
-                        .zip(&coefficients[range.clone()])
-                        .fold(GF8::from(0), |sum, (&value, &coefficient)| {
-                            sum + GF8::from(value) * GF8::from(coefficient)
-                        });
-                    assert_eq!(*actual, u8::from(expected));
-                }
-            }
-
-            let shards = [shard, shard];
-            let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-            let portable = OcelotHintedX::<_, Sha256, CHECKSUMS>::new(Impl8::new(Portable))
-                .checksum(&shards, &coefficients, &strategy)
-                .unwrap();
-            let dispatched = OcelotHintedX::<_, Sha256, CHECKSUMS>::new(Impl8::new(kernel))
-                .checksum(&shards, &coefficients, &strategy)
-                .unwrap();
-            assert_eq!(dispatched, portable);
-        }
-    }
-
-    #[test]
-    fn checksum_ranges_match_scalar_inner_products() {
-        with_kernel(TestChecksumRanges);
-    }
-
-    struct TestSchemeDifferential;
-
-    impl WithKernel for TestSchemeDifferential {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
-            assert_scheme_differential(kernel, &Sequential);
-            assert_scheme_differential(kernel, &rayon);
-        }
-    }
-
-    fn assert_scheme_differential<K: Kernel>(kernel: K, strategy: &impl Strategy) {
-        let portable = OcelotHintedX::<_, Sha256, CHECKSUMS>::new(Impl8::new(Portable));
-        let dispatched = OcelotHintedX::<_, Sha256, CHECKSUMS>::new(Impl8::new(kernel));
-        let mut rng = test_rng();
-        let mut data = vec![0; 1027];
-        rng.fill_bytes(&mut data);
-        let (portable_commitment, portable_shards) = portable
-            .encode(b"scheme differential", &CONFIG, &data[..], strategy)
-            .unwrap();
-        let (dispatched_commitment, dispatched_shards) = dispatched
-            .encode(b"scheme differential", &CONFIG, &data[..], strategy)
-            .unwrap();
-        assert_eq!(portable_commitment.encode(), dispatched_commitment.encode());
         assert_eq!(
-            portable_shards
-                .iter()
-                .map(Encode::encode)
-                .collect::<Vec<_>>(),
-            dispatched_shards
-                .iter()
-                .map(Encode::encode)
-                .collect::<Vec<_>>()
+            scheme
+                .decode(
+                    &CONFIG,
+                    &commitment,
+                    checking_data,
+                    checked.iter(),
+                    &strategy,
+                )
+                .unwrap(),
+            data
         );
-
-        let (portable_checking, _, portable_weak) = portable
-            .weaken(
-                b"scheme differential",
-                &CONFIG,
-                &portable_commitment,
-                0,
-                dispatched_shards[0].clone(),
-                strategy,
-            )
-            .unwrap();
-        let (dispatched_checking, _, dispatched_weak) = dispatched
-            .weaken(
-                b"scheme differential",
-                &CONFIG,
-                &dispatched_commitment,
-                0,
-                portable_shards[0].clone(),
-                strategy,
-            )
-            .unwrap();
-        assert_eq!(portable_checking, dispatched_checking);
-        assert_eq!(portable_weak.encode(), dispatched_weak.encode());
-
-        let checked_by_portable: Vec<_> = dispatched_shards
-            .iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                portable
-                    .check(
-                        &CONFIG,
-                        &portable_commitment,
-                        &dispatched_checking,
-                        index as u16,
-                        shard.weak.clone(),
-                        strategy,
-                    )
-                    .unwrap()
-            })
-            .collect();
-        let checked_by_dispatched: Vec<_> = portable_shards
-            .iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                dispatched
-                    .check(
-                        &CONFIG,
-                        &dispatched_commitment,
-                        &portable_checking,
-                        index as u16,
-                        shard.weak.clone(),
-                        strategy,
-                    )
-                    .unwrap()
-            })
-            .collect();
-        for indices in [[0, 1, 2], [0, 3, 4]] {
-            let portable_decoded = portable
-                .decode(
-                    &CONFIG,
-                    &portable_commitment,
-                    dispatched_checking.clone(),
-                    indices.iter().map(|&index| &checked_by_dispatched[index]),
-                    strategy,
-                )
-                .unwrap();
-            let dispatched_decoded = dispatched
-                .decode(
-                    &CONFIG,
-                    &dispatched_commitment,
-                    portable_checking.clone(),
-                    indices.iter().map(|&index| &checked_by_portable[index]),
-                    strategy,
-                )
-                .unwrap();
-            assert_eq!(portable_decoded, data);
-            assert_eq!(dispatched_decoded, data);
-        }
     }
 
     #[test]
-    fn portable_and_dispatched_schemes_match() {
-        with_kernel(TestSchemeDifferential);
-    }
-
-    #[test]
-    fn tiled_checksums_match_scalar_inner_products() {
-        let scheme = OcelotHintedX::<_, Sha256, CHECKSUMS>::new(Impl8::new(Portable));
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-        let mut rng = test_rng();
-        for len in [0, 2 * stripe_bytes::<Impl8<Portable>>() + 3] {
-            let mut shards = vec![vec![0; len]; 2];
-            for shard in &mut shards {
-                rng.fill_bytes(shard);
-            }
-            let mut coefficients = vec![0; CHECKSUMS * len];
-            rng.fill_bytes(&mut coefficients);
-            let shards: Vec<_> = shards.iter().map(Vec::as_slice).collect();
-            let actual = scheme.checksum(&shards, &coefficients, &strategy).unwrap();
-            for (shard, actual) in shards.iter().zip(actual.as_chunks::<CHECKSUMS>().0) {
-                for (output, &actual) in actual.iter().enumerate() {
-                    let expected = shard.iter().enumerate().fold(GF8::from(0), |sum, (i, &v)| {
-                        sum + GF8::from(v) * GF8::from(coefficients[output * len + i])
-                    });
-                    assert_eq!(actual, u8::from(expected));
-                }
-            }
-        }
-        assert!(scheme.checksum(&[], &[], &strategy).unwrap().is_empty());
-    }
-
-    #[test]
-    fn checksum_dimensions_are_per_code_symbol() {
-        assert_eq!(coefficient_count(6, 2).unwrap(), 3 * CHECKSUMS);
-        assert!(coefficient_count(5, 2).is_err());
-    }
-
-    #[test]
-    fn checksum_rejects_merkle_committed_non_codeword() {
+    fn hinted_rejects_committed_non_codeword() {
         let imp = Impl8::new(Portable);
-        let scheme = OcelotHintedX::<_, Sha256, 16>::new(imp);
+        let scheme = Hinted::new(imp);
         let len = stripe_bytes::<Impl8<Portable>>() + 3;
         let data_bytes = (3 * len - u32::SIZE) as u32;
         let mut rng = test_rng();
@@ -1597,7 +1823,7 @@ mod tests {
         }
         originals[0][..u32::SIZE].copy_from_slice(&data_bytes.to_be_bytes());
         let original_refs: Vec<_> = originals.iter().map(Vec::as_slice).collect();
-        let mut recovery = Encoder::new(imp).encode(&original_refs, 4, &Sequential);
+        let mut recovery = Encoder::new(imp).encode(&original_refs, 4, &STRATEGY);
         recovery[0][len - 1] ^= 1;
         let shards: Vec<Bytes> = original_refs
             .iter()
@@ -1610,13 +1836,10 @@ mod tests {
         }
         let tree = builder.build();
         let root = tree.root();
-        let mut transcript = OcelotHintedX::<Impl8<Portable>, Sha256, 16>::transcript(
-            b"test", &CONFIG, data_bytes, &root,
-        );
-        let coefficients =
-            OcelotHintedX::<Impl8<Portable>, Sha256, 16>::coefficients(&transcript, len).unwrap();
+        let mut transcript = Hinted::transcript(b"test", &CONFIG, data_bytes, &root);
+        let coefficients = Hinted::coefficients(&transcript, len).unwrap();
         let checksum = scheme
-            .checksum(&original_refs, &coefficients, &Sequential)
+            .checksum(&original_refs, &coefficients, &STRATEGY)
             .unwrap();
         transcript.commit(checksum.clone());
         let commitment = transcript.summarize();
@@ -1639,218 +1862,10 @@ mod tests {
                 &commitment,
                 index as u16,
                 strong,
-                &Sequential
+                &STRATEGY
             ),
             Err(Error::InvalidWeakShard)
         ));
-    }
-
-    #[test]
-    fn recovered_originals_match_committed_checksums() {
-        let imp = Impl8::new(Portable);
-        let scheme = OcelotHintedX::<_, Sha256, 16>::new(imp);
-        let (commitment, shards) = scheme
-            .encode(
-                b"test",
-                &CONFIG,
-                &b"recovered checksum invariant"[..],
-                &Sequential,
-            )
-            .unwrap();
-        let (checking_data, _, _) = scheme
-            .weaken(
-                b"test",
-                &CONFIG,
-                &commitment,
-                0,
-                shards[0].clone(),
-                &Sequential,
-            )
-            .unwrap();
-        let checked: Vec<_> = shards
-            .into_iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                scheme
-                    .check(
-                        &CONFIG,
-                        &commitment,
-                        &checking_data,
-                        index as u16,
-                        shard.weak,
-                        &Sequential,
-                    )
-                    .unwrap()
-            })
-            .collect();
-        let k = usize::from(CONFIG.minimum_shards.get());
-        let decoder = Decoder::new(imp);
-        // Every threshold subset, including mixed and recovery-only inputs.
-        for mask in 0usize..1 << checked.len() {
-            if mask.count_ones() as usize != k {
-                continue;
-            }
-            let input: Vec<_> = checked
-                .iter()
-                .enumerate()
-                .map(|(i, shard)| (mask & (1 << i) != 0).then_some(shard.shard.as_ref()))
-                .collect();
-            for (index, shard) in decoder
-                .decode(&input[..k], &input[k..], &Sequential)
-                .unwrap()
-            {
-                let mut checksum = [0; CHECKSUMS];
-                imp.checksum_range(
-                    &shard,
-                    &checking_data.coefficients,
-                    0..shard.len(),
-                    &mut checksum,
-                );
-                assert_eq!(checksum.as_slice(), checking_data.encoded_checksum[index]);
-            }
-        }
-    }
-
-    #[test]
-    fn decode_with_surplus_shards() {
-        let data = b"only consume the shards needed for recovery";
-        let (commitment, shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &data[..], &Sequential).unwrap();
-        let (checking_data, _, _) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            0,
-            shards[0].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        let checked: Vec<_> = shards
-            .into_iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                Ocelot8::<Sha256>::check(
-                    &CONFIG,
-                    &commitment,
-                    &checking_data,
-                    index as u16,
-                    shard.weak,
-                    &Sequential,
-                )
-                .unwrap()
-            })
-            .collect();
-        // Exercise systematic, mixed, and recovery-only inputs with surplus shards.
-        for indices in [
-            vec![0, 1, 2, 3, 4, 5, 6],
-            vec![0, 3, 4, 5, 6],
-            vec![3, 4, 5, 6],
-        ] {
-            let input = indices.iter().rev().map(|&i| &checked[i]);
-            let decoded = Ocelot8::<Sha256>::decode(
-                &CONFIG,
-                &commitment,
-                checking_data.clone(),
-                input,
-                &Sequential,
-            );
-            assert_eq!(decoded.unwrap(), data);
-        }
-
-        let mut wrong_commitment = checked[3].clone();
-        wrong_commitment.commitment =
-            Ocelot8::<Sha256>::encode(b"other", &CONFIG, &data[..], &Sequential)
-                .unwrap()
-                .0;
-        assert!(matches!(
-            Ocelot8::<Sha256>::decode(
-                &CONFIG,
-                &commitment,
-                checking_data.clone(),
-                checked[..3].iter().chain([&wrong_commitment]),
-                &Sequential,
-            ),
-            Err(Error::CommitmentMismatch)
-        ));
-        assert!(matches!(
-            Ocelot8::<Sha256>::decode(
-                &CONFIG,
-                &commitment,
-                checking_data,
-                checked.iter().chain([&checked[0]]),
-                &Sequential,
-            ),
-            Err(Error::DuplicateIndex(0))
-        ));
-    }
-
-    #[test]
-    fn decode_rejects_duplicate_indices() {
-        let (commitment, shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &b"duplicates"[..], &Sequential).unwrap();
-        let (checking_data, checked, _) = Ocelot8::<Sha256>::weaken(
-            b"test",
-            &CONFIG,
-            &commitment,
-            0,
-            shards[0].clone(),
-            &Sequential,
-        )
-        .unwrap();
-        assert!(matches!(
-            Ocelot8::<Sha256>::decode(
-                &CONFIG,
-                &commitment,
-                checking_data,
-                [&checked, &checked, &checked].into_iter(),
-                &Sequential,
-            ),
-            Err(Error::DuplicateIndex(0))
-        ));
-    }
-
-    #[test]
-    fn weaken_rejects_inconsistent_length_before_challenge_allocation() {
-        let (commitment, mut shards) =
-            Ocelot8::<Sha256>::encode(b"test", &CONFIG, &b"length"[..], &Sequential).unwrap();
-        shards[0].data_bytes = u32::MAX;
-        assert!(matches!(
-            Ocelot8::<Sha256>::weaken(
-                b"test",
-                &CONFIG,
-                &commitment,
-                0,
-                shards.remove(0),
-                &Sequential
-            ),
-            Err(Error::InvalidStrongShard)
-        ));
-    }
-
-    type Basic = super::OcelotX<Impl8<Portable>, Sha256>;
-
-    fn prove_codeword(
-        mut codeword: Vec<Vec<u8>>,
-    ) -> (
-        <Sha256 as Hasher>::Digest,
-        Vec<WeakShard<<Sha256 as Hasher>::Digest>>,
-    ) {
-        let mut builder = Builder::<Sha256>::new(codeword.len());
-        for shard in &codeword {
-            builder.add(&Sha256::hash(&[shard]));
-        }
-        let tree = builder.build();
-        let root = tree.root();
-        let shards = codeword
-            .drain(..)
-            .enumerate()
-            .map(|(index, shard)| WeakShard {
-                shard: shard.into(),
-                index: index as u16,
-                proof: tree.proof(index as u32).unwrap(),
-            })
-            .collect();
-        (root, shards)
     }
 
     fn raw_codeword(originals: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -1858,88 +1873,9 @@ mod tests {
         let recovery = Encoder::new(Impl8::new(Portable)).encode(
             &refs,
             usize::from(CONFIG.extra_shards.get()),
-            &Sequential,
+            &STRATEGY,
         );
         originals.into_iter().chain(recovery).collect()
-    }
-
-    fn check_basic(
-        scheme: &Basic,
-        root: &<Sha256 as Hasher>::Digest,
-        shards: &[WeakShard<<Sha256 as Hasher>::Digest>],
-    ) -> Vec<BasicCheckedShard<<Sha256 as Hasher>::Digest>> {
-        shards
-            .iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                scheme
-                    .check(&CONFIG, root, index as u16, shard, &Sequential)
-                    .unwrap()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn basic_roundtrip_reconstructs_the_canonical_commitment() {
-        let scheme = Basic::new(Impl8::new(Portable));
-        let mut boundary = vec![0; 3 * (stripe_bytes::<Impl8<Portable>>() + 1) - u32::SIZE];
-        test_rng().fill_bytes(&mut boundary);
-        for data in [Vec::new(), vec![7], boundary] {
-            let (root, shards) = scheme
-                .encode(&CONFIG, data.as_slice(), &Sequential)
-                .unwrap();
-            let checked = check_basic(&scheme, &root, &shards);
-            for indices in [[0, 1, 2], [0, 3, 4], [3, 4, 5]] {
-                let decoded = scheme
-                    .decode(
-                        &CONFIG,
-                        &root,
-                        indices.iter().map(|&index| &checked[index]),
-                        &Sequential,
-                    )
-                    .unwrap();
-                assert_eq!(decoded, data);
-                assert_eq!(
-                    scheme
-                        .encode(&CONFIG, decoded.as_slice(), &Sequential)
-                        .unwrap()
-                        .0,
-                    root
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn basic_rejects_non_codeword_roots_with_all_originals_or_surplus() {
-        let scheme = Basic::new(Impl8::new(Portable));
-        let (_, honest) = scheme
-            .encode(&CONFIG, &b"committed non-codeword"[..], &Sequential)
-            .unwrap();
-        let honest: Vec<Vec<u8>> = honest.iter().map(|shard| shard.shard.to_vec()).collect();
-
-        let mut bad_all_originals = honest.clone();
-        bad_all_originals[3][0] ^= 1;
-        let (root, shards) = prove_codeword(bad_all_originals);
-        let checked = check_basic(&scheme, &root, &shards);
-        assert!(matches!(
-            scheme.decode(&CONFIG, &root, checked.iter(), &Sequential),
-            Err(Error::InvalidData)
-        ));
-
-        let mut bad_surplus = honest;
-        bad_surplus[6][0] ^= 1;
-        let (root, shards) = prove_codeword(bad_surplus);
-        let checked = check_basic(&scheme, &root, &shards);
-        assert!(matches!(
-            scheme.decode(
-                &CONFIG,
-                &root,
-                [1, 2, 3, 4, 5, 6].into_iter().map(|index| &checked[index]),
-                &Sequential,
-            ),
-            Err(Error::InvalidData)
-        ));
     }
 
     #[test]
@@ -1956,51 +1892,12 @@ mod tests {
         for (flat, width) in malformed.into_iter().zip([2, 2, 4]) {
             let originals = flat.chunks_exact(width).map(<[u8]>::to_vec).collect();
             let (root, shards) = prove_codeword(raw_codeword(originals));
-            let checked = check_basic(&scheme, &root, &shards);
+            let checked = check_basic(&scheme, &CONFIG, &root, &shards);
             assert!(matches!(
-                scheme.decode(&CONFIG, &root, checked[..3].iter(), &Sequential),
+                scheme.decode(&CONFIG, &root, checked[..3].iter(), &STRATEGY),
                 Err(Error::InvalidData)
             ));
         }
-    }
-
-    #[test]
-    fn basic_checked_shards_bind_commitment_config_and_field() {
-        let scheme = Basic::new(Impl8::new(Portable));
-        let (root_a, shards_a) = scheme
-            .encode(&CONFIG, &b"commitment a"[..], &Sequential)
-            .unwrap();
-        let (root_b, shards_b) = scheme
-            .encode(&CONFIG, &b"commitment b"[..], &Sequential)
-            .unwrap();
-        let checked_a = check_basic(&scheme, &root_a, &shards_a);
-        let checked_b = check_basic(&scheme, &root_b, &shards_b);
-        assert!(matches!(
-            scheme.decode(
-                &CONFIG,
-                &root_a,
-                [&checked_a[0], &checked_a[1], &checked_b[2]].into_iter(),
-                &Sequential,
-            ),
-            Err(Error::CommitmentMismatch)
-        ));
-
-        let other_config = Config {
-            minimum_shards: NZU16!(2),
-            extra_shards: NZU16!(5),
-        };
-        assert!(matches!(
-            scheme.decode(&other_config, &root_a, checked_a[..3].iter(), &Sequential,),
-            Err(Error::CommitmentMismatch)
-        ));
-
-        let other_field = super::OcelotX::<crate::ocelot::Impl16<Portable>, Sha256>::new(
-            crate::ocelot::Impl16::new(Portable),
-        );
-        assert!(matches!(
-            other_field.decode(&CONFIG, &root_a, checked_a[..3].iter(), &Sequential),
-            Err(Error::CommitmentMismatch)
-        ));
     }
 }
 

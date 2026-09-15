@@ -74,14 +74,6 @@ impl<K: Kernel> Impl for Impl16<K> {
         self.kernel.run(AddInto { dst, src });
     }
 
-    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
-        Impl8::new(self.kernel).derivative_four(quarters);
-    }
-
-    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
-        Impl8::new(self.kernel).derivative_sixteen(blocks);
-    }
-
     fn sub_into(self, dst: &mut [u8], src: &[u8]) {
         self.add_into(dst, src);
     }
@@ -106,6 +98,14 @@ impl<K: Kernel> Impl for Impl16<K> {
 
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: GF16) {
         self.mul_add(dst, src, c);
+    }
+
+    fn derivative_four(self, quarters: [&mut [u8]; 4]) {
+        Impl8::new(self.kernel).derivative_four(quarters);
+    }
+
+    fn derivative_sixteen(self, blocks: [&mut [u8]; 16]) {
+        Impl8::new(self.kernel).derivative_sixteen(blocks);
     }
 
     fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: GF16) {
@@ -747,13 +747,13 @@ impl WithKernel for ChecksumRange<'_> {
 mod tests {
     use super::*;
     use crate::ocelot::{
-        code::{Decoder, Encoder, stripe_bytes, test_suites::fuzz_code},
+        code::test_suites::{
+            DefaultImpl, ImplPlan, fuzz_code, fuzz_impl, fuzz_impl_matches_reference,
+        },
         kernel::{portable::Portable, with_kernel},
     };
-    use commonware_parallel::{Rayon, Strategy};
-    use commonware_utils::{NZUsize, test_rng};
-    use rand_core::Rng as _;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    const OCELOT16: Impl16<Portable> = Impl16::new(Portable);
 
     fn elements(bytes: &[u8]) -> Vec<GF16> {
         assert!(bytes.len().is_multiple_of(2));
@@ -781,413 +781,100 @@ mod tests {
         bytes
     }
 
-    fn checksum_reference(
-        shard: &[u8],
-        coefficients: &[u8],
-        range: Range<usize>,
-        output_symbols: usize,
-    ) -> Vec<u8> {
-        let input_symbols = shard.len() / 2;
-        let values = elements(shard);
-        let mut out = Vec::with_capacity(output_symbols);
-        for output in 0..output_symbols {
-            let mut sum = GF16(0);
-            for i in range.start / 2..range.end / 2 {
-                sum += &(values[i] * GF16(u16::from(coefficients[output * input_symbols + i])));
-            }
-            out.push(sum);
-        }
-        layout(&out)
-    }
-
-    struct TestCode;
-
-    impl WithKernel for TestCode {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            commonware_invariants::minifuzz::test(|u| fuzz_code(u, Impl16::new(kernel)));
-        }
+    #[test]
+    fn minifuzz_code() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| fuzz_code(u, OCELOT16));
     }
 
     #[test]
-    fn test_ocelot16() {
-        with_kernel(TestCode);
-    }
-
-    struct TestArithmetic;
-
-    impl WithKernel for TestArithmetic {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let imp = Impl16::new(kernel);
-            let mut rng = test_rng();
-            for len in (0..=3 * BLOCK_BYTES).step_by(2) {
-                let offset = 1 + len / 2 % 7;
-                let range = offset..offset + len;
-                let mut x = vec![0xa5; offset + len + 7];
-                let mut y = vec![0x5a; offset + len + 7];
-                rng.fill_bytes(&mut x[range.clone()]);
-                rng.fill_bytes(&mut y[range.clone()]);
-
-                for c in [0, 1, 0x80, 0xff, 0x0100, 0x0128, 0x84e4, 0xffff].map(GF16) {
-                    let mut overwritten = x.clone();
-                    overwritten[range.clone()].fill(0xa5);
-                    imp.mul_into(&mut overwritten[range.clone()], &y[range.clone()], c);
-                    let products: Vec<_> = elements(&y[range.clone()])
-                        .into_iter()
-                        .map(|y| y * c)
-                        .collect();
-                    let mut expected_overwrite = overwritten.clone();
-                    expected_overwrite[range.clone()].copy_from_slice(&layout(&products));
-                    assert_eq!(overwritten, expected_overwrite);
-
-                    let mut actual = x.clone();
-                    imp.mul_add(&mut actual[range.clone()], &y[range.clone()], c);
-                    let products: Vec<_> = elements(&x[range.clone()])
-                        .into_iter()
-                        .zip(elements(&y[range.clone()]))
-                        .map(|(x, y)| x + y * c)
-                        .collect();
-                    let mut expected = x.clone();
-                    expected[range.clone()].copy_from_slice(&layout(&products));
-                    assert_eq!(actual, expected);
-
-                    let mut actual_x = x.clone();
-                    let mut actual_y = y.clone();
-                    let mut expected_x = elements(&x[range.clone()]);
-                    let mut expected_y = elements(&y[range.clone()]);
-                    for (x, y) in expected_x.iter_mut().zip(&mut expected_y) {
-                        *x += &(*y * c);
-                        *y += x;
-                    }
-                    imp.fft_butterfly(
-                        &mut actual_x[range.clone()],
-                        &mut actual_y[range.clone()],
-                        c,
-                    );
-                    let mut expected = x.clone();
-                    expected[range.clone()].copy_from_slice(&layout(&expected_x));
-                    assert_eq!(actual_x, expected);
-                    let mut expected = y.clone();
-                    expected[range.clone()].copy_from_slice(&layout(&expected_y));
-                    assert_eq!(actual_y, expected);
-                    imp.ifft_butterfly(
-                        &mut actual_x[range.clone()],
-                        &mut actual_y[range.clone()],
-                        c,
-                    );
-                    assert_eq!(actual_x, x);
-                    assert_eq!(actual_y, y);
-                }
-            }
-
-            for shard_len in [2, 6, 126, 128, 130, 258] {
-                let shard_count = 3;
-                let len = shard_len * shard_count;
-                let offset = 1 + shard_len / 2 % 7;
-                let range = offset..offset + len;
-                let mut original: [Vec<u8>; 4] =
-                    std::array::from_fn(|_| vec![0xa5; offset + len + 7]);
-                for quarter in &mut original {
-                    rng.fill_bytes(&mut quarter[range.clone()]);
-                }
-                for coefficients in [
-                    [GF16(0), GF16(1), GF16(0xff)],
-                    [GF16(0), GF16(0x0128), GF16(0x80)],
-                    [GF16(0x0100), GF16(0x84e4), GF16(0xffff)],
-                ] {
-                    let mut actual = original.clone();
-                    let mut expected = original.clone();
-                    for shard in 0..shard_count {
-                        let start = offset + shard * shard_len;
-                        let end = start + shard_len;
-                        let mut values: [Vec<GF16>; 4] =
-                            std::array::from_fn(|q| elements(&expected[q][start..end]));
-                        for i in 0..shard_len / 2 {
-                            let mut lanes =
-                                [values[0][i], values[1][i], values[2][i], values[3][i]];
-                            let apply = |lanes: &mut [GF16; 4], x: usize, y: usize, c: GF16| {
-                                let mut a = lanes[x];
-                                let mut b = lanes[y];
-                                a += &(b * c);
-                                b += &a;
-                                lanes[x] = a;
-                                lanes[y] = b;
-                            };
-                            apply(&mut lanes, 0, 2, coefficients[2]);
-                            apply(&mut lanes, 1, 3, coefficients[2]);
-                            apply(&mut lanes, 0, 1, coefficients[0]);
-                            apply(&mut lanes, 2, 3, coefficients[1]);
-                            for (values, value) in values.iter_mut().zip(lanes) {
-                                values[i] = value;
-                            }
-                        }
-                        for (quarter, values) in expected.iter_mut().zip(values) {
-                            quarter[start..end].copy_from_slice(&layout(&values));
-                        }
-                    }
-                    let [q0, q1, q2, q3] = &mut actual;
-                    imp.fft_butterfly_two_layers(
-                        [
-                            &mut q0[range.clone()],
-                            &mut q1[range.clone()],
-                            &mut q2[range.clone()],
-                            &mut q3[range.clone()],
-                        ],
-                        shard_len,
-                        coefficients,
-                    );
-                    assert_eq!(actual, expected);
-                    let [q0, q1, q2, q3] = &mut actual;
-                    imp.ifft_butterfly_two_layers(
-                        [
-                            &mut q0[range.clone()],
-                            &mut q1[range.clone()],
-                            &mut q2[range.clone()],
-                            &mut q3[range.clone()],
-                        ],
-                        shard_len,
-                        coefficients,
-                    );
-                    assert_eq!(actual, original);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn arithmetic_and_butterflies_match_scalar() {
-        TestArithmetic.call(Portable);
-        with_kernel(TestArithmetic);
-    }
-
-    struct TestChecksum;
-
-    impl WithKernel for TestChecksum {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let imp = Impl16::new(kernel);
-            let mut rng = test_rng();
-            let len = 3 * BLOCK_BYTES + 42;
-            let symbols = len / 2;
-            let mut shard_backing = vec![0xa5; len + 9];
-            let shard = &mut shard_backing[1..1 + len];
-            rng.fill_bytes(shard);
-
-            for output_symbols in [16, BLOCK_SYMBOLS + 3] {
-                let coefficient_len = symbols * output_symbols;
-                let mut coefficient_backing = vec![0x5a; coefficient_len + 11];
-                let coefficients = &mut coefficient_backing[3..3 + coefficient_len];
-                rng.fill_bytes(coefficients);
-
-                let check_range = |range: Range<usize>| {
-                    let output_len = 2 * output_symbols;
-                    let mut actual = vec![0xcc; output_len + 12];
-                    imp.checksum_range(
-                        shard,
-                        coefficients,
-                        range.clone(),
-                        &mut actual[5..5 + output_len],
-                    );
-                    assert_eq!(
-                        &actual[5..5 + output_len],
-                        checksum_reference(shard, coefficients, range.clone(), output_symbols),
-                        "range {range:?}"
-                    );
-                    assert!(actual[..5].iter().all(|&byte| byte == 0xcc));
-                    assert!(actual[5 + output_len..].iter().all(|&byte| byte == 0xcc));
-                };
-
-                for range in [
-                    0..0,
-                    18..18,
-                    0..len,
-                    14..2 * (BLOCK_SYMBOLS + 11),
-                    2 * (BLOCK_SYMBOLS - 3)..2 * (2 * BLOCK_SYMBOLS + 5),
-                    2 * (2 * BLOCK_SYMBOLS + 7)..len,
-                    len - 10..len,
-                ] {
-                    check_range(range);
-                }
-                for remainder in 0..=K::LANES.min(BLOCK_SYMBOLS - 1) {
-                    check_range(0..2 * remainder);
-                }
-
-                let mut full = vec![0; 2 * output_symbols];
-                imp.checksum_range(shard, coefficients, 0..len, &mut full);
-                let partitions = [
-                    0,
-                    10,
-                    2 * (BLOCK_SYMBOLS - 3),
-                    2 * (BLOCK_SYMBOLS + 11),
-                    4 * BLOCK_SYMBOLS,
-                    len - 10,
-                    len,
-                ];
-                let mut partitioned = vec![0; full.len()];
-                for bounds in partitions.windows(2) {
-                    let mut part = vec![0; full.len()];
-                    imp.checksum_range(shard, coefficients, bounds[0]..bounds[1], &mut part);
-                    imp.add_into(&mut partitioned, &part);
-                }
-                assert_eq!(partitioned, full);
-
-                let invalid_tape = catch_unwind(AssertUnwindSafe(|| {
-                    imp.checksum_range(
-                        shard,
-                        &coefficients[..coefficients.len() - 1],
-                        0..len,
-                        &mut vec![0; full.len()],
-                    );
-                }));
-                assert!(invalid_tape.is_err());
-                let invalid_range = catch_unwind(AssertUnwindSafe(|| {
-                    imp.checksum_range(shard, coefficients, 1..len, &mut vec![0; full.len()]);
-                }));
-                assert!(invalid_range.is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn checksums_match_scalar_and_partition() {
-        TestChecksum.call(Portable);
-        with_kernel(TestChecksum);
-    }
-
-    struct TestChecksumCommutation;
-
-    impl WithKernel for TestChecksumCommutation {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            const OUTPUT_SYMBOLS: usize = 4;
-            let imp = Impl16::new(kernel);
-            let mut rng = test_rng();
-            let symbols = K::LANES + 3;
-            let mut original = vec![vec![0; 2 * symbols]; 5];
-            for shard in &mut original {
-                rng.fill_bytes(shard);
-            }
-            let mut coefficients = vec![0; symbols * OUTPUT_SYMBOLS];
-            rng.fill_bytes(&mut coefficients);
-            let encoder = Encoder::new(imp);
-            let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-            let original_refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
-            let recovery = encoder.encode(&original_refs, 3, &strategy);
-            let checksums: Vec<_> = original
-                .iter()
-                .map(|shard| {
-                    let mut out = vec![0; 2 * OUTPUT_SYMBOLS];
-                    imp.checksum_range(shard, &coefficients, 0..shard.len(), &mut out);
-                    out
-                })
-                .collect();
-            let checksum_refs: Vec<_> = checksums.iter().map(Vec::as_slice).collect();
-            let encoded_checksums = encoder.encode(&checksum_refs, 3, &strategy);
-            for (shard, expected) in recovery.iter().zip(encoded_checksums) {
-                let mut actual = vec![0; 2 * OUTPUT_SYMBOLS];
-                imp.checksum_range(shard, &coefficients, 0..shard.len(), &mut actual);
-                assert_eq!(actual, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn checksums_commute_with_encoding() {
-        with_kernel(TestChecksumCommutation);
-    }
-
-    struct TestCodeEdges;
-
-    impl WithKernel for TestCodeEdges {
-        type Output = ();
-
-        fn call<K: Kernel>(self, kernel: K) {
-            let imp = Impl16::new(kernel);
-            let encoder = Encoder::new(imp);
-            let decoder = Decoder::new(imp);
-            let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-            let mut rng = test_rng();
-
-            let len = stripe_bytes::<Impl16<K>>() + 2;
-            let mut original = vec![vec![0; len]; 3];
-            for shard in &mut original {
-                rng.fill_bytes(shard);
-            }
-            let refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
-            let recovery = encoder.encode(&refs, 2, &strategy);
-            let recovered = decoder
-                .decode(
-                    &[None, Some(original[1].as_slice()), None],
-                    &recovery
-                        .iter()
-                        .map(|shard| Some(shard.as_slice()))
-                        .collect::<Vec<_>>(),
-                    &strategy,
-                )
-                .unwrap();
-            assert_eq!(
-                recovered,
-                vec![(0, original[0].clone()), (2, original[2].clone())]
-            );
-
-            let mut original = vec![vec![0; 4096 + BLOCK_BYTES + 2]; 67];
-            for shard in &mut original {
-                rng.fill_bytes(shard);
-            }
-            let refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
-            let recovery = encoder.encode(&refs, 33, &strategy);
-            let mut available: Vec<_> = refs.iter().copied().map(Some).collect();
-            available[0] = None;
-            available[66] = None;
-            let recovered = decoder
-                .decode(
-                    &available,
-                    &recovery
-                        .iter()
-                        .map(|shard| Some(shard.as_slice()))
-                        .collect::<Vec<_>>(),
-                    &strategy,
-                )
-                .unwrap();
-            assert_eq!(
-                recovered,
-                vec![(0, original[0].clone()), (66, original[66].clone())]
-            );
-
-            for (k, r) in [(257, 2), (u16::MAX as usize, 1)] {
-                let mut original = vec![vec![0; 2]; k];
-                for shard in &mut original {
-                    rng.fill_bytes(shard);
-                }
-                let refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
-                let recovery = encoder.encode(&refs, r, &strategy);
-                let mut available: Vec<_> = original
-                    .iter()
-                    .map(|shard| Some(shard.as_slice()))
-                    .collect();
-                available[k - 1] = None;
-                let recovered = decoder
-                    .decode(
-                        &available,
-                        &recovery
-                            .iter()
-                            .map(|shard| Some(shard.as_slice()))
-                            .collect::<Vec<_>>(),
-                        &strategy,
+    fn minifuzz_impl_contract() {
+        for plan in ImplPlan::ALL {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| {
+                    fuzz_impl(
+                        u,
+                        OCELOT16,
+                        plan,
+                        2 * Portable::LANES,
+                        elements,
+                        layout,
+                        |coefficient| GF16(u16::from(coefficient)),
                     )
-                    .unwrap();
-                assert_eq!(recovered, vec![(k - 1, original[k - 1].clone())]);
+                });
+        }
+        for plan in ImplPlan::DEFAULTS {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| {
+                    fuzz_impl(
+                        u,
+                        DefaultImpl(OCELOT16),
+                        plan,
+                        2 * Portable::LANES,
+                        elements,
+                        layout,
+                        |coefficient| GF16(u16::from(coefficient)),
+                    )
+                });
+        }
+    }
+
+    struct FuzzImplDifferential;
+
+    impl WithKernel for FuzzImplDifferential {
+        type Output = ();
+
+        fn call<K: Kernel>(self, kernel: K) {
+            for plan in ImplPlan::ALL {
+                commonware_invariants::minifuzz::Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(100)
+                    .test(|u| {
+                        fuzz_impl_matches_reference(
+                            u,
+                            Impl16::new(kernel),
+                            OCELOT16,
+                            plan,
+                            2 * K::LANES,
+                            elements,
+                        )
+                    });
             }
         }
     }
 
     #[test]
-    fn code_handles_stripe_tails_and_field_boundaries() {
-        with_kernel(TestCodeEdges);
+    fn minifuzz_impl_matches_portable() {
+        with_kernel(FuzzImplDifferential);
+    }
+
+    #[test]
+    fn cantor_basis_is_linearly_independent() {
+        let basis = <Impl16<Portable> as Impl>::basis();
+        assert_eq!(basis.len(), <Impl16<Portable> as Impl>::BITS);
+        assert_eq!(basis[0], GF16(1));
+        for pair in basis.windows(2) {
+            assert_eq!(pair[1] * pair[1] + pair[1], pair[0]);
+        }
+
+        let mut pivots = [0u16; 16];
+        for value in basis {
+            let mut value = value.0;
+            while value != 0 {
+                let bit = value.ilog2() as usize;
+                if pivots[bit] == 0 {
+                    pivots[bit] = value;
+                    break;
+                }
+                value ^= pivots[bit];
+            }
+            assert_ne!(value, 0);
+        }
     }
 }
