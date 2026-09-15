@@ -170,6 +170,7 @@ impl IoBufs {
     /// Whether all buffers are empty.
     #[inline]
     pub const fn is_empty(&self) -> bool {
+        // Only Single can be empty. All other variants contain readable bytes.
         match &self.inner {
             IoBufsInner::Single(buf) => buf.is_empty(),
             IoBufsInner::Pair(_) | IoBufsInner::Triple(_) | IoBufsInner::Chunked(_) => false,
