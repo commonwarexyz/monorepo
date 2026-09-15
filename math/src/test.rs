@@ -18,12 +18,12 @@ fn mul_mod(a: u64, b: u64, p: u64) -> u64 {
 #[read_cfg(())]
 pub struct F(
     #[codec(read_with = {
-    let value = u64::read_cfg(buf, cfg)?;
-    if value >= P {
-        return Err(commonware_codec::Error::Invalid("F", "out of range"));
-    }
-    Ok(value)
-})]
+        let value = u64::read_cfg(buf, cfg)?;
+        if value >= P {
+            return Err(commonware_codec::Error::Invalid("F", "out of range"));
+        }
+        Ok(value)
+    })]
     u64,
 );
 
@@ -140,16 +140,16 @@ impl arbitrary::Arbitrary<'_> for F {
 #[read_cfg(())]
 pub struct G(
     #[codec(read_with = {
-    let value = u64::read_cfg(buf, cfg)?;
-    if value >= Q {
-        return Err(commonware_codec::Error::Invalid("G", "out of range"));
-    }
-    let out = G(value);
-    if out.0 == 0 || out.scale(&[P]).0 != 1 {
-        return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
-    }
-    Ok(value)
-})]
+        let value = u64::read_cfg(buf, cfg)?;
+        if value >= Q {
+            return Err(commonware_codec::Error::Invalid("G", "out of range"));
+        }
+        let out = G(value);
+        if out.0 == 0 || out.scale(&[P]).0 != 1 {
+            return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
+        }
+        Ok(value)
+    })]
     u64,
 );
 

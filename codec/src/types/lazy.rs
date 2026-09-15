@@ -266,12 +266,12 @@ mod test {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Write, FixedSize, Read)]
     struct Small(
         #[codec(read_with = {
-        let byte = u8::read_cfg(buf, &())?;
-        if byte > 100 {
-            return Err(crate::Error::Invalid("Small", "value > 100"));
-        }
-        Ok(byte)
-    })]
+            let byte = u8::read_cfg(buf, &())?;
+            if byte > 100 {
+                return Err(crate::Error::Invalid("Small", "value > 100"));
+            }
+            Ok(byte)
+        })]
         u8,
     );
 

@@ -13,12 +13,12 @@ const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 #[read_cfg(<u64 as Read>::Cfg)]
 pub struct F(
     #[codec(read_with = {
-    let x = u64::read_cfg(buf, cfg)?;
-    if x >= P {
-        return Err(commonware_codec::Error::Invalid("F", "out of range"));
-    }
-    Ok(x)
-})]
+        let x = u64::read_cfg(buf, cfg)?;
+        if x >= P {
+            return Err(commonware_codec::Error::Invalid("F", "out of range"));
+        }
+        Ok(x)
+    })]
     u64,
 );
 

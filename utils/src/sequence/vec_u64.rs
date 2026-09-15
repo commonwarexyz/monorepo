@@ -11,10 +11,10 @@ use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, Write};
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct VecU64(
     #[codec(encode_with = {
-    let bytes = value.to_be_bytes();
-    bytes.len().write(buf);
-    buf.put_slice(&bytes);
-}, encode_size = u64::SIZE.encode_size() + u64::SIZE)]
+        let bytes = value.to_be_bytes();
+        bytes.len().write(buf);
+        buf.put_slice(&bytes);
+    }, encode_size = u64::SIZE.encode_size() + u64::SIZE)]
     #[codec(read_with = {
         let len = usize::read_cfg(buf, &(u64::SIZE..=u64::SIZE).into())?;
         if buf.remaining() < len {

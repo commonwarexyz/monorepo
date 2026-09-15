@@ -15,13 +15,13 @@ pub struct EmptyRange;
 #[codec(read_bounds(Idx: Read + PartialOrd))]
 pub struct NonEmptyRange<Idx>(
     #[codec(read_with = {
-    let start = Idx::read_cfg(buf, cfg)?;
-    let end = Idx::read_cfg(buf, cfg)?;
-    if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {
-        return Err(CodecError::Invalid("NonEmptyRange", "start must be < end"));
-    }
-    Ok(start..end)
-})]
+        let start = Idx::read_cfg(buf, cfg)?;
+        let end = Idx::read_cfg(buf, cfg)?;
+        if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {
+            return Err(CodecError::Invalid("NonEmptyRange", "start must be < end"));
+        }
+        Ok(start..end)
+    })]
     Range<Idx>,
 );
 

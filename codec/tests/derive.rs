@@ -76,10 +76,16 @@ fn read_u8(buf: &mut impl Buf, cfg: &u8) -> Result<u8, Error> {
 #[read_cfg(u8)]
 struct CustomReadClosure(
     #[codec(read_with = |buf: &mut dyn Buf, cfg: &u8| {
-    if !buf.has_remaining() { return Err(Error::EndOfBuffer); }
-    let value = buf.get_u8();
-    if value == *cfg { Ok(value) } else { Err(Error::Invalid("CustomReadClosure", "bad value")) }
-})]
+        if !buf.has_remaining() {
+            return Err(Error::EndOfBuffer);
+        }
+        let value = buf.get_u8();
+        if value == *cfg {
+            Ok(value)
+        } else {
+            Err(Error::Invalid("CustomReadClosure", "bad value"))
+        }
+    })]
     u8,
 );
 
@@ -87,9 +93,13 @@ struct CustomReadClosure(
 #[read_cfg(u8)]
 struct CustomReadBlock(
     #[codec(cfg = &(*cfg + 2), read_with = {
-    let value = u8::read_cfg(buf, &())?;
-    if value == *cfg { Ok(value) } else { Err(Error::Invalid("CustomReadBlock", "bad value")) }
-})]
+        let value = u8::read_cfg(buf, &())?;
+        if value == *cfg {
+            Ok(value)
+        } else {
+            Err(Error::Invalid("CustomReadBlock", "bad value"))
+        }
+    })]
     u8,
 );
 
