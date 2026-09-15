@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Commonware Studio • Simplex BFT Consensus & BLS12-381 DKG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="logo-area">
+      <div class="logo-badge">
+        <span class="logo-glow"></span>
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+          <polyline points="2 17 12 22 22 17"></polyline>
+          <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-title">COMMONWARE <span class="badge-rust">MODULAR PRIMITIVES</span></h1>
+        <p class="brand-subtitle">Simplex BFT Consensus (~200ms) • BLS12-381 Threshold DKG • QMDB Storage</p>
+      </div>
+    </div>
+
+    <!-- Finality Meter -->
+    <div class="finality-meter">
+      <span class="pulse-dot"></span>
+      <span id="header-finality">~210ms Simplex Finality</span>
+      <span class="dkg-tag">BLS12-381 Active</span>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-tab="simplex">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+      Simplex BFT Consensus
+    </button>
+    <button class="nav-tab" data-tab="crypto">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+      BLS12-381 Threshold DKG
+    </button>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <!-- Tab 1: Simplex Consensus -->
+    <section id="tab-simplex" class="tab-pane active">
+      <div class="hero-card">
+        <div class="hero-content">
+          <div class="pill-highlight">⚡ Modular Rust Consensus Primitive</div>
+          <h2>Sub-Second Finality with Simplex BFT</h2>
+          <p>
+            <code>consensus::simplex</code> questions traditional BFT assumptions, achieving ~200ms block finality using VRF leader selection and BLS threshold signatures.
+          </p>
+        </div>
+      </div>
+
+      <div class="layout-grid mt-4">
+        <!-- Simplex Control Card -->
+        <div class="card">
+          <div class="card-header">
+            <h3>⚡ Simplex Round Proposer</h3>
+            <button class="btn btn-primary btn-sm" id="btn-commit-block">Commit Simplex Block</button>
+          </div>
+          <p class="text-muted" style="font-size: 0.85rem;">Trigger instant BFT view round consensus and threshold signature aggregation.</p>
+          <div class="mt-3">
+            <button class="btn btn-gradient btn-lg" id="btn-toggle-auto">
+              ▶️ Start Auto-Consensus Stream (5 blocks/sec)
+            </button>
+          </div>
+          <div id="simplex-status-box" class="mt-3"></div>
+        </div>
+
+        <!-- Live Finalized Blocks Ledger -->
+        <div class="card">
+          <div class="card-header">
+            <h3>📜 Finalized Simplex Blocks</h3>
+          </div>
+          <div class="ledger-list" id="blocks-container">
+            <div class="empty-state">Click "Commit Simplex Block" to start consensus.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 2: Crypto DKG -->
+    <section id="tab-crypto" class="tab-pane">
+      <div class="card">
+        <div class="card-header">
+          <h3>🔐 BLS12-381 Threshold Key Generation</h3>
+          <button class="btn btn-gradient btn-sm" id="btn-gen-dkg">Generate Threshold Keys</button>
+        </div>
+        <div class="json-inspector mt-3">
+          <div class="inspector-header"><span>BLS12-381 Key Pair & Polynomial Commitments</span></div>
+          <pre id="dkg-json-box">Click "Generate Threshold Keys" to run distributed key generation.</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>Commonware Studio • Founded by Patrick O'Grady • Open Source Modular Rust Primitives</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
