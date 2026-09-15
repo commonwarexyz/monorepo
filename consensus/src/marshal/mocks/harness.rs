@@ -24,9 +24,8 @@ use crate::{
     },
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
-use bytes::BufMut;
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
@@ -81,7 +80,7 @@ pub type P = ConstantProvider<S, Epoch>;
 type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
 pub type CodingCtx = Context<TestCommitment, K>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, Read, EncodeSize)]
 pub struct CodingB(Block<D, CodingCtx>);
 
 impl CodingB {
@@ -92,26 +91,6 @@ impl CodingB {
         timestamp: u64,
     ) -> Self {
         Self(Block::new::<H>(context, parent, height, timestamp))
-    }
-}
-
-impl Write for CodingB {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl Read for CodingB {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Block::read_cfg(reader, cfg).map(Self)
-    }
-}
-
-impl EncodeSize for CodingB {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
     }
 }
 

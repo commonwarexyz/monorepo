@@ -5,7 +5,6 @@ use crate::{
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
 };
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
     Digest, PublicKey,
@@ -18,7 +17,7 @@ use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, Read, EncodeSize)]
 pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
@@ -33,6 +32,7 @@ pub struct Context<D: Digest, P: PublicKey> {
     /// of that term); any uncovered view may eventually be finalized and skipping it would
     /// result in a fork. The parent remains valid even if a later nullification in its own
     /// term covers the parent view.
+    #[codec(cfg = &((), ()))]
     pub parent: (View, D),
 }
 
@@ -45,36 +45,6 @@ impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
 impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     fn view(&self) -> View {
         self.round.view()
-    }
-}
-
-impl<D: Digest, P: PublicKey> Write for Context<D, P> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.round.write(buf);
-        self.leader.write(buf);
-        self.parent.write(buf);
-    }
-}
-
-impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
-    }
-}
-
-impl<D: Digest, P: PublicKey> Read for Context<D, P> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let leader = P::read(reader)?;
-        let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
-
-        Ok(Self {
-            round,
-            leader,
-            parent,
-        })
     }
 }
 
@@ -641,7 +611,7 @@ impl<D: Digest> Viewable for Subject<'_, D> {
 }
 
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
 pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -649,35 +619,6 @@ pub enum Vote<S: Scheme, D: Digest> {
     Nullify(Nullify<S>),
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
-}
-
-impl<S: Scheme, D: Digest> Write for Vote<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullify(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalize(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Notarize(v) => v.encode_size(),
-            Self::Nullify(v) => v.encode_size(),
-            Self::Finalize(v) => v.encode_size(),
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Read for Vote<S, D> {
@@ -750,7 +691,7 @@ where
 }
 
 /// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
 pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
@@ -803,35 +744,6 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
                 nullification.verify::<_, D>(rng, scheme, strategy)
             }
             Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Notarization(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullification(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalization(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Notarization(v) => v.encode_size(),
-            Self::Nullification(v) => v.encode_size(),
-            Self::Finalization(v) => v.encode_size(),
         }
     }
 }
@@ -909,7 +821,7 @@ where
 }
 
 /// Artifact represents all consensus artifacts (votes and certificates) for storage.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
 pub enum Artifact<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -925,56 +837,6 @@ pub enum Artifact<S: Scheme, D: Digest> {
     Finalize(Finalize<S, D>),
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
-}
-
-impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Notarization(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Certification(r, b) => {
-                2u8.write(writer);
-                r.write(writer);
-                b.write(writer);
-            }
-            Self::Nullify(v) => {
-                3u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullification(v) => {
-                4u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalize(v) => {
-                5u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalization(v) => {
-                6u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Notarize(v) => v.encode_size(),
-            Self::Notarization(v) => v.encode_size(),
-            Self::Certification(r, b) => r.encode_size() + b.encode_size(),
-            Self::Nullify(v) => v.encode_size(),
-            Self::Nullification(v) => v.encode_size(),
-            Self::Finalize(v) => v.encode_size(),
-            Self::Finalization(v) => v.encode_size(),
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
@@ -1114,7 +976,7 @@ where
 
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Write, Read, EncodeSize)]
 pub struct Proposal<D: Digest> {
     /// The round in which this proposal is made
     pub round: Round,
@@ -1132,35 +994,6 @@ impl<D: Digest> Proposal<D> {
             parent,
             payload,
         }
-    }
-}
-
-impl<D: Digest> Write for Proposal<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.parent.write(writer);
-        self.payload.write(writer)
-    }
-}
-
-impl<D: Digest> Read for Proposal<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let parent = View::read(reader)?;
-        let payload = D::read(reader)?;
-        Ok(Self {
-            round,
-            parent,
-            payload,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for Proposal<D> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.parent.encode_size() + self.payload.encode_size()
     }
 }
 
@@ -1194,7 +1027,7 @@ where
 }
 
 /// Validator vote that endorses a proposal for notarization.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
 pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
@@ -1257,33 +1090,6 @@ impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.attestation.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-
-        Ok(Self {
-            proposal,
-            attestation,
-        })
-    }
-}
-
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> Participant {
         self.attestation.signer
@@ -1342,9 +1148,11 @@ where
 /// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
+#[codec(read_cfg = <S::Certificate as Read>::Cfg)]
 pub struct Notarization<S: Scheme, D: Digest> {
     /// The proposal that has been notarized.
+    #[codec(cfg = &())]
     pub proposal: Proposal<D>,
     /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
@@ -1432,33 +1240,6 @@ impl<S: Scheme, D: Digest> Hash for Notarization<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Notarization<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Notarization<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.certificate.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Notarization<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-
-        Ok(Self {
-            proposal,
-            certificate,
-        })
-    }
-}
-
 impl<S: Scheme, D: Digest> Epochable for Notarization<S, D> {
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
@@ -1489,7 +1270,7 @@ where
 
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
 pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
@@ -1545,30 +1326,6 @@ impl<S: Scheme> Nullify<S> {
     }
 }
 
-impl<S: Scheme> Write for Nullify<S> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme> EncodeSize for Nullify<S> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.attestation.encode_size()
-    }
-}
-
-impl<S: Scheme> Read for Nullify<S> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-
-        Ok(Self { round, attestation })
-    }
-}
-
 impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> Participant {
         self.attestation.signer
@@ -1603,9 +1360,11 @@ where
 /// When a view is nullified, consensus moves to the first view of the next
 /// term without finalizing a block (the next view when `term_length` is 1);
 /// a nullification covers the nullified view and the rest of its term.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
+#[codec(read_cfg = <S::Certificate as Read>::Cfg)]
 pub struct Nullification<S: Scheme> {
     /// The round in which this nullification is made.
+    #[codec(cfg = &())]
     pub round: Round,
     /// The recovered certificate for the nullification.
     pub certificate: S::Certificate,
@@ -1687,30 +1446,6 @@ impl<S: Scheme> Hash for Nullification<S> {
     }
 }
 
-impl<S: Scheme> Write for Nullification<S> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme> EncodeSize for Nullification<S> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.certificate.encode_size()
-    }
-}
-
-impl<S: Scheme> Read for Nullification<S> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-
-        Ok(Self { round, certificate })
-    }
-}
-
 impl<S: Scheme> Epochable for Nullification<S> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
@@ -1738,7 +1473,7 @@ where
 /// Validator vote to finalize a proposal.
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this round.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
 pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
@@ -1801,33 +1536,6 @@ impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.attestation.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-
-        Ok(Self {
-            proposal,
-            attestation,
-        })
-    }
-}
-
 impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> Participant {
         self.attestation.signer
@@ -1868,9 +1576,11 @@ where
 /// Some signing schemes (like [`super::scheme::bls12381_threshold::vrf`]) embed an additional
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::vrf::Seedable::seed`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, Read, EncodeSize)]
+#[codec(read_cfg = <S::Certificate as Read>::Cfg)]
 pub struct Finalization<S: Scheme, D: Digest> {
     /// The proposal that has been finalized.
+    #[codec(cfg = &())]
     pub proposal: Proposal<D>,
     /// The recovered certificate for the proposal.
     pub certificate: S::Certificate,
@@ -1958,33 +1668,6 @@ impl<S: Scheme, D: Digest> Hash for Finalization<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Finalization<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.proposal.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Finalization<S, D> {
-    fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.certificate.encode_size()
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Finalization<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proposal = Proposal::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-
-        Ok(Self {
-            proposal,
-            certificate,
-        })
-    }
-}
-
 impl<S: Scheme, D: Digest> Epochable for Finalization<S, D> {
     fn epoch(&self) -> Epoch {
         self.proposal.epoch()
@@ -2015,59 +1698,13 @@ where
 
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, Read, EncodeSize)]
+#[read_cfg((usize, <S::Certificate as Read>::Cfg))]
 pub enum Backfiller<S: Scheme, D: Digest> {
     /// Request for missing notarizations and nullifications
-    Request(Request),
+    Request(#[codec(cfg = &cfg.0)] Request),
     /// Response containing requested notarizations and nullifications
     Response(Response<S, D>),
-}
-
-impl<S: Scheme, D: Digest> Write for Backfiller<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Request(request) => {
-                0u8.write(writer);
-                request.write(writer);
-            }
-            Self::Response(response) => {
-                1u8.write(writer);
-                response.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Backfiller<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Request(v) => v.encode_size(),
-            Self::Response(v) => v.encode_size(),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
-    type Cfg = (usize, <S::Certificate as Read>::Cfg);
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let tag = <u8>::read(reader)?;
-        match tag {
-            0 => {
-                let (max_len, _) = cfg;
-                let v = Request::read_cfg(reader, max_len)?;
-                Ok(Self::Request(v))
-            }
-            1 => {
-                let v = Response::<S, D>::read_cfg(reader, cfg)?;
-                Ok(Self::Response(v))
-            }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Backfiller",
-                "Invalid type",
-            )),
-        }
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -2094,10 +1731,11 @@ where
 
 /// Request is a message to request missing notarizations and nullifications.
 /// This is used by validators who need to catch up with the consensus state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Request {
     /// Unique identifier for this request (used to match responses)
+    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
     pub id: u64,
     /// Views for which notarizations are requested
     pub notarizations: Vec<View>,
@@ -2113,22 +1751,6 @@ impl Request {
             notarizations,
             nullifications,
         }
-    }
-}
-
-impl Write for Request {
-    fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.id).write(writer);
-        self.notarizations.write(writer);
-        self.nullifications.write(writer);
-    }
-}
-
-impl EncodeSize for Request {
-    fn encode_size(&self) -> usize {
-        UInt(self.id).encode_size()
-            + self.notarizations.encode_size()
-            + self.nullifications.encode_size()
     }
 }
 
@@ -2168,9 +1790,10 @@ impl Read for Request {
 
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Write, EncodeSize)]
 pub struct Response<S: Scheme, D: Digest> {
     /// Identifier matching the original request
+    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
     pub id: u64,
     /// Notarizations for the requested views
     pub notarizations: Vec<Notarization<S, D>>,
@@ -2223,22 +1846,6 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             .expect("non-empty response must contain a certificate");
 
         scheme.verify_certificates::<_, D, _>(rng, certificates, strategy)
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for Response<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.id).write(writer);
-        self.notarizations.write(writer);
-        self.nullifications.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Response<S, D> {
-    fn encode_size(&self) -> usize {
-        UInt(self.id).encode_size()
-            + self.notarizations.encode_size()
-            + self.nullifications.encode_size()
     }
 }
 
@@ -2318,7 +1925,7 @@ where
 ///
 /// Use [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter and
 /// verify activities based on [`Scheme::is_attributable`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -2446,70 +2053,6 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Self::ConflictingNotarize(c) => c.verify(rng, scheme, strategy),
             Self::ConflictingFinalize(c) => c.verify(rng, scheme, strategy),
             Self::NullifyFinalize(c) => c.verify(rng, scheme, strategy),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Write for Activity<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Notarize(v) => {
-                0u8.write(writer);
-                v.write(writer);
-            }
-            Self::Notarization(v) => {
-                1u8.write(writer);
-                v.write(writer);
-            }
-            Self::Certification(v) => {
-                2u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullify(v) => {
-                3u8.write(writer);
-                v.write(writer);
-            }
-            Self::Nullification(v) => {
-                4u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalize(v) => {
-                5u8.write(writer);
-                v.write(writer);
-            }
-            Self::Finalization(v) => {
-                6u8.write(writer);
-                v.write(writer);
-            }
-            Self::ConflictingNotarize(v) => {
-                7u8.write(writer);
-                v.write(writer);
-            }
-            Self::ConflictingFinalize(v) => {
-                8u8.write(writer);
-                v.write(writer);
-            }
-            Self::NullifyFinalize(v) => {
-                9u8.write(writer);
-                v.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Notarize(v) => v.encode_size(),
-            Self::Notarization(v) => v.encode_size(),
-            Self::Certification(v) => v.encode_size(),
-            Self::Nullify(v) => v.encode_size(),
-            Self::Nullification(v) => v.encode_size(),
-            Self::Finalize(v) => v.encode_size(),
-            Self::Finalization(v) => v.encode_size(),
-            Self::ConflictingNotarize(v) => v.encode_size(),
-            Self::ConflictingFinalize(v) => v.encode_size(),
-            Self::NullifyFinalize(v) => v.encode_size(),
         }
     }
 }
@@ -2659,7 +2202,7 @@ where
 
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub struct ConflictingNotarize<S: Scheme, D: Digest> {
     /// The first conflicting notarize
     notarize_1: Notarize<S, D>,
@@ -2732,13 +2275,6 @@ impl<S: Scheme, D: Digest> Viewable for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for ConflictingNotarize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.notarize_1.write(writer);
-        self.notarize_2.write(writer);
-    }
-}
-
 impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
@@ -2763,12 +2299,6 @@ impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.notarize_1.encode_size() + self.notarize_2.encode_size()
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingNotarize<S, D>
 where
@@ -2787,7 +2317,7 @@ where
 
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub struct ConflictingFinalize<S: Scheme, D: Digest> {
     /// The second conflicting finalize
     finalize_1: Finalize<S, D>,
@@ -2860,13 +2390,6 @@ impl<S: Scheme, D: Digest> Viewable for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for ConflictingFinalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.finalize_1.write(writer);
-        self.finalize_2.write(writer);
-    }
-}
-
 impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
@@ -2891,12 +2414,6 @@ impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.finalize_1.encode_size() + self.finalize_2.encode_size()
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingFinalize<S, D>
 where
@@ -2916,7 +2433,7 @@ where
 /// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize)]
 pub struct NullifyFinalize<S: Scheme, D: Digest> {
     /// The conflicting nullify
     nullify: Nullify<S>,
@@ -2976,13 +2493,6 @@ impl<S: Scheme, D: Digest> Viewable for NullifyFinalize<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for NullifyFinalize<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.nullify.write(writer);
-        self.finalize.write(writer);
-    }
-}
-
 impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
@@ -2998,12 +2508,6 @@ impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
         }
 
         Ok(Self { nullify, finalize })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
-    fn encode_size(&self) -> usize {
-        self.nullify.encode_size() + self.finalize.encode_size()
     }
 }
 

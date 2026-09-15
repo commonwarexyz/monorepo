@@ -78,7 +78,7 @@ mod tests {
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     };
-    use bytes::{BufMut, Bytes};
+    use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
     use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
@@ -7903,8 +7903,8 @@ mod tests {
     }
 
     /// Counts full block clones through a zero-byte mock context.
-    #[derive(Debug, Default)]
-    struct CloneCounter(Arc<AtomicUsize>);
+    #[derive(Debug, Default, Write)]
+    struct CloneCounter(#[codec(encode_with = {})] Arc<AtomicUsize>);
 
     impl Clone for CloneCounter {
         fn clone(&self) -> Self {
@@ -7915,10 +7915,6 @@ mod tests {
 
     impl FixedSize for CloneCounter {
         const SIZE: usize = 0;
-    }
-
-    impl Write for CloneCounter {
-        fn write(&self, _: &mut impl BufMut) {}
     }
 
     impl Read for CloneCounter {

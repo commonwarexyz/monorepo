@@ -193,8 +193,7 @@ mod tests {
         marshal::{coding::types::StoredCodedBlock, mocks::block::Block},
         types::{Epoch, Height, View},
     };
-    use bytes::BufMut;
-    use commonware_codec::{Buf, EncodeSize, Error, Read, Write};
+    use commonware_codec::{EncodeSize, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
@@ -209,6 +208,7 @@ mod tests {
     type TestContext = Context<TestCommitment, PublicKey>;
     type InnerBlock = Block<Sha256Digest, TestContext>;
 
+    #[derive(Write, Read, EncodeSize)]
     struct NoCloneBlock {
         inner: InnerBlock,
     }
@@ -216,28 +216,6 @@ mod tests {
     impl Clone for NoCloneBlock {
         fn clone(&self) -> Self {
             panic!("shared block operations must not clone the inner block");
-        }
-    }
-
-    impl Write for NoCloneBlock {
-        fn write(&self, writer: &mut impl BufMut) {
-            self.inner.write(writer);
-        }
-    }
-
-    impl Read for NoCloneBlock {
-        type Cfg = ();
-
-        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-            Ok(Self {
-                inner: InnerBlock::read_cfg(reader, cfg)?,
-            })
-        }
-    }
-
-    impl EncodeSize for NoCloneBlock {
-        fn encode_size(&self) -> usize {
-            self.inner.encode_size()
         }
     }
 

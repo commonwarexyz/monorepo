@@ -38,7 +38,6 @@
 //! to prevent accidental type misuse.
 
 use crate::{Epochable, Viewable};
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
@@ -54,9 +53,12 @@ use core::{
 ///
 /// An epoch increments when the validator set changes, providing a reconfiguration boundary.
 /// All consensus operations within an epoch use the same validator set.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Epoch(u64);
+pub struct Epoch(
+    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    u64,
+);
 
 impl Epoch {
     /// Returns epoch zero.
@@ -129,18 +131,6 @@ impl Read for Epoch {
     }
 }
 
-impl Write for Epoch {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
-
-impl EncodeSize for Epoch {
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
-    }
-}
-
 impl From<Epoch> for U64 {
     fn from(epoch: Epoch) -> Self {
         Self::from(epoch.get())
@@ -150,9 +140,12 @@ impl From<Epoch> for U64 {
 /// Represents a sequential position in a chain or sequence.
 ///
 /// Height is a monotonically increasing counter. Height zero is the genesis block.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Height(u64);
+pub struct Height(
+    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    u64,
+);
 
 impl Height {
     /// Returns height zero.
@@ -234,18 +227,6 @@ impl Read for Height {
     }
 }
 
-impl Write for Height {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
-
-impl EncodeSize for Height {
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
-    }
-}
-
 impl From<Height> for U64 {
     fn from(height: Height) -> Self {
         Self::from(height.get())
@@ -256,9 +237,12 @@ impl From<Height> for U64 {
 ///
 /// Views represent individual consensus rounds within an epoch. Each view corresponds to
 /// one attempt to reach consensus on a proposal.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct View(u64);
+pub struct View(
+    #[codec(encode_with = { UInt(*value).write(buf); }, encode_size = UInt(*value).encode_size())]
+    u64,
+);
 
 impl View {
     /// Returns view zero.
@@ -462,18 +446,6 @@ impl Read for View {
     }
 }
 
-impl Write for View {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
-
-impl EncodeSize for View {
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
-    }
-}
-
 impl From<View> for U64 {
     fn from(view: View) -> Self {
         Self::from(view.get())
@@ -608,7 +580,9 @@ impl Display for TermLength {
 ///
 /// Round provides a total ordering across epoch boundaries, where rounds are
 /// ordered first by epoch, then by view within that epoch.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Write, EncodeSize, Read,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Round {
     epoch: Epoch,
@@ -818,30 +792,6 @@ impl Epocher for FixedEpocher {
     }
 }
 
-impl Read for Round {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            epoch: Epoch::read(buf)?,
-            view: View::read(buf)?,
-        })
-    }
-}
-
-impl Write for Round {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.view.write(buf);
-    }
-}
-
-impl EncodeSize for Round {
-    fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.view.encode_size()
-    }
-}
-
 impl Display for Round {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.epoch, self.view)
@@ -954,9 +904,13 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// Each field is parsed as its declared type on deserialization, so the accessors on a
         /// successfully decoded [`Commitment`] never fail.
-        #[derive(FixedArray)]
+        #[derive(FixedArray, Write)]
         #[fixed_array(bytes([u8; COMMITMENT_SIZE]))]
-        pub struct Commitment<B, C, H>([u8; COMMITMENT_SIZE], PhantomData<(B, C, H)>);
+        pub struct Commitment<B, C, H>(
+            [u8; COMMITMENT_SIZE],
+            #[codec(encode_with = {})]
+            PhantomData<(B, C, H)>,
+        );
 
         impl<B, C, H> Clone for Commitment<B, C, H> {
             fn clone(&self) -> Self {
@@ -1085,12 +1039,6 @@ commonware_macros::stability_scope!(ALPHA {
             };
         }
 
-        impl<B: Digestible, C: Scheme, H: Hasher> Write for Commitment<B, C, H> {
-            fn write(&self, buf: &mut impl bytes::BufMut) {
-                buf.put_slice(self.as_ref());
-            }
-        }
-
         impl<B: Digestible, C: Scheme, H: Hasher> FixedSize for Commitment<B, C, H> {
             const SIZE: usize = COMMITMENT_SIZE;
         }
@@ -1211,7 +1159,7 @@ commonware_macros::stability_scope!(ALPHA {
 mod tests {
     use super::*;
     use crate::types::coding::{COMMITMENT_SIZE, Commitment};
-    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize};
+    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{Digest as DigestTrait, Digestible, Hasher};
     use commonware_math::algebra::Random;
@@ -2246,8 +2194,8 @@ mod tests {
 
     #[test]
     fn test_coding_commitment_fallible_digest() {
-        #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        struct Digest([u8; Self::SIZE]);
+        #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Write, FixedSize)]
+        struct Digest([u8; 32]);
 
         impl Random for Digest {
             fn random(mut rng: impl rand_core::CryptoRng) -> Self {
@@ -2259,16 +2207,6 @@ mod tests {
 
         impl commonware_cryptography::Digest for Digest {
             const EMPTY: Self = Self([0u8; Self::SIZE]);
-        }
-
-        impl Write for Digest {
-            fn write(&self, buf: &mut impl BufMut) {
-                buf.put_slice(&self.0);
-            }
-        }
-
-        impl FixedSize for Digest {
-            const SIZE: usize = 32;
         }
 
         impl Read for Digest {

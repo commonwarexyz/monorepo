@@ -5,7 +5,7 @@ use crate::{
     marshal::core::ExpectedCommitment,
     types::{Height, coding::Commitment},
 };
-use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -17,6 +17,7 @@ use std::{
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
+#[derive(Write, EncodeSize)]
 pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
     pub(crate) commitment: Commitment<B, C, H>,
@@ -69,30 +70,6 @@ impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
     }
 }
 
-impl<B: Digestible, C: Scheme, H: Hasher> Write for Shard<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-        self.index.write(buf);
-        self.inner.write(buf);
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.commitment.write(buf);
-        self.index.write(buf);
-        self.inner.write_bufs(buf);
-    }
-}
-
-impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_inline_size()
-    }
-}
-
 impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
     type Cfg = commonware_coding::CodecConfig;
 
@@ -138,19 +115,22 @@ where
 }
 
 /// An envelope type for an erasure coded [`Block`].
-#[derive(Debug)]
+#[derive(Debug, Write, EncodeSize)]
 pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     /// The inner block type.
     inner: Arc<B>,
     /// The erasure coding configuration.
     config: CodingConfig,
     /// The erasure coding commitment.
+    #[codec(encode_with = {}, encode_size = 0)]
     commitment: C::Commitment,
     /// The coded shards.
     ///
     /// These shards are lazily-constructed when [`CodedBlock`] is formed with [`Self::new_trusted`].
+    #[codec(encode_with = {}, encode_size = 0)]
     shards: OnceLock<Arc<[C::Shard]>>,
     /// Phantom data for the hasher.
+    #[codec(encode_with = {}, encode_size = 0)]
     _hasher: PhantomData<H>,
 }
 
@@ -298,19 +278,6 @@ impl<B: Block, C: Scheme, H: Hasher> Digestible for CodedBlock<B, C, H> {
     }
 }
 
-impl<B: Block, C: Scheme, H: Hasher> Write for CodedBlock<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.inner.write(buf);
-        self.config.write(buf);
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
-    fn encode_size(&self) -> usize {
-        self.inner.encode_size() + self.config.encode_size()
-    }
-}
-
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
 /// Decoding checks the expected digest and coding configuration.
@@ -445,6 +412,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 ///
 /// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
+#[derive(Write, EncodeSize)]
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
     commitment: Commitment<B, C, H>,
@@ -511,19 +479,6 @@ impl<B: Block, C: Scheme, H: Hasher> Digestible for StoredCodedBlock<B, C, H> {
 
     fn digest(&self) -> Self::Digest {
         self.inner.digest()
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> Write for StoredCodedBlock<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.inner.write(buf);
-        self.commitment.write(buf);
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> EncodeSize for StoredCodedBlock<B, C, H> {
-    fn encode_size(&self) -> usize {
-        self.inner.encode_size() + self.commitment.encode_size()
     }
 }
 
