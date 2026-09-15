@@ -5,14 +5,14 @@ use commonware_broadcast::{
     Broadcaster,
     buffered::{Config, Engine, Mailbox},
 };
-use commonware_codec::{Buf, Encode, RangeCfg, ReadRangeExt};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::{
     Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
 use commonware_p2p::{Recipients, simulated::Network};
-use commonware_runtime::{BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
+use commonware_runtime::{Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
     NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
 };
@@ -46,9 +46,12 @@ pub enum RecipientPattern {
     One(u64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Arbitrary)]
+#[derive(Debug, Clone, PartialEq, Eq, Arbitrary, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 pub struct FuzzMessage {
+    #[codec(cfg = &(*cfg, ()))]
     pub commitment: Vec<u8>,
+    #[codec(cfg = &(*cfg, ()))]
     pub content: Vec<u8>,
 }
 
@@ -56,31 +59,6 @@ impl Digestible for FuzzMessage {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
         Sha256::hash(&[&self.encode()])
-    }
-}
-
-impl commonware_codec::Write for FuzzMessage {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.commitment.write(buf);
-        self.content.write(buf);
-    }
-}
-
-impl commonware_codec::EncodeSize for FuzzMessage {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.content.encode_size()
-    }
-}
-
-impl commonware_codec::Read for FuzzMessage {
-    type Cfg = RangeCfg<usize>;
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let commitment = Vec::<u8>::read_range(buf, *range)?;
-        let content = Vec::<u8>::read_range(buf, *range)?;
-        Ok(Self {
-            commitment,
-            content,
-        })
     }
 }
 

@@ -1,9 +1,9 @@
-use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, Error, Read, ReadExt, Write};
+use bytes::Bytes;
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct Message<Key: Span> {
     /// Unique identifier for the message.
     /// Responses should have the same ID as the request they are responding to.
@@ -11,38 +11,6 @@ pub struct Message<Key: Span> {
 
     /// Payload is the data being sent.
     pub payload: Payload<Key>,
-}
-
-impl<Key: Span> Write for Message<Key> {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        self.payload.write(buf);
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.id.write(buf);
-        self.payload.write_bufs(buf);
-    }
-}
-
-impl<Key: Span> EncodeSize for Message<Key> {
-    fn encode_size(&self) -> usize {
-        self.id.encode_size() + self.payload.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.id.encode_size() + self.payload.encode_inline_size()
-    }
-}
-
-impl<Key: Span> Read for Message<Key> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let id = u64::read(buf)?;
-        let payload = Payload::read(buf)?;
-        Ok(Self { id, payload })
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -58,7 +26,7 @@ where
 }
 
 /// Represents the contents of a message sent between peers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize)]
 pub enum Payload<Key: Span> {
     // Request is a request for a response.
     Request(Key),
@@ -70,58 +38,6 @@ pub enum Payload<Key: Span> {
     //
     // This allows the requester to handle the error more quickly than timing out.
     Error,
-}
-
-impl<Key: Span> Write for Payload<Key> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Request(key) => {
-                buf.put_u8(0);
-                key.write(buf);
-            }
-            Self::Response(data) => {
-                buf.put_u8(1);
-                data.write(buf);
-            }
-            Self::Error => {
-                buf.put_u8(2);
-            }
-        }
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        match self {
-            Self::Request(key) => {
-                buf.put_u8(0);
-                key.write(buf);
-            }
-            Self::Response(data) => {
-                buf.put_u8(1);
-                data.write_bufs(buf);
-            }
-            Self::Error => {
-                buf.put_u8(2);
-            }
-        }
-    }
-}
-
-impl<Key: Span> EncodeSize for Payload<Key> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Request(key) => key.encode_size(),
-            Self::Response(data) => data.encode_size(),
-            Self::Error => 0,
-        }
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        1 + match self {
-            Self::Request(key) => key.encode_size(),
-            Self::Response(data) => data.encode_inline_size(),
-            Self::Error => 0,
-        }
-    }
 }
 
 impl<Key: Span> Read for Payload<Key> {

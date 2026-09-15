@@ -1,62 +1,20 @@
 use crate::authenticated::data::Data;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::BufMut;
-
-/// Prefix that identifies the message as a Data message.
-pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
-/// Prefix that identifies the message as a Ping message.
-pub const PING_PREFIX: u8 = 1;
+use commonware_codec::{EncodeSize, Read, Write};
 
 /// The messages that can be sent between peers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write, Read)]
+#[read_cfg(usize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
-    Data(Data),
+    #[codec(tag = 0)]
+    Data(#[codec(cfg = &((..=*cfg).into()))] Data),
+    #[codec(tag = 1)]
     Ping,
 }
 
 impl From<Data> for Message {
     fn from(data: Data) -> Self {
         Self::Data(data)
-    }
-}
-
-impl EncodeSize for Message {
-    fn encode_size(&self) -> usize {
-        (match self {
-            Self::Data(data) => data.encode_size(),
-            Self::Ping => 0, // Ping has no payload
-        }) + 1 // 1 bytes for Message discriminant
-    }
-}
-
-impl Write for Message {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf); // Discriminant for Data
-                data.write(buf);
-            }
-            Self::Ping => {
-                PING_PREFIX.write(buf); // Discriminant for Ping
-            }
-        }
-    }
-}
-
-impl Read for Message {
-    type Cfg = usize; // Maximum amount of data to read
-
-    fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
-        let message_type = <u8>::read(buf)?;
-        match message_type {
-            DATA_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Self::Data(data))
-            }
-            PING_PREFIX => Ok(Self::Ping),
-            other => Err(Error::InvalidEnum(other)),
-        }
     }
 }
 
@@ -69,7 +27,7 @@ mod tests {
 
     #[test]
     fn test_data_prefix_value() {
-        assert_eq!(DATA_PREFIX, 0);
+        assert_eq!(crate::authenticated::data::DATA_PREFIX, 0);
     }
 
     #[test]
