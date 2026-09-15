@@ -2,7 +2,6 @@
 
 use crate::merkle::{Family, Location};
 use core::ops::Range;
-use std::collections::BTreeMap;
 
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
@@ -13,17 +12,17 @@ use std::collections::BTreeMap;
 /// # Arguments
 ///
 /// * `range` - The sync range
-/// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
+/// * `fetched_ranges` - Ranges of fetched batches, in ascending order of start location
 /// * `outstanding_ranges` - Maximum ranges of outstanding requests, in ascending order
 ///
 /// # Invariants
 ///
-/// - All start locations in `fetched_operations` are in `range`
+/// - All fetched range starts are in `range`
 /// - All outstanding request starts are in `range`
-/// - All operation counts in `fetched_operations` are > 0
+/// - All fetched ranges are nonempty
 pub fn find_next<F: Family>(
     range: Range<Location<F>>,
-    fetched_operations: &BTreeMap<Location<F>, u64>, // start_loc -> operation_count
+    fetched_ranges: impl IntoIterator<Item = Range<Location<F>>>,
     outstanding_ranges: impl IntoIterator<Item = Range<Location<F>>>,
 ) -> Option<Range<Location<F>>> {
     if range.is_empty() {
@@ -33,28 +32,21 @@ pub fn find_next<F: Family>(
     // Track the next uncovered location (exclusive end of covered range)
     let mut next_uncovered: Location<F> = range.start;
 
-    // Create iterators for both data structures (already sorted)
-    let mut fetched_ops_iter = fetched_operations
-        .iter()
-        .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.checked_add(operation_count).unwrap();
-            start_loc..end_loc
-        })
-        .peekable();
-
+    // Create iterators for both sets of ranges (already sorted)
+    let mut fetched_ranges_iter = fetched_ranges.into_iter().peekable();
     let mut outstanding_ranges_iter = outstanding_ranges.into_iter().peekable();
 
     // Merge process both iterators in sorted order
     loop {
-        let covered_range = match (fetched_ops_iter.peek(), outstanding_ranges_iter.peek()) {
+        let covered_range = match (fetched_ranges_iter.peek(), outstanding_ranges_iter.peek()) {
             (Some(f_range), Some(o_range)) => {
                 if f_range.start <= o_range.start {
-                    fetched_ops_iter.next().unwrap()
+                    fetched_ranges_iter.next().unwrap()
                 } else {
                     outstanding_ranges_iter.next().unwrap()
                 }
             }
-            (Some(_), None) => fetched_ops_iter.next().unwrap(),
+            (Some(_), None) => fetched_ranges_iter.next().unwrap(),
             (None, Some(_)) => outstanding_ranges_iter.next().unwrap(),
             (None, None) => break,
         };
@@ -246,11 +238,10 @@ mod tests {
     })]
     fn test_find_next(#[case] test_case: FindNextTestCase) {
         use crate::merkle::mmr::Family as MmrFamily;
-        let fetched_ops: BTreeMap<Location<MmrFamily>, u64> = test_case
+        let fetched_ranges = test_case
             .fetched_ops
-            .into_iter()
-            .map(|(k, v)| (Location::new(k), v))
-            .collect();
+            .iter()
+            .map(|&(start, count)| Location::<MmrFamily>::new(start)..Location::new(start + count));
         let request_size = test_case.fetch_batch_size;
         let outstanding_ranges: Vec<Range<Location<MmrFamily>>> = test_case
             .requested_ops
@@ -259,7 +250,7 @@ mod tests {
             .collect();
         let result = find_next(
             Location::new(test_case.lower_bound)..Location::new(test_case.upper_bound),
-            &fetched_ops,
+            fetched_ranges,
             outstanding_ranges,
         );
         assert_eq!(
