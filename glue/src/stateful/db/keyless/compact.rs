@@ -5,8 +5,8 @@
 //! adapters expose append and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_compact_db, validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -225,8 +225,10 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
-        let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size)).await?;
+    ) -> Result<Self, InitError<Error<F>>> {
+        let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size))
+            .await
+            .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -289,8 +291,10 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
-        let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size)).await?;
+    ) -> Result<Self, InitError<Error<F>>> {
+        let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size))
+            .await
+            .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -1055,7 +1059,7 @@ mod tests {
                     Some(targets[0].clone())
                 )
                 .await,
-                Err(Error::HistoricalFloorPruned(_))
+                Err(InitError::Database(Error::HistoricalFloorPruned(_)))
             ));
         });
     }

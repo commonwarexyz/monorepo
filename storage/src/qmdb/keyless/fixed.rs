@@ -33,17 +33,20 @@ mod tests {
             keyless::tests::{self, keyless_tests},
         },
     };
+    use commonware_codec::FixedSize;
     use commonware_cryptography::Sha256;
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
         BufferPooler, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
-        deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        deterministic::{
+            self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
+        },
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::U64};
     use core::future::Future;
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -174,10 +177,12 @@ mod tests {
             assert_eq!((db.bounds().end, db.root()), appended);
         }
     }
+
     #[test_traced]
     fn test_standard_bounded_initialization_mmr() {
         deterministic::Runner::default().start(bounded_standard::<mmr::Family>);
     }
+
     #[test_traced]
     fn test_standard_bounded_initialization_mmb() {
         deterministic::Runner::default().start(bounded_standard::<mmb::Family>);
@@ -255,10 +260,12 @@ mod tests {
             assert_eq!((db.size(), db.root()), appended);
         }
     }
+
     #[test_traced]
     fn test_compact_bounded_initialization_mmr() {
         deterministic::Runner::default().start(bounded_compact::<mmr::Family>);
     }
+
     #[test_traced]
     fn test_compact_bounded_initialization_mmb() {
         deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
@@ -448,6 +455,112 @@ mod tests {
             assert_eq!(db.get(loc).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
         });
+    }
+
+    /// An interrupted sibling sync must recover operations and a root from the same history.
+    #[test_traced]
+    fn test_keyless_fixed_rebranch_sync_crash() {
+        for merkle_first in [false, true] {
+            let ((root_p, root_b), checkpoint) = deterministic::Runner::default()
+                .start_and_recover(move |ctx| async move {
+                    let pending = PendingSyncs::default();
+
+                    // Each 18-byte operation occupies one page, so selecting the genesis
+                    // commit discards two complete pages from the same seven-item blob.
+                    let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
+                    cfg.log.items_per_blob = NZU64!(7);
+                    cfg.log.page_cache = CacheRef::from_pooler(&ctx, NZU16!(18), PAGE_CACHE_SIZE);
+                    let open = DelayedDb::init(
+                        DelayedSyncContext {
+                            inner: ctx.child("first"),
+                            pending: pending.clone(),
+                        },
+                        cfg.clone(),
+                        None,
+                    );
+                    let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+                    let root_p = db.root();
+                    let floor = db.inactivity_floor_loc();
+                    (db, _) = apply_append(db, U64::new(11), floor).await;
+                    db = drive_pending_syncs(&pending, db.sync()).await.unwrap();
+                    let root_a = db.root();
+                    assert_eq!(db.bounds().end, Location::new(3));
+                    drop(db);
+
+                    let open = DelayedDb::init(
+                        DelayedSyncContext {
+                            inner: ctx.child("bounded"),
+                            pending: pending.clone(),
+                        },
+                        cfg,
+                        Some(Location::new(1)),
+                    );
+                    let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+                    assert_eq!(db.bounds().end, Location::new(1));
+                    assert_eq!(db.root(), root_p);
+                    let floor = db.inactivity_floor_loc();
+                    let loc;
+                    (db, loc) = apply_append(db, U64::new(22), floor).await;
+                    assert_eq!(loc, Location::new(1));
+                    assert_eq!(db.bounds().end, Location::new(3));
+                    let root_b = db.root();
+                    assert_ne!(root_a, root_b);
+
+                    let starts = pending.starts();
+                    let completions = pending.completions();
+                    let handle;
+                    (db, handle) = db.start_sync().await.unwrap();
+                    assert_eq!(pending.starts() - starts, 2);
+                    let operation_data = next_pending_sync(&pending);
+                    let merkle_data = next_pending_sync(&pending);
+                    let (completed, _parked) = if merkle_first {
+                        (merkle_data, operation_data)
+                    } else {
+                        (operation_data, merkle_data)
+                    };
+                    let _waiter = ctx.child("partial_sync").spawn(|_| handle);
+                    completed.release.send(Ok(())).unwrap();
+                    while pending.completions() < completions + 1 {
+                        reschedule().await;
+                    }
+                    assert_eq!(pending.completions(), completions + 1);
+                    drop(db);
+                    (root_p, root_b)
+                });
+
+            deterministic::Runner::from(checkpoint).start(move |ctx| async move {
+                let pending = PendingSyncs::default();
+                let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
+                cfg.log.items_per_blob = NZU64!(7);
+                cfg.log.page_cache = CacheRef::from_pooler(&ctx, NZU16!(18), PAGE_CACHE_SIZE);
+                let open = DelayedDb::init(
+                    DelayedSyncContext {
+                        inner: ctx.child("reopen"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                    None,
+                );
+                let db = drive_pending_syncs(&pending, open).await.unwrap();
+                let (size, root) = if merkle_first {
+                    (1, root_p)
+                } else {
+                    (3, root_b)
+                };
+                assert_eq!(db.bounds().end, Location::new(size));
+                assert_eq!(db.root(), root);
+                if !merkle_first {
+                    assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(U64::new(22)));
+                }
+                let (proof, operations) = db.proof(Location::new(0), NZU64!(size)).await.unwrap();
+                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                    &proof,
+                    Location::new(0),
+                    &operations,
+                    &root,
+                ));
+            });
+        }
     }
 
     /// Pruning drains the in-flight sync before mutating storage.
@@ -733,6 +846,160 @@ mod tests {
             let target_db =
                 Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
             target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Reopen at an earlier commit, apply an uncommitted batch over the discarded suffix, then
+    /// crash before any sync. Recovery must yield one legitimate history and never splice the new
+    /// batch onto the discarded suffix.
+    #[test_traced]
+    fn test_keyless_fixed_bounded_init_then_append_crash_recovers_history() {
+        // One operation per page makes the initialization truncation page aligned and one blob
+        // keeps both histories' writes overlapping.
+        fn config(pooler: &impl BufferPooler) -> Config<Sequential> {
+            let page_size =
+                NonZeroU16::new(<Operation<mmr::Family, U64> as FixedSize>::SIZE as u16).unwrap();
+            Config {
+                merkle: crate::merkle::full::Config {
+                    journal_partition: "rebranch-merkle-journal".into(),
+                    metadata_partition: "rebranch-merkle-metadata".into(),
+                    items_per_blob: NZU64!(100_000),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                log: JournalConfig {
+                    partition: "rebranch-log".into(),
+                    items_per_blob: NZU64!(100_000),
+                    page_cache: CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            }
+        }
+
+        // Keep unsynced writes and drop unsynced resizes at the crash.
+        let runtime = DeterministicConfig::default().with_storage_fault_config(
+            FaultConfig::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }),
+        );
+        let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
+            .start_and_recover(|context| async move {
+                let db =
+                    TestDb::<mmr::Family>::init(context.child("initial"), config(&context), None)
+                        .await
+                        .unwrap();
+
+                // A: append 1..=100 and commit.
+                let mut batch = db.new_batch();
+                for value in 1..=100u64 {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                let root_a = db.root();
+
+                // B: append 1001..=1100 and commit.
+                let mut batch = db.new_batch();
+                for value in 1001..=1100u64 {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 203);
+                let root_b = db.root();
+                drop(db);
+
+                // Reopen at A, discarding B.
+                let db = TestDb::<mmr::Family>::init(
+                    context.child("bounded"),
+                    config(&context),
+                    Some(Location::new(102)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                assert_eq!(db.root(), root_a);
+
+                // N: append 2001..=2050 without committing, then crash. The batch fits in the
+                // write buffer, so the crash must not resurrect B from its discarded pages. A
+                // commit would sync the log and hide a missing initialization sync.
+                let mut batch = db.new_batch();
+                for value in 2001..=2050u64 {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let root_n = batch.root();
+                let (db, range) = db.apply_batch(batch).await.unwrap();
+                assert_eq!((*range.start, *range.end), (102, 153));
+                drop(db);
+
+                (root_a, root_b, root_n)
+            });
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let db =
+                    TestDb::<mmr::Family>::init(context.child("reopen"), config(&context), None)
+                        .await
+                        .unwrap();
+
+                // Only A, or N applied on A, is a legitimate history. A splice would keep B's tail.
+                let size = *db.bounds().end;
+                let root = db.root();
+                assert_ne!(root, root_b);
+                for value in 1..=100u64 {
+                    assert_eq!(
+                        db.get(Location::new(value)).await.unwrap(),
+                        Some(U64::new(value))
+                    );
+                }
+                match size {
+                    102 => assert_eq!(root, root_a),
+                    153 => {
+                        assert_eq!(root, root_n);
+                        for (offset, value) in (2001..=2050u64).enumerate() {
+                            assert_eq!(
+                                db.get(Location::new(102 + offset as u64)).await.unwrap(),
+                                Some(U64::new(value))
+                            );
+                        }
+                    }
+                    other => panic!("recovered {other} operations from neither history"),
+                }
+
+                // Commit on the recovered history so the next restart must reproduce it.
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(9999))
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let size = *db.bounds().end;
+                let root = db.root();
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = TestDb::<mmr::Family>::init(context.child("restart"), config(&context), None)
+                .await
+                .unwrap();
+            assert_eq!(*db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(
+                db.get(Location::new(size - 2)).await.unwrap(),
+                Some(U64::new(9999))
+            );
+            db.destroy().await.unwrap();
         });
     }
 }

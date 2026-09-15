@@ -422,10 +422,6 @@ where
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
     ///
-    /// Journal pruning is section-granular, so the actual pruned boundary may be less than
-    /// the requested `prune_loc`. Returns that actual boundary so callers can keep the bitmap
-    /// aligned with the journal's retained start.
-    ///
     /// # Errors
     ///
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
@@ -434,7 +430,7 @@ where
     pub(crate) async fn prune_log(
         mut self,
         prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -442,9 +438,8 @@ where
             ));
         }
 
-        let boundary;
-        (self.log, boundary) = self.log.prune(prune_loc).await?;
-        Ok((self, boundary))
+        (self.log, _) = self.log.prune(prune_loc).await?;
+        Ok(self)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -465,8 +460,8 @@ where
     pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
-        db.prune_bitmap(actual_pruned);
+        let mut db = self.prune_log(prune_loc).await?;
+        db.prune_bitmap(prune_loc);
         db.update_metrics();
         Ok(db)
     }

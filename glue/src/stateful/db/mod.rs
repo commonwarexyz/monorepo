@@ -83,13 +83,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::{
-    merkle::Family,
-    qmdb::{
-        self,
-        sync::{self, FeedbackTx, Request, Response, Source},
-    },
-};
+use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -372,12 +366,13 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
     /// Open a database, recovering and validating the complete expected target when supplied.
-    /// Return an error unless the recovered root and range exactly match that target.
+    /// Returns [`InitError::TargetMismatch`] unless the recovered root and range exactly match
+    /// that target.
     fn init(
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, InitError<Self::Error>>> + Send;
 
     /// Return the sync target produced by a newly initialized database.
     ///
@@ -740,13 +735,25 @@ where
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
 
+/// Why a managed database failed to open.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError<E: Debug> {
+    /// The database failed to open or recover.
+    #[error("database initialization failed: {0:?}")]
+    Database(E),
+    /// The recovered database does not match the caller's target. A database opens against a
+    /// size bound only, so the caller compares the recovered root and range.
+    #[error("database does not match initialization target")]
+    TargetMismatch,
+}
+
 /// Validate the complete target before returning a managed database.
-fn validate_initialization<E, F: Family, T>(
+fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,
-) -> Result<T, T::Error>
+) -> Result<T, InitError<T::Error>>
 where
-    T: ManagedDb<E, Error = qmdb::Error<F>>,
+    T: ManagedDb<E>,
     T::SyncTarget: Debug,
 {
     let Some(expected) = expected else {
@@ -759,7 +766,7 @@ where
             ?recovered,
             "database does not match initialization target"
         );
-        return Err(qmdb::Error::InitializationTargetMismatch);
+        return Err(InitError::TargetMismatch);
     }
     Ok(db)
 }
@@ -1972,8 +1979,9 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
-        CoordinatorAction, CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb,
-        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
+        ManagedDb, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
+        drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2433,7 +2441,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             Ok(Self)
         }
 
@@ -2465,7 +2473,7 @@ mod tests {
             _context: E,
             config: Self::Config,
             expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             let target = expected.unwrap_or(config);
             assert!(
                 target <= config,
@@ -2504,7 +2512,7 @@ mod tests {
             _context: E,
             prune_count: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             Ok(Self { prune_count })
         }
 
@@ -2609,7 +2617,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             Ok(Self)
         }
 
@@ -2649,15 +2657,17 @@ mod tests {
             _context: E,
             (state, fail): Self::Config,
             expected: Option<u64>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             let retained = state.load(Ordering::Relaxed);
             let selected = expected.unwrap_or(retained);
             if selected > retained {
-                return Err("database is behind");
+                return Err(InitError::Database("database is behind"));
             }
             state.store(selected, Ordering::Relaxed);
             if fail {
-                return Err("initialization interrupted after durable repair");
+                return Err(InitError::Database(
+                    "initialization interrupted after durable repair",
+                ));
             }
             Ok(Self(selected))
         }
@@ -2753,7 +2763,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("BlockingApplyDb is constructed directly in tests")
         }
 
@@ -2797,7 +2807,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
@@ -2833,7 +2843,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!(
                 "RejectDuplicateTargetSyncDb is only constructed through state sync in tests"
             )
@@ -2869,7 +2879,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
@@ -2903,7 +2913,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
@@ -2937,7 +2947,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
@@ -2971,7 +2981,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
@@ -3005,7 +3015,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
@@ -3039,7 +3049,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
@@ -3073,7 +3083,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
@@ -3109,7 +3119,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!(
                 "DistinctObservedFastSyncDb is only constructed through state sync in tests"
             )
@@ -3254,7 +3264,7 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _expected: Option<Self::SyncTarget>,
-        ) -> Result<Self, Self::Error> {
+        ) -> Result<Self, InitError<Self::Error>> {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 

@@ -153,6 +153,7 @@ where
     /// Initialize from the latest retained commit, discarding uncommitted operations.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
+    #[boxed]
     pub async fn init(
         context: E,
         cfg: Config<C::Config, S>,
@@ -161,7 +162,7 @@ where
     where
         C: authenticated::Backing<E>,
     {
-        let journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
@@ -169,14 +170,6 @@ where
             false,
         )
         .await?;
-        Self::init_from_journal(journal, context).await
-    }
-
-    #[boxed]
-    pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H, S>,
-        context: E,
-    ) -> Result<Self, Error<F>> {
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -2955,7 +2948,7 @@ pub(crate) mod tests {
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
-        // Reopen: `init_from_journal` must recover the floor from the last commit op.
+        // Reopening restores the inactivity floor from the last commit.
         let db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds();
         assert_eq!(reopened_bounds.end, commit_loc + 1);

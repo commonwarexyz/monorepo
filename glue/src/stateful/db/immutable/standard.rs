@@ -6,8 +6,8 @@
 //! so the batch API can read through to applied state.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -308,13 +308,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = <Self>::init(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -402,13 +403,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = <Self>::init(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
