@@ -143,7 +143,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                state.state().liability(),
+                fixture.context.predecessor_liability() - withdrawal_total,
                 100,
                 101,
                 CloseLimits::protocol_maximum(),
@@ -220,7 +220,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 })
             }));
             let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
-            let state = Box::pin(state.commit()).await.unwrap();
+            let state = Box::pin(state.sync()).await.unwrap();
             assert_eq!(first_head.root(), close.roots.successor);
             let heads = [genesis, first_head, *state.state().head()];
             (
@@ -265,18 +265,10 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 .is_err()
         );
         assert_eq!(*state.state().head(), heads[2]);
-        let epoch = Epoch::load(state.logs(), EPOCH).await.unwrap();
-        let source = epoch
-            .source_proof(state.logs(), &roots.logs())
-            .await
-            .unwrap()
-            .verify::<Sha256, VerifyingKey>(&roots.logs())
-            .unwrap();
-        assert_eq!(source.context(), &context);
-        let lookup = epoch
-            .account_lookup(state.logs(), &roots.logs(), &account)
+        let epoch = Epoch::at(state.logs(), EPOCH, roots.activity_range(&context).unwrap())
             .await
             .unwrap();
+        let lookup = epoch.account_lookup(state.logs(), &account).await.unwrap();
         assert_eq!(
             adjudicate::<Sha256, _, _>(
                 &context,

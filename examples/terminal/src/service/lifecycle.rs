@@ -18,14 +18,14 @@ use crate::{
 };
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
-    logs::LogHead,
+    logs::{LogHead, PayoutOperation},
     qmdb::{StateLookup, StateOpening, account_key},
     transition::{WithdrawalClaim, WithdrawalOutput},
 };
 use commonware_runtime::deterministic;
 use commonware_utils::channel::{mpsc, oneshot};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -153,15 +153,20 @@ struct Native {
     database: Database,
     requests: [Option<SavedRequest>; 3],
     packets: BTreeMap<PacketId, RegisterEpochRequest>,
+    published: [Option<PublishedPacket>; model::EPOCHS],
     closes: Vec<SettlementResult>,
     payments: [Option<operator_rpc::AcceptSendRequest>; 2],
     claim_cache: BTreeMap<OutputId, CachedClaim>,
-    acknowledged_claims: BTreeSet<OutputId>,
 }
 
 struct SavedRequest {
     request: SignedWithdrawal<Key, Digest>,
     opening: StateOpening<Key, Digest>,
+}
+
+struct PublishedPacket {
+    anchor: Digest,
+    packet: PacketId,
 }
 
 #[derive(Clone)]
@@ -189,10 +194,10 @@ impl Native {
             database,
             requests: std::array::from_fn(|_| None),
             packets: BTreeMap::new(),
+            published: std::array::from_fn(|_| None),
             closes: Vec::new(),
             payments: [None, None],
             claim_cache: BTreeMap::new(),
-            acknowledged_claims: BTreeSet::new(),
         }
     }
 
@@ -467,6 +472,20 @@ impl Native {
         })
     }
 
+    fn close_requests(&self, close: &SettlementResult) -> Result<&WithdrawalBatch<Key, Digest>> {
+        self.packets
+            .values()
+            .find(|request| {
+                request.epoch == close.context.payment().epoch()
+                    && request
+                        .withdrawals
+                        .root::<Sha256>()
+                        .is_ok_and(|root| &root == close.context.withdrawal_root())
+            })
+            .map(|request| &request.withdrawals)
+            .context("close has no matching retained registration packet")
+    }
+
     fn read_kind(lookup: &Lookup) -> ReadKind {
         match lookup {
             Lookup::Status => ReadKind::Status,
@@ -506,30 +525,11 @@ impl Native {
         outcome
     }
 
-    fn claim(
-        &self,
-        output: OutputId,
-    ) -> Result<(SignedWithdrawal<Key, Digest>, WithdrawalClaim<Digest>)> {
-        self.closes
-            .iter()
-            .find_map(|close| {
-                close
-                    .withdrawals
-                    .requests()
-                    .iter()
-                    .zip(&close.withdrawal_claims)
-                    .find(|(_, claim)| claim.position() == output)
-                    .map(|(request, claim)| (request.clone(), claim.clone()))
-            })
-            .context("claim output is unavailable")
-    }
-
     async fn payout_proof(
         &self,
         context: &deterministic::Context,
         head: LogHead<Digest>,
         index: u64,
-        expected: &WithdrawalOutput,
     ) -> Result<WithdrawalClaim<Digest>> {
         let operator_claim = { self.operator().lock().payout_proof(head, index) };
         let claim = match operator_claim {
@@ -541,15 +541,56 @@ impl Native {
             }
         };
         ensure!(claim.position() == index, "payout proof has another index");
+        let verified = claim.verify::<Sha256>(&head)?;
         ensure!(
-            claim.output() == expected,
-            "payout proof has another output"
-        );
-        ensure!(
-            claim.verify::<Sha256>(&head)? == *expected,
+            &verified == claim.output(),
             "payout proof authenticates another output"
         );
         Ok(claim)
+    }
+
+    async fn payout_outputs(
+        &self,
+        context: &deterministic::Context,
+        head: LogHead<Digest>,
+    ) -> Result<BTreeMap<OutputId, WithdrawalOutput>> {
+        let chain = self.client(context);
+        let mut outputs = BTreeMap::new();
+        let mut cursor = 0;
+        while cursor < head.operations {
+            let (start, operations) = chain.payout_operations(context, head, cursor).await?;
+            ensure!(
+                start == cursor,
+                "lifecycle payout prefix is unavailable at the authenticated head"
+            );
+            let count = u64::try_from(operations.len())?;
+            let end = start
+                .checked_add(count)
+                .context("payout operation page exceeds the position domain")?;
+            ensure!(
+                count > 0 && end <= head.operations,
+                "payout operation page has invalid bounds"
+            );
+            for (offset, operation) in operations.into_iter().enumerate() {
+                let position = start
+                    .checked_add(u64::try_from(offset)?)
+                    .context("payout operation position overflow")?;
+                match operation {
+                    PayoutOperation::Append(output) => {
+                        ensure!(
+                            outputs.insert(position, output).is_none(),
+                            "payout operation page repeated a position"
+                        );
+                    }
+                    PayoutOperation::Commit(None, _) => {}
+                    PayoutOperation::Commit(Some(_), _) => {
+                        bail!("payout operation page contains application commit metadata")
+                    }
+                }
+            }
+            cursor = end;
+        }
+        Ok(outputs)
     }
 
     async fn execute(
@@ -643,6 +684,18 @@ impl Native {
                         ..packet
                     });
                 if accepted {
+                    let anchor = self
+                        .client(context)
+                        .anchor(context, u64::from(packet.epoch))
+                        .await?
+                        .context("accepted publication has no permanent native anchor")?;
+                    self.published[usize::from(packet.epoch)] = Some(PublishedPacket {
+                        anchor,
+                        packet: PacketId {
+                            queued: 0,
+                            ..packet
+                        },
+                    });
                     if before.is_some() && before == after {
                         Outcome::Unchanged
                     } else {
@@ -808,11 +861,8 @@ impl Native {
                 }
             }
             Action::Refresh(output) => {
-                let (_, source) = self.claim(output)?;
                 let status = self.client(context).payout_status(context, output).await?;
-                let claim = self
-                    .payout_proof(context, status.head, output, source.output())
-                    .await?;
+                let claim = self.payout_proof(context, status.head, output).await?;
                 self.claim_cache.insert(
                     output,
                     CachedClaim {
@@ -836,6 +886,7 @@ impl Native {
                 if before.interval.is_none() {
                     return Ok(Outcome::Unchanged);
                 }
+                let expected = cached.claim.output().clone();
                 self.control
                     .submit(SettlementTx::ClaimWithdrawal(
                         crate::chain::tx::WithdrawalClaimRequest {
@@ -846,25 +897,12 @@ impl Native {
                     ))
                     .await;
                 let after = self.client(context).payout_status(context, output).await?;
-                let expected = self.claim(output)?.1.output().clone();
-                self.payout_proof(context, after.head, output, &expected)
-                    .await?;
+                let current = self.payout_proof(context, after.head, output).await?;
+                ensure!(
+                    current.output() == &expected,
+                    "current payout head changed an existing output"
+                );
                 if after.interval.is_none() {
-                    Outcome::Accepted
-                } else {
-                    Outcome::Rejected
-                }
-            }
-            Action::Acknowledge(output) => {
-                self.claim(output)?;
-                if self
-                    .client(context)
-                    .payout_status(context, output)
-                    .await?
-                    .interval
-                    .is_none()
-                {
-                    self.acknowledged_claims.insert(output);
                     Outcome::Accepted
                 } else {
                     Outcome::Rejected
@@ -907,7 +945,8 @@ impl Native {
             }
         }
         let mut chain = self.client(context);
-        let (status, payout_tip) = chain.payout_checkpoint(context).await?;
+        let status = chain.recent_status(context).await?;
+        let payout_tip = chain.payout_checkpoint(context).await?;
         let registered = chain.registration(context).await?;
         let mut receipts = [None; model::ACCOUNTS];
         for account in 0..model::ACCOUNTS {
@@ -922,18 +961,21 @@ impl Native {
         let mut admitted = [false; model::EPOCHS];
         let mut adopted = false;
         for epoch in 0..model::EPOCHS {
-            if payout_tip
-                .finalized
+            if status
+                .last_finalized
                 .is_some_and(|last| epoch as u64 <= last)
             {
-                let source = chain.source(context, epoch as u64, payout_tip).await?;
-                let anchor = *source.context().payment().anchor();
+                let close = self
+                    .closes
+                    .get(epoch)
+                    .context("finalized trace epoch has no retained local close")?;
+                let anchor = *close.context.payment().anchor();
                 if payment.epoch() == epoch as u64 {
                     adopted = payment.anchor() == &anchor;
                 }
                 anchors[epoch] = Some(PacketId {
                     epoch: epoch.try_into()?,
-                    requests: self.request_mask(source.withdrawals())?,
+                    requests: self.request_mask(self.close_requests(close)?)?,
                     queued: 0,
                 });
                 admitted[epoch] = true;
@@ -948,7 +990,13 @@ impl Native {
                         close.context.payment().anchor() == &anchor,
                         "stored close differs from permanent native anchor"
                     );
-                    self.request_mask(&close.withdrawals)?
+                    self.request_mask(self.close_requests(close)?)?
+                } else if let Some(published) = &self.published[epoch] {
+                    ensure!(
+                        published.anchor == anchor,
+                        "permanent native anchor changed after publication"
+                    );
+                    published.packet.requests
                 } else {
                     let registered = registered
                         .as_ref()
@@ -979,65 +1027,65 @@ impl Native {
         let mut released = [[None; model::ACCOUNTS]; model::EPOCHS];
         let mut unclaimed = BTreeMap::new();
         let mut claim_head = [None; model::ACCOUNTS];
-        for account in 0..model::ACCOUNTS {
-            let key = wallets[account].public_key();
-            claim_head[account] = self.closes.iter().find_map(|close| {
-                close
-                    .withdrawals
-                    .request_for(&key)
-                    .and_then(|request| {
-                        close
-                            .withdrawals
-                            .requests()
-                            .iter()
-                            .position(|candidate| candidate == request)
-                    })
-                    .and_then(|ordinal| close.withdrawal_claims.get(ordinal))
-                    .map(WithdrawalClaim::position)
-                    .filter(|position| !self.acknowledged_claims.contains(position))
-            });
-        }
+        let finalized_outputs = self.payout_outputs(context, payout_tip.payouts).await?;
         for close in &self.closes {
             let epoch: usize = close.context.payment().epoch().try_into()?;
-            for (request, claim) in close
-                .withdrawals
-                .requests()
-                .iter()
-                .zip(&close.withdrawal_claims)
-            {
+            let finalized = status
+                .last_finalized
+                .is_some_and(|last| epoch as u64 <= last);
+            let start = close.context.predecessor_logs().payouts.operations;
+            let end = close
+                .roots
+                .withdrawal_outputs
+                .operations
+                .checked_sub(1)
+                .context("close payout head omits its commit")?;
+            ensure!(start <= end, "close payout head precedes its input");
+            for position in start..end {
+                let output = if finalized {
+                    finalized_outputs
+                        .get(&position)
+                        .cloned()
+                        .context("finalized payout append is unavailable")?
+                } else {
+                    self.payout_proof(context, close.roots.withdrawal_outputs, position)
+                        .await?
+                        .output()
+                        .clone()
+                };
                 let account = wallets
                     .iter()
-                    .position(|wallet| wallet.public_key() == *request.account())
-                    .unwrap();
-                outputs[epoch][account] = Some(
-                    claim
-                        .verify::<Sha256>(&close.roots.withdrawal_outputs)?
-                        .amount(),
+                    .position(|wallet| {
+                        output.destination().as_ref() == wallet.public_key().as_ref()
+                    })
+                    .context("payout destination is outside the trace accounts")?;
+                ensure!(
+                    outputs[epoch][account].replace(output.amount()).is_none(),
+                    "close contains repeated outputs for one trace account"
                 );
-                if status
-                    .last_finalized
-                    .is_some_and(|finalized| epoch as u64 <= finalized)
-                {
-                    let payout = chain.payout_status(context, claim.position()).await?;
+                if finalized {
+                    let payout = chain.payout_status(context, position).await?;
                     ensure!(
-                        payout.head == payout_tip.heads.payouts,
+                        payout.head == payout_tip.payouts,
                         "payout status differs from the current finalized head"
                     );
-                    let expected = claim.output();
-                    self.payout_proof(context, payout.head, claim.position(), expected)
-                        .await?;
+                    let claim = self.payout_proof(context, payout.head, position).await?;
+                    ensure!(
+                        claim.output() == &output,
+                        "payout page and point opening disagree"
+                    );
                     match payout.interval {
                         Some(interval) => {
+                            claim_head[account].get_or_insert(position);
                             ensure!(
-                                interval.start <= claim.position()
-                                    && claim.position() < interval.end,
+                                interval.start <= position && position < interval.end,
                                 "payout status interval does not contain its output"
                             );
                             if let Some(prior) = unclaimed.insert(interval.start, interval.end) {
                                 ensure!(prior == interval.end, "payout interval views disagree");
                             }
                         }
-                        None => released[epoch][account] = Some(expected.amount()),
+                        None => released[epoch][account] = Some(output.amount()),
                     }
                 }
             }
@@ -1109,7 +1157,7 @@ impl Native {
                 .last_finalized
                 .map_or(0, |epoch| u8::try_from(epoch + 1).unwrap()),
             finalized_balances,
-            payout_head: payout_tip.heads.payouts.operations,
+            payout_head: payout_tip.payouts.operations,
             unclaimed,
             outputs,
             released,
@@ -1143,7 +1191,13 @@ async fn replay(context: &deterministic::Context, trace: Trace) {
             trace.name
         );
         assert_eq!(
-            native.project(context).await.unwrap(),
+            native.project(context).await.unwrap_or_else(|error| {
+                panic!(
+                    "{} step {index}: {action:?} projection: {error:#}; path: {:?}",
+                    trace.name,
+                    &trace.actions[..=index]
+                )
+            }),
             model.projection(&transition.state),
             "{} step {index}: {action:?}",
             trace.name

@@ -13,6 +13,9 @@ documentation = "https://docs.rs/commonware-terminal"
 [lints]
 workspace = true
 
+[features]
+bench = [ "commonware-clearing/bench" ]
+
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
@@ -56,6 +59,12 @@ stateright.workspace = true
 [[example]]
 name = "terminal_withdrawal_model"
 path = "stateright/explorer.rs"
+
+[[bench]]
+name = "durable_ack"
+path = "benches/durable_ack.rs"
+harness = false
+required-features = ["bench"]
 
 [[bin]]
 name = "terminal-operator"

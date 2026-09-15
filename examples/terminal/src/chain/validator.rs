@@ -49,7 +49,9 @@ use commonware_glue::stateful::{
 use commonware_macros::boxed;
 use commonware_p2p::{Manager, TrackedPeers, authenticated::discovery};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Handle, Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{
+    Handle, Quota, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, tokio,
+};
 use commonware_storage::{
     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
     merkle::full::Config as MerkleConfig, translator::TwoCap,
@@ -227,6 +229,9 @@ pub struct Validator {
     /// Retain native Bajillion history for historical proof serving.
     #[arg(long)]
     pub retain_native_history: bool,
+    /// Workers shared by clearing validation and its three native QMDBs.
+    #[arg(long, default_value_t = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))]
+    pub workers: NonZeroUsize,
 }
 
 /// Start every validator actor and run until one stops.
@@ -475,6 +480,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (sealer, sealer_mailbox) = da::Sealer::new(
         context.child("sealer"),
         da::Config {
+            strategy: context.strategy(args.workers),
             retain_history: args.retain_native_history,
             scheme: clearing,
             registry,

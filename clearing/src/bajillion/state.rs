@@ -5,17 +5,13 @@ use crate::bajillion::{
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
 };
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
-
-const CHANGE_VALUE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_VALUE";
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_cryptography::{Digest, PublicKey};
 
 /// Settlement-visible output authenticated while validating one account's activity.
 ///
-/// `Withdrawal(0)` is distinct from `None` so a compact close claim can authenticate the action
-/// even when no value is released.
+/// `Withdrawal(0)` creates a payout output whose native location must be consumed even when
+/// no value is released.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SettlementOutput {
@@ -74,10 +70,9 @@ pub struct AccountRow<P: PublicKey, D: Digest> {
     pub output: SettlementOutput,
 }
 
-/// Settlement and challenge projection derived from one fully validated activity row.
+/// Challenge projection derived from one fully validated activity row.
 ///
-/// Composing the committed [`ChangeValue`] keeps this projection and the guarded compact value
-/// structurally identical, so no field can exist here without being committed by the guard.
+/// The native activity row commits the account, terminal debit and sequence, and outgoing root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountChange<P: PublicKey, D: Digest> {
     account: P,
@@ -94,16 +89,8 @@ pub struct ChangeValue<D: Digest> {
 /// Change value fields that precede the per-account outgoing-vector root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeValueCore {
-    output: SettlementOutput,
     terminal_debit: u64,
     terminal_seq: u64,
-}
-
-/// Ordered changed-account key and digest of its compact value.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChangeGuard<P: PublicKey, D: Digest> {
-    account: P,
-    value_digest: D,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -137,7 +124,6 @@ where
 impl arbitrary::Arbitrary<'_> for ChangeValueCore {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            output: u.arbitrary()?,
             terminal_debit: u.arbitrary()?,
             terminal_seq: u.arbitrary()?,
         })
@@ -153,7 +139,6 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
             account: row.account.clone(),
             value: ChangeValue {
                 core: ChangeValueCore {
-                    output: row.output,
                     terminal_debit: row
                         .outgoing
                         .as_ref()
@@ -168,11 +153,6 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
     /// Returns the participating account.
     pub const fn account(&self) -> &P {
         &self.account
-    }
-
-    /// Returns the committed settlement output.
-    pub const fn output(&self) -> SettlementOutput {
-        self.value.core.output
     }
 
     /// Returns this leaf's compact change value, paired elsewhere with a membership lookup target.
@@ -207,11 +187,6 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
     /// Returns the compact per-account outgoing-vector root.
     pub const fn send_root(&self) -> VectorRoot<D> {
         self.value.send_root
-    }
-
-    /// Projects the exact guard appended to the activity log.
-    pub fn guard<H: Hasher<Digest = D>>(&self) -> ChangeGuard<P, D> {
-        ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
     }
 
     /// Returns whether `body` is the terminal authorization in `context`.
@@ -252,36 +227,6 @@ impl<D: Digest> ChangeValue<D> {
     }
 }
 
-impl ChangeValueCore {
-    #[cfg(feature = "std")]
-    pub(crate) const fn from_sources(
-        output: SettlementOutput,
-        terminal_debit: u64,
-        terminal_seq: u64,
-    ) -> Self {
-        Self {
-            output,
-            terminal_debit,
-            terminal_seq,
-        }
-    }
-}
-
-impl<P: PublicKey, D: Digest> ChangeGuard<P, D> {
-    pub(crate) fn from_value<H: Hasher<Digest = D>>(account: P, value: &ChangeValue<D>) -> Self {
-        let encoded = value.encode();
-        Self {
-            account,
-            value_digest: H::hash(&[CHANGE_VALUE_HASH_NAMESPACE, encoded.as_ref()]),
-        }
-    }
-
-    /// Returns the ordered participating account.
-    pub const fn account(&self) -> &P {
-        &self.account
-    }
-}
-
 impl<D: Digest> Write for ChangeValue<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.core.write(buf);
@@ -308,7 +253,6 @@ impl<D: Digest> Read for ChangeValue<D> {
 
 impl Write for ChangeValueCore {
     fn write(&self, buf: &mut impl BufMut) {
-        self.output.write(buf);
         self.terminal_debit.write(buf);
         self.terminal_seq.write(buf);
     }
@@ -316,7 +260,7 @@ impl Write for ChangeValueCore {
 
 impl EncodeSize for ChangeValueCore {
     fn encode_size(&self) -> usize {
-        self.output.encode_size() + u64::SIZE * 2
+        u64::SIZE * 2
     }
 }
 
@@ -325,7 +269,6 @@ impl Read for ChangeValueCore {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            output: SettlementOutput::read(buf)?,
             terminal_debit: u64::read(buf)?,
             terminal_seq: u64::read(buf)?,
         })
@@ -356,47 +299,11 @@ impl<P: PublicKey, D: Digest> Read for AccountChange<P, D> {
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for ChangeGuard<P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.account.write(buf);
-        self.value_digest.write(buf);
-    }
-}
-
-impl<P: PublicKey, D: Digest> FixedSize for ChangeGuard<P, D> {
-    const SIZE: usize = P::SIZE + D::SIZE;
-}
-
-impl<P: PublicKey, D: Digest> Read for ChangeGuard<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            account: P::read(buf)?,
-            value_digest: D::read(buf)?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for ChangeGuard<P, D>
-where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            account: u.arbitrary()?,
-            value_digest: u.arbitrary()?,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
-    use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
+    use commonware_codec::{DecodeExt, Encode as _};
+    use commonware_cryptography::{Hasher as _, Sha256, Signer as _, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
         SigningKey, StrictVerifyingKey as VerifyingKey,
     };
@@ -490,7 +397,27 @@ mod tests {
     }
 
     #[test]
-    fn change_leaf_binds_challenge_and_settlement_projection() {
+    fn execution_output_does_not_change_challenge_projection() {
+        let account = SigningKey::from_seed(1).public_key();
+        let root = crate::bajillion::vector::OutVector::empty(7, account.clone())
+            .root::<Sha256, ShaDigest>()
+            .unwrap();
+        let mut row = AccountRow::<VerifyingKey, ShaDigest> {
+            account,
+            predecessor: 10,
+            successor: 10,
+            outgoing: None,
+            output: SettlementOutput::None,
+        };
+        let change = AccountChange::from_row(&row, root);
+        for amount in [0, 6, u64::MAX] {
+            row.output = SettlementOutput::Withdrawal(amount);
+            assert_eq!(AccountChange::from_row(&row, root), change);
+        }
+    }
+
+    #[test]
+    fn change_leaf_binds_the_challenge_projection() {
         let account = SigningKey::from_seed(1).public_key();
         let send_root = crate::bajillion::commitment::empty_root::<Sha256>(
             crate::bajillion::commitment::VectorKind::OutEntry,
@@ -504,7 +431,6 @@ mod tests {
         };
         let leaf = AccountChange::from_row(&row, send_root);
         assert_eq!(leaf.account(), &account);
-        assert_eq!(leaf.output(), SettlementOutput::Withdrawal(6));
         assert_eq!(leaf.send_root(), send_root);
         assert_eq!(leaf.terminal_seq(), 0);
         assert!(!leaf.has_outgoing());
@@ -512,7 +438,7 @@ mod tests {
         for output in [SettlementOutput::None, SettlementOutput::Withdrawal(7)] {
             let mut changed_output = row.clone();
             changed_output.output = output;
-            assert_ne!(AccountChange::from_row(&changed_output, send_root), leaf);
+            assert_eq!(AccountChange::from_row(&changed_output, send_root), leaf);
         }
 
         let mut changed_row = row;
@@ -528,6 +454,6 @@ mod tests {
         let activity = AccountChange::from_row(&changed_row, send_root);
         assert_eq!(activity.terminal_debit(), 1);
         assert_eq!(activity.terminal_seq(), 1);
-        assert_ne!(activity.guard::<Sha256>(), leaf.guard::<Sha256>());
+        assert_ne!(activity, leaf);
     }
 }

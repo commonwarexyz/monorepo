@@ -1,6 +1,5 @@
 use super::*;
 use commonware_clearing::bajillion::{
-    custody::Epoch as SourceEpoch,
     logs::{LogHead, PayoutOperation},
     transition::WithdrawalClaim,
 };
@@ -115,6 +114,8 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             .collect();
         let withdrawals = WithdrawalBatch::new(requests).unwrap();
         let mut results = Vec::new();
+        let mut first_claims = Vec::new();
+        let mut liability = genesis.liability();
         for epoch in 0..4 {
             let boundary = if epoch == 0 {
                 withdrawals.clone()
@@ -123,7 +124,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             };
             let deposits = DepositBatch::empty();
             let root = deposits.root::<Sha256>().unwrap();
-            let liability = replica.state().liability();
             let registration = protocol
                 .registration_at(
                     epoch,
@@ -185,6 +185,18 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                 .await
                 .unwrap();
             replica = replica.apply(prepared).await.unwrap();
+            if epoch == 0 {
+                let start = result.context.predecessor_logs().payouts.operations;
+                for position in start..start + 4 {
+                    let output = replica.logs().payout_at(position).await.unwrap();
+                    let (opening, _) = replica
+                        .logs()
+                        .payout_opening(&result.roots.withdrawal_outputs, position, NonZeroU64::MIN)
+                        .await
+                        .unwrap();
+                    first_claims.push(WithdrawalClaim::new(output, opening));
+                }
+            }
             seal_native(
                 &db,
                 epoch + 1,
@@ -192,6 +204,7 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                 &[register, SettlementTx::Admit(AdmitRequest::from(&result))],
             )
             .await;
+            liability = liability.checked_sub(result.withdrawal_total).unwrap();
             assert!(matches!(
                 read(&db, &admitted_key(&deployment(), epoch)).await,
                 Some(Record::Admitted(_))
@@ -204,52 +217,15 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         assert_eq!(status(&db).await.last_finalized, Some(0));
         assert_eq!(status(&db).await.claimable, 3);
         let first_tip = crate::protocol::PayoutTip {
-            heads: results[0].roots.logs(),
+            payouts: results[0].roots.withdrawal_outputs,
             finalized: Some(0),
         };
-        let source_epoch = SourceEpoch::<Key, Digest>::load(replica.logs(), 0)
-            .await
-            .unwrap();
-        let first_source = source_epoch
-            .source_proof(replica.logs(), &first_tip.heads)
-            .await
-            .unwrap();
-        let source = first_source
-            .verify::<Sha256, Key>(&first_tip.heads)
-            .unwrap();
-        assert_eq!(source.context(), &results[0].context);
-        assert_eq!(source.withdrawals(), &withdrawals);
-        assert_eq!(first_tip.encode().len(), 105);
+        assert_eq!(first_tip.encode().len(), 57);
         assert_eq!(
             crate::protocol::PayoutTip::decode(first_tip.encode()).unwrap(),
             first_tip
         );
-        let wire = Evidence::Source(first_source.clone());
-        assert_eq!(Evidence::decode(wire.encode()).unwrap(), wire);
-        let lookup = EvidenceLookup::Source {
-            epoch: 0,
-            heads: first_tip.heads,
-        };
-        assert_eq!(EvidenceLookup::decode(lookup.encode()).unwrap(), lookup);
-        let pending = SourceEpoch::<Key, Digest>::load(replica.logs(), 1)
-            .await
-            .unwrap();
-        let pending_proof = pending
-            .source_proof(replica.logs(), &results[3].roots.logs())
-            .await
-            .unwrap();
-        assert!(
-            pending_proof
-                .verify::<Sha256, Key>(&first_tip.heads)
-                .is_err()
-        );
-        assert!(
-            pending
-                .source_proof(replica.logs(), &first_tip.heads)
-                .await
-                .is_err()
-        );
-        let claims = &results[0].withdrawal_claims;
+        let claims = &first_claims;
         assert_eq!(claims.len(), 4);
         assert_eq!(
             claims
@@ -473,23 +449,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                 panic!("current payout tip");
             };
             assert_eq!(tip.finalized, Some(epoch as u64));
-            let old = source_epoch
-                .source_proof(replica.logs(), &tip.heads)
-                .await
-                .unwrap();
-            let source = old.verify::<Sha256, Key>(&tip.heads).unwrap();
-            assert_eq!(source.context(), &results[0].context);
-            assert_eq!(source.activity_range().head, tip.heads.activity);
-            let wire = Evidence::Source(old.clone());
-            assert_eq!(Evidence::decode(wire.encode()).unwrap(), wire);
-            let mut wrong = old.clone();
-            let mut corrupted = wrong.metadata.to_vec();
-            corrupted[0] ^= 1;
-            wrong.metadata = Bytes::from(corrupted);
-            assert!(wrong.verify::<Sha256, Key>(&tip.heads).is_err());
-            let mut wrong = tip.heads;
-            wrong.activity.operations += 1;
-            assert!(old.verify::<Sha256, Key>(&wrong).is_err());
             for position in positions {
                 if !consumed.insert(position) {
                     continue;
@@ -657,15 +616,36 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         let registration = protocol
             .registration_at(0, deposits, withdrawals.clone(), 400, 11, 12)
             .unwrap();
-        let result = protocol
-            .fixture_complete(
-                &accounts(),
-                &[],
+        let balances = replay_state(
+            context.child("payout_status_validator"),
+            crate::protocol::state_config(
+                "payout_status_validator",
+                &context,
+                protocol.strategy().clone(),
+            ),
+            &state.history,
+        )
+        .await;
+        let (result, candidate) = protocol
+            .complete(
                 protocol.prepare(registration, Vec::new()).unwrap(),
-                41,
+                &balances,
+                &mut TestRng::new(41),
             )
+            .await
             .unwrap();
         let start = result.context.predecessor_logs().payouts.operations;
+        let balances = balances.apply(candidate).await.unwrap();
+        let mut claims = Vec::new();
+        for position in start..start + 3 {
+            let output = balances.logs().payout_at(position).await.unwrap();
+            let (opening, _) = balances
+                .logs()
+                .payout_opening(&result.roots.withdrawal_outputs, position, NonZeroU64::MIN)
+                .await
+                .unwrap();
+            claims.push(WithdrawalClaim::new(output, opening));
+        }
         let index = start + 2;
         let request = req(Lookup::Unclaimed { index });
         let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
@@ -700,8 +680,8 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         .unwrap();
         assert!(before_verified.unclaimed.is_none());
         assert!(
-            result.withdrawal_claims[2]
-                .verify::<Sha256>(&before_verified.payout_tip.unwrap().heads.payouts)
+            claims[2]
+                .verify::<Sha256>(&before_verified.payout_tip.unwrap().payouts)
                 .is_err()
         );
         let (issued, _) = certified_read(
@@ -730,8 +710,8 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
             )
         );
         assert!(
-            result.withdrawal_claims[2]
-                .verify::<Sha256>(&issued_verified.payout_tip.unwrap().heads.payouts)
+            claims[2]
+                .verify::<Sha256>(&issued_verified.payout_tip.unwrap().payouts)
                 .is_ok()
         );
         let mut splice = before.clone();
@@ -759,7 +739,7 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         let first = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
             start,
-            claim: result.withdrawal_claims[1].clone(),
+            claim: claims[1].clone(),
         });
         let (split, _) = certified_read(
             &db,
@@ -771,7 +751,7 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
                 SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                     deployment: deployment(),
                     start,
-                    claim: result.withdrawal_claims[0].clone(),
+                    claim: claims[0].clone(),
                 }),
                 first,
             ],
@@ -816,7 +796,7 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         let stale = WithdrawalClaimRequest {
             deployment: deployment(),
             start,
-            claim: result.withdrawal_claims[2].clone(),
+            claim: claims[2].clone(),
         };
         let reserve = status(&db).await.claimable;
         seal_native(
@@ -1034,29 +1014,5 @@ fn retired_epoch_reads_keep_their_captured_tip_and_reject_preissuance_absence() 
             ),
             Err(light::Error::Proof)
         ));
-        let replica = replay_state(
-            context.child("retained_replica"),
-            crate::protocol::state_config(
-                "retired-epoch-replica",
-                &context,
-                protocol.strategy().clone(),
-            ),
-            &second.successor.history,
-        )
-        .await;
-        let epoch = SourceEpoch::<Key, Digest>::load(replica.logs(), 0)
-            .await
-            .unwrap();
-        let proof = epoch
-            .source_proof(replica.logs(), &tip.heads)
-            .await
-            .unwrap();
-        let source = proof.verify::<Sha256, Key>(&tip.heads).unwrap();
-        assert_eq!(source.context(), &first.result.context);
-        assert_eq!(source.activity_range().head, tip.heads.activity);
-        assert_eq!(
-            source.activity_range().start,
-            first.result.context.predecessor_logs().activity.operations
-        );
     });
 }

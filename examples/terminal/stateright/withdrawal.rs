@@ -22,7 +22,7 @@ pub const REQUESTS: usize = 3;
 pub const INITIAL_BALANCES: [u64; ACCOUNTS] = [100, 100];
 pub const BACKGROUND_LIABILITY: u64 = 200;
 
-const REQUIRED_WITNESSES: [&str; 10] = [
+const REQUIRED_WITNESSES: [&str; 11] = [
     "intake during active registration",
     "queued tail finalized",
     "queue after freeze requires rebuilt publication",
@@ -32,6 +32,7 @@ const REQUIRED_WITNESSES: [&str; 10] = [
     "captured status precedes root advance",
     "captured anchor excludes stale request",
     "captured exclusion loses local boundary race",
+    "faulted clean prefix remains claimable",
     "later receipt preserves original acknowledgement",
 ];
 
@@ -158,7 +159,6 @@ pub enum Action {
     Fault,
     Refresh(OutputId),
     Claim(OutputId),
-    Acknowledge(OutputId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -198,7 +198,7 @@ pub struct Projection {
     pub outputs: [[Option<u64>; ACCOUNTS]; EPOCHS],
     /// Certified consumption exists even when its authenticated amount is zero.
     pub released: [[Option<u64>; ACCOUNTS]; EPOCHS],
-    /// Oldest output still offered by the operator for each account.
+    /// Oldest finalized unclaimed output discoverable for each account.
     pub claim_head: [Option<OutputId>; ACCOUNTS],
     pub custody: u64,
     pub claimable: u64,
@@ -281,17 +281,20 @@ pub struct State {
     unclaimed: BTreeMap<u64, u64>,
     claim_cache: [Option<ClaimCache>; EPOCHS * ACCOUNTS],
     released: [[Option<u64>; ACCOUNTS]; EPOCHS],
-    acknowledged: u8,
     reconciliation: Option<Reconciliation>,
 }
 
 impl State {
     fn claim_head(&self, account: usize) -> Option<OutputId> {
-        self.closes.iter().enumerate().find_map(|(epoch, close)| {
-            close
-                .and_then(|close| close.output_ids[account])
-                .filter(|_| self.acknowledged & (1 << (epoch * ACCOUNTS + account)) == 0)
-        })
+        self.closes
+            .iter()
+            .enumerate()
+            .take(self.root as usize)
+            .find_map(|(epoch, close)| {
+                close
+                    .and_then(|close| close.output_ids[account])
+                    .filter(|_| self.released[epoch][account].is_none())
+            })
     }
 
     fn output(&self, id: OutputId) -> Option<(usize, usize, u64)> {
@@ -422,7 +425,6 @@ impl WithdrawalModel {
             unclaimed: BTreeMap::new(),
             claim_cache: [None; EPOCHS * ACCOUNTS],
             released: [[None; ACCOUNTS]; EPOCHS],
-            acknowledged: 0,
             reconciliation: None,
         }
     }
@@ -819,6 +821,9 @@ impl WithdrawalModel {
                 if state.faulted {
                     return Outcome::Unchanged;
                 }
+                if state.active().is_none() {
+                    return Outcome::Rejected;
+                }
                 state.faulted = true;
                 Outcome::Accepted
             }
@@ -871,16 +876,6 @@ impl WithdrawalModel {
                 }
                 state.claim_cache[slot] = None;
                 state.released[epoch][account] = Some(amount);
-                Outcome::Accepted
-            }
-            Action::Acknowledge(output) => {
-                let Some((epoch, account, _)) = state.output(output) else {
-                    return Outcome::Rejected;
-                };
-                if state.released[epoch][account].is_none() {
-                    return Outcome::Rejected;
-                }
-                state.acknowledged |= 1 << (epoch * ACCOUNTS + account);
                 Outcome::Accepted
             }
         }
@@ -954,6 +949,9 @@ impl WithdrawalModel {
     }
 
     fn intake_available(&self, state: &State) -> bool {
+        if state.faulted {
+            return true;
+        }
         RequestId::ALL.into_iter().all(|id| {
             let Some(signed) = state.signed[id.index()] else {
                 return true;
@@ -983,6 +981,9 @@ impl WithdrawalModel {
     }
 
     fn exact_retry(&self, state: &State) -> bool {
+        if state.faulted {
+            return true;
+        }
         RequestId::ALL.into_iter().all(|id| {
             let Some(authorization) = state.authorizations[id.index()] else {
                 return true;
@@ -998,7 +999,7 @@ impl WithdrawalModel {
     }
 
     fn staging_available(&self, state: &State) -> bool {
-        if state.prepared.is_some() || state.epoch as usize >= EPOCHS {
+        if state.faulted || state.prepared.is_some() || state.epoch as usize >= EPOCHS {
             return true;
         }
         RequestId::ALL.into_iter().all(|id| {
@@ -1086,29 +1087,6 @@ impl WithdrawalModel {
                 if state.released[epoch][account].is_some() && first.outcome != Outcome::Unchanged {
                     return false;
                 }
-                let bit = 1 << (epoch * ACCOUNTS + account);
-                let released = state.released[epoch][account].is_some();
-                if state.acknowledged & bit != 0 && !released {
-                    return false;
-                }
-                if released {
-                    let acknowledgement = self.step(state, Action::Acknowledge(id));
-                    if acknowledgement.outcome != Outcome::Accepted
-                        || acknowledgement.state.acknowledged & bit == 0
-                        || acknowledgement.state.claim_head(account) == Some(id)
-                        || acknowledgement.state.released != state.released
-                        || acknowledgement.state.closes != state.closes
-                        || acknowledgement.state.authorizations != state.authorizations
-                    {
-                        return false;
-                    }
-                    let retry = self.step(&acknowledgement.state, Action::Acknowledge(id));
-                    if retry.outcome != Outcome::Accepted || retry.state != acknowledgement.state {
-                        return false;
-                    }
-                } else if self.step(state, Action::Acknowledge(id)).outcome != Outcome::Rejected {
-                    return false;
-                }
             }
         }
         let outstanding = state
@@ -1131,6 +1109,16 @@ impl WithdrawalModel {
             .collect::<BTreeSet<_>>();
         if outstanding != covered || state.unclaimed.len() > outstanding.len() {
             return false;
+        }
+        for account in 0..ACCOUNTS {
+            let expected = outstanding.iter().copied().find(|id| {
+                state
+                    .output(*id)
+                    .is_some_and(|(_, output_account, _)| output_account == account)
+            });
+            if state.claim_head(account) != expected {
+                return false;
+            }
         }
         true
     }
@@ -1167,7 +1155,8 @@ impl WithdrawalModel {
     }
 
     fn cleanup_progress(&self, state: &State) -> bool {
-        if state.reconciliation.is_some()
+        if state.faulted
+            || state.reconciliation.is_some()
             || state.adopted
             || state.epoch as usize >= EPOCHS
             || state.anchors[state.epoch as usize].is_some()
@@ -1305,11 +1294,6 @@ impl WithdrawalModel {
                     append(Action::Restart, &mut state, &mut actions);
                     append(Action::Refresh(output), &mut state, &mut actions);
                     append(Action::Claim(output), &mut state, &mut actions);
-                    if state.released[1][0].is_some() {
-                        append(Action::Acknowledge(output), &mut state, &mut actions);
-                        append(Action::Restart, &mut state, &mut actions);
-                        append(Action::Acknowledge(output), &mut state, &mut actions);
-                    }
                 } else if name == "intake during active registration" {
                     append(Action::Queue(RequestId::A0), &mut state, &mut actions);
                 } else if name == "queue after freeze requires rebuilt publication" {
@@ -1442,6 +1426,9 @@ impl Model for WithdrawalModel {
             actions.push(Action::Admit(state.root));
         }
         actions.push(Action::Finalize);
+        if !state.faulted && state.active().is_some() {
+            actions.push(Action::Fault);
+        }
         if state.reconciliation.is_none() {
             actions.push(Action::StartReconcile);
         } else {
@@ -1466,13 +1453,6 @@ impl Model for WithdrawalModel {
                     if current && state.released[epoch][account].is_none() {
                         actions.push(Action::Claim(output));
                     }
-                }
-                if state.released[epoch][account].is_some() {
-                    actions.push(Action::Acknowledge(
-                        state
-                            .output_id(epoch, account)
-                            .expect("released output owns a global payout index"),
-                    ));
                 }
             }
         }
@@ -1511,17 +1491,34 @@ impl Model for WithdrawalModel {
                 Self::carried_tail,
             ),
             Property::<Self>::sometimes("intake during active registration", |_, s| {
-                s.active().is_some_and(|a| a.epoch == 0) && s.pending[0] == Some(RequestId::A0)
+                !s.faulted
+                    && s.active().is_some_and(|a| a.epoch == 0)
+                    && s.pending[0] == Some(RequestId::A0)
             }),
             Property::<Self>::sometimes("queued tail finalized", |_, s| {
-                s.root >= 2
+                !s.faulted
+                    && s.root >= 2
                     && s.closes[1].is_some_and(|c| c.requests & RequestId::A0.bit() != 0)
                     && s.receipts[0] == Some(RequestId::A0)
+            }),
+            Property::<Self>::sometimes("faulted clean prefix remains claimable", |_, s| {
+                s.faulted
+                    && s.root > 0
+                    && s.admitted
+                        .iter()
+                        .skip(s.root as usize)
+                        .all(|admitted| !admitted)
+                    && s.released
+                        .iter()
+                        .take(s.root as usize)
+                        .flatten()
+                        .any(Option::is_some)
             }),
             Property::<Self>::sometimes(
                 "queue after freeze requires rebuilt publication",
                 |_, s| {
-                    s.epoch == 1
+                    !s.faulted
+                        && s.epoch == 1
                         && s.root == 0
                         && s.admitted[0]
                         && s.prepared.is_some_and(|packet| {
@@ -1540,26 +1537,31 @@ impl Model for WithdrawalModel {
                 stale_released(s, true)
             }),
             Property::<Self>::sometimes("published registration survives lost response", |_, s| {
-                s.root == 1
+                !s.faulted
+                    && s.root == 1
                     && s.epoch == 1
                     && !s.adopted
                     && s.anchors[1].is_some_and(|p| p.requests != 0)
                     && s.boundary() != 0
             }),
             Property::<Self>::sometimes("captured status precedes root advance", |_, s| {
-                s.reconciliation
-                    .is_some_and(|r| matches!(r.reply, Some(Reply::Status(root)) if root < s.root))
+                !s.faulted
+                    && s.reconciliation.is_some_and(
+                        |r| matches!(r.reply, Some(Reply::Status(root)) if root < s.root),
+                    )
             }),
             Property::<Self>::sometimes("captured anchor excludes stale request", |_, s| {
-                s.reconciliation
-                    .is_some_and(|r| r.excluded != 0 && r.reply == Some(Reply::Anchor(None)))
+                !s.faulted
+                    && s.reconciliation
+                        .is_some_and(|r| r.excluded != 0 && r.reply == Some(Reply::Anchor(None)))
             }),
             Property::<Self>::sometimes("captured exclusion loses local boundary race", |_, s| {
-                s.reconciliation.is_some_and(|r| {
-                    r.excluded != 0
-                        && r.reply == Some(Reply::Anchor(None))
-                        && r.boundary != s.boundary()
-                })
+                !s.faulted
+                    && s.reconciliation.is_some_and(|r| {
+                        r.excluded != 0
+                            && r.reply == Some(Reply::Anchor(None))
+                            && r.boundary != s.boundary()
+                    })
             }),
         ];
         let tail = 100 - self.instance.debit + self.instance.credit;
@@ -1568,7 +1570,8 @@ impl Model for WithdrawalModel {
             properties.push(Property::<Self>::sometimes(
                 "later receipt preserves original acknowledgement",
                 |_, s| {
-                    s.receipts[0] == Some(RequestId::A1)
+                    !s.faulted
+                        && s.receipts[0] == Some(RequestId::A1)
                         && s.authorizations[0].is_some_and(|a| a.epoch == 1)
                 },
             ));
@@ -1578,7 +1581,8 @@ impl Model for WithdrawalModel {
 }
 
 fn stale_released(state: &State, mixed: bool) -> bool {
-    state.epoch == 1
+    !state.faulted
+        && state.epoch == 1
         && state.root == 1
         && state.prepared.is_none()
         && [RequestId::A0, RequestId::B0].into_iter().any(|id| {
@@ -1653,7 +1657,7 @@ mod tests {
     #[test]
     fn generated_witnesses_are_replayable() {
         let traces = WithdrawalModel::generated_traces();
-        assert_eq!(traces.len(), 21);
+        assert_eq!(traces.len(), 22);
         assert_eq!(
             traces
                 .iter()
@@ -1788,6 +1792,22 @@ mod tests {
     }
 
     #[test]
+    fn fault_requires_an_active_registration() {
+        let model = WithdrawalModel::default();
+        let mut state = model.initial_state();
+        apply_all(
+            &model,
+            &mut state,
+            [Action::Sign(RequestId::A0), Action::Apply(RequestId::A0)],
+        );
+        close_and_finalize(&model, &mut state, 0, RequestId::A0.bit());
+
+        let transition = model.step(&state, Action::Fault);
+        assert_eq!(transition.outcome, Outcome::Rejected);
+        assert_eq!(transition.state, state);
+    }
+
+    #[test]
     fn faulted_clean_prefix_claims_without_new_admission() {
         let model = WithdrawalModel::default();
         let mut state = model.initial_state();
@@ -1806,8 +1826,15 @@ mod tests {
                 Action::ObserveRegistration,
                 Action::Cut,
                 Action::Admit(0),
-                Action::Fault,
                 Action::Finalize,
+                Action::Freeze,
+                Action::Publish(PacketId {
+                    epoch: 1,
+                    requests: 0,
+                    queued: 0,
+                }),
+                Action::ObserveRegistration,
+                Action::Fault,
             ],
         );
         let output = state.output_id(0, 0).unwrap();

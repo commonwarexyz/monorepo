@@ -10,22 +10,19 @@ use commonware_clearing::bajillion::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
         WithdrawalId,
     },
-    challenge::{
-        AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup,
-        higher_entry_lookup,
-    },
-    logs::{LogHead, Opening as LogOpening},
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict},
+    custody::Epoch,
+    logs::{LogHead, Opening as LogOpening, PayoutOperation},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{StateHead, StateOpening, StateRoot, account_key},
     settlement::{
-        BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, HardFaultReason, HardFaultSettlement,
-        PendingBatch, SettlementChain, SettlementConfig, UnclaimedInterval,
+        BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, Genesis, HardFaultReason,
+        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig, UnclaimedInterval,
     },
     state::SettlementOutput,
     transition::{
-        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature,
-        OperatorVariant, PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput,
-        prepare_close_with_strategy,
+        BatchId, Close, CloseContext, CloseLimits, OperatorKey, OperatorSignature, OperatorVariant,
+        PreparedClose, Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -191,7 +188,6 @@ struct Prepared {
     context: TestContext,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
-    withdrawal_claims: Vec<TestWithdrawalClaim>,
     withdrawal_outputs: Vec<WithdrawalOutput>,
     close: TestClose,
     successor: TestCache,
@@ -411,7 +407,21 @@ impl Harness {
             deployment,
             operator.public_key(),
             committee.clone(),
-            &(&finalized.head).into(),
+            &Genesis::new(
+                finalized.root(),
+                finalized.head.operations(),
+                &finalized
+                    .leaves
+                    .iter()
+                    .map(|entry| {
+                        (
+                            account_key(&entry.account).unwrap(),
+                            NonZeroU64::new(entry.balance).unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
             0,
             config,
         )
@@ -483,7 +493,7 @@ impl Harness {
         )
         .unwrap();
         assert_eq!(self.claims.encode(), encoded);
-        let state = self.state.take().unwrap().commit().await.unwrap();
+        let state = self.state.take().unwrap().sync().await.unwrap();
         let head = *state.state().head();
         drop(state);
         let state = support::open_state(self.runtime.child("replica"), "settlement")
@@ -1060,6 +1070,7 @@ impl Harness {
             epoch,
             self.operator.public_key(),
             self.state.as_ref().unwrap(),
+            cache.liability(),
             deposits,
             withdrawals,
             admission_deadline,
@@ -1258,16 +1269,12 @@ impl Harness {
         prepared: PreparedClose<VerifyingKey, Digest>,
     ) -> Prepared {
         let close = prepared.close().clone();
-        let withdrawal_claims = withdrawals
+        let withdrawal_outputs = close.withdrawal_outputs().to_vec();
+        withdrawals
             .requests()
             .iter()
-            .map(|request| {
-                let claim = prepared
-                    .withdrawal_claim::<Sha256>(request.account())
-                    .expect("validated withdrawal has a canonical claim");
-                let output = claim
-                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                    .expect("validated withdrawal claim verifies");
+            .zip(&withdrawal_outputs)
+            .for_each(|(request, output)| {
                 assert_eq!(output.destination(), request.body().destination());
                 let row = close
                     .rows
@@ -1308,13 +1315,7 @@ impl Harness {
                         assert_eq!(row.successor, 0);
                     }
                 }
-                claim
-            })
-            .collect::<Vec<_>>();
-        let withdrawal_outputs = withdrawal_claims
-            .iter()
-            .map(|claim| claim.output().clone())
-            .collect::<Vec<_>>();
+            });
         assert_eq!(withdrawal_outputs.len(), withdrawals.len());
         assert_eq!(close.withdrawal_total, output_total(&withdrawal_outputs));
         for entry in close.out_vectors.iter().flat_map(|vector| vector.entries()) {
@@ -1343,7 +1344,6 @@ impl Harness {
             context,
             deposits,
             withdrawals,
-            withdrawal_claims,
             withdrawal_outputs,
             close,
             successor,
@@ -1873,8 +1873,40 @@ impl Harness {
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
             let (state, validated) = candidate.apply(self.state.take().unwrap()).await.unwrap();
-            self.state = Some(state.commit().await.unwrap());
             assert_eq!(validated.header, prepared.close.header);
+            let registered = self
+                .registered
+                .take()
+                .expect("admission requires the exact registered epoch");
+            let payout_start = registered.context.predecessor_logs().payouts.operations;
+            let mut withdrawal_claims = Vec::with_capacity(registered.withdrawal_outputs.len());
+            for (offset, expected_output) in registered.withdrawal_outputs.iter().enumerate() {
+                let position = payout_start
+                    .checked_add(u64::try_from(offset).expect("bounded output count fits in u64"))
+                    .expect("bounded payout position cannot overflow");
+                let (opening, operations) = state
+                    .logs()
+                    .payout_opening(
+                        &validated.roots.withdrawal_outputs,
+                        position,
+                        NonZeroU64::MIN,
+                    )
+                    .await
+                    .expect("an applied withdrawal output has a native opening");
+                let [PayoutOperation::Append(output)] = operations.as_slice() else {
+                    panic!("a withdrawal position contains exactly one output append");
+                };
+                assert_eq!(output, expected_output);
+                let claim = WithdrawalClaim::new(output.clone(), opening);
+                assert_eq!(
+                    &claim
+                        .verify::<Sha256>(&validated.roots.withdrawal_outputs)
+                        .expect("native withdrawal claim verifies"),
+                    expected_output
+                );
+                withdrawal_claims.push(claim);
+            }
+            self.state = Some(state.sync().await.unwrap());
             self.replica = prepared.successor.clone();
             assert_eq!(
                 *self.state.as_ref().unwrap().state().head(),
@@ -1894,10 +1926,6 @@ impl Harness {
                     self.replica.balance(&account.public_key())
                 );
             }
-            let registered = self
-                .registered
-                .take()
-                .expect("admission requires the exact registered epoch");
             for record in registered.deposits.records() {
                 assert_eq!(
                     self.staged_deposits.remove(record.account()),
@@ -1921,7 +1949,7 @@ impl Harness {
                 context: registered.context,
                 deposits: registered.deposits,
                 withdrawals: registered.withdrawals,
-                withdrawal_claims: registered.withdrawal_claims,
+                withdrawal_claims,
                 withdrawal_outputs: registered.withdrawal_outputs,
                 header: registered.close.header,
                 certificate: retained_certificate,
@@ -2141,15 +2169,12 @@ impl Harness {
     }
 
     /// Builds guaranteed-proven evidence of one challenge kind against a validated close.
-    fn challenge_evidence(
+    async fn challenge_evidence(
         &self,
         family: u8,
         context: &TestContext,
-        _predecessor: &TestCache,
         close: &TestClose,
     ) -> (TestChallenge, ChallengeKind) {
-        let index = ChallengeIndex::new::<Sha256>(context, close)
-            .expect("validated close has a canonical challenge index");
         let key = &self.accounts[usize::from(family) % self.accounts.len()];
         let payer = key.public_key();
         let row = close
@@ -2203,16 +2228,28 @@ impl Harness {
             .checked_add(1)
             .expect("bounded fixture debit cannot overflow");
         match family % 3 {
-            0 => (
-                Challenge::HigherAckDebit {
-                    ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
-                    payer: Box::new(
-                        account_lookup::<Sha256, _, _>(&index, &payer)
-                            .expect("validated close has canonical payer evidence"),
-                    ),
-                },
-                ChallengeKind::HigherAckDebit,
-            ),
+            0 => {
+                let range = close
+                    .roots
+                    .activity_range(context)
+                    .expect("validated close has an exact activity range");
+                let logs = self.state.as_ref().unwrap().logs();
+                let epoch = Epoch::at(logs, context.payment().epoch(), range)
+                    .await
+                    .expect("an admitted close has retained native activity");
+                (
+                    Challenge::HigherAckDebit {
+                        ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
+                        payer: Box::new(
+                            epoch
+                                .account_lookup(logs, &payer)
+                                .await
+                                .expect("validated close has canonical payer evidence"),
+                        ),
+                    },
+                    ChallengeKind::HigherAckDebit,
+                )
+            }
             1 => {
                 let OutTipLookup::Present {
                     cumulative,
@@ -2224,6 +2261,14 @@ impl Harness {
                 else {
                     panic!("retained vector carries the disputed entry");
                 };
+                let range = close
+                    .roots
+                    .activity_range(context)
+                    .expect("validated close has an exact activity range");
+                let logs = self.state.as_ref().unwrap().logs();
+                let epoch = Epoch::at(logs, context.payment().epoch(), range)
+                    .await
+                    .expect("an admitted close has retained native activity");
                 (
                     Challenge::HigherAckEntry {
                         entry: Box::new(EntryWitness {
@@ -2234,10 +2279,10 @@ impl Harness {
                             opening,
                         }),
                         sender: Box::new(
-                            higher_entry_lookup::<Sha256, _, _>(
-                                &index, &payer, committed, &recipient,
-                            )
-                            .expect("validated close has canonical composed sender evidence"),
+                            epoch
+                                .higher_entry_lookup(logs, &payer, &recipient)
+                                .await
+                                .expect("validated close has canonical composed sender evidence"),
                         ),
                     },
                     ChallengeKind::HigherAckEntry,
@@ -2272,34 +2317,29 @@ impl Harness {
         } else {
             self.slots
                 .get(usize::from(slot_selector) % self.slots.len())
-                .map(|slot| {
-                    (
-                        slot.context.clone(),
-                        slot.batch_id(),
-                        slot.predecessor.clone(),
-                        slot.close.clone(),
-                    )
-                })
+                .map(|slot| (slot.context.clone(), slot.batch_id(), slot.close.clone()))
         };
-        let (context, batch, predecessor, close) = if let Some(selected) = selected {
-            selected
+        let (context, batch, close, admitted) = if let Some((context, batch, close)) = selected {
+            (context, batch, close, true)
         } else {
             let prepared = self.make_prepared().await;
             (
                 prepared.context,
                 prepared.close.header.batch_id::<Sha256>(),
-                prepared.predecessor,
                 prepared.close,
+                false,
             )
         };
-        let family = mutation % 3;
+        // The unknown-batch action has no applied native interval to serve. AckFork preserves the
+        // negative challenge path without advancing the replica solely to manufacture evidence.
+        let family = if admitted { mutation % 3 } else { 2 };
         let variant = (mutation / 4) % 4;
         let submitted_batch = if variant == 1 || (!encoded && variant != 0) {
             BatchId::new(self.digest(b"unknown-batch", step))
         } else {
             batch
         };
-        let (challenge, kind) = self.challenge_evidence(family, &context, &predecessor, &close);
+        let (challenge, kind) = self.challenge_evidence(family, &context, &close).await;
         let canonical = challenge.encode().to_vec();
         let mut bytes = canonical.clone();
         let maximum = if encoded && variant == 2 {
@@ -2826,7 +2866,10 @@ fn successor_snapshot(
     assert!(leaves.len() <= MAX_ACCOUNTS);
     let snapshot = TestCache { head, leaves };
     assert_eq!(snapshot.root(), close.roots.successor);
-    assert_eq!(snapshot.liability(), head.liability());
+    assert_eq!(
+        snapshot.liability(),
+        predecessor.liability() + deposits.total() - close.withdrawal_total
+    );
     assert_eq!(snapshot.len() as u64, head.live_accounts());
     snapshot
 }

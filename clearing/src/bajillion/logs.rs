@@ -1,16 +1,17 @@
 //! Native append-only activity and payout histories.
 //!
-//! Each accepted close appends its rows followed by the keyless QMDB commit operation. Native
-//! locations are stable protocol indices; commit locations are intentional gaps between row
-//! ranges. Activity values distinguish compact Guard appends from source Metadata commits; payout
-//! operation framing directly distinguishes output appends from metadata-free commits.
+//! Each accepted close appends its activity rows, original outgoing entries, and then the keyless
+//! QMDB commit operation. Native locations are stable protocol indices; commit locations are
+//! intentional gaps between epoch ranges. Payout operation framing directly distinguishes output
+//! appends from metadata-free commits.
 
-use super::{state::ChangeGuard, transition::WithdrawalOutput};
-use bytes::{BufMut, Bytes};
+use super::{commitment, state::AccountChange, transition::WithdrawalOutput, vector::OutEntry};
+use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_macros::select;
 use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
     Context,
@@ -21,23 +22,20 @@ use commonware_storage::{
         keyless::{self, batch::MerkleizedBatch},
     },
 };
-use core::num::NonZeroU64;
+use core::{future::Future, num::NonZeroU64};
 use std::sync::Arc;
 use thiserror::Error;
 
-const ACTIVITY_GUARD_ROLE: u8 = 0;
-const ACTIVITY_METADATA_ROLE: u8 = 1;
-
-/// Byte limits for one activity Commit's source metadata.
-pub type ActivityCfg = RangeCfg<usize>;
+const ACTIVITY_ROW_ROLE: u8 = 0;
+const ACTIVITY_ENTRY_ROLE: u8 = 1;
 
 /// A typed value in the activity log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActivityRecord<P: PublicKey, D: Digest> {
-    /// A compact changed-account guard in the epoch's ordered Append range.
-    Guard(ChangeGuard<P, D>),
-    /// Original source data carried only by the epoch's terminal Commit.
-    Metadata(Bytes),
+    /// One participating account in the epoch's ordered row prefix.
+    Row(AccountChange<P, D>),
+    /// One original cumulative outgoing entry in the row-delimited suffix.
+    Entry(OutEntry<P>),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -48,8 +46,15 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match u.int_in_range(0..=1)? {
-            0 => Ok(Self::Guard(u.arbitrary()?)),
-            1 => Ok(Self::Metadata(Bytes::from(u.arbitrary::<Vec<u8>>()?))),
+            0 => Ok(Self::Row(u.arbitrary()?)),
+            1 => {
+                let count = u.int_in_range(1..=u64::MAX)?;
+                Ok(Self::Entry(OutEntry {
+                    recipient: u.arbitrary()?,
+                    cumulative: u.int_in_range(count..=u64::MAX)?,
+                    count,
+                }))
+            }
             _ => unreachable!(),
         }
     }
@@ -58,13 +63,13 @@ where
 impl<P: PublicKey, D: Digest> Write for ActivityRecord<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Guard(guard) => {
-                ACTIVITY_GUARD_ROLE.write(buf);
-                guard.write(buf);
+            Self::Row(row) => {
+                ACTIVITY_ROW_ROLE.write(buf);
+                row.write(buf);
             }
-            Self::Metadata(data) => {
-                ACTIVITY_METADATA_ROLE.write(buf);
-                data.write(buf);
+            Self::Entry(entry) => {
+                ACTIVITY_ENTRY_ROLE.write(buf);
+                entry.write(buf);
             }
         }
     }
@@ -74,19 +79,28 @@ impl<P: PublicKey, D: Digest> EncodeSize for ActivityRecord<P, D> {
     fn encode_size(&self) -> usize {
         u8::SIZE
             + match self {
-                Self::Guard(guard) => guard.encode_size(),
-                Self::Metadata(data) => data.encode_size(),
+                Self::Row(row) => row.encode_size(),
+                Self::Entry(entry) => entry.encode_size(),
             }
     }
 }
 
 impl<P: PublicKey, D: Digest> Read for ActivityRecord<P, D> {
-    type Cfg = ActivityCfg;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            ACTIVITY_GUARD_ROLE => Ok(Self::Guard(ChangeGuard::read(buf)?)),
-            ACTIVITY_METADATA_ROLE => Ok(Self::Metadata(Bytes::read_cfg(buf, cfg)?)),
+            ACTIVITY_ROW_ROLE => Ok(Self::Row(AccountChange::read(buf)?)),
+            ACTIVITY_ENTRY_ROLE => {
+                let entry = OutEntry::read(buf)?;
+                if !valid_entry(&entry) {
+                    return Err(CodecError::Invalid(
+                        "ActivityRecord",
+                        "infeasible outgoing entry",
+                    ));
+                }
+                Ok(Self::Entry(entry))
+            }
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -95,31 +109,32 @@ impl<P: PublicKey, D: Digest> Read for ActivityRecord<P, D> {
 /// Unencoded input for one native activity append-and-commit batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivityInput<P: PublicKey, D: Digest> {
-    /// Compact guards, in canonical account-byte order.
-    guards: Vec<ChangeGuard<P, D>>,
-    /// Canonically encoded original sources needed for on-demand proof construction.
-    metadata: Bytes,
+    /// Full activity rows, in canonical account-byte order.
+    rows: Vec<AccountChange<P, D>>,
+    /// Canonical outgoing entries grouped by each row's terminal debit.
+    entries: Vec<OutEntry<P>>,
 }
 
 impl<P: PublicKey, D: Digest> ActivityInput<P, D> {
     /// Construct one activity batch input.
-    pub const fn new(guards: Vec<ChangeGuard<P, D>>, metadata: Bytes) -> Self {
-        Self { guards, metadata }
+    pub const fn new(rows: Vec<AccountChange<P, D>>, entries: Vec<OutEntry<P>>) -> Self {
+        Self { rows, entries }
     }
 
-    /// Return the ordered compact guards.
-    pub fn guards(&self) -> &[ChangeGuard<P, D>] {
-        &self.guards
+    /// Return the ordered activity rows.
+    pub fn rows(&self) -> &[AccountChange<P, D>] {
+        &self.rows
     }
 
-    /// Return the encoded original source metadata.
-    pub const fn metadata(&self) -> &Bytes {
-        &self.metadata
+    /// Return the row-delimited outgoing entries.
+    pub fn entries(&self) -> &[OutEntry<P>] {
+        &self.entries
     }
 
     /// Consume the input into its native batch components.
-    pub fn into_parts(self) -> (Vec<ChangeGuard<P, D>>, Bytes) {
-        (self.guards, self.metadata)
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(self) -> (Vec<AccountChange<P, D>>, Vec<OutEntry<P>>) {
+        (self.rows, self.entries)
     }
 }
 
@@ -128,12 +143,6 @@ pub type ActivityOperation<P, D> =
     keyless::Operation<mmr::Family, VariableEncoding<ActivityRecord<P, D>>>;
 /// Native payout operation encoding.
 pub type PayoutOperation = keyless::Operation<mmr::Family, VariableEncoding<WithdrawalOutput>>;
-/// Native log sync request.
-pub type Request = qmdb::sync::Request<mmr::Family>;
-/// Native activity sync response.
-pub type ActivityResponse<P, D> = qmdb::sync::Response<mmr::Family, ActivityOperation<P, D>, D>;
-/// Native payout sync response.
-pub type PayoutResponse<D> = qmdb::sync::Response<mmr::Family, PayoutOperation, D>;
 /// Native variable activity-log database.
 pub type ActivityDb<E, H, P, S> =
     keyless::variable::Db<mmr::Family, E, ActivityRecord<P, <H as Hasher>::Digest>, H, S>;
@@ -148,8 +157,8 @@ type PayoutBatch<D, S> = MerkleizedBatch<mmr::Family, D, VariableEncoding<Withdr
 /// Physical configuration for the two native logs.
 #[derive(Clone)]
 pub struct Config<S: Strategy = Sequential> {
-    /// Variable-size activity log.
-    pub activity: keyless::variable::Config<ActivityCfg, S>,
+    /// Typed activity log.
+    pub activity: keyless::variable::Config<(), S>,
     /// Variable-size payout log.
     pub payouts: keyless::variable::Config<RangeCfg<usize>, S>,
 }
@@ -368,11 +377,11 @@ where
 }
 
 impl<D: Digest> Opening<D> {
-    /// Verify activity appends at an arbitrary row-only subrange.
+    /// Verify activity rows at an arbitrary row-only subrange.
     pub fn verify_activity<H, P>(
         &self,
         head: &LogHead<D>,
-        values: &[ChangeGuard<P, D>],
+        values: &[AccountChange<P, D>],
     ) -> Result<(), Error>
     where
         H: Hasher<Digest = D>,
@@ -381,46 +390,9 @@ impl<D: Digest> Opening<D> {
         let operations = values
             .iter()
             .cloned()
-            .map(|guard| ActivityOperation::Append(ActivityRecord::Guard(guard)))
+            .map(|row| ActivityOperation::Append(ActivityRecord::Row(row)))
             .collect::<Vec<_>>();
         self.verify::<H, _>(head, &operations)
-    }
-
-    /// Verify one activity Metadata Commit at any retained historical position.
-    pub fn verify_activity_metadata<H, P>(
-        &self,
-        head: &LogHead<D>,
-        metadata: &Bytes,
-        floor: u64,
-    ) -> Result<(), Error>
-    where
-        H: Hasher<Digest = D>,
-        P: PublicKey,
-    {
-        LogHead::try_new(head.root, head.operations, head.floor)?;
-        let start = Location::<mmr::Family>::new(self.start);
-        let floor = Location::<mmr::Family>::new(floor);
-        if !start.is_valid_index()
-            || start >= Location::new(head.operations)
-            || !floor.is_valid_index()
-            || floor > start
-            || self.proof.leaves != Location::new(head.operations)
-            || self.proof.inactive_peaks
-                != mmr::Family::inactive_peaks(
-                    Location::new(head.operations),
-                    Location::new(head.floor),
-                )
-        {
-            return Err(Error::Proof);
-        }
-        let operation = [ActivityOperation::<P, D>::Commit(
-            Some(ActivityRecord::Metadata(metadata.clone())),
-            floor,
-        )];
-        if !qmdb::verify_proof::<H, mmr::Family, _>(&self.proof, start, &operation, &head.root) {
-            return Err(Error::Proof);
-        }
-        Ok(())
     }
 
     /// Verify one payout append at its stable native location.
@@ -492,7 +464,6 @@ impl<D: Digest> Read for Opening<D> {
 pub struct Logs<E: Context, H: Hasher, P: PublicKey, S: Strategy = Sequential> {
     activity: ActivityDb<E, H, P, S>,
     payouts: PayoutDb<E, H, S>,
-    activity_cfg: ActivityCfg,
     payout_cfg: RangeCfg<usize>,
     head: Heads<H::Digest>,
 }
@@ -501,7 +472,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     /// Open both native logs and derive their recovered heads.
     pub async fn open(context: E, config: Config<S>) -> Result<Self, Error> {
         validate_partitions(&config)?;
-        let activity_cfg = config.activity.log.codec_config;
         let payout_cfg = config.payouts.log.codec_config;
         let activity = ActivityDb::init(context.child("activity"), config.activity).await?;
         let payouts = PayoutDb::init(context.child("payouts"), config.payouts).await?;
@@ -512,7 +482,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         Ok(Self {
             activity,
             payouts,
-            activity_cfg,
             payout_cfg,
             head,
         })
@@ -522,7 +491,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     pub fn from_parts(
         activity: ActivityDb<E, H, P, S>,
         payouts: PayoutDb<E, H, S>,
-        activity_cfg: ActivityCfg,
         payout_cfg: RangeCfg<usize>,
     ) -> Self {
         let head = Heads {
@@ -532,7 +500,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         Self {
             activity,
             payouts,
-            activity_cfg,
             payout_cfg,
             head,
         }
@@ -542,11 +509,10 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     pub fn from_parts_checked(
         activity: ActivityDb<E, H, P, S>,
         payouts: PayoutDb<E, H, S>,
-        activity_cfg: ActivityCfg,
         payout_cfg: RangeCfg<usize>,
         expected: &Heads<H::Digest>,
     ) -> Result<Self, Error> {
-        let logs = Self::from_parts(activity, payouts, activity_cfg, payout_cfg);
+        let logs = Self::from_parts(activity, payouts, payout_cfg);
         if logs.head() != expected {
             return Err(Error::Head);
         }
@@ -573,22 +539,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         &self.payouts
     }
 
-    /// Serve one untrusted native activity-sync request.
-    pub async fn serve_activity(
-        &self,
-        request: Request,
-    ) -> Result<(ActivityResponse<P, H::Digest>, qmdb::sync::FeedbackTx), Error> {
-        Ok(qmdb::sync::Source::serve(&self.activity, request).await?)
-    }
-
-    /// Serve one untrusted native payout-sync request.
-    pub async fn serve_payout(
-        &self,
-        request: Request,
-    ) -> Result<(PayoutResponse<H::Digest>, qmdb::sync::FeedbackTx), Error> {
-        Ok(qmdb::sync::Source::serve(&self.payouts, request).await?)
-    }
-
     /// Return each native journal's oldest retained operation.
     pub fn retained_starts(&self) -> Floors {
         Floors {
@@ -607,28 +557,13 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         operations.pop().ok_or(Error::Row)
     }
 
-    /// Read a compact activity guard Append at a retained native location.
-    pub async fn activity_guard_at(&self, index: u64) -> Result<ChangeGuard<P, H::Digest>, Error> {
+    /// Read an activity row Append at a retained native location.
+    pub async fn activity_row_at(&self, index: u64) -> Result<AccountChange<P, H::Digest>, Error> {
         match self
             .raw_activity_record_at(&self.head.activity, index)
             .await?
         {
-            ActivityOperation::Append(ActivityRecord::Guard(guard)) => Ok(guard),
-            _ => Err(Error::Row),
-        }
-    }
-
-    /// Read source metadata from an activity Commit at a retained historical head.
-    pub async fn activity_metadata_at(
-        &self,
-        head: &LogHead<H::Digest>,
-        index: u64,
-    ) -> Result<(Bytes, u64, Opening<H::Digest>), Error> {
-        let (proof, operations) = self.activity_opening(head, index, NonZeroU64::MIN).await?;
-        match operations.into_iter().next() {
-            Some(ActivityOperation::Commit(Some(ActivityRecord::Metadata(metadata)), floor)) => {
-                Ok((metadata, *floor, proof))
-            }
+            ActivityOperation::Append(ActivityRecord::Row(row)) => Ok(row),
             _ => Err(Error::Row),
         }
     }
@@ -649,6 +584,9 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     }
 
     /// Prepare one append-and-commit batch in each log.
+    ///
+    /// Positive rows must carry roots already validated against their entries by the transition
+    /// owner. This layer validates canonical row/entry framing without rebuilding those trees.
     pub async fn prepare(
         &self,
         expected: &Heads<H::Digest>,
@@ -659,44 +597,33 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         if expected != self.head() {
             return Err(Error::Predecessor);
         }
-        let (guards, metadata) = activity_input.into_parts();
-        if guards
-            .windows(2)
-            .any(|pair| pair[0].account().as_ref() >= pair[1].account().as_ref())
-        {
-            return Err(Error::Order);
-        }
-        if !self.activity_cfg.contains(&metadata.len()) {
-            return Err(Error::Bounds);
-        }
+        let (rows, entries) = activity_input.into_parts();
+        validate_activity::<H, P>(&rows, &entries)?;
         if outputs
             .iter()
             .any(|output| !self.payout_cfg.contains(&output.destination().len()))
         {
             return Err(Error::Bounds);
         }
-        validate_floor(expected.activity, floors.activity, guards.len())?;
+        let activity_len = rows.len().checked_add(entries.len()).ok_or(Error::Bounds)?;
+        validate_floor(expected.activity, floors.activity, activity_len)?;
         validate_floor(expected.payouts, floors.payouts, outputs.len())?;
 
         let mut activity = self.activity.new_batch();
-        for guard in guards {
-            activity = activity.append(ActivityRecord::Guard(guard));
+        for row in rows {
+            activity = activity.append(ActivityRecord::Row(row));
         }
-        let activity = activity
-            .merkleize(
-                &self.activity,
-                Some(ActivityRecord::Metadata(metadata)),
-                Location::new(floors.activity),
-            )
-            .await;
+        for entry in entries {
+            activity = activity.append(ActivityRecord::Entry(entry));
+        }
+        let activity = activity.merkleize(&self.activity, None, Location::new(floors.activity));
 
         let mut payouts = self.payouts.new_batch();
         for output in outputs {
             payouts = payouts.append(output);
         }
-        let payouts = payouts
-            .merkleize(&self.payouts, None, Location::new(floors.payouts))
-            .await;
+        let payouts = payouts.merkleize(&self.payouts, None, Location::new(floors.payouts));
+        let (activity, payouts) = join(activity, payouts).await;
 
         let head = Heads {
             activity: batch_head(&activity),
@@ -711,28 +638,63 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
     }
 
     /// Apply both prepared native batches. Any error consumes the entire owner.
-    pub async fn apply(mut self, prepared: PreparedLogs<P, H::Digest, S>) -> Result<Self, Error> {
+    pub async fn apply(self, prepared: PreparedLogs<P, H::Digest, S>) -> Result<Self, Error> {
         if prepared.predecessor != self.head {
             return Err(Error::Predecessor);
         }
-        (self.activity, _) = self.activity.apply_batch(prepared.activity).await?;
-        (self.payouts, _) = self.payouts.apply_batch(prepared.payouts).await?;
-        self.head = prepared.head;
-        Ok(self)
+        let Self {
+            activity,
+            payouts,
+            payout_cfg,
+            ..
+        } = self;
+        let (activity, payouts) = join(
+            activity.apply_batch(prepared.activity),
+            payouts.apply_batch(prepared.payouts),
+        )
+        .await;
+        let (activity, _) = activity?;
+        let (payouts, _) = payouts?;
+        Ok(Self {
+            activity,
+            payouts,
+            payout_cfg,
+            head: prepared.head,
+        })
     }
 
     /// Durably commit both logs.
-    pub async fn commit(mut self) -> Result<Self, Error> {
-        self.activity = self.activity.commit().await?;
-        self.payouts = self.payouts.commit().await?;
-        Ok(self)
+    pub async fn commit(self) -> Result<Self, Error> {
+        let Self {
+            activity,
+            payouts,
+            payout_cfg,
+            head,
+        } = self;
+        let (activity, payouts) = join(activity.commit(), payouts.commit()).await;
+        Ok(Self {
+            activity: activity?,
+            payouts: payouts?,
+            payout_cfg,
+            head,
+        })
     }
 
     /// Fully synchronize both logs.
-    pub async fn sync(mut self) -> Result<Self, Error> {
-        self.activity = self.activity.sync().await?;
-        self.payouts = self.payouts.sync().await?;
-        Ok(self)
+    pub async fn sync(self) -> Result<Self, Error> {
+        let Self {
+            activity,
+            payouts,
+            payout_cfg,
+            head,
+        } = self;
+        let (activity, payouts) = join(activity.sync(), payouts.sync()).await;
+        Ok(Self {
+            activity: activity?,
+            payouts: payouts?,
+            payout_cfg,
+            head,
+        })
     }
 
     /// Rewind both logs to an authenticated shared checkpoint.
@@ -800,16 +762,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
         Ok((Opening { start, proof }, operations))
     }
 
-    /// Alias for [`Self::activity_opening`] used by history transports.
-    pub async fn activity_proof(
-        &self,
-        head: &LogHead<H::Digest>,
-        start: u64,
-        count: NonZeroU64,
-    ) -> Result<(Opening<H::Digest>, Vec<ActivityOperation<P, H::Digest>>), Error> {
-        self.activity_opening(head, start, count).await
-    }
-
     /// Generate a payout proof at a retained historical head.
     pub async fn payout_opening(
         &self,
@@ -831,16 +783,6 @@ impl<E: Context, H: Hasher, P: PublicKey, S: Strategy> Logs<E, H, P, S> {
             return Err(Error::Head);
         }
         Ok((Opening { start, proof }, operations))
-    }
-
-    /// Alias for [`Self::payout_opening`] used by history transports.
-    pub async fn payout_proof(
-        &self,
-        head: &LogHead<H::Digest>,
-        start: u64,
-        count: NonZeroU64,
-    ) -> Result<(Opening<H::Digest>, Vec<PayoutOperation>), Error> {
-        self.payout_opening(head, start, count).await
     }
 }
 
@@ -874,50 +816,86 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedLogs<P, D, S> {
         let (start, operations) = self.payouts.operations();
         (*start, operations)
     }
+}
 
-    /// Prove the full new activity range, including the final commit.
-    pub fn activity_proof<E, H>(&self, logs: &Logs<E, H, P, S>) -> Result<Opening<D>, Error>
-    where
-        E: Context,
-        H: Hasher<Digest = D>,
+/// Drive both futures to completion, including when either result is an error.
+pub(super) fn join<A, B>(
+    left: impl Future<Output = A>,
+    right: impl Future<Output = B>,
+) -> impl Future<Output = (A, B)> {
+    // Store-owning futures are large; keep the combined frame out of the replica future.
+    Box::pin(async move {
+        let mut left = core::pin::pin!(left);
+        let mut right = core::pin::pin!(right);
+        select! {
+            output = &mut left => (output, right.await),
+            output = &mut right => (left.await, output),
+        }
+    })
+}
+
+const fn valid_entry<P: PublicKey>(entry: &OutEntry<P>) -> bool {
+    entry.cumulative != 0 && entry.count != 0 && entry.cumulative >= entry.count
+}
+
+fn validate_activity<H: Hasher, P: PublicKey>(
+    rows: &[AccountChange<P, H::Digest>],
+    entries: &[OutEntry<P>],
+) -> Result<(), Error> {
+    if rows.len() > commitment::MAX_VECTOR_LENGTH as usize {
+        return Err(Error::Bounds);
+    }
+    if rows
+        .windows(2)
+        .any(|pair| pair[0].account().as_ref() >= pair[1].account().as_ref())
     {
-        let (start, _) = self.activity.operations();
-        Ok(Opening {
-            start: *start,
-            proof: self.activity.proof(&logs.activity)?,
-        })
+        return Err(Error::Order);
     }
 
-    /// Prove the full new payout range, including the final commit.
-    pub fn payout_proof<E, H>(&self, logs: &Logs<E, H, P, S>) -> Result<Opening<D>, Error>
-    where
-        E: Context,
-        H: Hasher<Digest = D>,
-    {
-        let (start, _) = self.payouts.operations();
-        Ok(Opening {
-            start: *start,
-            proof: self.payouts.proof(&logs.payouts)?,
-        })
-    }
+    let empty_root = commitment::empty_root::<H>(commitment::VectorKind::OutEntry);
+    let mut cursor = 0usize;
+    for row in rows {
+        let debit = row.terminal_debit();
+        if debit == 0 {
+            if row.terminal_seq() != 0 || row.send_root() != empty_root {
+                return Err(Error::Original);
+            }
+            continue;
+        }
 
-    /// Return the activity Merkle frontier needed to import this batch range.
-    pub fn activity_pinned_nodes<E, H>(&self, logs: &Logs<E, H, P, S>) -> Result<Vec<D>, Error>
-    where
-        E: Context,
-        H: Hasher<Digest = D>,
-    {
-        Ok(self.activity.pinned_nodes(&logs.activity)?)
+        let mut previous_recipient: Option<&P> = None;
+        let mut group_len = 0usize;
+        let mut total_credit = 0u64;
+        let mut total_count = 0u64;
+        while total_credit < debit {
+            let entry = entries.get(cursor).ok_or(Error::Original)?;
+            if !valid_entry(entry)
+                || previous_recipient
+                    .is_some_and(|previous| previous.as_ref() >= entry.recipient.as_ref())
+            {
+                return Err(Error::Original);
+            }
+            group_len = group_len.checked_add(1).ok_or(Error::Bounds)?;
+            if group_len > commitment::MAX_VECTOR_LENGTH as usize {
+                return Err(Error::Original);
+            }
+            total_credit = total_credit
+                .checked_add(entry.cumulative)
+                .ok_or(Error::Original)?;
+            total_count = total_count
+                .checked_add(entry.count)
+                .ok_or(Error::Original)?;
+            if total_credit > debit {
+                return Err(Error::Original);
+            }
+            previous_recipient = Some(&entry.recipient);
+            cursor = cursor.checked_add(1).ok_or(Error::Bounds)?;
+        }
     }
-
-    /// Return the payout Merkle frontier needed to import this batch range.
-    pub fn payout_pinned_nodes<E, H>(&self, logs: &Logs<E, H, P, S>) -> Result<Vec<D>, Error>
-    where
-        E: Context,
-        H: Hasher<Digest = D>,
-    {
-        Ok(self.payouts.pinned_nodes(&logs.payouts)?)
+    if cursor != entries.len() {
+        return Err(Error::Original);
     }
+    Ok(())
 }
 
 fn validate_floor<D: Digest>(head: LogHead<D>, floor: u64, rows: usize) -> Result<(), Error> {
@@ -1021,9 +999,12 @@ pub enum Error {
     /// A candidate belongs to another live prefix.
     #[error("flat log predecessor does not match")]
     Predecessor,
-    /// Activity guards are not strictly ordered.
-    #[error("activity guards are not strictly account-sorted")]
+    /// Activity rows are not strictly ordered.
+    #[error("activity rows are not strictly account-sorted")]
     Order,
+    /// Original entries do not form canonical row-delimited payer groups.
+    #[error("activity entries are not canonical for their rows")]
+    Original,
     /// A registered floor regresses or exceeds its candidate commit location.
     #[error("invalid flat log floor")]
     Floor,
@@ -1036,8 +1017,8 @@ pub enum Error {
     /// A native opening does not authenticate the exact operation range and head.
     #[error("invalid flat log proof")]
     Proof,
-    /// The requested location is a commit, is outside the authenticated head, or is pruned.
-    #[error("native location is not a retained append row")]
+    /// The requested location is not a retained append of the requested role.
+    #[error("native location is not a retained append of the requested role")]
     Row,
 }
 
@@ -1045,7 +1026,7 @@ pub enum Error {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_codec::{Decode as _, DecodeExt as _};
+    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, Signer as _, sha256::Digest as ShaDigest};
     use commonware_cryptography_curve25519::signing::{
         SigningKey, StrictVerifyingKey as VerifyingKey,
@@ -1056,8 +1037,180 @@ mod tests {
     };
     use commonware_storage::{journal::contiguous::variable, merkle::full};
     use commonware_utils::{NZU16, NZU64, NZUsize};
+    use core::{
+        pin::Pin,
+        task::{Context as TaskContext, Poll},
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     type TestLogs = Logs<deterministic::Context, Sha256, VerifyingKey, Sequential>;
+    type TestActivityDb = ActivityDb<deterministic::Context, Sha256, VerifyingKey, Sequential>;
+
+    fn activity_row(
+        account: VerifyingKey,
+        debit: u64,
+        seq: u64,
+        send_root: commitment::VectorRoot<ShaDigest>,
+    ) -> AccountChange<VerifyingKey, ShaDigest> {
+        let mut bytes = Vec::new();
+        account.write(&mut bytes);
+        debit.write(&mut bytes);
+        seq.write(&mut bytes);
+        send_root.write(&mut bytes);
+        AccountChange::decode(Bytes::from(bytes)).unwrap()
+    }
+
+    fn outgoing_root(
+        payer: VerifyingKey,
+        entries: &[OutEntry<VerifyingKey>],
+    ) -> commitment::VectorRoot<ShaDigest> {
+        crate::bajillion::vector::OutVector::new(0, payer, entries.to_vec())
+            .unwrap()
+            .root::<Sha256, ShaDigest>()
+            .unwrap()
+    }
+
+    async fn activity_operation_at(
+        db: &TestActivityDb,
+        index: u64,
+    ) -> ActivityOperation<VerifyingKey, ShaDigest> {
+        let (_, mut operations) = db
+            .proof(Location::new(index), NonZeroU64::MIN)
+            .await
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        operations.pop().unwrap()
+    }
+
+    struct Rendezvous {
+        polled: Arc<AtomicBool>,
+        peer_polled: Arc<AtomicBool>,
+    }
+
+    impl Future for Rendezvous {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            self.polled.store(true, Ordering::SeqCst);
+            if self.peer_polled.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    struct DelayedResult {
+        remaining: usize,
+        completed: Arc<AtomicBool>,
+    }
+
+    impl Future for DelayedResult {
+        type Output = Result<(), u8>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            if self.remaining == 0 {
+                self.completed.store(true, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            } else {
+                self.remaining -= 1;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn join_polls_both_and_observes_completion_after_error() {
+        deterministic::Runner::default().start(|_| async move {
+            let left_polled = Arc::new(AtomicBool::new(false));
+            let right_polled = Arc::new(AtomicBool::new(false));
+            join(
+                Rendezvous {
+                    polled: left_polled.clone(),
+                    peer_polled: right_polled.clone(),
+                },
+                Rendezvous {
+                    polled: right_polled.clone(),
+                    peer_polled: left_polled.clone(),
+                },
+            )
+            .await;
+            assert!(left_polled.load(Ordering::SeqCst));
+            assert!(right_polled.load(Ordering::SeqCst));
+
+            let right_completed = Arc::new(AtomicBool::new(false));
+            let (left, right) = join(
+                async { Err::<(), _>(1) },
+                DelayedResult {
+                    remaining: 1,
+                    completed: right_completed.clone(),
+                },
+            )
+            .await;
+            assert_eq!(left, Err(1));
+            assert_eq!(right, Ok(()));
+            assert!(right_completed.load(Ordering::SeqCst));
+
+            let left_completed = Arc::new(AtomicBool::new(false));
+            let (left, right) = join(
+                DelayedResult {
+                    remaining: 1,
+                    completed: left_completed.clone(),
+                },
+                async { Err::<(), _>(2) },
+            )
+            .await;
+            assert_eq!(left, Ok(()));
+            assert_eq!(right, Err(2));
+            assert!(left_completed.load(Ordering::SeqCst));
+        });
+    }
+
+    #[test]
+    fn activity_record_codec_is_bounded_and_role_tagged() {
+        let payer = SigningKey::from_seed(1).public_key();
+        let recipient = SigningKey::from_seed(2).public_key();
+        let row = activity_row(
+            payer,
+            2,
+            u64::MAX,
+            commitment::VectorRoot {
+                digest: Sha256::hash(&[b"outgoing"]),
+            },
+        );
+        let records = [
+            ActivityRecord::Row(row),
+            ActivityRecord::Entry(OutEntry {
+                recipient: recipient.clone(),
+                cumulative: 2,
+                count: 1,
+            }),
+        ];
+        for (role, record) in records.into_iter().enumerate() {
+            let encoded = record.encode();
+            assert_eq!(encoded[0], role as u8);
+            assert_eq!(
+                ActivityRecord::<VerifyingKey, ShaDigest>::decode(encoded).unwrap(),
+                record
+            );
+        }
+
+        for (cumulative, count) in [(0, 1), (1, 0), (1, 2)] {
+            let mut infeasible = Vec::new();
+            ACTIVITY_ENTRY_ROLE.write(&mut infeasible);
+            recipient.write(&mut infeasible);
+            cumulative.write(&mut infeasible);
+            count.write(&mut infeasible);
+            assert!(
+                ActivityRecord::<VerifyingKey, ShaDigest>::decode(Bytes::from(infeasible)).is_err()
+            );
+        }
+        assert!(
+            ActivityRecord::<VerifyingKey, ShaDigest>::decode(Bytes::from_static(&[2])).is_err()
+        );
+    }
 
     fn config(context: &deterministic::Context, suffix: &str) -> Config<Sequential> {
         let cache = CacheRef::from_pooler(context, NZU16!(128), NZUsize!(16));
@@ -1077,7 +1230,7 @@ mod tests {
                     partition: format!("logs-{suffix}-activity-log"),
                     items_per_section: NZU64!(64),
                     compression: None,
-                    codec_config: (0..=4096).into(),
+                    codec_config: (),
                     page_cache: cache.clone(),
                     write_buffer: NZUsize!(4096),
                     replay_buffer: NZUsize!(4096),
@@ -1120,7 +1273,7 @@ mod tests {
             let prepared = logs
                 .prepare(
                     &bootstrap,
-                    ActivityInput::new(Vec::new(), Bytes::new()),
+                    ActivityInput::new(Vec::new(), Vec::new()),
                     Vec::new(),
                     Floors {
                         activity: 0,
@@ -1133,28 +1286,14 @@ mod tests {
             assert_eq!(candidate.activity.operations, 2);
             assert_eq!(candidate.payouts.operations, 2);
             let (activity_start, activity_ops) = prepared.activity_operations();
-            let activity_opening = prepared.activity_proof(&logs).unwrap();
             assert_eq!(activity_start, 1);
             assert!(matches!(
                 activity_ops.as_slice(),
-                [ActivityOperation::Commit(
-                    Some(ActivityRecord::Metadata(metadata)),
-                    floor
-                )] if metadata.is_empty() && **floor == 0
-            ));
-            assert!(qmdb::verify_proof::<Sha256, mmr::Family, _>(
-                &activity_opening.proof,
-                Location::new(activity_start),
-                activity_ops.as_slice(),
-                &candidate.activity.root,
-            ));
-            assert!(matches!(
-                activity_opening.verify_activity::<Sha256, VerifyingKey>(&candidate.activity, &[]),
-                Err(Error::Proof)
+                [ActivityOperation::Commit(None, floor)] if **floor == 0
             ));
 
             let logs = logs.apply(prepared).await.unwrap().commit().await.unwrap();
-            assert!(matches!(logs.activity_guard_at(1).await, Err(Error::Row)));
+            assert!(matches!(logs.activity_row_at(1).await, Err(Error::Row)));
             let logs = logs.rewind(&bootstrap).await.unwrap().sync().await.unwrap();
             assert_eq!(*logs.head(), bootstrap);
             drop(logs);
@@ -1166,17 +1305,232 @@ mod tests {
     }
 
     #[test]
+    fn activity_originals_are_appends_and_commit_is_metadata_free() {
+        deterministic::Runner::default().start(|context| async move {
+            let logs = TestLogs::open(context.child("open"), config(&context, "originals"))
+                .await
+                .unwrap();
+            let payer = SigningKey::from_seed(7).public_key();
+            let mut recipients = [
+                SigningKey::from_seed(8).public_key(),
+                SigningKey::from_seed(9).public_key(),
+            ];
+            recipients.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+            let entries = [
+                OutEntry {
+                    recipient: recipients[0].clone(),
+                    cumulative: 10,
+                    count: 3,
+                },
+                OutEntry {
+                    recipient: recipients[1].clone(),
+                    cumulative: 2,
+                    count: 1,
+                },
+            ];
+            let row = activity_row(payer.clone(), 12, 0, outgoing_root(payer, &entries));
+            let predecessor = *logs.head();
+            let prepared = logs
+                .prepare(
+                    &predecessor,
+                    ActivityInput::new(vec![row.clone()], entries.to_vec()),
+                    Vec::new(),
+                    Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            let (_, operations) = prepared.activity_operations();
+            assert!(matches!(
+                operations.as_slice(),
+                [
+                    ActivityOperation::Append(ActivityRecord::Row(stored_row)),
+                    ActivityOperation::Append(ActivityRecord::Entry(first_entry)),
+                    ActivityOperation::Append(ActivityRecord::Entry(second_entry)),
+                    ActivityOperation::Commit(None, floor),
+                ] if stored_row == &row
+                    && first_entry == &entries[0]
+                    && second_entry == &entries[1]
+                    && **floor == 0
+            ));
+            drop(prepared);
+            logs.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn bounded_activity_corpus_crosses_native_sync_boundaries() {
+        deterministic::Runner::default().start(|context| async move {
+            const ENTRY_OPERATION_SIZE: usize = u8::SIZE * 2 + VerifyingKey::SIZE + u64::SIZE * 2;
+            const ENTRY_COUNT: usize = 257;
+
+            assert_eq!(ENTRY_OPERATION_SIZE, 50);
+            assert!(ENTRY_COUNT <= commitment::MAX_VECTOR_LENGTH as usize);
+
+            let payer = SigningKey::from_seed(1).public_key();
+            let mut recipients = (0..ENTRY_COUNT)
+                .map(|index| {
+                    SigningKey::from_seed(u64::try_from(index).unwrap().checked_add(2).unwrap())
+                        .public_key()
+                })
+                .collect::<Vec<_>>();
+            recipients.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+            assert!(
+                recipients
+                    .windows(2)
+                    .all(|pair| pair[0].as_ref() < pair[1].as_ref())
+            );
+            let first_recipient = recipients.first().unwrap().clone();
+            let last_recipient = recipients.last().unwrap().clone();
+
+            let entries = recipients
+                .into_iter()
+                .map(|recipient| OutEntry {
+                    recipient,
+                    cumulative: 1,
+                    count: 1,
+                })
+                .collect::<Vec<_>>();
+            let send_root = outgoing_root(payer.clone(), &entries);
+            let row = activity_row(
+                payer,
+                u64::try_from(ENTRY_COUNT).unwrap(),
+                u64::MAX,
+                send_root,
+            );
+
+            let mut source_cfg = config(&context, "activity-boundaries-source");
+            source_cfg.activity.merkle.items_per_blob = NZU64!(128);
+            source_cfg.activity.log.items_per_section = NZU64!(128);
+            let source_reopen_cfg = source_cfg.clone();
+            let logs = TestLogs::open(context.child("source_open"), source_cfg)
+                .await
+                .unwrap();
+            let predecessor = *logs.head();
+            let prepared = logs
+                .prepare(
+                    &predecessor,
+                    ActivityInput::new(vec![row.clone()], entries),
+                    Vec::new(),
+                    Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            let candidate = *prepared.head();
+            let (activity_start, operations) = prepared.activity_operations();
+            assert_eq!(operations.len(), 259);
+            assert_eq!(candidate.activity.operations, 260);
+            assert_eq!(candidate.activity.operations.div_ceil(128), 3);
+            let max_record_size = u8::SIZE + VerifyingKey::SIZE + u64::SIZE * 2 + ShaDigest::SIZE;
+            assert_eq!(max_record_size, 81);
+            assert_eq!(ActivityRecord::Row(row.clone()).encode_size(), 81);
+            assert_eq!(
+                ActivityOperation::Append(ActivityRecord::Row(row.clone())).encode_size(),
+                82
+            );
+            let ActivityOperation::Append(ActivityRecord::Entry(first_entry)) = &operations[1]
+            else {
+                panic!("first original is not an Entry append");
+            };
+            assert_eq!(
+                ActivityRecord::<VerifyingKey, ShaDigest>::Entry(first_entry.clone()).encode_size(),
+                49
+            );
+            assert_eq!(operations[1].encode_size(), ENTRY_OPERATION_SIZE);
+            assert!(operations.iter().all(|operation| match operation {
+                ActivityOperation::Append(record) => {
+                    record.encode_size() <= max_record_size
+                        && operation.encode_size() <= u8::SIZE + max_record_size
+                }
+                ActivityOperation::Commit(None, _) => {
+                    operation.encode_size() <= u8::SIZE + max_record_size
+                }
+                ActivityOperation::Commit(Some(_), _) => false,
+            }));
+            drop(operations);
+            let logs = logs.apply(prepared).await.unwrap().commit().await.unwrap();
+            drop(logs);
+
+            let source = TestLogs::open(context.child("source_reopen"), source_reopen_cfg)
+                .await
+                .unwrap();
+            assert_eq!(*source.head(), candidate);
+            let (source_activity, source_payouts) = source.into_parts();
+            let source_activity = Arc::new(source_activity);
+
+            let mut destination_cfg = config(&context, "activity-boundaries-destination").activity;
+            destination_cfg.merkle.items_per_blob = NZU64!(128);
+            destination_cfg.log.items_per_section = NZU64!(128);
+            let destination_reopen_cfg = destination_cfg.clone();
+            let imported: TestActivityDb = qmdb::sync::sync(qmdb::sync::engine::Config {
+                context: context.child("destination_import"),
+                source: source_activity.clone(),
+                target: candidate.activity.target(0).unwrap(),
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(128),
+                apply_batch_size: NZU64!(128),
+                db_config: destination_cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
+            })
+            .await
+            .unwrap();
+            assert_eq!(head(&imported), candidate.activity);
+            assert_eq!(imported.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                activity_operation_at(&imported, activity_start).await,
+                ActivityOperation::Append(ActivityRecord::Row(stored)) if stored == row
+            ));
+            assert!(matches!(
+                activity_operation_at(&imported, activity_start + 1).await,
+                ActivityOperation::Append(ActivityRecord::Entry(entry))
+                    if entry.recipient == first_recipient
+                        && entry.cumulative == 1
+                        && entry.count == 1
+            ));
+            assert!(matches!(
+                activity_operation_at(&imported, candidate.activity.operations - 2).await,
+                ActivityOperation::Append(ActivityRecord::Entry(entry))
+                    if entry.recipient == last_recipient
+                        && entry.cumulative == 1
+                        && entry.count == 1
+            ));
+            drop(imported);
+
+            let imported =
+                TestActivityDb::init(context.child("destination_reopen"), destination_reopen_cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(head(&imported), candidate.activity);
+            assert_eq!(imported.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                activity_operation_at(&imported, candidate.activity.operations - 1).await,
+                ActivityOperation::Commit(None, floor) if *floor == 0
+            ));
+            imported.destroy().await.unwrap();
+            source_payouts.destroy().await.unwrap();
+            Arc::try_unwrap(source_activity)
+                .unwrap_or_else(|_| panic!("native activity source still retained"))
+                .destroy()
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn row_openings_exclude_commit_and_bind_roles() {
         deterministic::Runner::default().start(|context| async move {
             let logs = TestLogs::open(context.child("open"), config(&context, "rows"))
                 .await
                 .unwrap();
             let account = SigningKey::from_seed(7).public_key();
-            let mut guard_bytes = Vec::new();
-            account.write(&mut guard_bytes);
-            Sha256::hash(&[b"change"]).write(&mut guard_bytes);
-            let guard =
-                ChangeGuard::<VerifyingKey, ShaDigest>::decode(Bytes::from(guard_bytes)).unwrap();
 
             let mut output_bytes = Vec::new();
             Bytes::from_static(b"destination").write(&mut output_bytes);
@@ -1184,13 +1538,24 @@ mod tests {
             let output =
                 WithdrawalOutput::decode_cfg(Bytes::from(output_bytes), &(0..=64usize).into())
                     .unwrap();
-            let metadata = Bytes::from_static(b"source metadata");
+            let recipient = SigningKey::from_seed(8).public_key();
+            let entry = OutEntry {
+                recipient,
+                cumulative: 4,
+                count: 1,
+            };
+            let row = activity_row(
+                account.clone(),
+                4,
+                3,
+                outgoing_root(account, core::slice::from_ref(&entry)),
+            );
 
             let predecessor = *logs.head();
             let prepared = logs
                 .prepare(
                     &predecessor,
-                    ActivityInput::new(vec![guard.clone()], metadata.clone()),
+                    ActivityInput::new(vec![row.clone()], vec![entry.clone()]),
                     vec![output.clone()],
                     Floors {
                         activity: 0,
@@ -1201,6 +1566,12 @@ mod tests {
                 .unwrap();
             let head = *prepared.head();
             let logs = logs.apply(prepared).await.unwrap();
+            assert_eq!(
+                logs.activity_row_at(predecessor.activity.operations)
+                    .await
+                    .unwrap(),
+                row
+            );
 
             let one = NonZeroU64::new(1).unwrap();
             let (activity, operations) = logs
@@ -1209,16 +1580,20 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 operations.as_slice(),
-                [ActivityOperation::Append(ActivityRecord::Guard(value))] if value == &guard
+                [ActivityOperation::Append(ActivityRecord::Row(value))] if value == &row
             ));
             activity
-                .verify_activity::<Sha256, VerifyingKey>(&head.activity, &[guard])
+                .verify_activity::<Sha256, VerifyingKey>(&head.activity, &[row])
                 .unwrap();
-            assert!(
-                activity
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(&head.activity, &metadata, 0,)
-                    .is_err()
-            );
+            assert!(matches!(
+                logs.raw_activity_record_at(
+                    &head.activity,
+                    predecessor.activity.operations + 1,
+                )
+                .await
+                .unwrap(),
+                ActivityOperation::Append(ActivityRecord::Entry(value)) if value == entry
+            ));
 
             let (payout, operations) = logs
                 .payout_opening(&head.payouts, predecessor.payouts.operations, one)
@@ -1235,134 +1610,6 @@ mod tests {
                 logs.payout_at(head.payouts.operations - 1).await,
                 Err(Error::Row)
             ));
-            logs.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn metadata_commits_verify_at_terminal_and_historical_locations() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut logs = TestLogs::open(context.child("open"), config(&context, "metadata"))
-                .await
-                .unwrap();
-            let metadata = [
-                Bytes::from_static(b"a"),
-                Bytes::from_static(b"b"),
-                Bytes::from_static(b"c"),
-                Bytes::from_static(b"d"),
-            ];
-            let mut commits = Vec::new();
-            for value in &metadata {
-                let predecessor = *logs.head();
-                commits.push(predecessor.activity.operations);
-                let prepared = logs
-                    .prepare(
-                        &predecessor,
-                        ActivityInput::new(Vec::new(), value.clone()),
-                        Vec::new(),
-                        Floors {
-                            activity: predecessor.activity.operations - 1,
-                            payouts: predecessor.payouts.operations - 1,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                logs = logs.apply(prepared).await.unwrap();
-            }
-
-            let target = logs.head().activity;
-            assert_eq!(target.operations, 5);
-            assert_eq!(target.floor, 3);
-            let (historical_metadata, historical_floor, historical) = logs
-                .activity_metadata_at(&target, commits[0])
-                .await
-                .unwrap();
-            assert_eq!(historical_metadata, metadata[0]);
-            assert_eq!(historical_floor, 0);
-            historical
-                .verify_activity_metadata::<Sha256, VerifyingKey>(
-                    &target,
-                    &metadata[0],
-                    historical_floor,
-                )
-                .unwrap();
-            assert!(
-                historical
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &target,
-                        &metadata[1],
-                        historical_floor,
-                    )
-                    .is_err()
-            );
-            assert!(
-                historical
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &target,
-                        &metadata[0],
-                        historical_floor + 1,
-                    )
-                    .is_err()
-            );
-
-            let (terminal_metadata, terminal_floor, terminal) = logs
-                .activity_metadata_at(&target, commits[3])
-                .await
-                .unwrap();
-            assert_eq!(terminal_metadata, metadata[3]);
-            assert_eq!(terminal_floor, target.floor);
-            terminal
-                .verify_activity_metadata::<Sha256, VerifyingKey>(
-                    &target,
-                    &metadata[3],
-                    terminal_floor,
-                )
-                .unwrap();
-
-            let mut wrong_root = target;
-            wrong_root.root = Sha256::hash(&[b"wrong"]);
-            assert!(
-                historical
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &wrong_root,
-                        &metadata[0],
-                        historical_floor,
-                    )
-                    .is_err()
-            );
-            let mut wrong_count = target;
-            wrong_count.operations -= 1;
-            assert!(
-                historical
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &wrong_count,
-                        &metadata[0],
-                        historical_floor,
-                    )
-                    .is_err()
-            );
-            let mut wrong_floor = target;
-            wrong_floor.floor = wrong_floor.operations - 1;
-            assert!(
-                historical
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &wrong_floor,
-                        &metadata[0],
-                        historical_floor,
-                    )
-                    .is_err()
-            );
-            let mut wrong_location = historical.clone();
-            wrong_location.start += 1;
-            assert!(
-                wrong_location
-                    .verify_activity_metadata::<Sha256, VerifyingKey>(
-                        &target,
-                        &metadata[0],
-                        historical_floor,
-                    )
-                    .is_err()
-            );
             logs.destroy().await.unwrap();
         });
     }
@@ -1413,25 +1660,135 @@ mod tests {
     }
 
     #[test]
-    fn preparation_rejects_oversized_metadata_before_mutation() {
+    fn preparation_enforces_row_delimited_entry_grammar_before_mutation() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "metadata-bound"))
+            let logs = TestLogs::open(context.child("open"), config(&context, "original-order"))
                 .await
                 .unwrap();
             let predecessor = *logs.head();
-            let result = logs
-                .prepare(
+            let mut accounts = [
+                SigningKey::from_seed(1).public_key(),
+                SigningKey::from_seed(2).public_key(),
+                SigningKey::from_seed(3).public_key(),
+            ];
+            accounts.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+            let mut recipients = [
+                SigningKey::from_seed(4).public_key(),
+                SigningKey::from_seed(5).public_key(),
+            ];
+            recipients.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+            let entry = |recipient: VerifyingKey, cumulative, count| OutEntry {
+                recipient,
+                cumulative,
+                count,
+            };
+            let arbitrary_root = || commitment::VectorRoot {
+                digest: Sha256::hash(&[b"outgoing"]),
+            };
+            let empty_root = commitment::empty_root::<Sha256>(commitment::VectorKind::OutEntry);
+            let positive =
+                |debit, seq| activity_row(accounts[0].clone(), debit, seq, arbitrary_root());
+            let zero = |seq, root| activity_row(accounts[0].clone(), 0, seq, root);
+            let invalid = vec![
+                (vec![positive(1, 0)], Vec::new()),
+                (
+                    vec![zero(0, empty_root)],
+                    vec![entry(recipients[0].clone(), 1, 1)],
+                ),
+                (
+                    vec![positive(1, 0)],
+                    vec![entry(recipients[0].clone(), 2, 1)],
+                ),
+                (
+                    vec![positive(2, 0)],
+                    vec![entry(recipients[0].clone(), 1, 1)],
+                ),
+                (
+                    vec![positive(u64::MAX, 0)],
+                    vec![
+                        entry(recipients[0].clone(), u64::MAX - 1, 1),
+                        entry(recipients[1].clone(), 2, 1),
+                    ],
+                ),
+                (
+                    vec![positive(2, 0)],
+                    vec![
+                        entry(recipients[1].clone(), 1, 1),
+                        entry(recipients[0].clone(), 1, 1),
+                    ],
+                ),
+                (vec![zero(1, empty_root)], Vec::new()),
+                (vec![zero(0, arbitrary_root())], Vec::new()),
+            ];
+
+            for (rows, entries) in invalid {
+                let result = logs
+                    .prepare(
+                        &predecessor,
+                        ActivityInput::new(rows, entries),
+                        Vec::new(),
+                        Floors {
+                            activity: 0,
+                            payouts: 0,
+                        },
+                    )
+                    .await;
+                assert!(matches!(result, Err(Error::Original)));
+                assert_eq!(*logs.head(), predecessor);
+            }
+
+            let reversed = vec![
+                activity_row(accounts[1].clone(), 0, 0, empty_root),
+                activity_row(accounts[0].clone(), 0, 0, empty_root),
+            ];
+            assert!(matches!(
+                logs.prepare(
                     &predecessor,
-                    ActivityInput::new(Vec::new(), Bytes::from(vec![0; 4097])),
+                    ActivityInput::new(reversed, Vec::new()),
                     Vec::new(),
                     Floors {
                         activity: 0,
                         payouts: 0,
                     },
                 )
-                .await;
-            assert!(matches!(result, Err(Error::Bounds)));
-            assert_eq!(*logs.head(), predecessor);
+                .await,
+                Err(Error::Order)
+            ));
+
+            let entries = vec![
+                entry(recipients[0].clone(), 1, 1),
+                entry(recipients[1].clone(), 2, 1),
+                entry(recipients[0].clone(), 3, 2),
+            ];
+            let rows = vec![
+                activity_row(
+                    accounts[0].clone(),
+                    3,
+                    0,
+                    outgoing_root(accounts[0].clone(), &entries[..2]),
+                ),
+                activity_row(accounts[1].clone(), 0, 0, empty_root),
+                activity_row(
+                    accounts[2].clone(),
+                    3,
+                    7,
+                    outgoing_root(accounts[2].clone(), &entries[2..]),
+                ),
+            ];
+            let prepared = logs
+                .prepare(
+                    &predecessor,
+                    ActivityInput::new(rows, entries),
+                    Vec::new(),
+                    Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(prepared.head().activity.operations, 8);
+            drop(prepared);
             logs.destroy().await.unwrap();
         });
     }
@@ -1454,7 +1811,7 @@ mod tests {
             let result = logs
                 .prepare(
                     &predecessor,
-                    ActivityInput::new(Vec::new(), Bytes::new()),
+                    ActivityInput::new(Vec::new(), Vec::new()),
                     vec![output],
                     Floors {
                         activity: 0,
@@ -1479,7 +1836,7 @@ mod tests {
             let prepared = logs
                 .prepare(
                     &predecessor,
-                    ActivityInput::new(Vec::new(), Bytes::new()),
+                    ActivityInput::new(Vec::new(), Vec::new()),
                     vec![zero, positive],
                     Floors {
                         activity: 0,
@@ -1508,20 +1865,21 @@ mod tests {
     }
 
     #[test]
-    fn row_lookups_reject_metadata_bearing_commits() {
+    fn row_lookups_reject_value_bearing_commits() {
         deterministic::Runner::default().start(|context| async move {
-            let logs = TestLogs::open(context.child("open"), config(&context, "metadata"))
+            let logs = TestLogs::open(context.child("open"), config(&context, "commit-value"))
                 .await
                 .unwrap();
             let account = SigningKey::from_seed(9).public_key();
-            let mut guard_bytes = Vec::new();
-            account.write(&mut guard_bytes);
-            Sha256::hash(&[b"metadata-change"]).write(&mut guard_bytes);
-            let guard =
-                ChangeGuard::<VerifyingKey, ShaDigest>::decode(Bytes::from(guard_bytes)).unwrap();
+            let row = activity_row(
+                account,
+                0,
+                0,
+                commitment::empty_root::<Sha256>(commitment::VectorKind::OutEntry),
+            );
 
             let mut output_bytes = Vec::new();
-            Bytes::from_static(b"metadata-destination").write(&mut output_bytes);
+            Bytes::from_static(b"commit-destination").write(&mut output_bytes);
             11u64.write(&mut output_bytes);
             let output =
                 WithdrawalOutput::decode_cfg(Bytes::from(output_bytes), &(0..=64usize).into())
@@ -1530,11 +1888,7 @@ mod tests {
             let (activity, payouts) = logs.into_parts();
             let activity_batch = activity
                 .new_batch()
-                .merkleize(
-                    &activity,
-                    Some(ActivityRecord::Guard(guard)),
-                    Location::new(0),
-                )
+                .merkleize(&activity, Some(ActivityRecord::Row(row)), Location::new(0))
                 .await;
             let (activity, _) = activity.apply_batch(activity_batch).await.unwrap();
             let activity_batch = activity
@@ -1554,9 +1908,8 @@ mod tests {
                 .await;
             let (payouts, _) = payouts.apply_batch(payout_batch).await.unwrap();
 
-            let logs =
-                TestLogs::from_parts(activity, payouts, (0..=4096).into(), (0..=4096).into());
-            assert!(matches!(logs.activity_guard_at(1).await, Err(Error::Row)));
+            let logs = TestLogs::from_parts(activity, payouts, (0..=4096).into());
+            assert!(matches!(logs.activity_row_at(1).await, Err(Error::Row)));
             assert!(matches!(logs.payout_at(1).await, Err(Error::Row)));
             logs.destroy().await.unwrap();
         });

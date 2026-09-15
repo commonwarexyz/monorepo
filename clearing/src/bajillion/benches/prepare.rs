@@ -10,6 +10,17 @@ use std::{
 
 fn bench_prepare(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
+        let (context, deposits, withdrawals, terminals, expected) = super::fixtures::runner()
+            .start(|runtime| async move {
+                let fixture = active_close_fixture(runtime, profile).await;
+                (
+                    fixture.context,
+                    fixture.deposits,
+                    fixture.withdrawals,
+                    fixture.terminals,
+                    fixture.prepared.encoded().clone(),
+                )
+            });
         c.bench_function(
             &format!(
                 "{}/{} E={}",
@@ -19,25 +30,22 @@ fn bench_prepare(c: &mut Criterion) {
             ),
             |b| {
                 b.iter_custom(|iterations| {
-                    super::fixtures::runner().start(|runtime| async move {
-                        let fixture = active_close_fixture(runtime, profile).await;
-                        let mut elapsed = Duration::ZERO;
-                        for _ in 0..iterations {
-                            let terminals = fixture.terminals.clone();
-                            let start = Instant::now();
-                            let prepared = prepare_dealing::<Sha256, _, _>(
-                                fixture.context.epoch_context(),
-                                &fixture.deposits,
-                                &fixture.withdrawals,
-                                terminals,
-                            )
-                            .expect("prepare dealing");
-                            elapsed += start.elapsed();
-                            assert_eq!(prepared.encoded(), fixture.prepared.encoded());
-                            black_box(prepared);
-                        }
-                        elapsed
-                    })
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let terminals = terminals.clone();
+                        let start = Instant::now();
+                        let prepared = prepare_dealing::<Sha256, _, _>(
+                            context.epoch_context(),
+                            &deposits,
+                            &withdrawals,
+                            terminals,
+                        )
+                        .expect("prepare dealing");
+                        elapsed += start.elapsed();
+                        assert_eq!(prepared.encoded(), &expected);
+                        black_box(prepared);
+                    }
+                    elapsed
                 });
             },
         );

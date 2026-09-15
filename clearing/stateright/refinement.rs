@@ -1,12 +1,12 @@
 use super::*;
 use crate::bajillion::{
     admission::seal,
-    challenge::{AckWitness, EntryWitness, account_lookup, higher_entry_lookup},
+    challenge::{AckWitness, EntryWitness},
     model::settlement as spec,
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::account_key,
     state::SettlementOutput,
-    transition::{ChallengeIndex, OperatorVariant, Terminal, prepare_close_with_strategy},
+    transition::{OperatorVariant, Terminal, prepare_close_with_strategy},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_cryptography::bls12381::primitives::ops::sign_message;
@@ -270,6 +270,7 @@ impl RefinementDriver {
         // Current roots bind the canonical batch history, including balance-neutral epochs.
         // Replaying each predecessor before its updates makes counterfactual fixtures agree
         // with actual admitted candidates without trusting a map-derived root.
+        let liability: u64 = balances.into_iter().sum();
         self.canonical_cache(predecessor).synthetic_next(
             ACCOUNTS
                 .into_iter()
@@ -281,6 +282,7 @@ impl RefinementDriver {
                     )
                 })
                 .collect(),
+            liability,
         )
     }
 
@@ -559,9 +561,15 @@ impl RefinementDriver {
                 sealed.close().withdrawal_total,
                 prepared.close().withdrawal_total
             );
+            let successor_liability = crate::bajillion::transition::checked_successor_liability(
+                registered.context.predecessor_liability(),
+                registered.deposits.total(),
+                sealed.close().withdrawal_total,
+            )
+            .unwrap();
             let accepted = Accepted::prepared(&sealed);
             let (_, close) = Box::pin(sealed.apply::<_, Sha256>(state)).await.unwrap();
-            let successor = cache.extended(accepted);
+            let successor = cache.extended(accepted, successor_liability);
             (vote, close, successor)
         });
         let certificate = self.fixture.signer.assemble_exact([vote]).unwrap();
@@ -603,13 +611,16 @@ impl RefinementDriver {
     fn challenge(&mut self, proven: crate::bajillion::model::challenge::ProvenChallenge) -> bool {
         let target = proven.target();
         let material = self.material(target);
-        let index = ChallengeIndex::new::<Sha256>(&material.context, &material.close).unwrap();
         let challenge = match proven.kind() {
             spec::ChallengeKind::HigherDebit => {
                 // A retained countersigned endpoint for a payer the close never advanced.
                 let payer = &self.fixture.accounts[1];
                 let ack = fork_ack(&material.context, &self.fixture.operator, payer, 1, 2);
-                let lookup = account_lookup::<Sha256, _, _>(&index, &payer.public_key()).unwrap();
+                let lookup = material.successor.account_lookup(
+                    &material.context,
+                    &material.close.roots,
+                    &payer.public_key(),
+                );
                 Challenge::HigherAckDebit {
                     ack: Box::new(AckWitness::from_ack(&ack)),
                     payer: Box::new(lookup),
@@ -646,18 +657,12 @@ impl RefinementDriver {
                 else {
                     panic!("the retained vector credits the recipient");
                 };
-                let position = material
-                    .close
-                    .rows
-                    .binary_search_by(|row| row.account.cmp(&payer.public_key()))
-                    .expect("the refined virtual-credit close carries the sender row");
-                let sender = higher_entry_lookup::<Sha256, _, _>(
-                    &index,
+                let sender = material.successor.higher_entry_lookup(
+                    &material.context,
+                    &material.close.roots,
                     &payer.public_key(),
-                    Some(&material.close.out_vectors[position]),
                     &recipient,
-                )
-                .unwrap();
+                );
                 Challenge::HigherAckEntry {
                     entry: Box::new(EntryWitness {
                         ack: AckWitness::from_ack(&ack),
@@ -724,13 +729,14 @@ impl RefinementDriver {
 
     fn claim_withdrawal(&mut self, source: spec::Batch, position: u8, refresh: bool) -> bool {
         let source = self.material(source);
-        let Some(request) = source.withdrawals.requests().first() else {
+        if source.withdrawals.requests().is_empty() {
             return false;
-        };
-        let mut claim = source
-            .close
-            .withdrawal_claim::<Sha256>(request.account())
-            .unwrap();
+        }
+        let mut claim = source.successor.payout_claim(
+            &source.close.roots.withdrawal_outputs,
+            source.context.predecessor_logs().payouts.operations,
+        );
+        assert_eq!(claim.output(), &source.close.withdrawal_outputs()[0]);
         let finalized = self.fixture.chain.finalized_payouts();
         if refresh && claim.position() < finalized.operations {
             claim = self.finalized_cache().refresh(&claim, &finalized);

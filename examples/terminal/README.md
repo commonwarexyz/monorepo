@@ -161,7 +161,7 @@ closes must finalize first.
 
 | Process | Owned state |
 | --- | --- |
-| Wallet | SQLite payment intents, receipts, exact withdrawal requests and source outputs, and replaceable current proofs. |
+| Wallet | SQLite payment intents, receipts, one exact active withdrawal authorization, its retirement deadline, and an optional verified payout claim. |
 | Operator | SQLite live payments and certified close jobs, with an optional balance QMDB and two native log replicas for proofs. |
 | Validator | Certified chain state; per deployment, a Current Ordered MMB balance QMDB, cumulative activity and payout MMRs, and a local compact keyless QMDB for checkpoints and saved votes. |
 
@@ -180,8 +180,8 @@ its amount atomically. A zero-valued output still consumes its position.
 Wallets authenticate the current payout head and range coverage under the same
 certified block, then refresh the output proof through the operator or configured
 holders. Proposers refresh proofs again when finalization advances before execution.
-Signed requests, source outputs, and retry identity survive proof replacement and
-restart. After a deployment fault, finalized payouts remain claimable without a
+The exact active authorization remains independent of the cached payout claim.
+The claim retains its native position across proof replacement and restart. After a deployment fault, finalized payouts remain claimable without a
 new vote, alongside deposit refunds and recovery from the frozen balance root.
 
 Validators prune native history behind the current challenge and recovery boundaries.
@@ -192,13 +192,11 @@ databases and a replica with the required history available for old claims.
 The outstanding-range ledger shrinks as payouts are consumed. Each finalization
 retires the previous finalized admission and anchor. The chain keeps the latest
 finalized descriptor and the live pending suffix; the fixed admission and challenge
-windows bound that suffix. Older source metadata is authenticated by its native
-Commit opening under the current finalized activity head. That metadata binds the
-exact signed requests to their global payout positions. Proof servers walk retained
-native operations and reconstruct requested proofs from their original sources.
-Unavailable historical operations make reads retryable rather than proving absence.
-Native transaction and deposit idempotency records remain; this change does not
-bound every settlement-chain record.
+windows bound that suffix. Proof servers walk retained native rows and payment
+entries for activity proofs, and native payout outputs for claims under the current
+finalized payout head. Public Commit operations carry no metadata. Unavailable
+operations make reads retryable rather than proving absence. Native transaction
+and deposit idempotency records are retained for replay protection.
 
 Run `terminal-operator --node-dir <operator-directory> --no-proof-replica` to
 accept payments, propose closes, and accept certificates without constructing any

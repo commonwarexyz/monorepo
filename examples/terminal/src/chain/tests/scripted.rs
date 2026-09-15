@@ -259,30 +259,6 @@ pub(super) async fn run(
         closes == vec![0, epochs[2], epochs[3]],
         "close requests must identify each completed work arc: {closes:?}"
     );
-    let (_, tip) = chain.payout_checkpoint(&context).await?;
-    for ((epoch, withdrawal), (amount, account)) in withdrawals
-        .iter()
-        .zip([(3, Agent::new(0)?.account()), (2, eve_account.clone())])
-    {
-        let source = chain.source(&context, *epoch, tip).await?;
-        let position = source
-            .withdrawal_index(&account)
-            .ok_or_else(|| anyhow::anyhow!("script request has no finalized source"))?;
-        let source_claim = chain
-            .payout_proof(&context, tip.heads.payouts, position)
-            .await?;
-        let issued = source.verify_withdrawal::<Sha256>(withdrawal, &source_claim)?;
-        let status = chain.payout_status(&context, position).await?;
-        let proof = chain.payout_proof(&context, status.head, position).await?;
-        let output = proof.verify::<Sha256>(&status.head)?;
-        anyhow::ensure!(
-            status.interval.is_none()
-                && output == issued
-                && output.amount() == amount
-                && output.destination() == &account.encode(),
-            "incorrect withdrawal consumption"
-        );
-    }
     let status = chain.status(&context).await?;
     anyhow::ensure!(
         status.last_finalized == Some(epochs[3])

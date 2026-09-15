@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, HigherEntryLookup},
-    logs::{Heads, LogHead},
+    logs::LogHead,
     qmdb::{StateLookup, StateOpening, StateRoot, account_key},
     transition::{ActivityRange, WithdrawalClaim, WithdrawalOutput},
 };
@@ -44,13 +44,9 @@ pub(super) fn verify_payout_proof(
         claim.output() == expected,
         "payout proof has another output"
     );
-    let output = claim
+    claim
         .verify::<Sha256>(head)
         .context("verify current payout proof")?;
-    ensure!(
-        output == *expected,
-        "payout proof authenticates another output"
-    );
     Ok(claim)
 }
 
@@ -249,40 +245,15 @@ impl Holders {
                 .resolve::<Sha256>(root, &account_key(account)?)
                 .context("verify Current balance lookup")?;
             match lookup {
-                StateLookup::Present(value) => {
-                    let opening = StateOpening {
-                        account: account.clone(),
-                        balance: value.balance,
-                        proof: value.proof,
-                    };
-                    check_opening(&opening, root, account)?;
-                    Ok(Some(opening))
-                }
+                StateLookup::Present(value) => Ok(Some(StateOpening {
+                    account: account.clone(),
+                    balance: value.balance,
+                    proof: value.proof,
+                })),
                 StateLookup::Absent(_) => Ok(None),
             }
         };
         self.fetch(ctx, chain, account, lookup, accept).await
-    }
-
-    /// Authenticates the account's terminal epoch activity, including explicit absence.
-    #[cfg(test)]
-    pub(super) async fn committed_account<E: Env>(
-        &self,
-        ctx: &E,
-        chain: &Client,
-        epoch: u64,
-        admitted: &AdmittedRootsResponse,
-        account: &Key,
-    ) -> Result<AccountLookup<Key, Digest>> {
-        self.committed_account_at(
-            ctx,
-            chain,
-            epoch,
-            admitted.roots.logs(),
-            &admitted.activity_range(),
-            account,
-        )
-        .await
     }
 
     /// Authenticates terminal activity under an independently authenticated native range.
@@ -291,13 +262,12 @@ impl Holders {
         ctx: &E,
         chain: &Client,
         epoch: u64,
-        heads: Heads<Digest>,
         range: &ActivityRange<Digest>,
         account: &Key,
     ) -> Result<AccountLookup<Key, Digest>> {
         let request = EvidenceLookup::Account {
             epoch,
-            heads,
+            range: *range,
             account: account.clone(),
         };
         let accept = |evidence: Evidence| {
@@ -312,30 +282,6 @@ impl Holders {
         self.fetch(ctx, chain, account, request, accept).await
     }
 
-    /// The payer's committed terminal entry for `recipient` in the admitted
-    /// close, verified against the admitted change root.
-    #[cfg(test)]
-    pub(super) async fn committed_entry<E: Env>(
-        &self,
-        ctx: &E,
-        chain: &Client,
-        epoch: u64,
-        admitted: &AdmittedRootsResponse,
-        payer: &Key,
-        recipient: &Key,
-    ) -> Result<HigherEntryLookup<Key, Digest>> {
-        self.committed_entry_at(
-            ctx,
-            chain,
-            epoch,
-            admitted.roots.logs(),
-            &admitted.activity_range(),
-            payer,
-            recipient,
-        )
-        .await
-    }
-
     /// Authenticates a terminal entry under an independently authenticated native range.
     #[allow(
         clippy::too_many_arguments,
@@ -346,14 +292,13 @@ impl Holders {
         ctx: &E,
         chain: &Client,
         epoch: u64,
-        heads: Heads<Digest>,
         range: &ActivityRange<Digest>,
         payer: &Key,
         recipient: &Key,
     ) -> Result<HigherEntryLookup<Key, Digest>> {
         let lookup = EvidenceLookup::CommittedEntry {
             epoch,
-            heads,
+            range: *range,
             payer: payer.clone(),
             recipient: recipient.clone(),
         };

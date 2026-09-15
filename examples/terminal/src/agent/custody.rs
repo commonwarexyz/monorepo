@@ -1,11 +1,6 @@
 //! Custody flows: deposits, withdrawal authorization and escalation, and recovery.
 
-use super::{
-    Agent,
-    evidence::unusable_head,
-    store::{PendingWithdrawalClaim, WithdrawalSource},
-    wallet::settlement_status,
-};
+use super::{Agent, evidence::unusable_head, wallet::settlement_status};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -22,7 +17,6 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
-    custody::Source,
     qmdb::StateRoot,
 };
 use commonware_codec::Encode as _;
@@ -45,19 +39,8 @@ pub(crate) enum WithdrawalOutcome {
     },
 }
 
-#[derive(Clone, Copy)]
-enum WithdrawalExpiryBarrier {
-    Healthy,
-    Settling,
-}
-
 pub(super) fn withdrawal_deadline(now: u64, timing: &crate::protocol::Timing) -> Result<u64> {
     Ok(now.saturating_add(settlement_config(timing)?.maximum_withdrawal_notice.get()))
-}
-
-/// Inclusive lower and exclusive upper registration heights for one saved request.
-pub(super) const fn withdrawal_notice_bounds(deadline: u64, maximum_notice: u64) -> [u64; 2] {
-    [deadline.saturating_sub(maximum_notice), deadline]
 }
 
 #[cfg(test)]
@@ -71,7 +54,7 @@ pub(super) fn initial_deposit_nonce() -> u64 {
 }
 
 impl Agent {
-    /// The saved authorization remains the retry authority until its claim completes.
+    /// The active authorization remains the retry authority until its certified deadline.
     pub(crate) fn pending_withdrawal_action(&self) -> Option<WithdrawalAction> {
         self.pending_withdrawal
             .as_ref()
@@ -198,27 +181,8 @@ impl Agent {
                          validators opened none",
                     )?;
                 let Some(opening) = opening else {
-                    // State absence says nothing about a finalized withdrawal reserve. Only
-                    // complete finalized history can retire an uncached authorization.
-                    if self
-                        .pending_withdrawal_claim
-                        .as_ref()
-                        .is_some_and(|claim| claim.source.is_none())
-                        && let Some(request) = self.pending_withdrawal.clone()
-                        && self
-                            .carried_withdrawal_epoch(
-                                ctx,
-                                chain,
-                                &request,
-                                WithdrawalExpiryBarrier::Settling,
-                            )
-                            .await?
-                            .is_none()
-                    {
-                        self.store.discard_unused_withdrawal(&request)?;
-                        self.pending_withdrawal = None;
-                        self.pending_withdrawal_claim = None;
-                    }
+                    // State absence does not prove whether an active authorization was carried.
+                    // Preserve it for exact retry or a later healthy deadline observation.
                     return Ok(None);
                 };
                 opening
@@ -438,45 +402,15 @@ impl Agent {
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
-        ensure!(
-            self.pending_withdrawal_claim.is_none() || self.pending_withdrawal.is_some(),
-            "the pending withdrawal claim must complete before a new withdrawal"
-        );
+        self.observe_withdrawal_expiry(ctx, chain).await?;
         if let Some(request) = self.pending_withdrawal.clone() {
             ensure!(
                 request.body().action() == &action,
                 "the pending withdrawal claim must complete before a different withdrawal"
             );
-            let status = chain.recent_status(ctx).await?;
-            ensure!(
-                status.deployment == self.deployment,
-                "unexpected withdrawal deployment"
-            );
-            if status.height >= request.body().deadline() {
-                ensure!(
-                    !status.hard_faulted,
-                    "expired withdrawal requires hard-fault recovery"
-                );
-                // A healthy post-deadline state excludes every outstanding obligation.
-                // Finalized boundaries distinguish completed carriage from a request never used.
-                if let Some(epoch) = self
-                    .carried_withdrawal_epoch(
-                        ctx,
-                        chain,
-                        &request,
-                        WithdrawalExpiryBarrier::Healthy,
-                    )
-                    .await?
-                {
-                    return Ok(WithdrawalOutcome::Applied { epoch, request });
-                }
-                self.store.discard_unused_withdrawal(&request)?;
-                self.pending_withdrawal = None;
-                self.pending_withdrawal_claim = None;
-            }
         }
-        let request = match &self.pending_withdrawal {
-            Some(pending) => pending.clone(),
+        match &self.pending_withdrawal {
+            Some(_) => {}
             None => {
                 // The signed deadline is an absolute block height, so it is
                 // chosen from a recency-bounded status read: a certified tip
@@ -494,6 +428,7 @@ impl Agent {
                     !status.hard_faulted,
                     "settlement is permanently hard-faulted"
                 );
+                self.check_withdrawal_floor(&status)?;
 
                 // Retain a head opening before signing. It is not sent anywhere: if the
                 // deployment later hard-faults while frozen at this root, recovery needs it.
@@ -546,14 +481,22 @@ impl Agent {
                     .stage_withdrawal(&request)
                     .context("persist signed withdrawal")?;
                 self.cache = None;
-                self.pending_withdrawal_claim = Some(PendingWithdrawalClaim {
-                    source: None,
-                    refreshed: None,
-                });
-                self.pending_withdrawal = Some(request.clone());
-                request
+                self.pending_withdrawal = Some(request);
             }
-        };
+        }
+        self.retry_withdrawal(ctx, operator).await
+    }
+
+    /// Retries only the exact active authorization and never stages a replacement.
+    pub(crate) async fn retry_withdrawal<E: Env>(
+        &mut self,
+        ctx: &E,
+        operator: SocketAddr,
+    ) -> Result<WithdrawalOutcome> {
+        let request = self
+            .pending_withdrawal
+            .clone()
+            .context("no withdrawal authorization is active")?;
         let digest = operator_rpc::withdrawal_digest(&request);
         let applied = match operator_rpc::apply_withdrawal(
             ctx,
@@ -583,129 +526,6 @@ impl Agent {
             epoch: applied.epoch,
             request,
         })
-    }
-
-    /// Searches the fixed-tip notice window before declaring an expired request uncarried.
-    async fn carried_withdrawal_epoch<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        request: &SignedWithdrawal<Key, Digest>,
-        barrier: WithdrawalExpiryBarrier,
-    ) -> Result<Option<u64>> {
-        Ok(self
-            .withdrawal_in_notice_window(ctx, chain, request, Some(barrier))
-            .await?
-            .map(|(epoch, _)| epoch))
-    }
-
-    /// Finds one exact immutable source using the same bounded native-custody search.
-    pub(super) async fn withdrawal_source_in_notice_window<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        request: &SignedWithdrawal<Key, Digest>,
-    ) -> Result<Option<WithdrawalSource>> {
-        let Some((_, source)) = self
-            .withdrawal_in_notice_window(ctx, chain, request, None)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let position = source
-            .withdrawal_index(request.account())
-            .context("exact withdrawal source has no native payout position")?;
-        let claim = chain
-            .payout_proof(ctx, source.heads().payouts, position)
-            .await
-            .context("open finalized withdrawal output")?;
-        let output = source
-            .verify_withdrawal::<Sha256>(request, &claim)
-            .context("bind finalized withdrawal output to its exact request")?;
-        Ok(Some(WithdrawalSource { position, output }))
-    }
-
-    /// Authenticates every source Commit at one fixed paired-head checkpoint.
-    ///
-    /// A closure barrier is required only for negative expiry cleanup. Missing native custody is
-    /// an error in both modes, so it can never retire the exact saved authorization.
-    #[commonware_macros::boxed]
-    async fn withdrawal_in_notice_window<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        request: &SignedWithdrawal<Key, Digest>,
-        barrier: Option<WithdrawalExpiryBarrier>,
-    ) -> Result<Option<(u64, Source<Key, Digest>)>> {
-        let deadline = request.body().deadline();
-        let (status, tip) = chain
-            .payout_checkpoint(ctx)
-            .await
-            .context("read withdrawal custody checkpoint")?;
-        ensure!(
-            status.deployment == self.deployment,
-            "withdrawal custody checkpoint has another deployment"
-        );
-        ensure!(
-            status.last_finalized == tip.finalized,
-            "withdrawal custody status and payout tip disagree"
-        );
-        match barrier {
-            Some(WithdrawalExpiryBarrier::Healthy) => ensure!(
-                !status.hard_faulted && status.height >= deadline,
-                "healthy withdrawal expiry has no post-deadline barrier"
-            ),
-            Some(WithdrawalExpiryBarrier::Settling) => ensure!(
-                status.hard_faulted,
-                "withdrawal expiry has no terminal-settlement barrier"
-            ),
-            None => {}
-        }
-
-        let Some(last) = tip.finalized else {
-            return Ok(None);
-        };
-        let epoch_end = last.checked_add(1).context("finalized epoch overflow")?;
-        let timing = chain.genesis().timing();
-        let maximum_notice = settlement_config(&timing)?.maximum_withdrawal_notice.get();
-        let window = withdrawal_notice_bounds(deadline, maximum_notice);
-
-        // Canonical finalized registration heights are strictly increasing, so two binary
-        // searches locate the exact height window while every comparison stays under `tip`.
-        let mut bounds = [0_u64; 2];
-        for (bound, height) in bounds.iter_mut().zip(window) {
-            let mut low = 0_u64;
-            let mut high = epoch_end;
-            while low < high {
-                let middle = low + (high - low) / 2;
-                let source = chain
-                    .source(ctx, middle, tip)
-                    .await
-                    .context("fetch withdrawal-window source")?;
-                let registered = source
-                    .context()
-                    .admission_deadline()
-                    .checked_sub(timing.admission_offset)
-                    .context("source admission deadline precedes its configured offset")?;
-                if registered < height {
-                    low = middle + 1;
-                } else {
-                    high = middle;
-                }
-            }
-            *bound = low;
-        }
-
-        for epoch in bounds[0]..bounds[1] {
-            let source = chain
-                .source(ctx, epoch, tip)
-                .await
-                .context("fetch withdrawal-window source")?;
-            if source.withdrawals().request_for(request.account()) == Some(request) {
-                return Ok(Some((epoch, source)));
-            }
-        }
-        Ok(None)
     }
 
     /// Escalates a signed withdrawal the operator would not carry directly to the chain.

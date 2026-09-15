@@ -6,7 +6,8 @@ use crate::{
     protocol::{
         Acceptance, AcceptedEntry, Account, AccountIdentity, Ack, DepositEvent, Entry, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES, MAX_ENTRIES,
-        MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult, encoded_artifacts,
+        MAX_RESULT_BYTES, MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult,
+        encoded_artifacts,
     },
     store::CommitUnknown,
 };
@@ -35,7 +36,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
 /// one [`Receipt`] from a fixed-size acknowledgment and a bounded entry opening, so this
 /// page stays well under the RPC body limit.
@@ -43,11 +44,8 @@ pub(crate) const MAX_INCOMING_PAGE: usize = 128;
 /// Bounds one stored entry opening: a position and a BMT path over at most
 /// [`MAX_ACCEPTED_PAYMENTS`] vector leaves.
 const MAX_OPENING_BYTES: usize = 1_024;
-const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 const MAX_WITHDRAWAL_BYTES: usize = 512;
-const MAX_RESULT_BYTES: usize =
-    crate::rpc::MAX_BODY_SIZE + MAX_WITHDRAWALS * (MAX_CLAIM_BYTES + MAX_WITHDRAWAL_BYTES) + 4096;
 const EFFECTIVE_ACCOUNT_SQL: &str = "SELECT state.epoch, identity.name,
             length(state.public_key), state.public_key,
             state.predecessor_balance, state.current_balance
@@ -1959,50 +1957,6 @@ impl Store {
         result: &SettlementResult,
         genesis_root: StateRoot<Digest>,
     ) -> Result<()> {
-        ensure!(
-            result.withdrawal_claims.len() == result.withdrawals.requests().len(),
-            "finalized withdrawals do not have exact claim evidence"
-        );
-        let mut withdrawal_total = 0_u64;
-        for (position, (request, claim)) in result
-            .withdrawals
-            .requests()
-            .iter()
-            .zip(&result.withdrawal_claims)
-            .enumerate()
-        {
-            let position = result
-                .context
-                .predecessor_logs()
-                .payouts
-                .operations
-                .checked_add(u64::try_from(position)?)
-                .context("withdrawal position overflow")?;
-            ensure!(
-                claim.position() == position,
-                "withdrawal claim has the wrong request position"
-            );
-            let output = claim
-                .verify::<Sha256>(&result.roots.withdrawal_outputs)
-                .context("verify withdrawal claim")?;
-            ensure!(
-                output.destination() == request.body().destination(),
-                "withdrawal claim has the wrong request destination"
-            );
-            if let WithdrawalAction::Amount(amount) = request.body().action() {
-                ensure!(
-                    output.amount() == 0 || output.amount() == amount.get(),
-                    "withdrawal claim has the wrong requested amount"
-                );
-            }
-            withdrawal_total = withdrawal_total
-                .checked_add(output.amount())
-                .context("withdrawal claim total overflow")?;
-        }
-        ensure!(
-            withdrawal_total == result.withdrawal_total,
-            "withdrawal claims do not exhaust the finalized reserve"
-        );
         mutate(&mut self.connection, "close finalization", |transaction| {
             let epoch = sql_u64(result.context.payment().epoch(), "epoch")?;
             let status: Option<String> = transaction
@@ -2068,7 +2022,7 @@ impl Store {
                     header,
                     roots,
                     certificate,
-                    sql_usize(result.rows, "row count")?,
+                    sql_u64(result.roots.row_count, "row count")?,
                     sql_usize(result.dealing_bytes, "dealing bytes")?,
                     sql_u64(result.withdrawal_total, "withdrawal total")?,
                     sql_u128(result.prepare_micros, "prepare duration")?,

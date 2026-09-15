@@ -3,10 +3,14 @@
 use super::{tests::Fixture, *};
 use commonware_clearing::bajillion::{logs, qmdb, replica::Replica};
 use commonware_runtime::{
-    Clock as _, Listener as _, Runner as _, Supervisor as _, deterministic,
+    Clock as _, Listener as _, Runner as _, Storage as _, Strategizer as _, Supervisor as _,
+    deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync},
 };
+use commonware_utils::NZUsize;
 use std::{future::Future, net::SocketAddr};
+
+mod retirement;
 
 async fn drive<T>(gates: &[PendingSyncs; 3], future: impl Future<Output = T>) -> T {
     drive_pending_syncs(
@@ -27,7 +31,7 @@ async fn controlled(
     let config = replica_config(
         &format!("{prefix}-replica-{}-0", deployment.digest()),
         context,
-        Sequential,
+        context.strategy(NZUsize!(1)),
     );
     let state = qmdb::State::open(
         DelayedSyncContext {
@@ -38,7 +42,6 @@ async fn controlled(
     )
     .await
     .unwrap();
-    let activity_cfg = config.logs.activity.log.codec_config;
     let payout_cfg = config.logs.payouts.log.codec_config;
     let activity = logs::ActivityDb::init(
         DelayedSyncContext {
@@ -58,10 +61,7 @@ async fn controlled(
     )
     .await
     .unwrap();
-    Replica::from_parts(
-        state,
-        logs::Logs::from_parts(activity, payouts, activity_cfg, payout_cfg),
-    )
+    Replica::from_parts(state, logs::Logs::from_parts(activity, payouts, payout_cfg))
 }
 pub(super) async fn reopen(
     context: &deterministic::Context,
@@ -78,7 +78,7 @@ pub(super) async fn reopen(
         replica_config(
             &format!("{prefix}-replica-{}-{generation}", deployment.digest()),
             context,
-            Sequential,
+            context.strategy(NZUsize!(1)),
         ),
     )
     .await
@@ -86,7 +86,6 @@ pub(super) async fn reopen(
     let (replica, checkpoints) = recover(replica, deployment, checkpoints).await.unwrap();
     Lane {
         deployment: deployment.clone(),
-        fetching: false,
         pending: None,
         state: Some(replica),
         checkpoint: Some(checkpoints),
@@ -112,7 +111,6 @@ async fn controlled_lane(
     .unwrap();
     Lane {
         deployment: deployment.clone(),
-        fetching: false,
         pending: None,
         state: Some(state),
         checkpoint: Some(checkpoints),
@@ -166,7 +164,7 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
                 replica_config(
                     &format!("ack_barrier-replica-{}-0", deployment.digest()),
                     &context,
-                    Sequential,
+                    context.strategy(NZUsize!(1)),
                 ),
             )
             .await
@@ -268,17 +266,17 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
                 let (state, logs) = replica.into_parts();
                 let (activity, payouts) = logs.into_parts();
                 if durable & 1 != 0 {
-                    drop(state.sync().await.unwrap());
+                    drop(state.commit().await.unwrap());
                 } else {
                     drop(state);
                 }
                 if durable & 2 != 0 {
-                    drop(activity.sync().await.unwrap());
+                    drop(activity.commit().await.unwrap());
                 } else {
                     drop(activity);
                 }
                 if durable & 4 != 0 {
-                    drop(payouts.sync().await.unwrap());
+                    drop(payouts.commit().await.unwrap());
                 } else {
                     drop(payouts);
                 }
@@ -291,7 +289,7 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
                     replica_config(
                         &format!("ahead-replica-{}-0", deployment.digest()),
                         &context,
-                        Sequential,
+                        context.strategy(NZUsize!(1)),
                     ),
                 )
                 .await
@@ -463,7 +461,7 @@ fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
                 replica_config(
                     &format!("rewind_barrier-replica-{}-0", deployment.digest()),
                     &context,
-                    Sequential,
+                    context.strategy(NZUsize!(1)),
                 ),
             )
             .await
@@ -557,7 +555,7 @@ fn native_source_serves_admitted_parent_while_every_donor_has_an_unadmitted_chil
             context.child("import"),
             authority,
             deployment.clone(),
-            replica_config("parent-import", &context, Sequential),
+            replica_config("parent-import", &context, context.strategy(NZUsize!(1))),
             fresh.lane.manifest().canonical.checkpoint.clone(),
             1,
             false,
@@ -670,12 +668,29 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
         (deployment, expected)
     });
     deterministic::Runner::from(crash).start(|context| async move {
+        let old_config = replica_config(
+            &format!("loser-replica-{}-0", deployment.digest()),
+            &context,
+            context.strategy(NZUsize!(1)),
+        );
+        let old_partitions = [
+            format!("{}-blobs", old_config.state.journal_config.partition),
+            format!("{}_data", old_config.logs.activity.log.partition),
+            format!("{}_data", old_config.logs.payouts.log.partition),
+        ];
         let lane = reopen(&context, "loser", &deployment).await;
         assert_eq!(lane.state.as_ref().unwrap().head(), expected);
         assert_eq!(lane.next(), 1);
         assert!(lane.manifest().decision.is_none());
         assert!(lane.manifest().candidate.is_none());
+        assert!(lane.manifest().garbage.is_none());
         assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
+        for partition in old_partitions {
+            assert!(matches!(
+                context.scan(&partition).await,
+                Err(commonware_runtime::Error::PartitionMissing(_))
+            ));
+        }
     });
 }
 
@@ -683,7 +698,19 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
 fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_holder_claims() {
     for cut_before_prune in [false, true] {
         let (
-            (deployment, old_index, old_output, old_request, frozen, latest, retained, authority),
+            (
+                deployment,
+                old_index,
+                old_output,
+                protected_index,
+                protected_output,
+                protected_account,
+                protected_range,
+                frozen,
+                latest,
+                retained,
+                authority,
+            ),
             crash,
         ) = deterministic::Runner::default().start_and_recover(move |context| async move {
             let mut hot = Fixture::new(&context, "hot", 70).await;
@@ -691,6 +718,7 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
             let mut heads = Vec::new();
             let mut ballots = Vec::new();
             let mut old = None;
+            let mut protected = None;
             for epoch in 0..132 {
                 let floors = if epoch >= 4 {
                     let head: commonware_clearing::bajillion::replica::ReplicaHead<Digest> =
@@ -708,13 +736,30 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                 let (ballot, requests, prepared) = hot.prepare(0, 70, floors).await;
                 let (other, _, replica) = holder.prepare(0, 70, floors).await;
                 assert_eq!(ballot.header, other.header);
-                if epoch == 0 {
-                    let index = ballot.context.predecessor_logs().payouts.operations;
-                    let output = prepared.close().withdrawal_evidence().0[0].clone();
-                    old = Some((index, output, requests.requests()[0].clone()));
-                }
+                let output_index = ballot.context.predecessor_logs().payouts.operations;
                 hot.candidate(ballot.clone(), prepared).await;
                 hot.promote().await;
+                if epoch == 0 || epoch == 128 {
+                    let output = hot
+                        .lane
+                        .state
+                        .as_ref()
+                        .unwrap()
+                        .logs()
+                        .payout_at(output_index)
+                        .await
+                        .unwrap();
+                    if epoch == 0 {
+                        old = Some((output_index, output));
+                    } else {
+                        protected = Some((
+                            output_index,
+                            output,
+                            requests.requests()[0].account().clone(),
+                            ballot.roots.activity_range(&ballot.context).unwrap(),
+                        ));
+                    }
+                }
                 holder.candidate(other, replica).await;
                 holder.promote().await;
                 heads.push(hot.lane.state.as_ref().unwrap().head());
@@ -740,16 +785,33 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                     .collect(),
             };
             let logs = hot.lane.state.as_ref().unwrap().logs();
-            let source = commonware_clearing::bajillion::custody::Epoch::load(logs, 128)
+            let protected_head = ballots[128].roots.withdrawal_outputs;
+            let first_output = ballots[128].context.predecessor_logs().payouts.operations;
+            assert!(
+                sync::payout_predecessor(logs.payout_source(), &protected_head, first_output)
+                    .await
+                    .is_err()
+            );
+            let mut tampered = protected_head;
+            tampered.root = Digest::from([0u8; 32]);
+            assert!(
+                sync::payout_predecessor(
+                    logs.payout_source(),
+                    &tampered,
+                    hot.lane.manifest().canonical.checkpoint.retained.payouts,
+                )
                 .await
-                .unwrap()
-                .source_proof(logs, &frozen.logs)
-                .await
-                .unwrap()
-                .verify::<Sha256, Key>(&frozen.logs)
-                .unwrap();
+                .is_err()
+            );
+            let payout_commit = sync::payout_predecessor(
+                logs.payout_source(),
+                &protected_head,
+                hot.lane.manifest().canonical.checkpoint.retained.payouts,
+            )
+            .await
+            .unwrap();
             let retained = authority
-                .retention(&hot.lane.manifest().canonical.checkpoint, &source)
+                .retention(&hot.lane.manifest().canonical.checkpoint, payout_commit)
                 .unwrap();
             assert_eq!(
                 retained.activity,
@@ -757,7 +819,7 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
             );
             assert_eq!(
                 retained.payouts,
-                ballots[128].context.predecessor_logs().payouts.operations
+                ballots[128].context.predecessor_logs().payouts.operations - 1
             );
             assert!(retained.payouts < latest.logs.payouts.floor);
             assert!(retained.state > 4096 && retained.activity > 128 && retained.payouts > 128);
@@ -778,20 +840,25 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                     .await
                     .unwrap();
             }
-            let (old_index, old_output, old_request) = old.unwrap();
+            let (old_index, old_output) = old.unwrap();
+            let (protected_index, protected_output, protected_account, protected_range) =
+                protected.unwrap();
             (
                 hot.lane.deployment.clone(),
                 old_index,
                 old_output,
-                old_request,
+                protected_index,
+                protected_output,
+                protected_account,
+                protected_range,
                 frozen,
                 latest,
                 retained,
                 authority,
             )
         });
-        let ((deployment, frozen, latest, account), crash) = deterministic::Runner::from(crash)
-            .start_and_recover(|context| async move {
+        let ((frozen, latest, protected_index, protected_output, account, protected_range), crash) =
+            deterministic::Runner::from(crash).start_and_recover(|context| async move {
                 let hot = reopen(&context, "hot", &deployment).await;
                 let holder = reopen(&context, "holder", &deployment).await;
                 let replica = hot.state.as_ref().unwrap();
@@ -814,41 +881,23 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                 .unwrap();
                 assert_eq!(claim.output(), &old_output);
                 claim.verify::<Sha256>(&frozen.logs.payouts).unwrap();
-                let retained_source = commonware_clearing::bajillion::custody::Epoch::load(
-                    holder.state.as_ref().unwrap().logs(),
-                    0,
+                let claim = payout(replica, &frozen.logs.payouts, protected_index)
+                    .await
+                    .unwrap();
+                assert_eq!(claim.output(), &protected_output);
+                claim.verify::<Sha256>(&frozen.logs.payouts).unwrap();
+                let protected = commonware_clearing::bajillion::custody::Epoch::at(
+                    replica.logs(),
+                    128,
+                    protected_range,
                 )
                 .await
                 .unwrap();
-                let source_proof = retained_source
-                    .source_proof(holder.state.as_ref().unwrap().logs(), &frozen.logs)
-                    .await
-                    .unwrap();
-                let source = source_proof.verify::<Sha256, Key>(&frozen.logs).unwrap();
-                source
-                    .verify_withdrawal::<Sha256>(&old_request, &claim)
-                    .unwrap();
-                assert!(
-                    commonware_clearing::bajillion::custody::Epoch::load(replica.logs(), 0)
-                        .await
-                        .is_err()
-                );
-                let protected =
-                    commonware_clearing::bajillion::custody::Epoch::load(replica.logs(), 128)
-                        .await
-                        .unwrap();
-                let protected_proof = protected
-                    .source_proof(replica.logs(), &frozen.logs)
-                    .await
-                    .unwrap();
-                let protected_source = protected_proof.verify::<Sha256, Key>(&frozen.logs).unwrap();
-                let account = protected_source.withdrawals().requests()[0]
-                    .account()
-                    .clone();
-                retained_current_proofs(replica, frozen.state, latest.state, &account).await;
+                retained_current_proofs(replica, frozen.state, latest.state, &protected_account)
+                    .await;
                 assert!(matches!(
                     protected
-                        .account_lookup(replica.logs(), &frozen.logs, &account)
+                        .account_lookup(replica.logs(), &protected_account)
                         .await
                         .unwrap(),
                     commonware_clearing::bajillion::challenge::AccountLookup::Present(_)
@@ -860,7 +909,7 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                     context.child("pruned_import"),
                     authority,
                     deployment.clone(),
-                    replica_config("fresh-after-prune", &context, Sequential),
+                    replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
                     fresh.lane.manifest().canonical.checkpoint.clone(),
                     1,
                     false,
@@ -874,23 +923,42 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                 let imported = imported.replica;
                 assert_eq!(imported.head(), latest);
                 assert!(imported.logs().retained_starts().activity > 0);
-                retained_current_proofs(&imported, frozen.state, latest.state, &account).await;
-                let source =
-                    commonware_clearing::bajillion::custody::Epoch::load(imported.logs(), 128)
-                        .await
-                        .unwrap();
-                source
-                    .withdrawal_claim(imported.logs(), &frozen.logs, &account)
+                retained_current_proofs(&imported, frozen.state, latest.state, &protected_account)
+                    .await;
+                let claim = payout(&imported, &frozen.logs.payouts, protected_index)
                     .await
                     .unwrap();
+                assert_eq!(claim.output(), &protected_output);
+                claim.verify::<Sha256>(&frozen.logs.payouts).unwrap();
+                let protected = commonware_clearing::bajillion::custody::Epoch::at(
+                    imported.logs(),
+                    128,
+                    protected_range,
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    protected
+                        .account_lookup(imported.logs(), &protected_account)
+                        .await
+                        .unwrap(),
+                    commonware_clearing::bajillion::challenge::AccountLookup::Present(_)
+                ));
 
                 server.abort();
-                (deployment, frozen, latest, account)
+                (
+                    frozen,
+                    latest,
+                    protected_index,
+                    protected_output,
+                    protected_account,
+                    protected_range,
+                )
             });
         deterministic::Runner::from(crash).start(|context| async move {
             let imported = NativeReplica::open(
                 context.child("imported_reopen"),
-                replica_config("fresh-after-prune", &context, Sequential),
+                replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
             )
             .await
             .unwrap();
@@ -898,14 +966,25 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
             assert_ne!(frozen, latest);
             assert!(imported.state().retained_start() > 0);
             retained_current_proofs(&imported, frozen.state, latest.state, &account).await;
-            let source = commonware_clearing::bajillion::custody::Epoch::load(imported.logs(), 128)
+            let claim = payout(&imported, &frozen.logs.payouts, protected_index)
                 .await
                 .unwrap();
-            source
-                .withdrawal_claim(imported.logs(), &frozen.logs, &account)
-                .await
-                .unwrap();
-            assert_eq!(source.context().deployment(), deployment.digest());
+            assert_eq!(claim.output(), &protected_output);
+            claim.verify::<Sha256>(&frozen.logs.payouts).unwrap();
+            let protected = commonware_clearing::bajillion::custody::Epoch::at(
+                imported.logs(),
+                128,
+                protected_range,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                protected
+                    .account_lookup(imported.logs(), &account)
+                    .await
+                    .unwrap(),
+                commonware_clearing::bajillion::challenge::AccountLookup::Present(_)
+            ));
         });
     }
 }

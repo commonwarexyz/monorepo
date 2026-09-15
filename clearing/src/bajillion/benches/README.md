@@ -35,7 +35,9 @@ fewer than `B` recipients.
 | `2`: zero-net balances | 512 | 512 | 512 | 1 |
 
 `COMMONWARE_CLEARING_PROFILE` accepts an index or an exact label such as
-`N=1024 A=1024 B=512 K=1`. With `RUSTFLAGS='--cfg full_bench'`, 14 profiles cover:
+`N=1000000 A=1000000 B=512 K=1`; exact labels are parsed at runtime and do not
+require custom `RUSTFLAGS`. The optional `full_bench` build cfg only adds 14
+convenience indices covering:
 
 - Dense activity: 1,024, 10,000, 100,000, or 1,000,000 live accounts, all sending.
 - Sparse activity: 1,000,000 live accounts with 1,024, 10,000, or 100,000 senders.
@@ -92,13 +94,14 @@ that view can scale with the retained operation window.
 Storage runs in memory under the deterministic runtime. The `bench` feature uses
 real Rayon workers, with a 1 ns executor cycle; elapsed time includes scheduling.
 The timers exclude journal commit/sync, application evidence persistence, SQL,
-transport, and transaction framing. Use a quiet external host and matching
-compiler, runtime, and workload settings for comparative measurements.
+transport, and transaction framing. Use a dedicated, fully described host and
+matching compiler, runtime, and workload settings for comparative measurements;
+do not describe an ordinary host with background services as isolated or quiet.
 
-For size comparisons, a Header plus certificate is 101 bytes in this
-100-validator SHA-256 fixture. The encoded RootBundle is 176 bytes; its withdrawal total adds 8 bytes.
-These 184 descriptor bytes are separate from the operator dealing, before chain
-transaction framing. The original `sizes` group constructs native `W=1` and `W=N` claim fixtures.
+For size comparisons, the `sizes` selector prints the actual Header, certificate,
+RootBundle, withdrawal-total, and combined descriptor encodings. These values are
+separate from the operator dealing and any chain transaction framing. The selector
+also constructs native `W=1` and `W=N` claim fixtures.
 The `native-transition` group executes signed Close withdrawals through actual
 balance deletion and payout append, including a full `W=N` exit. Complete Current openings
 and known-key lookups use separate encodings.
@@ -113,14 +116,15 @@ phase. Use the current harness above to measure later revisions.
 
 ## Independent native history and epoch sweeps
 
-Six explicit selectors avoid the unrelated calculator-parity corpus:
+Publication selectors avoid both the unrelated calculator-parity corpus and
+duplicate Criterion IDs across orthogonal activity/payout slices:
 
 | Selector | Output or timed work |
 | --- | --- |
 | `native-sizes` | Encoded activity lookups and payout artifacts; verifies every fixture. |
 | `native-proofs` | Criterion verification latency on those decoded, already constructed artifacts. |
-| `native-source-sizes` | Actual signed-close metadata and full SourceProof sizes, current and refreshed. |
-| `native-source-proofs` | Source verification and source plus account/claim verification. |
+| `native-activity-sizes` / `native-activity-proofs` | Activity half of the combined selectors. |
+| `native-payout-sizes` / `native-payout-proofs` | Payout half of the combined selectors. |
 | `native-transition-check` | Encoded dealing/descriptor sizes and native operation counts; checks two transitions with rewind between them. |
 | `native-transition` | Criterion native prepare, decode, validate+prepare, apply, memory commit, and complete encoded-dealing pipeline phases. |
 
@@ -131,7 +135,7 @@ Dimensions are comma-separated integer lists, independent of the original
 | --- | --- | --- |
 | `COMMONWARE_CLEARING_HISTORY` | `0,1024,65536` | Prior activity rows or prior payout outputs, excluding Commit markers. |
 | `COMMONWARE_CLEARING_ROWS` | `0,1,2,128,1024` | Current activity rows for proof sweeps; self-payment rows for transition sweeps. |
-| `COMMONWARE_CLEARING_ACCOUNTS` | `1024` | One live account count, and the full-exit output count. |
+| `COMMONWARE_CLEARING_ACCOUNTS` | `1024` | Account fixture size and maximum standalone payout-output count. |
 | `COMMONWARE_CLEARING_PAYOUTS` | `0,1,N/2,N` | Current payout output count, at most N. |
 
 Proof workloads sweep H x R and H x W separately. Activity cases include
@@ -152,21 +156,63 @@ from the same key prefix, so `payment_rows=R` and `activity_rows=max(R,W)` are
 reported separately and checked against the certified range. W=N removes every
 balance. H excludes the historical Commit markers; the output includes the
 history epoch count and all three predecessor/successor operation counts.
-`context_bytes`, `source_metadata_bytes`, verified `source_proof_bytes`, and `payout_commit_bytes` report their actual encodings separately
-from operator dealing bytes and the 184-byte roots/withdrawal-total descriptor.
+Context bytes, bounded activity-Append counts/bytes, payout-output counts/bytes,
+and metadata-free Commit sizes report their actual encodings separately from
+operator dealing bytes and the roots/withdrawal-total descriptor.
 
 `native-transition` restores a fixed predecessor through native rewind between
 iterations; fixture construction, signing, cloning native prepare inputs, and
 rewind are outside timers. `native_prepare_state_logs` starts with already
-derived mutations, exact activity Guards and metadata, and payout outputs. `validate_prepare_state_logs` starts with a
+derived mutations, exact activity Row/Entry records,
+and payout outputs. `validate_prepare_state_logs` starts with a
 decoded dealing and includes cryptographic validation and all native batches.
 `decode_validate_apply` starts with complete encoded dealing bytes and ends after
 all three stores apply. Its `_commit_memory` counterpart also calls native
-Replica::commit. Individual phase groups overlap the complete pipeline and must
+`Replica::commit`. Individual phase groups overlap the complete pipeline and must
 not be summed as independently sampled data. No vote, chain admission, SQL,
 network transfer, application evidence persistence, or SSD I/O is measured.
 Commit uses the deterministic runtime's in-memory storage, including native
 journal processing; it is not a durable SSD measurement.
+
+## Publication runner
+
+`publication.py plan` prints the full million-account matrix without building.
+Execution requires explicit output and real-filesystem storage directories plus
+`--execute`. Material scale is supplied through `--accounts`, repeatable exact
+profiles, activity/payout cases, and durable-ACK cases; the runner records the
+validated plan before executing anything. Durable ACK cases use one adaptive
+Rayon pool shared by sealing and the three public stores, with `--workers 16` by
+default, while `--runtime-workers 2` controls Tokio I/O workers. Concurrent
+polling does not imply that every small CPU job is offloaded.
+
+The durable ACK metadata reports the production storage geometry used by the
+example. Activity and payout logs hold 128 operations per section and 1,024
+Merkle nodes per blob; Current holds 4,096 operations and 4,096 Merkle nodes per
+blob. Native pages are 1,024 bytes, each of the three native cache instances has
+16 pages, and log/private I/O buffers are 2,048 bytes. The publication runner
+requires these emitted values and does not replace them with benchmark-only
+storage tuning.
+
+Million-account activity and withdrawal limits are explicit fixture settings;
+raw ACK metadata retains the exact emitted `context_limits`, and this local
+storage benchmark does not exercise the deployed terminal transport or body-size
+admission limits.
+
+The runner snapshots source and Cargo.lock, rejects source drift, builds one
+optimized binary per benchmark target, runs selectors serially, and requires an
+exact Criterion/ACK inventory. It enforces configurable RSS, free-disk, and case
+timeout gates. The first ACK readiness run is traced separately for actual
+`fsync`/`fdatasync` calls; tracing is never enabled for timed samples. Every ACK
+sample starts from an isolated, durably copied four-owner predecessor and stops
+only after all three authoritative public-store commits and the following private
+control-store checkpoint and Ballot barrier. Full native sync of derived recovery
+metadata is outside the timed ACK contract; native reopen reconstructs that
+metadata and must recover the exact public heads.
+
+Check aggregation also requires the canonical encoded size rows to agree across
+all signed profiles: 184-byte `RootBundle`, 192-byte roots-plus-withdrawal-total
+descriptor, 101-byte Header-plus-100-validator-certificate, and 293-byte combined
+package. The published byte table is still derived from the emitted codec output.
 
 Small correctness sweep (no timing statistics):
 
@@ -185,31 +231,22 @@ Criterion CLI options can override this. Preserve raw Criterion estimates and
 host/build metadata with publication results. Sizes are exact encoder outputs;
 no large-workload runtime capacity claim follows from size arithmetic alone.
 
-## Native source custody
+The September 15 million-account archive is an explicitly completed subset, not
+the runner's full planned matrix. Its Criterion `mean_ns` values are equal-weight
+arithmetic means of the per-sample `times_i / iters_i` ratios; durable-ACK means
+are arithmetic means of three raw timer values. The archive lists every omitted
+case and retains the exact measured source and binary identities. A setup-only
+preparation-fixture hoist landed after the measured binary and is disclosed
+separately rather than being attributed to that binary.
 
-`native-source-sizes` uses the signed transition workload to encode and verify
-`SourceProof` separately from compact account lookups and payout claims. It
-measures the current source and the same source refreshed after another empty
-close advances both native floors. `source_metadata_bytes` is the original
-context, terminal sequences, outgoing leaves, and signed withdrawals inside the
-activity Commit. `source_proof_bytes` includes that complete byte frame, its
-length prefix, and the native Commit opening. `source_plus_claim_bytes` is the
-sum of that frame and the payout claim; it excludes transaction envelopes.
-The original operator dealing does not contain this source-proof frame.
+## Native proof scope
 
-`native-source-proofs` times source authentication alone and source authentication
-plus the account lookup and optional payout claim. Sources and proofs are built
-outside the timers; each timed source verification decodes and authenticates the
-full metadata. Both selectors use the same N/H/payment-row/W dimensions as
-`native-transition`, including its history of one or more signed epochs.
-
-The raw `native-proofs` and `native-sizes` fixtures use empty opaque activity
-metadata to isolate compact Guard and payout proof encodings. Their H>0 history
-is one prior native batch. They do not represent complete source proofs. All
-reported operation counts include the bootstrap and epoch Commit markers.
-Activity records are variable Guard or Metadata records; payout Appends contain
-WithdrawalOutput directly and payout Commits carry no metadata.
-
-The executable source workload currently limits each metadata frame to 16 MiB
-through the native journal codec configuration. Larger proposed profiles must
-respect that bound; the small smoke matrix is not evidence of their capacity.
+The raw `native-proofs` and `native-sizes` fixtures isolate compact activity-row
+and payout MMR proof encodings. Their H>0 history is one prior native batch.
+Payout cases cover current, historical,
+refreshed-after-append, and refreshed-after-floor openings directly against the
+selected MMR head; there is no separate source-proof wrapper. All reported
+operation counts include the bootstrap and epoch Commit markers. Activity Appends
+contain Row or Entry records; payout Appends contain WithdrawalOutput
+directly. All three public stores use metadata-free Commits. The largest activity
+record is bounded independently of N, A, R, H, or W.

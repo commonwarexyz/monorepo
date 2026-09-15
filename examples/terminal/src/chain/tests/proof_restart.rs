@@ -1,10 +1,10 @@
 use super::{fixture::ReadFixture, *};
 use commonware_clearing::bajillion::{
     admission::bls12381,
-    transition::{Header, RootBundle, prepare_close_with_strategy},
+    transition::{Header, RootBundle, WithdrawalClaim, prepare_close_with_strategy},
 };
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
-use commonware_runtime::reschedule;
+use commonware_runtime::{Strategizer as _, reschedule};
 use std::net::SocketAddr;
 
 const DA_PARTITION: &str = "proof-restart-da";
@@ -166,9 +166,11 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         da::tests::network(&network_context, &operator, &validator, true, true).await;
     let clearing =
         bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap()).unwrap();
+    let strategy = context.strategy(NZUsize!(1));
     let (sealer, mailbox) = da::Sealer::new(
         context.child("initial_sealer"),
         da::Config {
+            strategy: strategy.clone(),
             retain_history: true,
             scheme: clearing.clone(),
             registry: fixture.registry.clone(),
@@ -191,16 +193,20 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         },
     );
 
+    let genesis_balances = crate::protocol::genesis_balances(&configured).unwrap();
+    let mut liability = genesis_balances.iter().fold(0u64, |total, (_, balance)| {
+        total.checked_add(balance.get()).unwrap()
+    });
     let mut balances = Box::pin(
         crate::protocol::init_replica(
             context.child("operator_balances"),
             "proof-restart-operator",
-            Sequential,
-            crate::protocol::genesis_balances(&configured).unwrap(),
+            strategy.clone(),
+            genesis_balances,
         )
         .await
         .unwrap()
-        .commit(),
+        .sync(),
     )
     .await
     .unwrap();
@@ -279,7 +285,6 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         ])
         .unwrap();
         let deposits_root = deposits.root::<Sha256>().unwrap();
-        let liability = balances.state().liability();
         submit_one(
             &mut fixture,
             &context,
@@ -349,7 +354,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
             &deposits,
             &withdrawals,
             terminals,
-            &Sequential,
+            &strategy,
         )
         .await
         .unwrap();
@@ -362,15 +367,8 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
             header: prepared.close().header,
             roots: prepared.close().roots,
         };
-        if epoch == 0 {
-            let amount = prepared
-                .withdrawal_claim::<Sha256>(&withdrawal_account)
-                .unwrap()
-                .output()
-                .amount();
-            assert_eq!(amount, 7);
-            withdrawal_amount = Some(amount);
-        }
+        let withdrawal_position =
+            (epoch == 0).then_some(close_context.predecessor_logs().payouts.operations);
         assert!(
             !da_sender
                 .send(
@@ -413,6 +411,10 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
             )
             .await,
         );
+        liability = liability
+            .checked_add(deposit_amount)
+            .and_then(|total| total.checked_sub(ballot.withdrawal_total))
+            .unwrap();
         let queried = if epoch == 0 { &payer } else { &recipient };
         let balance = state_lookup(
             &context,
@@ -426,10 +428,32 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
             successor_balance = Some(balance.get());
         }
         let (_, candidate) = prepared.into_parts();
-        balances = Box::pin(balances.apply(candidate).await.unwrap().commit())
+        balances = Box::pin(balances.apply(candidate).await.unwrap().sync())
             .await
             .unwrap();
         assert_eq!(balances.state().root(), expected.roots.successor);
+        if let Some(position) = withdrawal_position {
+            let (opening, operations) = balances
+                .logs()
+                .payout_opening(
+                    &expected.roots.withdrawal_outputs,
+                    position,
+                    NonZeroU64::MIN,
+                )
+                .await
+                .unwrap();
+            let [commonware_storage::qmdb::keyless::Operation::Append(output)] =
+                operations.as_slice()
+            else {
+                panic!("withdrawal output is not the native payout append")
+            };
+            let output = WithdrawalClaim::new(output.clone(), opening)
+                .verify::<Sha256>(&expected.roots.withdrawal_outputs)
+                .unwrap();
+            assert_eq!(output.destination().as_ref(), withdrawal_account.as_ref());
+            assert_eq!(output.amount(), 7);
+            withdrawal_amount = Some(output.amount());
+        }
         if epoch == 0 {
             recipient_balance_before_live = Some(
                 balances
@@ -525,6 +549,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
     let (sealer, mailbox) = da::Sealer::new(
         context.child("restarted_sealer"),
         da::Config {
+            strategy: context.strategy(NZUsize!(1)),
             retain_history: true,
             scheme: clearing,
             registry: fixture.registry.clone(),
@@ -596,28 +621,8 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         panic!("finalized paired log heads")
     };
     assert_eq!(tip.finalized, Some(1));
-    assert_eq!(tip.heads, expected.live.roots.logs());
-    let EvidenceResponse::Served(Evidence::Source(proof)) = evidence(
-        &context,
-        EvidenceLookup::Source {
-            epoch: 0,
-            heads: tip.heads,
-        },
-    )
-    .await
-    else {
-        panic!("retired original source not served from native metadata")
-    };
-    let source = proof.verify::<Sha256, Key>(&tip.heads).unwrap();
-    assert_eq!(source.context().deployment(), &deployment());
-    assert_eq!(source.context().payment().epoch(), 0);
-    assert_eq!(
-        source.activity_range().start,
-        expected.historical.range.start
-    );
-    assert_eq!(source.activity_range().end, expected.historical.range.end);
-    assert_eq!(source.activity_range().head, tip.heads.activity);
-    let range = source.activity_range();
+    assert_eq!(tip.payouts, expected.live.roots.withdrawal_outputs);
+    let range = expected.historical.range;
     for (account, debit, present) in [
         (expected.payer.clone(), 3, true),
         (expected.inactive.clone(), 0, false),
@@ -626,7 +631,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
             &context,
             EvidenceLookup::Account {
                 epoch: 0,
-                heads: tip.heads,
+                range,
                 account: account.clone(),
             },
         )
@@ -634,7 +639,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         else {
             panic!("historical account proof")
         };
-        let (found_debit, changed) = lookup.resolve::<Sha256>(range, &account).unwrap();
+        let (found_debit, changed) = lookup.resolve::<Sha256>(&range, &account).unwrap();
         assert_eq!(found_debit, debit);
         assert_eq!(changed.is_some(), present);
     }
@@ -646,7 +651,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
             &context,
             EvidenceLookup::CommittedEntry {
                 epoch: 0,
-                heads: tip.heads,
+                range,
                 payer: expected.payer.clone(),
                 recipient: recipient.clone(),
             },
@@ -657,24 +662,16 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         };
         assert_eq!(
             lookup
-                .resolve::<Sha256>(range, &expected.payer, &recipient)
+                .resolve::<Sha256>(&range, &expected.payer, &recipient)
                 .unwrap(),
             amount
         );
     }
-    assert_eq!(
-        source
-            .withdrawals()
-            .request_for(expected.withdrawal.account()),
-        Some(&expected.withdrawal)
-    );
-    let index = source
-        .withdrawal_index(expected.withdrawal.account())
-        .unwrap();
+    let index = expected.historical.roots.withdrawal_outputs.operations - 2;
     let EvidenceResponse::Served(Evidence::Payout(claim)) = evidence(
         &context,
         EvidenceLookup::Payout {
-            head: tip.heads.payouts,
+            head: tip.payouts,
             index,
         },
     )
@@ -682,12 +679,11 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
     else {
         panic!("native payout proof")
     };
+    let output = claim.verify::<Sha256>(&tip.payouts).unwrap();
+    assert_eq!(output.amount(), expected.withdrawal_amount);
     assert_eq!(
-        source
-            .verify_withdrawal::<Sha256>(&expected.withdrawal, &claim)
-            .unwrap()
-            .amount(),
-        expected.withdrawal_amount
+        output.destination(),
+        expected.withdrawal.body().destination()
     );
     assert_eq!(
         state_lookup(
@@ -705,23 +701,4 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         !commonware_runtime::Metrics::encode(&context).contains("restarted_sealer_archive"),
         "proof serving must use native stores"
     );
-    let EvidenceResponse::Served(Evidence::Close {
-        header,
-        roots,
-        context: close,
-        ..
-    }) = evidence(
-        &context,
-        EvidenceLookup::CloseEvidence {
-            epoch: 1,
-            batch_id: expected.live.header.batch_id::<Sha256>(),
-        },
-    )
-    .await
-    else {
-        panic!("bounded current finalized close evidence")
-    };
-    assert_eq!(header, expected.live.header);
-    assert_eq!(roots, expected.live.roots);
-    assert_eq!(close.deployment(), &deployment());
 }

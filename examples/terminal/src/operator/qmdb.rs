@@ -1,7 +1,7 @@
 //! Serial ownership of the operator's optional native proof replica.
 
 use super::{
-    actor::{CommittedEntry, registration_for, replica_terminals},
+    actor::{registration_for, replica_terminals},
     store::EpochReader,
 };
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use commonware_clearing::bajillion::{
+    challenge::HigherEntryLookup,
     custody::Epoch,
     logs::{Heads, LogHead},
     qmdb::{Mutations, StateOpening, StateRoot, account_key},
@@ -66,7 +67,7 @@ pub(super) fn classify(error: anyhow::Error) -> anyhow::Error {
 enum Request {
     Root(u64, Reply<StateRoot<Digest>>),
     Opening(u64, Key, Reply<StateOpening<Key, Digest>>),
-    CommittedEntry(u64, Key, Key, Reply<CommittedEntry>),
+    CommittedEntry(u64, Key, Key, Reply<HigherEntryLookup<Key, Digest>>),
     PayoutProof(LogHead<Digest>, u64, Reply<WithdrawalClaim<Digest>>),
     CatchUp(Option<Reply<()>>),
     #[cfg(test)]
@@ -189,7 +190,7 @@ impl Handle {
         epoch: u64,
         payer: &Key,
         recipient: &Key,
-    ) -> Result<CommittedEntry> {
+    ) -> Result<HigherEntryLookup<Key, Digest>> {
         self.request(|reply| {
             Request::CommittedEntry(epoch, payer.clone(), recipient.clone(), reply)
         })
@@ -381,7 +382,7 @@ async fn committed_entry<E: Context + Spawner>(
     epoch: u64,
     payer: &Key,
     recipient: &Key,
-) -> Result<CommittedEntry> {
+) -> Result<HigherEntryLookup<Key, Digest>> {
     let result = source
         .stored_result(epoch)?
         .context("certified close is not retained")?;
@@ -393,20 +394,12 @@ async fn committed_entry<E: Context + Spawner>(
         ),
         "retained certified descriptor does not match its header"
     );
-    let retained = Epoch::load(replica.logs(), epoch).await?;
-    ensure!(
-        retained.context() == &result.context,
-        "native source context differs from the retained certified result"
-    );
-    let heads = result.roots.logs();
+    let range = result.roots.activity_range(&result.context)?;
+    let retained = Epoch::at(replica.logs(), epoch, range).await?;
     let lookup = retained
-        .higher_entry_lookup(replica.logs(), &heads, payer, recipient)
+        .higher_entry_lookup(replica.logs(), payer, recipient)
         .await?;
-    Ok(CommittedEntry {
-        batch_id: result.header.batch_id::<Sha256>(),
-        change_root: result.roots.change,
-        lookup,
-    })
+    Ok(lookup)
 }
 
 async fn payout_claim<E: Context + Spawner>(
@@ -437,13 +430,11 @@ fn initialize_checkpoints(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS proof_replica_checkpoints (
              sequence INTEGER PRIMARY KEY CHECK(sequence >= 0),
-             subject BLOB NOT NULL CHECK(length(subject) = {}),
              head BLOB NOT NULL CHECK(length(head) = {}),
              complete INTEGER NOT NULL CHECK(complete IN (0, 1))
          );
          CREATE UNIQUE INDEX IF NOT EXISTS proof_replica_checkpoint_head
              ON proof_replica_checkpoints(head);",
-        Digest::SIZE,
         ReplicaHead::<Digest>::SIZE,
     ))?;
     Ok(())
@@ -521,10 +512,6 @@ async fn recover<E: Context + Spawner>(
     // otherwise the bootstrap owner deterministically reapplies the configured allocations.
     let accepted = checkpoint_optional(connection, 0)?;
     if accepted == Some(replica.head()) {
-        ensure!(
-            checkpoint_subject(connection, 0)? == replica.state().root().digest,
-            "retained genesis checkpoint identity mismatch"
-        );
         let replica = replica.commit().await?;
         complete(connection, 0, &replica.head())?;
         #[cfg(test)]
@@ -556,7 +543,7 @@ async fn recover<E: Context + Spawner>(
         if let Some(accepted) = accepted {
             ensure!(accepted == head, "retained genesis checkpoint mismatch");
         }
-        record(connection, 0, &candidate.root().digest, &head)?;
+        record(connection, 0, &head)?;
         #[cfg(test)]
         recovery.stop(RecoveryCut::Checkpoint)?;
         #[cfg(test)]
@@ -642,7 +629,6 @@ async fn catch_up<E: Context + Spawner>(
         replica = apply_checkpoint(
             connection,
             applied,
-            result.roots.proposal.digest(),
             replica,
             candidate,
             #[cfg(test)]
@@ -699,15 +685,6 @@ fn checkpoint_optional(
     bytes
         .map(|bytes| ReplicaHead::decode(bytes).context("decode retained replica head"))
         .transpose()
-}
-
-fn checkpoint_subject(connection: &Connection, sequence: u64) -> Result<Digest> {
-    let bytes: Vec<u8> = connection.query_row(
-        "SELECT subject FROM proof_replica_checkpoints WHERE sequence = ?1",
-        [i64::try_from(sequence).context("sequence exceeds SQLite range")?],
-        |row| row.get(0),
-    )?;
-    Digest::decode(bytes).context("decode retained replica checkpoint identity")
 }
 
 fn latest_complete(connection: &Connection) -> Result<Option<(u64, ReplicaHead<Digest>)>> {
@@ -794,40 +771,30 @@ fn complete(connection: &Connection, sequence: u64, head: &ReplicaHead<Digest>) 
     Ok(())
 }
 
-fn record(
-    connection: &Connection,
-    sequence: u64,
-    subject: &Digest,
-    head: &ReplicaHead<Digest>,
-) -> Result<()> {
+fn record(connection: &Connection, sequence: u64, head: &ReplicaHead<Digest>) -> Result<()> {
     connection.execute(
-        "INSERT INTO proof_replica_checkpoints(sequence, subject, head, complete) VALUES(?1, ?2, ?3, 0)
+        "INSERT INTO proof_replica_checkpoints(sequence, head, complete) VALUES(?1, ?2, 0)
          ON CONFLICT(sequence) DO NOTHING",
-        params![
-            i64::try_from(sequence)?,
-            subject.as_ref(),
-            head.encode().as_ref()
-        ],
+        params![i64::try_from(sequence)?, head.encode().as_ref()],
     )?;
     ensure!(
-        checkpoint_subject(connection, sequence)? == *subject
-            && checkpoint(connection, sequence)? == *head,
+        checkpoint(connection, sequence)? == *head,
         "retained replica checkpoint mismatch"
     );
     Ok(())
 }
 
+#[commonware_macros::boxed]
 async fn apply_checkpoint<E: Context + Spawner>(
     connection: &Connection,
     sequence: u64,
-    subject: &Digest,
     replica: OperatorReplica<E>,
     candidate: PreparedReplica<Key, Digest, Rayon>,
     #[cfg(test)] recovery: &mut Recovery,
 ) -> Result<OperatorReplica<E>> {
-    // The identity is durable before native writes; the owning close result and retained SQL
-    // activity reconstruct this candidate if those writes do not survive a crash.
-    record(connection, sequence, subject, &candidate.head())?;
+    // The accepted native head is durable before native writes. The owning close result and
+    // retained SQL activity reconstruct this candidate if those writes do not survive a crash.
+    record(connection, sequence, &candidate.head())?;
     #[cfg(test)]
     recovery.stop(RecoveryCut::Checkpoint)?;
     #[cfg(test)]
@@ -944,7 +911,6 @@ mod tests {
                 assert_eq!(trace.prepared, work);
                 assert_eq!(trace.applied, work);
                 assert_eq!(state.head(), expected);
-                assert_eq!(state.state().liability(), 100);
                 assert_eq!(state.state().live_accounts(), 1);
                 assert_eq!(
                     connection
@@ -1164,11 +1130,8 @@ mod tests {
                 let entry = committed_entry(&state, &source, 0, &accounts[0].key, &accounts[1].key)
                     .await
                     .unwrap();
-                assert_eq!(entry.batch_id, results[0].header.batch_id::<Sha256>());
-                assert_eq!(entry.change_root, results[0].roots.change);
                 assert_eq!(
                     entry
-                        .lookup
                         .resolve::<Sha256>(
                             &results[0]
                                 .roots
@@ -1239,7 +1202,12 @@ mod tests {
                     .prepare(state.state().head(), genesis())
                     .await
                     .unwrap();
-                let expected = Genesis::from(candidate.head());
+                let expected = Genesis::new(
+                    candidate.head().root(),
+                    candidate.head().operations(),
+                    &[(AccountKey::new([1; 32]), NonZeroU64::new(100).unwrap())],
+                )
+                .unwrap();
                 let wrong = Genesis::new(
                     if changed == 0 {
                         state.state().root()
@@ -1307,10 +1275,7 @@ mod tests {
                     .prepare(
                         &predecessor,
                         vec![(key.clone(), NonZeroU64::new(100 + sequence))],
-                        ActivityInput::new(
-                            Vec::new(),
-                            Bytes::copy_from_slice(&sequence.to_be_bytes()),
-                        ),
+                        ActivityInput::new(Vec::new(), Vec::new()),
                         Vec::new(),
                         commonware_clearing::bajillion::logs::Floors {
                             activity: predecessor.logs.activity.operations - 1,
@@ -1319,11 +1284,9 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let subject = candidate.head().state.root().digest;
                 state = Box::pin(apply_checkpoint(
                     &connection,
                     sequence,
-                    &subject,
                     state,
                     candidate,
                     &mut Recovery::default(),
@@ -1365,7 +1328,6 @@ mod tests {
                     100 + sequence
                 );
             }
-            assert_eq!(state.state().liability(), 260);
         });
     }
 
@@ -1397,7 +1359,7 @@ mod tests {
                 .prepare(
                     &predecessor,
                     Vec::new(),
-                    ActivityInput::new(Vec::new(), Bytes::from_static(b"first")),
+                    ActivityInput::new(Vec::new(), Vec::new()),
                     vec![output.clone()],
                     commonware_clearing::bajillion::logs::Floors {
                         activity: 0,
@@ -1408,7 +1370,7 @@ mod tests {
                 .unwrap();
             let first = prepared.head();
             replica = replica.apply(prepared).await.unwrap();
-            replica = Box::pin(replica.commit()).await.unwrap();
+            replica = Box::pin(replica.sync()).await.unwrap();
             let claim = payout_claim(&replica, &first.logs.payouts, index)
                 .await
                 .unwrap();
@@ -1429,7 +1391,7 @@ mod tests {
                 .prepare(
                     &predecessor,
                     Vec::new(),
-                    ActivityInput::new(Vec::new(), Bytes::from_static(b"second")),
+                    ActivityInput::new(Vec::new(), Vec::new()),
                     Vec::new(),
                     commonware_clearing::bajillion::logs::Floors {
                         activity: predecessor.logs.activity.operations - 1,
@@ -1440,7 +1402,7 @@ mod tests {
                 .unwrap();
             let second = prepared.head();
             replica = replica.apply(prepared).await.unwrap();
-            replica = Box::pin(replica.commit()).await.unwrap();
+            replica = Box::pin(replica.sync()).await.unwrap();
             let historical = payout_claim(&replica, &first.logs.payouts, index)
                 .await
                 .unwrap();

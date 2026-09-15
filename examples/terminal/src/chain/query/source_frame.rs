@@ -3,10 +3,10 @@ use crate::{protocol, rpc};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    custody::{Epoch, SourceMetadata},
+    logs::PayoutOperation,
     payment::{SendAuthorization, VectorSendBody},
     qmdb::account_key,
-    transition::Terminal,
+    transition::{Terminal, WithdrawalClaim},
     vector::{OutEntry, OutVector},
 };
 use commonware_codec::{DecodeExt as _, Encode as _, EncodeSize as _};
@@ -14,14 +14,15 @@ use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::SigningKey;
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
 use commonware_utils::{NZU64, NZUsize, TestRng};
+use std::num::NonZeroU64;
 
 #[test]
-fn maximum_native_source_proof_round_trips_through_rpc_frame() {
-    deterministic::Runner::default().start(maximum_native_source_frame);
+fn old_payout_proof_from_maximum_native_epoch_fits_rpc_frame() {
+    deterministic::Runner::default().start(old_payout_frame_from_maximum_native_epoch);
 }
 
 #[commonware_macros::boxed]
-async fn maximum_native_source_frame(context: deterministic::Context) {
+async fn old_payout_frame_from_maximum_native_epoch(context: deterministic::Context) {
     let protocol = protocol::Protocol::new(NZUsize!(1)).unwrap();
     let mut signers = (0..protocol::MAX_ACTIVITY_ROWS)
         .map(|index| SigningKey::from_seed(90_000 + index as u64))
@@ -32,6 +33,12 @@ async fn maximum_native_source_frame(context: deterministic::Context) {
         .map(|signer| (account_key(&signer.public_key()).unwrap(), NZU64!(10)))
         .collect::<Vec<_>>();
     balances.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let initial_liability = balances
+        .iter()
+        .try_fold(0_u64, |total, (_, balance)| {
+            total.checked_add(balance.get())
+        })
+        .unwrap();
     let replica = protocol::init_replica(
         context.child("replica"),
         "source-frame",
@@ -50,6 +57,7 @@ async fn maximum_native_source_frame(context: deterministic::Context) {
             .collect(),
     )
     .unwrap();
+    let deposit_total = deposits.total();
     let withdrawals = WithdrawalBatch::new(
         withdrawal_signers
             .iter()
@@ -67,14 +75,7 @@ async fn maximum_native_source_frame(context: deterministic::Context) {
     )
     .unwrap();
     let registration = protocol
-        .registration_at(
-            0,
-            deposits,
-            withdrawals.clone(),
-            replica.state().liability(),
-            11,
-            12,
-        )
+        .registration_at(0, deposits, withdrawals.clone(), initial_liability, 11, 12)
         .unwrap();
     let terminals = signers[..entries]
         .iter()
@@ -109,38 +110,52 @@ async fn maximum_native_source_frame(context: deterministic::Context) {
         Box::pin(protocol.complete(prepared, &replica, &mut TestRng::new(90_001)))
             .await
             .unwrap();
-    assert_eq!(result.rows, protocol::MAX_ACTIVITY_ROWS);
+    assert_eq!(
+        result.roots.row_count,
+        u64::try_from(protocol::MAX_ACTIVITY_ROWS).unwrap()
+    );
+    let payout_position = result.context.predecessor_logs().payouts.operations;
     let replica = replica.apply(candidate).await.unwrap();
-    let heads = *replica.logs().head();
-    let epoch = Epoch::<protocol::Key, Digest>::load(replica.logs(), 0)
+
+    let successor_liability = initial_liability
+        .checked_add(deposit_total)
+        .and_then(|total| total.checked_sub(result.withdrawal_total))
+        .unwrap();
+    let registration = protocol
+        .registration_at(
+            1,
+            DepositBatch::new(Vec::new()).unwrap(),
+            WithdrawalBatch::new(Vec::new()).unwrap(),
+            successor_liability,
+            13,
+            14,
+        )
+        .unwrap();
+    let prepared = protocol.prepare(registration, Vec::new()).unwrap();
+    let (_, candidate) = Box::pin(protocol.complete(prepared, &replica, &mut TestRng::new(90_002)))
         .await
         .unwrap();
-    let proof = epoch.source_proof(replica.logs(), &heads).await.unwrap();
-    let metadata = SourceMetadata::<protocol::Key, Digest>::decode(proof.metadata.clone()).unwrap();
-    assert_eq!(metadata.rows().len(), protocol::MAX_ACTIVITY_ROWS);
-    assert_eq!(
-        metadata
-            .rows()
-            .iter()
-            .map(|row| row.entries().len())
-            .sum::<usize>(),
-        protocol::MAX_ACCEPTED_PAYMENTS,
-    );
-    assert_eq!(metadata.withdrawals(), &withdrawals);
-    assert!(
-        metadata.withdrawals().requests().iter().all(|request| {
-            request.body().destination().len() == protocol::MAX_DESTINATION_BYTES
-        })
-    );
-    assert!(proof.metadata.len() > protocol::MIN_DEALING_BYTES as usize);
-    assert!(proof.metadata.len() <= crate::chain::da::sync::tests::maximum_source_metadata_size());
-    let source = proof.verify::<Sha256, protocol::Key>(&heads).unwrap();
-    assert_eq!(source.context().deployment(), &protocol.deployment());
-    assert_eq!(source.context().payment().epoch(), 0);
+    let replica = replica.apply(candidate).await.unwrap();
+    let head = replica.logs().head().payouts;
+    let (opening, operations) = replica
+        .logs()
+        .payout_opening(&head, payout_position, NonZeroU64::MIN)
+        .await
+        .unwrap();
+    let [PayoutOperation::Append(output)] = operations.as_slice() else {
+        panic!("withdrawal output is not a native payout append")
+    };
+    let claim = WithdrawalClaim::new(output.clone(), opening);
+    assert_eq!(claim.verify::<Sha256>(&head).unwrap(), *claim.output());
 
-    let evidence = EvidenceResponse::Served(Evidence::Source(proof));
+    let evidence = EvidenceResponse::Served(Evidence::Payout(claim));
     let body = evidence.encode();
     assert_eq!(body.len(), evidence.encode_size());
+    assert!(
+        body.len() < 4 * 1024,
+        "payout authentication must not transmit unrelated epoch activity: {} bytes",
+        body.len()
+    );
     assert!(body.len() <= rpc::MAX_BODY_SIZE);
     assert_eq!(EvidenceResponse::decode(body.clone()).unwrap(), evidence);
     let response = rpc::Response::Success { body };

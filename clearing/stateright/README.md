@@ -80,6 +80,6 @@ refresh that proof under the current finalized head. They carry no target batch
 identity. The production fixture authenticates ledger membership by position and
 calls the real claim method; independent batch records account for issued/paid
 outputs only. Equal native outputs from distinct source-close identities remain
-interchangeable for payout claiming, while exact signed-request authentication
-belongs to SourceProof. A refinement regression checks this distinction and
-fails when a source-batch admission gate is restored.
+interchangeable for payout claiming. A refinement regression checks that the
+current finalized payout root authenticates each native position without a
+source-batch admission gate.

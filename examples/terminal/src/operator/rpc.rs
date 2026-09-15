@@ -1,7 +1,7 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, CommittedEntry, Operator, SendOutcome},
+    actor::{CloseEvent, Operator, SendOutcome},
     store::MAX_INCOMING_PAGE,
 };
 use crate::{
@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
     logs::LogHead,
     payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
-    transition::{BatchId, EpochContext, WithdrawalClaim},
+    transition::{EpochContext, WithdrawalClaim},
     vector::OutEntry,
 };
 use commonware_codec::{
@@ -599,53 +599,6 @@ impl Read for CommittedEntryRequest {
     }
 }
 
-/// A locally certified close's identity, change root, and terminal-entry lookup.
-///
-/// Callers must bind `batch_id` and `change_root` to an authenticated admission before
-/// relying on `lookup`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedEntryResponse {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) change_root: commonware_clearing::bajillion::logs::LogHead<Digest>,
-    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
-}
-
-impl From<CommittedEntry> for CommittedEntryResponse {
-    fn from(evidence: CommittedEntry) -> Self {
-        Self {
-            batch_id: evidence.batch_id,
-            change_root: evidence.change_root,
-            lookup: evidence.lookup,
-        }
-    }
-}
-
-impl Write for CommittedEntryResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.change_root.write(buf);
-        self.lookup.write(buf);
-    }
-}
-
-impl EncodeSize for CommittedEntryResponse {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.change_root.encode_size() + self.lookup.encode_size()
-    }
-}
-
-impl Read for CommittedEntryResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            change_root: commonware_clearing::bajillion::logs::LogHead::read(buf)?,
-            lookup: HigherEntryLookup::read(buf)?,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalOpeningResponse {
     pub(crate) root: StateRoot<Digest>,
@@ -1050,7 +1003,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let evidence = operator
                 .committed_entry(&request.payer, &request.recipient, request.epoch)
                 .context("read committed entry evidence")?;
-            Ok(CommittedEntryResponse::from(evidence).encode())
+            Ok(evidence.encode())
         }
     }
 }
@@ -1183,14 +1136,13 @@ pub(crate) async fn incoming_payments<E: Network + Clock>(
 
 /// Fetches retained activity evidence for one payer-recipient edge.
 ///
-/// The caller authenticates the admission identity and verifies the returned lookup against
-/// its change root. The operator only supplies the evidence.
+/// The caller verifies the lookup against an independently authenticated activity range.
 pub(crate) async fn committed_entry<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: CommittedEntryRequest,
-) -> Result<CommittedEntryResponse> {
-    CommittedEntryResponse::decode(
+) -> Result<HigherEntryLookup<Key, Digest>> {
+    HigherEntryLookup::decode(
         invoke(network, address, METHOD_COMMITTED_ENTRY, request.encode()).await?,
     )
     .context("decode committed entry evidence")

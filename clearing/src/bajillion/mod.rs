@@ -73,14 +73,14 @@
 //! no balances change.
 //!
 //! A cumulative native keyless MMR contains every disclosed sender, recipient, and boundary
-//! participant. Each epoch contributes one contiguous range sorted by canonical account bytes.
-//! Activity that nets to zero still has terminal evidence. Its compact guard commits the account
-//! and a value containing terminal debit, sequence, outgoing vector root, and settlement output.
+//! participant. Each epoch starts with a contiguous full-row prefix sorted by canonical account
+//! bytes; its certified count separates it from the flat outgoing-entry suffix. Every row commits
+//! the account, terminal debit, sequence, and outgoing vector root even when the balance is
+//! unchanged. Entries for positive-debit rows follow in row order, and their positive amounts
+//! uniquely delimit each vector. Payer-vector BMT proofs are reconstructed only when requested.
 //! A second keyless MMR appends every withdrawal output in request order, including zero releases.
-//! Payer-vector BMTs remain nested under their signed endpoints. Native Commit leaves separate
-//! epoch ranges; payout identities are sparse Append locations and never identify those markers.
-//! The activity Commit stores the original context and proof sources; payout Commit metadata is
-//! empty. Native Commit operations remain outside every activity and payout row interval.
+//! Payout identities are native Append locations. All three public stores use empty Commit
+//! metadata; native Commit leaves terminate batches outside their account and output intervals.
 //!
 //! `transition::Header` binds the exact registered context and predecessors, all three successor
 //! roots and native counts, canonical log floors, independent ProposalId, and withdrawal total.
@@ -93,20 +93,20 @@
 //! `transition::prepare_dealing` encodes accepted activity without reading account state.
 //! `admission::seal` decodes and validates the complete dealing against the exact predecessor and
 //! registered committee, returning the vote and owned native candidate. Before publishing the
-//! vote, the application applies and synchronizes all three candidate stores and publishes a
-//! durable shared checkpoint and signing decision. It keeps the canonical parent until settlement
-//! selects the successor. QMDB mutation failures consume the affected database owner; an embedding
-//! must not continue using it.
+//! vote, the application durably commits all three candidate stores, then records its private
+//! checkpoint and signing decision. It keeps the canonical parent until settlement selects the
+//! successor. QMDB mutation failures consume the affected database owner; an embedding must not
+//! continue using it.
 //!
 //! Canonical history and proof material protect the predecessor, every pending close, and the
 //! latest finalized recovery state. A pending close may outlive its own challenge deadline while
 //! an earlier FIFO entry waits. Native Current historical views reconstruct current-value proofs
 //! from retained operation history and pinned nodes. Operation inclusion alone does not prove an
-//! old balance was current. A shared durable checkpoint names all three native boundaries;
-//! recovery rewinds all ahead stores to that common checkpoint, then catches up through native
-//! operation transfer. Before discarding an unadmitted candidate, the application selects its
-//! durable parent checkpoint before truncating any store. Pruning follows a complete canonical
-//! checkpoint and preserves every protected source and Current historical boundary.
+//! old balance was current. The private checkpoint names all three accepted native boundaries.
+//! Recovery opens each store at its durable head and reconciles those heads with that decision.
+//! Before discarding an unadmitted candidate, the application selects its durable parent
+//! checkpoint before truncating any store. Pruning preserves every protected activity, payout,
+//! and Current historical boundary.
 //!
 //! # Registration and settlement
 //!
@@ -193,13 +193,13 @@
 //! an old unclaimed output does not pin hot validator pruning. A stale path alone does not provide
 //! a current-root claim witness, and a missing source is an error rather than evidence of absence.
 //!
-//! Each activity Commit retains its original context, terminal sequences, outgoing-vector leaves
-//! and exact signed withdrawals. Native operation walks and those leaves reconstruct requested
-//! proofs. A Commit opening under the current finalized activity head authenticates an older
-//! source and its Guard interval; the same settlement snapshot authenticates the payout head.
-//! This permits retirement of old epoch roots and anchors after their live obligations end.
-//! Source authentication discloses the bounded metadata record. Onchain challenges against a
-//! pending admitted root still use compact Guard and payer-vector openings.
+//! Public native Commit operations carry no metadata. Retained activity operations preserve the
+//! bounded originals needed to reconstruct requested payer-vector proofs, while the independently
+//! certified close descriptor and registered context authenticate the epoch and range. Native
+//! originals are proof material, not a second source of context or provenance. Old payout claims
+//! authenticate directly under the current finalized payout head, allowing retirement of old epoch
+//! roots and anchors after their live obligations end. Onchain challenges against a pending
+//! admitted root use native activity and payer-vector openings authenticated by that descriptor.
 //!
 //! Once the surviving clean prefix drains, hard-fault recovery freezes the last finalized QMDB
 //! root and liability. Each live account proves its positive balance at that root and is consumed
@@ -220,6 +220,11 @@
 
 #[cfg(feature = "std")]
 pub mod admission;
+/// Shared signed workloads for production durability benchmarks.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+#[path = "benches/workload.rs"]
+pub mod benchmark_workload;
 pub mod boundary;
 #[cfg(feature = "std")]
 pub mod challenge;
@@ -235,8 +240,6 @@ pub mod posted;
 pub mod qmdb;
 #[cfg(feature = "std")]
 pub mod replica;
-#[cfg(feature = "std")]
-pub mod serve;
 #[cfg(feature = "std")]
 pub mod settlement;
 pub mod state;

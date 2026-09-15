@@ -5,7 +5,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     posted,
     qmdb::{self, State, StateHead, StateOpening, account_key},
-    settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
+    settlement::{EpochDeadlinePolicy, Genesis, SettlementChain, SettlementConfig},
     transition::{
         CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
         prepare_close_with_strategy, validate_close_with_strategy,
@@ -100,6 +100,7 @@ struct AdmitInput {
 
 struct ChainSource {
     head: StateHead<Digest>,
+    genesis: Genesis<Digest>,
     validators: Validators,
 }
 
@@ -237,9 +238,22 @@ impl ChainSource {
         validator_count: usize,
     ) -> (Self, TestState, Vec<Account>) {
         let (state, accounts) = state_fixture(runtime, live_accounts).await;
+        let head = *state.state().head();
+        let allocations = accounts
+            .iter()
+            .map(|account| {
+                (
+                    account_key(&account.public).expect("benchmark account key is canonical"),
+                    NonZeroU64::new(OPENING_BALANCE).expect("opening balance is positive"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let genesis = Genesis::new(head.root(), head.operations(), &allocations)
+            .expect("benchmark genesis is canonical");
         (
             Self {
-                head: *state.state().head(),
+                head,
+                genesis,
                 validators: Validators::new(validator_count),
             },
             state,
@@ -252,7 +266,7 @@ impl ChainSource {
             deployment(),
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
             self.validators.committee().clone(),
-            &(&self.head).into(),
+            &self.genesis,
             0,
             settlement_config(
                 usize::try_from(self.head.live_accounts())
@@ -280,7 +294,10 @@ async fn admission_fixture(
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
         &deposits,
         &withdrawals,
-        state.state().liability(),
+        u64::try_from(LIVE_ACCOUNTS)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
         admission_deadline,
         admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE),
         CloseLimits::protocol_maximum(),

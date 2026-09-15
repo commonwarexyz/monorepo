@@ -1,16 +1,15 @@
 use commonware_clearing::bajillion::{
+    benchmark_workload as workload,
     boundary::{DepositBatch, WithdrawalBatch},
-    challenge::{
-        AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup, adjudicate,
-        higher_entry_lookup,
-    },
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, adjudicate},
+    custody::Epoch,
     logs::{self, Floors, Logs},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{self, State, account_key},
     replica::Replica,
     transition::{
-        ChallengeIndex, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
-        OperatorVariant, PreparedClose, RootBundle, Terminal, prepare_close_with_strategy,
+        Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, OperatorVariant,
+        PreparedClose, RootBundle, Terminal, prepare_close_with_strategy,
         validate_close_with_strategy,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
@@ -47,7 +46,6 @@ pub(crate) const PROFILE_ENV: &str = "COMMONWARE_CLEARING_PROFILE";
 pub(crate) const EPOCH: u64 = 7;
 pub(crate) const OPENING_BALANCE: u64 = 1_000_000;
 const OPERATOR_SEED: u64 = 1;
-const ACCOUNT_SEED_START: u64 = 10_000;
 pub(crate) type BenchState = Replica<deterministic::Context, Sha256, VerifyingKey, Rayon>;
 type BenchTerminal = Terminal<VerifyingKey, Digest>;
 type BenchAck = VectorAck<VerifyingKey, Digest>;
@@ -65,7 +63,7 @@ pub(crate) fn strategy() -> &'static Rayon {
     STRATEGY.get_or_init(|| Rayon::new(NonZeroUsize::new(WORKERS).unwrap()).expect("worker pool"))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct ActiveProfile {
     pub(crate) live_accounts: usize,
     pub(crate) senders: usize,
@@ -200,21 +198,66 @@ pub(crate) fn selected_active_profiles() -> Vec<(usize, ActiveProfile)> {
     let Ok(selector) = std::env::var(PROFILE_ENV) else {
         return ACTIVE_PROFILES.iter().copied().enumerate().collect();
     };
-    let selected = selector
+    if let Some(selected) = selector
         .parse::<usize>()
         .ok()
         .filter(|index| *index < ACTIVE_PROFILES.len())
-        .or_else(|| {
-            ACTIVE_PROFILES
-                .iter()
-                .position(|profile| profile_key(*profile) == selector)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "{PROFILE_ENV}={selector:?} is invalid; use a zero-based profile index or N=... A=... B=... K=..."
-            )
-        });
-    vec![(selected, ACTIVE_PROFILES[selected])]
+    {
+        return vec![(selected, ACTIVE_PROFILES[selected])];
+    }
+    let profile = parse_profile(&selector).unwrap_or_else(|| {
+        panic!(
+            "{PROFILE_ENV}={selector:?} is invalid; use a zero-based profile index or N=... A=... B=... K=..."
+        )
+    });
+    let index = ACTIVE_PROFILES
+        .iter()
+        .position(|candidate| *candidate == profile)
+        .unwrap_or(ACTIVE_PROFILES.len());
+    vec![(index, profile)]
+}
+
+fn parse_profile(value: &str) -> Option<ActiveProfile> {
+    let mut fields = [None; 4];
+    for part in value.split_whitespace() {
+        let (name, encoded) = part.split_once('=')?;
+        let slot = match name {
+            "N" => &mut fields[0],
+            "A" => &mut fields[1],
+            "B" => &mut fields[2],
+            "K" => &mut fields[3],
+            _ => return None,
+        };
+        if slot.is_some() {
+            return None;
+        }
+        *slot = Some(encoded.parse::<usize>().ok()?);
+    }
+    let [
+        Some(live_accounts),
+        Some(senders),
+        Some(credited_accounts),
+        Some(out_degree),
+    ] = fields
+    else {
+        return None;
+    };
+    if live_accounts == 0
+        || senders > live_accounts
+        || credited_accounts == 0
+        || credited_accounts > live_accounts
+        || out_degree == 0
+        || out_degree > credited_accounts
+        || senders.checked_mul(out_degree).is_none()
+    {
+        return None;
+    }
+    Some(ActiveProfile {
+        live_accounts,
+        senders,
+        credited_accounts,
+        out_degree,
+    })
 }
 
 pub(crate) fn state_config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<Rayon> {
@@ -245,14 +288,7 @@ pub(crate) fn state_config(context: &impl BufferPooler, prefix: &str) -> qmdb::C
 }
 
 pub(crate) fn accounts(live: usize) -> Vec<(VerifyingKey, SigningKey)> {
-    let mut accounts = (0..live)
-        .map(|i| {
-            let key = SigningKey::from_seed(ACCOUNT_SEED_START + i as u64);
-            (key.public_key(), key)
-        })
-        .collect::<Vec<_>>();
-    accounts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    accounts
+    workload::keys(live).accounts
 }
 
 pub(crate) fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Config<Rayon> {
@@ -265,7 +301,7 @@ pub(crate) fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Co
                 partition: activity.journal_config.partition,
                 items_per_section: commonware_utils::NZU64!(4096),
                 compression: None,
-                codec_config: commonware_codec::RangeCfg::new(..=16 * 1024 * 1024),
+                codec_config: (),
                 page_cache: activity.journal_config.page_cache,
                 write_buffer: commonware_utils::NZUsize!(4096),
                 replay_buffer: commonware_utils::NZUsize!(4096),
@@ -318,6 +354,7 @@ pub(crate) async fn new_state(
 
 pub(crate) fn epoch_context(
     state: &BenchState,
+    accounts: usize,
     epoch: u64,
     committee: Digest,
     operator: &SigningKey,
@@ -330,7 +367,10 @@ pub(crate) fn epoch_context(
         operator.public_key(),
         deposits,
         withdrawals,
-        state.state().liability(),
+        u64::try_from(accounts)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
         98,
         99,
         CloseLimits::protocol_maximum(),
@@ -455,7 +495,15 @@ pub(crate) async fn active_close_fixture_with_committee(
         compute_public::<OperatorVariant>(&BlsPrivate::new(Scalar::from(OPERATOR_SEED)));
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = epoch_context(&state, EPOCH, committee, &operator, &deposits, &withdrawals);
+    let context = epoch_context(
+        &state,
+        profile.live_accounts,
+        EPOCH,
+        committee,
+        &operator,
+        &deposits,
+        &withdrawals,
+    );
     let (terminals, acks) = terminal_material(profile, &accounts, &context, &operator);
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -550,17 +598,37 @@ fn assert_proven(
 /// The bench holds the operator and payer signers, so it can produce exactly the acknowledged
 /// evidence a cheating operator would have issued beyond the committed close. Each challenge is
 /// asserted to adjudicate to its proven kind.
-pub(crate) fn proven_challenges(
-    fixture: &CloseFixture,
-) -> [(ChallengeKind, Challenge<VerifyingKey, Digest>); 3] {
-    let close = fixture.prepared.close();
-    let index = ChallengeIndex::new::<Sha256>(&fixture.context, close)
-        .expect("benchmark challenge index is valid");
+pub(crate) async fn proven_challenges(
+    fixture: CloseFixture,
+) -> (
+    CloseContext<VerifyingKey, Digest>,
+    Close<VerifyingKey, Digest>,
+    BenchState,
+    [(ChallengeKind, Challenge<VerifyingKey, Digest>); 3],
+) {
+    let CloseFixture {
+        state,
+        context,
+        prepared,
+        accounts,
+        operator,
+        acks,
+        ..
+    } = fixture;
+    let (replica, close) = Box::pin(prepared.apply::<_, Sha256>(state))
+        .await
+        .expect("benchmark close applies");
+    let range = close
+        .roots
+        .activity_range(&context)
+        .expect("benchmark activity range is valid");
+    let epoch = Epoch::at(replica.logs(), context.payment().epoch(), range)
+        .await
+        .expect("benchmark epoch is retained");
 
     let payer_position = 3_usize;
     let payer_public = close.rows[payer_position].account.clone();
-    let payer_private = fixture
-        .accounts
+    let payer_private = accounts
         .iter()
         .find(|(public, _)| *public == payer_public)
         .map(|(_, private)| private.clone())
@@ -579,7 +647,7 @@ pub(crate) fn proven_challenges(
         .root::<Sha256, Digest>()
         .expect("vector root is valid");
     let retained_body = VectorSendBody::new(
-        fixture.context.payment(),
+        context.payment(),
         payer_public.clone(),
         1,
         close.rows[payer_position]
@@ -591,8 +659,7 @@ pub(crate) fn proven_challenges(
             + 1,
         retained_root,
     );
-    let retained_ack =
-        VectorAck::sign_by_authorities(retained_body, &payer_private, &fixture.operator);
+    let retained_ack = VectorAck::sign_by_authorities(retained_body, &payer_private, &operator);
     let OutTipLookup::Present {
         cumulative,
         count,
@@ -606,7 +673,9 @@ pub(crate) fn proven_challenges(
     let debit = Challenge::HigherAckDebit {
         ack: Box::new(AckWitness::from_ack(&retained_ack)),
         payer: Box::new(
-            account_lookup::<Sha256, _, _>(&index, &payer_public)
+            epoch
+                .account_lookup(replica.logs(), &payer_public)
+                .await
                 .expect("benchmark payer lookup is aligned"),
         ),
     };
@@ -619,22 +688,19 @@ pub(crate) fn proven_challenges(
             opening,
         }),
         sender: Box::new(
-            higher_entry_lookup::<Sha256, _, _>(
-                &index,
-                &payer_public,
-                Some(committed),
-                &retained_recipient,
-            )
-            .expect("benchmark sender lookup is aligned"),
+            epoch
+                .higher_entry_lookup(replica.logs(), &payer_public, &retained_recipient)
+                .await
+                .expect("benchmark sender lookup is aligned"),
         ),
     };
 
     // Two countersigned bodies at one payer sequence number.
     let fork = Challenge::AckFork {
-        left: Box::new(AckWitness::from_ack(&fixture.acks[payer_position])),
+        left: Box::new(AckWitness::from_ack(&acks[payer_position])),
         right: Box::new(AckWitness::from_ack(&{
             let body = VectorSendBody::new(
-                fixture.context.payment(),
+                context.payment(),
                 payer_public,
                 0,
                 close.rows[payer_position]
@@ -646,7 +712,7 @@ pub(crate) fn proven_challenges(
                     + 5,
                 retained_root,
             );
-            VectorAck::sign_by_authorities(body, &payer_private, &fixture.operator)
+            VectorAck::sign_by_authorities(body, &payer_private, &operator)
         })),
     };
 
@@ -657,7 +723,7 @@ pub(crate) fn proven_challenges(
     ];
     for (kind, challenge) in &challenges {
         assert_proven(
-            &fixture.context,
+            &context,
             &close.header,
             &close.roots,
             close.withdrawal_total,
@@ -665,5 +731,5 @@ pub(crate) fn proven_challenges(
             *kind,
         );
     }
-    challenges
+    (context, close, replica, challenges)
 }

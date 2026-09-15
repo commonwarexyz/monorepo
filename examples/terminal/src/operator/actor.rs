@@ -111,16 +111,6 @@ impl SendOutcome {
     }
 }
 
-/// Committed-side terminal-entry evidence for one (payer, recipient) edge, reconstructed
-/// from retained epoch data. A receiver resolves the lookup against `change_root` to read
-/// the close's public terminal entry for the edge, then challenges when a held receipt
-/// exceeds it.
-pub(crate) struct CommittedEntry {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) change_root: commonware_clearing::bajillion::logs::LogHead<Digest>,
-    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
-}
-
 pub(crate) struct CloseFinished {
     pub(crate) epoch: u64,
     pub(crate) header_digest: String,
@@ -502,7 +492,7 @@ impl Operator {
         payer: &Key,
         recipient: &Key,
         epoch: u64,
-    ) -> Result<CommittedEntry> {
+    ) -> Result<HigherEntryLookup<Key, Digest>> {
         self.ensure_store_usable()?;
         self.balances
             .as_ref()
@@ -1820,7 +1810,11 @@ impl Operator {
         Ok(CloseFinished {
             epoch: result.context.payment().epoch(),
             header_digest: short_digest(result.header.digest()),
-            rows: result.rows,
+            rows: result
+                .roots
+                .row_count
+                .try_into()
+                .context("row count overflow")?,
             dealing_bytes: result.dealing_bytes,
             withdrawal_total: result.withdrawal_total,
             header_bytes: result.header.encode_size(),

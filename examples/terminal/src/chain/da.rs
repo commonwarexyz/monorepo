@@ -4,6 +4,8 @@
 //! checkpoint are durable. Recovery rewinds the public stores to the selected common checkpoint.
 //! Independent replicas may retain older native history for proof availability.
 
+#[cfg(feature = "bench")]
+pub(crate) mod benches;
 mod checkpoint;
 mod config;
 #[cfg(test)]
@@ -42,7 +44,7 @@ use commonware_cryptography::{Sha256, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_parallel::Sequential;
+use commonware_parallel::Rayon;
 use commonware_runtime::{ContextCell, Handle, IoBuf, Metrics, Network, Spawner, spawn_cell};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::channel::{fallible::OneshotExt as _, oneshot};
@@ -52,7 +54,7 @@ use rand_core::CryptoRng;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tracing::{debug, error, warn};
 
-pub(crate) type NativeReplica<E> = Replica<E, Sha256, Key>;
+pub(crate) type NativeReplica<E> = Replica<E, Sha256, Key, Rayon>;
 
 /// One immutable complete dealing, shared by every validator.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,30 +221,23 @@ async fn recover<E: StorageContext + Spawner>(
                 )
                 .await?;
             ensure!(
-                (
-                    candidate.root(),
-                    candidate.head().operations(),
-                    candidate.head().liability()
-                ) == (
-                    deployment.genesis().root(),
-                    deployment.genesis().operations(),
-                    deployment.genesis().liability()
-                ),
+                (candidate.root(), candidate.head().operations())
+                    == (
+                        deployment.genesis().root(),
+                        deployment.genesis().operations()
+                    ),
                 "configured genesis mismatch"
             );
             state = state.apply(candidate).await?.sync().await?;
         }
         replica = Replica::from_parts(state, logs).sync().await?;
         ensure!(
-            (
-                replica.state().root(),
-                replica.state().head().operations(),
-                replica.state().liability()
-            ) == (
-                deployment.genesis().root(),
-                deployment.genesis().operations(),
-                deployment.genesis().liability()
-            ) && *replica.logs().head() == Heads::empty::<Key, Sha256>(),
+            (replica.state().root(), replica.state().head().operations())
+                == (
+                    deployment.genesis().root(),
+                    deployment.genesis().operations()
+                )
+                && *replica.logs().head() == Heads::empty::<Key, Sha256>(),
             "native replica has no completed checkpoint"
         );
         let canonical = sync::Transfer::capture(
@@ -283,7 +278,7 @@ async fn recover<E: StorageContext + Spawner>(
 #[commonware_macros::boxed]
 async fn persist_candidate<E: StorageContext + Spawner>(
     lane: &mut Lane<E>,
-    prepared: PreparedReplica<Key, Digest>,
+    prepared: PreparedReplica<Key, Digest, Rayon>,
     ballot: Ballot,
 ) -> Result<()> {
     let mut manifest = lane.manifest().as_ref().clone();
@@ -324,6 +319,7 @@ async fn discard<E: StorageContext + Spawner>(lane: &mut Lane<E>) -> Result<()> 
 }
 
 pub(crate) struct Config<E: Spawner + StorageContext> {
+    pub(crate) strategy: Rayon,
     pub(crate) scheme: bls12381::Scheme,
     pub(crate) registry: RegistryView,
     pub(crate) db: Database<E>,
@@ -334,7 +330,6 @@ pub(crate) struct Config<E: Spawner + StorageContext> {
 }
 struct Lane<E: StorageContext + Spawner> {
     deployment: Deployment,
-    fetching: bool,
     pending: Option<Dealing>,
     state: Option<NativeReplica<E>>,
     checkpoint: Option<checkpoint::Store<E>>,
@@ -402,6 +397,7 @@ impl Mailbox {
 }
 pub(crate) struct Sealer<E: Spawner + Metrics + Network + StorageContext + CryptoRng> {
     context: ContextCell<E>,
+    strategy: Rayon,
     scheme: bls12381::Scheme,
     registry: RegistryView,
     db: Database<E>,
@@ -418,6 +414,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         (
             Self {
                 context: ContextCell::new(context),
+                strategy: config.strategy,
                 scheme: config.scheme,
                 registry: config.registry,
                 db: config.db,
@@ -535,7 +532,6 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let position = lanes.len();
         lanes.push(Lane {
             deployment: deployment.clone(),
-            fetching: false,
             pending: None,
             state: Some(replica),
             checkpoint: Some(checkpoints),
@@ -546,11 +542,11 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         &self,
         deployment: &Digest,
         generation: u64,
-    ) -> commonware_clearing::bajillion::replica::Config {
+    ) -> commonware_clearing::bajillion::replica::Config<Rayon> {
         replica_config(
             &format!("{}-replica-{deployment}-{generation}", self.partition),
             self.context.as_present(),
-            Sequential,
+            self.strategy.clone(),
         )
     }
     async fn incoming<Se: Sender<PublicKey = ed25519::PublicKey>>(
@@ -596,7 +592,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         }
         match work {
             Work::Evidence(request) => {
-                let served = proofs::serve(&self.db, lanes, request.request)
+                let served = proofs::serve(lanes, request.request)
                     .await
                     .unwrap_or_else(|error| {
                         debug!(?error, "requested native proof is unavailable");
@@ -667,11 +663,12 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             }
             return Ok(());
         }
+        let importing = lane.manifest().garbage.is_some();
         if lane.next() != dealing.epoch
-            || lane.fetching
+            || importing
             || lane.state.as_ref().unwrap().state().root() != *registered.context.predecessor_root()
         {
-            if lane.fetching {
+            if importing {
                 lane.pending = Some(dealing);
             }
             return Ok(());
@@ -685,7 +682,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             registered.withdrawals,
             dealing.bytes.clone(),
             self.context.as_mut(),
-            &Sequential,
+            &self.strategy,
         )
         .await;
         let Ok((vote, prepared)) = result else {
@@ -755,7 +752,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 }
             }
         }
-        if !lane.fetching && authority.next() > lane.next() {
+        if lane.manifest().garbage.is_none() && authority.next() > lane.next() {
             self.begin_import(lanes, imports, position, 0).await?;
         }
         if !self.retain_history && lanes[position].manifest().candidate.is_none() {
@@ -771,18 +768,18 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         if epoch <= complete.retained.epoch || epoch >= complete.next {
             return Ok(());
         }
+        let replica = lane.state.as_ref().unwrap();
         let first = authority
             .entries
             .first()
-            .context("missing finalized authority")?;
-        let replica = lane.state.as_ref().unwrap();
-        let source =
-            commonware_clearing::bajillion::custody::Epoch::load(replica.logs(), epoch).await?;
-        let source = source
-            .source_proof(replica.logs(), &first.roots.logs())
-            .await?
-            .verify::<Sha256, Key>(&first.roots.logs())?;
-        let retained = authority.retention(complete, &source)?;
+            .context("empty finalized suffix")?;
+        let payout_commit = sync::payout_predecessor(
+            replica.logs().payout_source(),
+            &first.roots.withdrawal_outputs,
+            complete.retained.payouts,
+        )
+        .await?;
+        let retained = authority.retention(complete, payout_commit)?;
         Self::prune(lane, retained).await
     }
     async fn prune(lane: &mut Lane<E>, retained: checkpoint::Retention) -> Result<()> {
@@ -826,7 +823,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             return Ok(());
         }
         let lane = &mut lanes[position];
-        if lane.fetching {
+        if lane.manifest().garbage.is_some() {
             return Ok(());
         }
         let authority = sync::capture(&self.db, lane.deployment.digest()).await?;
@@ -839,7 +836,6 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             .checked_add(1)
             .context("replica generation overflow")?;
         lane.checkpoint = Some(lane.checkpoint.take().unwrap().stage(generation).await?);
-        lane.fetching = true;
         let context = self.context.child("checkpoint_import");
         let deployment = lane.deployment.clone();
         let config = self.config(deployment.digest(), generation);
@@ -877,9 +873,8 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         sender: &mut Se,
     ) -> Result<()> {
         let lane = &mut lanes[position];
-        let mut retired = None;
         let mut progressed = false;
-        match result {
+        let retired = match result {
             Ok(Some(sync::Imported { replica, transfer }))
                 if transfer.checkpoint.next > lane.next() =>
             {
@@ -900,24 +895,28 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 }
                 manifest.check(&lane.deployment)?;
                 lane.checkpoint = Some(lane.checkpoint.take().unwrap().put(manifest).await?);
-                retired = lane.state.replace(replica);
+                let retired = lane.state.replace(replica);
                 progressed = true;
+                retired
             }
-            Ok(Some(imported)) => retired = Some(imported.replica),
-            Ok(None) => {}
-            Err(error) => debug!(?error, holder, "native source unavailable"),
+            Ok(Some(imported)) => Some(imported.replica),
+            Ok(None) => None,
+            Err(error) => {
+                debug!(?error, holder, "native source unavailable");
+                None
+            }
+        };
+        if let Some(retired) = retired {
+            retired.destroy().await?;
+        } else {
+            let generation = lane.manifest().garbage.expect("staged generation");
+            config::remove_generation(
+                self.context.as_present(),
+                self.config(lane.deployment.digest(), generation),
+            )
+            .await?;
         }
-        if let Some(replica) = retired {
-            replica.destroy().await?;
-        }
-        let generation = lane.manifest().garbage.expect("staged generation");
-        config::remove_generation(
-            self.context.as_present(),
-            self.config(lane.deployment.digest(), generation),
-        )
-        .await?;
         lane.checkpoint = Some(lane.checkpoint.take().unwrap().retired().await?);
-        lane.fetching = false;
         if progressed {
             self.reconcile(lanes, imports, position).await?;
             if let Some(dealing) = lanes[position].pending.take() {

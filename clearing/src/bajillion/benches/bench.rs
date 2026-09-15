@@ -45,9 +45,11 @@ fn main() {
     match std::env::var(BENCH_ENV) {
         Ok(selected) if selected == "challenge-sizes" => sizes::benches(true),
         Ok(selected) if selected == "state-sizes" => state_sizes::benches(),
-        Ok(selected) if selected == "native-source-sizes" => native_transition::source_sizes(),
-        Ok(selected) if selected == "native-source-proofs" => native_transition::source_benches(),
+        Ok(selected) if selected == "native-activity-sizes" => native_proofs::activity_sizes(),
+        Ok(selected) if selected == "native-payout-sizes" => native_proofs::payout_sizes(),
         Ok(selected) if selected == "native-sizes" => native_proofs::sizes(),
+        Ok(selected) if selected == "native-activity-proofs" => native_proofs::activity_benches(),
+        Ok(selected) if selected == "native-payout-proofs" => native_proofs::payout_benches(),
         Ok(selected) if selected == "native-proofs" => native_proofs::benches(),
         Ok(selected) if selected == "native-transition" => native_transition::benches(),
         Ok(selected) if selected == "native-transition-check" => native_transition::check(),

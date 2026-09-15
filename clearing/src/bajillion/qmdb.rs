@@ -2,7 +2,8 @@
 //!
 //! Each epoch appends one canonical MMB batch. The application persists accepted mutations
 //! and close evidence before publishing votes; committing this owner persists only its
-//! database. Native commit metadata stores the balance liability. Historical Current proofs
+//! database without semantic commit metadata. Settlement owns balance liability; this database
+//! owns the positive-value account map and its native structural head. Historical Current proofs
 //! use a read-only native view over retained operations.
 //! Constructing that view can require work proportional to the historical active log window.
 
@@ -53,10 +54,6 @@ pub type Absence<D> = ordered::proof::constant::ExclusionProof<
 pub type StateDb<E, H, S> = Db<mmb::Family, E, AccountKey, Balance, H, EightCap, 32, S>;
 /// Native balance operation served to the QMDB sync engine.
 pub type StateOperation = qmdb::any::ordered::fixed::Operation<mmb::Family, AccountKey, Balance>;
-/// Native balance sync request.
-pub type StateRequest = qmdb::sync::Request<mmb::Family>;
-/// Native balance sync response.
-pub type StateResponse<D> = qmdb::sync::Response<mmb::Family, StateOperation, D>;
 type Batch<D, S> =
     MerkleizedBatch<mmb::Family, D, Update<AccountKey, FixedEncoding<Balance>>, 32, S>;
 
@@ -90,14 +87,13 @@ impl<D: Digest> Read for StateRoot<D> {
     }
 }
 
-/// Serializable description of one Current database prefix and its locally derived totals.
+/// Serializable description of one Current database prefix and its native-derived structure.
 ///
 /// Decoding validates structural bounds only. Applications authenticate persisted checkpoints, and
 /// a mutable [`State`] revalidates the descriptor against its native database before use.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct StateHead<D: Digest> {
     root: StateRoot<D>,
-    liability: u64,
     live_accounts: u64,
     operations: u64,
     sync_boundary: u64,
@@ -113,7 +109,6 @@ where
             u.int_in_range(1..=*<mmb::Family as commonware_storage::merkle::Family>::MAX_LEAVES)?;
         Ok(Self {
             root: u.arbitrary()?,
-            liability: u.arbitrary()?,
             live_accounts: u.arbitrary()?,
             operations,
             sync_boundary: u.int_in_range(0..=operations)?,
@@ -125,10 +120,6 @@ impl<D: Digest> StateHead<D> {
     /// Returns the Current root.
     pub const fn root(&self) -> StateRoot<D> {
         self.root
-    }
-    /// Returns the checked sum of current balances.
-    pub const fn liability(&self) -> u64 {
-        self.liability
     }
     /// Returns the number of positive balances.
     pub const fn live_accounts(&self) -> u64 {
@@ -147,7 +138,6 @@ impl<D: Digest> StateHead<D> {
 impl<D: Digest> Write for StateHead<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        self.liability.write(buf);
         self.live_accounts.write(buf);
         self.operations.write(buf);
         self.sync_boundary.write(buf);
@@ -155,7 +145,7 @@ impl<D: Digest> Write for StateHead<D> {
 }
 
 impl<D: Digest> FixedSize for StateHead<D> {
-    const SIZE: usize = StateRoot::<D>::SIZE + u64::SIZE * 4;
+    const SIZE: usize = StateRoot::<D>::SIZE + u64::SIZE * 3;
 }
 
 impl<D: Digest> Read for StateHead<D> {
@@ -164,7 +154,6 @@ impl<D: Digest> Read for StateHead<D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let head = Self {
             root: StateRoot::read(buf)?,
-            liability: u64::read(buf)?,
             live_accounts: u64::read(buf)?,
             operations: u64::read(buf)?,
             sync_boundary: u64::read(buf)?,
@@ -311,7 +300,7 @@ impl<D: Digest, S: Strategy> PreparedState<D, S> {
     pub const fn predecessor(&self) -> &StateHead<D> {
         &self.predecessor
     }
-    /// Returns the candidate root and locally derived totals.
+    /// Returns the candidate native structural head.
     pub const fn head(&self) -> &StateHead<D> {
         &self.head
     }
@@ -326,6 +315,9 @@ impl<D: Digest, S: Strategy> PreparedState<D, S> {
 }
 
 /// A full balance replica with a native recovered head.
+///
+/// The replica stores positive individual balances but neither derives nor retains their aggregate.
+/// The settlement protocol owns and validates balance liability.
 ///
 /// Mutable operations consume the owner. After failure or cancellation, reopen and rewind every
 /// native store to the application's authenticated shared checkpoint before catching up the
@@ -360,7 +352,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         state.apply(prepared).await
     }
 
-    /// Open the native database and recover its root-bound liability and active account count.
+    /// Open the native database and recover its structural head and active account count.
     ///
     /// Partitions belong exclusively to this owner. The application authenticates its shared
     /// checkpoint, rewinds an ahead owner to that boundary, and catches up a behind owner from the
@@ -373,7 +365,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
             return Err(Error::Partition);
         }
         let db = StateDb::init(context.child("balances"), config).await?;
-        let head = Self::derive_head(&db).await?;
+        let head = Self::derive_head(&db)?;
         Ok(Self {
             db,
             #[cfg(test)]
@@ -397,11 +389,8 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
     }
 
     /// Assemble a native peer-sync result after checking its canonical recovered head.
-    pub async fn from_db(
-        db: StateDb<E, H, S>,
-        expected: &StateHead<H::Digest>,
-    ) -> Result<Self, Error> {
-        let head = Self::derive_head(&db).await?;
+    pub fn from_db(db: StateDb<E, H, S>, expected: &StateHead<H::Digest>) -> Result<Self, Error> {
+        let head = Self::derive_head(&db)?;
         if &head != expected {
             return Err(Error::History);
         }
@@ -430,20 +419,9 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         Ok(target)
     }
 
-    /// Serve one untrusted native sync request.
-    pub async fn serve(
-        &self,
-        request: StateRequest,
-    ) -> Result<(StateResponse<H::Digest>, qmdb::sync::FeedbackTx), Error> {
-        Ok(qmdb::sync::Source::serve(&self.db, request).await?)
-    }
     /// Returns the live Current root.
     pub const fn root(&self) -> StateRoot<H::Digest> {
         self.head().root
-    }
-    /// Returns the sum of current balances.
-    pub const fn liability(&self) -> u64 {
-        self.head().liability
     }
     /// Returns the number of live accounts.
     pub const fn live_accounts(&self) -> u64 {
@@ -462,7 +440,8 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
     ///
     /// The caller derives and authorizes balances from the close's signed evidence. Duplicate or
     /// unsorted keys are rejected; equal old and new balances are omitted from the QMDB writes.
-    /// Empty updates still produce the epoch's single commit operation.
+    /// Empty updates still produce the epoch's single commit operation. Aggregate conservation is
+    /// validated by the settlement protocol, not this positive-value map.
     pub async fn prepare(
         &self,
         predecessor: &StateHead<H::Digest>,
@@ -477,8 +456,6 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         let db = &self.db;
         let keys = updates.iter().map(|(key, _)| key).collect::<Vec<_>>();
         let previous = db.get_many(&keys).await?;
-        let mut removed = 0u128;
-        let mut added = 0u128;
         let mut live_accounts = i128::from(predecessor.live_accounts);
         let mut mutations = Vec::with_capacity(updates.len());
         let mut batch = db.new_batch();
@@ -486,22 +463,14 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
             if value == old {
                 continue;
             }
-            removed += u128::from(old.map_or(0, Balance::get));
-            added += u128::from(value.map_or(0, Balance::get));
             live_accounts += i128::from(value.is_some()) - i128::from(old.is_some());
             batch = batch.write(key.clone(), value);
             mutations.push((key, value));
         }
-        let liability = u128::from(predecessor.liability)
-            .checked_sub(removed)
-            .and_then(|value| value.checked_add(added))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(Error::Arithmetic)?;
         let live_accounts = u64::try_from(live_accounts).map_err(|_| Error::Arithmetic)?;
-        let batch = batch.merkleize(db, Balance::new(liability)).await?;
+        let batch = batch.merkleize(db, None).await?;
         let head = StateHead {
             root: StateRoot::new(batch.root()),
-            liability,
             live_accounts,
             operations: *batch.bounds().tip.size,
             sync_boundary: *batch.sync_boundary(),
@@ -544,7 +513,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
             return Err(Error::Target);
         }
         self.db = self.db.rewind(Location::new(target.operations())).await?;
-        let recovered = Self::derive_head(&self.db).await?;
+        let recovered = Self::derive_head(&self.db)?;
         if recovered != *target {
             return Err(Error::History);
         }
@@ -568,10 +537,9 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         Ok(())
     }
 
-    async fn derive_head(db: &StateDb<E, H, S>) -> Result<StateHead<H::Digest>, Error> {
+    fn derive_head(db: &StateDb<E, H, S>) -> Result<StateHead<H::Digest>, Error> {
         Ok(StateHead {
             root: StateRoot::new(db.root()),
-            liability: db.get_metadata().await?.map_or(0, Balance::get),
             live_accounts: u64::try_from(db.active_keys()).map_err(|_| Error::Arithmetic)?,
             operations: *db.bounds().end,
             sync_boundary: *db.sync_boundary(),
@@ -868,8 +836,8 @@ pub enum Error {
     /// A candidate belongs to another database prefix.
     #[error("balance predecessor does not match")]
     Predecessor,
-    /// Liability or live-account arithmetic is out of range.
-    #[error("balance totals overflow")]
+    /// The live-account count is out of range.
+    #[error("live-account count overflow")]
     Arithmetic,
     /// The requested root and operation count do not identify the same native prefix.
     #[error("balance root does not match operation count")]
@@ -910,6 +878,12 @@ mod tests {
         AccountKey::new(bytes)
     }
 
+    fn colliding_key(value: u64) -> AccountKey {
+        let mut bytes = [0; 32];
+        bytes[8..16].copy_from_slice(&value.to_be_bytes());
+        AccountKey::new(bytes)
+    }
+
     fn balance(value: u64) -> Balance {
         Balance::new(value).unwrap()
     }
@@ -947,16 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn reopening_uses_recovered_head_without_application_replay() {
+    fn current_commit_has_no_metadata() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = config(&context, "native-head");
-            let state = TestState::init(
-                context.child("state"),
-                cfg.clone(),
-                vec![(key(1), balance(100))],
-            )
-            .await
-            .unwrap();
+            let state = TestState::init(context.child("state"), cfg, vec![(key(1), balance(100))])
+                .await
+                .unwrap();
             let state = apply(
                 state,
                 vec![(key(1), Some(balance(90))), (key(2), Some(balance(10)))],
@@ -965,11 +935,7 @@ mod tests {
             .commit()
             .await
             .unwrap();
-            let expected = *state.head();
-            drop(state);
-            let state = TestState::open(context.child("state"), cfg).await.unwrap();
-            assert_eq!(*state.head(), expected);
-            assert_eq!(state.db.get_metadata().await.unwrap(), Some(balance(100)));
+            assert_eq!(state.db.get_metadata().await.unwrap(), None);
         });
     }
 
@@ -1031,8 +997,9 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(first.head(), second.head());
-            assert_eq!(first.liability(), 30);
             assert_eq!(first.live_accounts(), 2);
+            assert_eq!(first.get(&key(2)).await.unwrap(), Some(balance(10)));
+            assert_eq!(first.get(&key(4)).await.unwrap(), Some(balance(20)));
             let root = first.root();
             let initial_operations = first.head().operations();
             assert!(matches!(
@@ -1091,13 +1058,14 @@ mod tests {
                     );
                 }
             }
-            assert_eq!(first.liability(), 0);
             assert_eq!(first.live_accounts(), 0);
+            assert_eq!(first.get(&key(2)).await.unwrap(), None);
+            assert_eq!(first.get(&key(4)).await.unwrap(), None);
         });
     }
 
     #[test]
-    fn liability_checks_net_changes_without_order_dependent_overflow() {
+    fn positive_value_map_does_not_own_aggregate_liability() {
         deterministic::Runner::default().start(|context| async move {
             let state = TestState::init(
                 context.child("state"),
@@ -1106,19 +1074,72 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(matches!(
-                state
-                    .prepare(state.head(), vec![(key(1), Some(balance(1)))])
-                    .await,
-                Err(Error::Arithmetic)
-            ));
             let state = apply(
                 state,
-                vec![(key(1), Some(balance(u64::MAX))), (key(2), None)],
+                vec![
+                    (key(1), Some(balance(1))),
+                    (key(2), Some(balance(u64::MAX))),
+                ],
             )
             .await;
-            assert_eq!(state.liability(), u64::MAX);
-            assert_eq!(state.live_accounts(), 1);
+            assert_eq!(state.get(&key(1)).await.unwrap(), Some(balance(1)));
+            assert_eq!(state.get(&key(2)).await.unwrap(), Some(balance(u64::MAX)));
+            assert_eq!(state.live_accounts(), 2);
+        });
+    }
+
+    #[test]
+    fn metadata_free_native_lifecycle_preserves_colliding_keys() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = config(&context, "colliding-lifecycle");
+            let first = colliding_key(1);
+            let second = colliding_key(2);
+            let state = TestState::init(
+                context.child("state"),
+                cfg.clone(),
+                vec![
+                    (first.clone(), balance(u64::MAX)),
+                    (second.clone(), balance(1)),
+                ],
+            )
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+            let populated = *state.head();
+            assert_eq!(state.db.get_metadata().await.unwrap(), None);
+
+            let State { db, .. } = state;
+            let state = TestState::from_db(db, &populated).unwrap();
+            assert_eq!(*state.head(), populated);
+            assert_eq!(state.get(&first).await.unwrap(), Some(balance(u64::MAX)));
+            assert_eq!(state.get(&second).await.unwrap(), Some(balance(1)));
+            assert_eq!(state.live_accounts(), 2);
+
+            let state = apply(state, vec![(first.clone(), None), (second.clone(), None)])
+                .await
+                .commit()
+                .await
+                .unwrap();
+            let empty = *state.head();
+            assert_eq!(state.db.get_metadata().await.unwrap(), None);
+            drop(state);
+
+            let state = TestState::open(context.child("reopened"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(*state.head(), empty);
+            assert_eq!(state.get(&first).await.unwrap(), None);
+            assert_eq!(state.get(&second).await.unwrap(), None);
+            assert_eq!(state.live_accounts(), 0);
+
+            let state = state.rewind(&populated).await.unwrap();
+            assert_eq!(*state.head(), populated);
+            assert_eq!(state.get(&first).await.unwrap(), Some(balance(u64::MAX)));
+            assert_eq!(state.get(&second).await.unwrap(), Some(balance(1)));
+            assert_eq!(state.live_accounts(), 2);
+            assert_eq!(state.db.get_metadata().await.unwrap(), None);
         });
     }
 
@@ -1453,12 +1474,14 @@ mod tests {
                 Some(balance(100))
             );
             let state = apply(state, vec![(key(2), Some(balance(9)))]).await;
-            assert_eq!(state.liability(), 99);
+            assert_eq!(state.get(&key(1)).await.unwrap(), Some(balance(90)));
+            assert_eq!(state.get(&key(2)).await.unwrap(), Some(balance(9)));
+            assert_eq!(state.live_accounts(), 2);
         });
     }
 
     #[test]
-    fn zero_and_maximum_liability_recover_from_native_metadata() {
+    fn metadata_free_recovery_preserves_empty_and_maximum_values() {
         deterministic::Runner::default().start(|context| async move {
             for total in [0, u64::MAX] {
                 let cfg = config(&context, &format!("total-{total}"));
@@ -1477,8 +1500,8 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(*state.head(), expected);
-                assert_eq!(state.liability(), total);
-                assert_eq!(state.db.get_metadata().await.unwrap(), Balance::new(total));
+                assert_eq!(state.get(&key(1)).await.unwrap(), Balance::new(total));
+                assert_eq!(state.db.get_metadata().await.unwrap(), None);
                 assert_eq!(state.live_accounts(), u64::from(total != 0));
             }
         });

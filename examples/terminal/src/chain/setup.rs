@@ -1683,7 +1683,6 @@ mod tests {
                 .unwrap();
                 assert_eq!(state.root(), deployment.genesis().root());
                 assert_eq!(state.head().operations(), deployment.genesis().operations());
-                assert_eq!(state.liability(), deployment.genesis().liability());
             }
         });
         let mut dealt = Vec::new();

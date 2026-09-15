@@ -12,11 +12,13 @@ use commonware_clearing::bajillion::{
     challenge::{
         AccountLookup, AckWitness, Challenge, ChallengeKind, Verdict, adjudicate, decode_bounded,
     },
+    commitment::{self, VectorKind},
+    custody::Epoch,
     logs::{Floors, LogHead, Logs, Opening as LogOpening},
     payment::EntryReceipt,
     posted,
     qmdb::{AccountKey, StateLookup, StateOpening, StateRoot, account_key},
-    serve,
+    state::AccountChange,
     transition::{
         Close, CloseContext, OperatorAggregate, WithdrawalClaim, WithdrawalOutput,
         prepare_close_with_strategy, validate_close_with_strategy,
@@ -145,6 +147,93 @@ fn challenge_bytes(
         Verdict::Proven(kind),
     );
     bytes.len()
+}
+
+fn print_challenges(
+    profile: ActiveProfile,
+    context: &CloseContext<VerifyingKey, Digest>,
+    close: &Close<VerifyingKey, Digest>,
+    challenges: [(ChallengeKind, Challenge<VerifyingKey, Digest>); 3],
+) {
+    for (kind, challenge) in challenges {
+        let bytes = challenge_bytes(context, close, &challenge, kind);
+        println!(
+            "clearing challenge: {} kind={} challenge_bytes={bytes}",
+            profile_key(profile),
+            kind_label(kind)
+        );
+    }
+}
+
+#[commonware_macros::boxed]
+async fn omitted_payer_sizes(
+    runtime: commonware_runtime::deterministic::Context,
+    profile: ActiveProfile,
+) {
+    let fixture = active_close_fixture(runtime, profile).await;
+    let omitted_ack = fixture.acks.last().expect("profile has senders").clone();
+    let omitted_payer = omitted_ack.body().payer().clone();
+    assert!(fixture.deposits.is_empty() && fixture.withdrawals.is_empty());
+    let terminals = fixture
+        .terminals
+        .iter()
+        .filter(|terminal| {
+            terminal.authorization.body().payer() != &omitted_payer
+                && terminal
+                    .vector
+                    .entries()
+                    .iter()
+                    .all(|entry| entry.recipient != omitted_payer)
+        })
+        .cloned()
+        .collect();
+    let CloseFixture {
+        state,
+        context,
+        deposits,
+        withdrawals,
+        prepared,
+        ..
+    } = fixture;
+    drop(prepared);
+    let omitted = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        terminals,
+        strategy(),
+    )
+    .await
+    .expect("omitted-payer close prepares");
+    let (replica, close) = Box::pin(omitted.apply::<_, Sha256>(state))
+        .await
+        .expect("omitted-payer close applies");
+    let range = close
+        .roots
+        .activity_range(&context)
+        .expect("omitted-payer activity range is valid");
+    let epoch = Epoch::at(replica.logs(), context.payment().epoch(), range)
+        .await
+        .expect("omitted-payer epoch is retained");
+    let payer = epoch
+        .account_lookup(replica.logs(), &omitted_payer)
+        .await
+        .expect("omitted payer absence opens");
+    assert!(matches!(payer, AccountLookup::Absent(_)));
+    let lookup_bytes = encoded(&payer).len();
+    let challenge = Challenge::HigherAckDebit {
+        ack: Box::new(AckWitness::from_ack(&omitted_ack)),
+        payer: Box::new(payer),
+    };
+    let omitted_bytes =
+        challenge_bytes(&context, &close, &challenge, ChallengeKind::HigherAckDebit);
+    println!(
+        "clearing omitted payer: {} activity_rows={} activity_absence_bytes={} challenge_bytes={omitted_bytes}",
+        profile_key(profile),
+        close.rows.len(),
+        lookup_bytes,
+    );
 }
 
 fn state_proof_sizes(
@@ -317,7 +406,7 @@ fn payout_material(
             let history = logs
                 .prepare(
                     logs.head(),
-                    commonware_clearing::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+                    commonware_clearing::bajillion::logs::ActivityInput::new(vec![], vec![]),
                     vec![filler; history_outputs as usize],
                     floors,
                 )
@@ -330,7 +419,7 @@ fn payout_material(
         let prepared = logs
             .prepare(
                 logs.head(),
-                commonware_clearing::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+                commonware_clearing::bajillion::logs::ActivityInput::new(vec![], vec![]),
                 outputs,
                 floors,
             )
@@ -478,7 +567,7 @@ pub(crate) fn benches(challenges_only: bool) {
             assert!(close.header.verify::<Sha256, _>(&fixture.context, &close.roots, close.withdrawal_total));
             let header = encoded(&close.header).len();
             let roots = encoded(&close.roots).len();
-            assert_eq!(roots, encoded(&close.roots.change).len() + encoded(&close.roots.withdrawal_outputs).len() + encoded(&close.roots.successor).len() + encoded(&close.roots.successor_operations).len() + encoded(&close.roots.successor_sync_boundary).len() + encoded(&close.roots.proposal).len());
+            assert_eq!(roots, encoded(&close.roots.change).len() + encoded(&close.roots.row_count).len() + encoded(&close.roots.withdrawal_outputs).len() + encoded(&close.roots.successor).len() + encoded(&close.roots.successor_operations).len() + encoded(&close.roots.successor_sync_boundary).len() + encoded(&close.roots.proposal).len());
             let withdrawal_total_bytes = encoded(&close.withdrawal_total).len();
             let descriptor = encoded(&(close.roots, close.withdrawal_total)).len();
             assert_eq!(descriptor, roots + withdrawal_total_bytes);
@@ -501,40 +590,26 @@ pub(crate) fn benches(challenges_only: bool) {
             let decoded = EntryReceipt::<VerifyingKey, Digest>::decode(receipt_wire.clone()).expect("receipt decodes");
             assert_eq!(decoded, receipt);
             decoded.verify::<Sha256>(fixture.context.payment()).expect("receipt verifies");
-            for (kind, challenge) in proven_challenges(&fixture) {
-                let bytes = challenge_bytes(&fixture.context, close, &challenge, kind);
-                println!("clearing challenge: {} kind={} challenge_bytes={bytes}", profile_key(profile), kind_label(kind));
-            }
-            let leaf = &close.change_evidence().0[3];
+            let row = &close.rows[3];
+            let send_root = row.outgoing.as_ref().map_or_else(
+                || commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+                |send| send.body().send_root(),
+            );
+            let leaf = AccountChange::from_row(row, send_root);
             println!(
-                "clearing activity disclosure: {} core_bytes={} value_bytes={} account_change_bytes={} guard_bytes={}",
+                "clearing activity disclosure: {} core_bytes={} value_bytes={} account_change_bytes={}",
                 profile_key(profile), encoded(&leaf.value().core()).len(), encoded(&leaf.value()).len(),
-                encoded(leaf).len(), encoded(&leaf.guard::<Sha256>()).len(),
+                encoded(&leaf).len(),
             );
             println!(
                 "clearing sizes: {} E={} rows={} validators={} identical_dealing_bytes={} dealt_egress_bytes={} integrated_commitment_bytes={} root_bundle_bytes={} withdrawal_total_bytes={} descriptor_bytes={} certificate_bytes={} header_certificate_bytes={} header_roots_withdrawal_total_certificate_bytes={} entry_receipt_bytes={}",
                 profile_key(profile), profile.edges(), close.rows.len(), VALIDATORS, parts.total(), egress, header, roots, withdrawal_total_bytes, descriptor, certificate_bytes, external, package, receipt_wire.len(),
             );
 
-            let omitted_ack = fixture.acks.last().expect("profile has senders");
-            let omitted_payer = omitted_ack.body().payer();
-            assert!(fixture.deposits.is_empty() && fixture.withdrawals.is_empty());
-            let terminals = fixture.terminals.iter().filter(|terminal| {
-                terminal.authorization.body().payer() != omitted_payer
-                    && terminal.vector.entries().iter().all(|entry| &entry.recipient != omitted_payer)
-            }).cloned().collect();
-            let omitted = prepare_close_with_strategy::<Sha256, _, _, _, _>(
-                &fixture.state, &fixture.context, &fixture.deposits, &fixture.withdrawals, terminals, strategy(),
-            ).await.expect("omitted-payer close prepares");
-            let payer = serve::Index::new(omitted.close()).account_lookup::<Sha256>(omitted_payer)
-                .expect("omitted payer absence opens");
-            assert!(matches!(payer, AccountLookup::Absent(_)));
-            let lookup_bytes = encoded(&payer).len();
-            let challenge = Challenge::HigherAckDebit { ack: Box::new(AckWitness::from_ack(omitted_ack)), payer: Box::new(payer) };
-            let omitted_bytes = challenge_bytes(&fixture.context, omitted.close(), &challenge, ChallengeKind::HigherAckDebit);
-            println!("clearing omitted payer: {} activity_rows={} activity_absence_bytes={} challenge_bytes={omitted_bytes}", profile_key(profile), omitted.close().rows.len(), lookup_bytes);
-
             if challenges_only {
+                let (context, close, _, challenges) =
+                    Box::pin(proven_challenges(fixture)).await;
+                print_challenges(profile, &context, &close, challenges);
                 return;
             }
 
@@ -558,7 +633,9 @@ pub(crate) fn benches(challenges_only: bool) {
                 fixture.state.state().opening(account.clone()).await.expect("predecessor opening"),
                 fixture.state.state().lookup(&key).await.expect("predecessor membership"),
                 fixture.state.state().lookup(&missing).await.expect("predecessor exclusion"), &missing);
-            let (state, _) = Box::pin(fixture.prepared.apply(fixture.state)).await.expect("close applies");
+            let (context, close, state, challenges) =
+                Box::pin(proven_challenges(fixture)).await;
+            print_challenges(profile, &context, &close, challenges);
             let successor = state.state().root();
             state_proof_sizes("successor_after_apply", profile, successor,
                 state.state().opening(account.clone()).await.expect("successor opening"),
@@ -571,6 +648,7 @@ pub(crate) fn benches(challenges_only: bool) {
             assert_eq!(state.state().root(), successor);
             println!("clearing state prefix: {} predecessor_operations={} successor_operations={}", profile_key(profile), predecessor_operations, state.state().head().operations());
         });
+        runner().start(|runtime| omitted_payer_sizes(runtime, profile));
     }
     if !challenges_only {
         calculator_parity();

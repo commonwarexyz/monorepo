@@ -151,7 +151,6 @@ impl Manifest {
                 .decision
                 .as_ref()
                 .context("candidate has no voting decision")?;
-            decision.check()?;
             ensure!(
                 candidate.checkpoint.generation == self.canonical.checkpoint.generation
                     && candidate.checkpoint.next

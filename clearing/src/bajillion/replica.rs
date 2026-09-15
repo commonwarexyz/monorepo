@@ -135,12 +135,13 @@ where
         if predecessor != &self.head() {
             return Err(Error::Predecessor);
         }
-        let state = self.state.prepare(&predecessor.state, mutations).await?;
-        let logs = self
-            .logs
-            .prepare(&predecessor.logs, activity, outputs, floors)
-            .await?;
-        Ok(PreparedReplica::new(state, logs))
+        let (state, logs) = logs::join(
+            self.state.prepare(&predecessor.state, mutations),
+            self.logs
+                .prepare(&predecessor.logs, activity, outputs, floors),
+        )
+        .await;
+        Ok(PreparedReplica::new(state?, logs?))
     }
 
     /// Apply all three candidates. Any error consumes the entire replica owner.
@@ -148,24 +149,37 @@ where
         if prepared.predecessor() != self.head() {
             return Err(Error::Predecessor);
         }
-        let (state, logs) = prepared.into_parts();
-        let state = self.state.apply(state).await?;
-        let logs = self.logs.apply(logs).await?;
-        Ok(Self { state, logs })
+        let (prepared_state, prepared_logs) = prepared.into_parts();
+        let (state, logs) = logs::join(
+            self.state.apply(prepared_state),
+            self.logs.apply(prepared_logs),
+        )
+        .await;
+        Ok(Self {
+            state: state?,
+            logs: logs?,
+        })
     }
 
-    /// Durably commit all three stores.
-    pub async fn commit(mut self) -> Result<Self, Error> {
-        self.state = self.state.commit().await?;
-        self.logs = self.logs.commit().await?;
-        self.sync().await
+    /// Durably commit applied operations in all three stores.
+    ///
+    /// Native recovery reconstructs auxiliary state that has not been synchronized. Every commit
+    /// completes before this call returns; any error consumes the entire replica owner.
+    pub async fn commit(self) -> Result<Self, Error> {
+        let (state, logs) = logs::join(self.state.commit(), self.logs.commit()).await;
+        Ok(Self {
+            state: state?,
+            logs: logs?,
+        })
     }
 
-    /// Fully synchronize all three stores.
-    pub async fn sync(mut self) -> Result<Self, Error> {
-        self.state = self.state.sync().await?;
-        self.logs = self.logs.sync().await?;
-        Ok(self)
+    /// Fully synchronize all three stores, including their auxiliary recovery state.
+    pub async fn sync(self) -> Result<Self, Error> {
+        let (state, logs) = logs::join(self.state.sync(), self.logs.sync()).await;
+        Ok(Self {
+            state: state?,
+            logs: logs?,
+        })
     }
 
     /// Rewind every ahead store to a shared checkpoint and make the alignment durable.

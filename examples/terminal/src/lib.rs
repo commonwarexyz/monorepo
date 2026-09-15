@@ -19,6 +19,11 @@ mod ui;
 #[path = "../stateright/withdrawal.rs"]
 mod withdrawal_model;
 
+/// Runs the filesystem benchmark through the validator's durable voting boundary.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+#[commonware_macros::stability(ALPHA)]
+pub use crate::chain::da::benches::run as benchmark_durable_ack;
 use anyhow::Result;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 

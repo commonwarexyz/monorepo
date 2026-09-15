@@ -690,11 +690,27 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
             &state.history,
         )
         .await;
-        let (result, _) = protocol
+        let (result, candidate) = protocol
             .complete(
                 protocol.prepare(registration, Vec::new()).unwrap(),
                 &balance_state,
                 &mut TestRng::new(191),
+            )
+            .await
+            .unwrap();
+        let payout_position = result.context.predecessor_logs().payouts.operations;
+        let balance_state = balance_state.apply(candidate).await.unwrap();
+        let output = balance_state
+            .logs()
+            .payout_at(payout_position)
+            .await
+            .unwrap();
+        let (opening, _) = balance_state
+            .logs()
+            .payout_opening(
+                &result.roots.withdrawal_outputs,
+                payout_position,
+                NonZeroU64::MIN,
             )
             .await
             .unwrap();
@@ -713,8 +729,8 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
         let initial = native_balance(&db, &native, &account).await.unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: result.context.predecessor_logs().payouts.operations,
-            claim: result.withdrawal_claims[0].clone(),
+            start: payout_position,
+            claim: WithdrawalClaim::new(output, opening),
         });
         apply(&db, &finalized, &native, 18, &[claim.clone(), claim]).await;
         assert_eq!(
@@ -877,9 +893,19 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 .await
                 .unwrap();
             assert_eq!(carried.withdrawal_total, 0);
-            assert_eq!(carried.withdrawal_claims.len(), 1);
-            assert_eq!(carried.withdrawal_claims[0].output().amount(), 0);
+            let payout_position = carried.context.predecessor_logs().payouts.operations;
             let balances = balances.apply(candidate).await.unwrap();
+            let output = balances.logs().payout_at(payout_position).await.unwrap();
+            assert_eq!(output.amount(), 0);
+            let (opening, _) = balances
+                .logs()
+                .payout_opening(
+                    &carried.roots.withdrawal_outputs,
+                    payout_position,
+                    NonZeroU64::MIN,
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 balances
                     .state()
@@ -915,8 +941,8 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
             let initial = native_balance(&db, &native, &account).await.unwrap();
             let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: deployment(),
-                start: carried.context.predecessor_logs().payouts.operations,
-                claim: carried.withdrawal_claims[0].clone(),
+                start: payout_position,
+                claim: WithdrawalClaim::new(output, opening),
             });
             apply(&db, &finalized, &native, 16, &[claim.clone(), claim]).await;
             assert_eq!(

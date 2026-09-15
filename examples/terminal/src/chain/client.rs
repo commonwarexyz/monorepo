@@ -34,6 +34,7 @@
 
 use crate::{
     chain::{
+        da::sync::{METHOD_NATIVE, NativeRequest, NativeResponse, Query as NativeQuery},
         ingress::Submission,
         light::{self, Latest, Verified},
         native::RegistryEntry,
@@ -55,14 +56,80 @@ use crate::{
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use commonware_clearing::bajillion::{
-    admission::bls12381, boundary::SignedWithdrawal, transition::CloseContext,
+    admission::bls12381,
+    boundary::SignedWithdrawal,
+    logs::{LogHead, PayoutOperation},
+    transition::CloseContext,
 };
-use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
+use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network, Spawner};
-use commonware_storage::Context as StorageContext;
+use commonware_storage::{
+    Context as StorageContext,
+    merkle::{Family as _, Location, mmr},
+    qmdb::{
+        self,
+        sync::{Request as NativeSyncRequest, Response as NativeSyncResponse},
+    },
+};
 use rand_core::CryptoRng;
-use std::{future::Future, net::SocketAddr, time::Duration};
+use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
+
+const PAYOUT_DISCOVERY_PAGE: u64 = 128;
+
+async fn fetch_payout_operations_at<E: Clock + Network>(
+    ctx: &E,
+    address: SocketAddr,
+    deployment: Digest,
+    head: LogHead<Digest>,
+    start: u64,
+) -> Result<Vec<PayoutOperation>> {
+    let size = Location::<mmr::Family>::new(head.operations);
+    let start = Location::<mmr::Family>::new(start);
+    ensure!(
+        start < size,
+        "payout discovery cursor is outside the authenticated head"
+    );
+    let count = (*size - *start).min(PAYOUT_DISCOVERY_PAGE);
+    let request = NativeRequest {
+        deployment,
+        query: NativeQuery::Payouts(NativeSyncRequest::Operations {
+            size,
+            start,
+            max_ops: NonZeroU64::new(count).expect("nonempty payout page"),
+        }),
+    };
+    let body = rpc::invoke(
+        ctx,
+        address,
+        "payout log custodian",
+        METHOD_NATIVE,
+        request.encode(),
+    )
+    .await?;
+    let NativeResponse::Data(body) = NativeResponse::decode(body)? else {
+        bail!("payout log page is unavailable")
+    };
+    let NativeSyncResponse::Operations { proof, operations } =
+        NativeSyncResponse::<mmr::Family, PayoutOperation, Digest>::decode_cfg(
+            body,
+            &(
+                usize::try_from(PAYOUT_DISCOVERY_PAGE).expect("payout page bound fits usize"),
+                RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
+            ),
+        )?
+    else {
+        bail!("custodian returned another payout response")
+    };
+    ensure!(
+        operations.len() == usize::try_from(count).expect("page count fits usize")
+            && proof.leaves == size
+            && proof.inactive_peaks == mmr::Family::inactive_peaks(size, Location::new(head.floor))
+            && qmdb::verify_proof::<Sha256, mmr::Family, _>(&proof, start, &operations, &head.root,),
+        "custodian returned an invalid payout-log page"
+    );
+    Ok(operations)
+}
 
 /// Tries each native custodian once and authenticates the requested output position and head.
 pub(crate) async fn fetch_payout_proof<E: Clock + Network>(
@@ -158,55 +225,76 @@ pub(crate) trait Chain: Send + 'static {
         async move { fetch_payout_proof(ctx, &holders?, deployment, head, index).await }
     }
 
-    /// Authenticates original epoch sources at one paired finalized checkpoint.
-    fn source<E: Env>(
+    /// Fetches and authenticates one bounded page of the finalized payout operation log.
+    ///
+    /// `start` is a logical cursor, independent of the MMR inactivity floor. A pruned or
+    /// unavailable holder is skipped; its response never proves that the requested prefix is
+    /// absent.
+    fn payout_operations<E: Env>(
         &self,
         ctx: &E,
-        epoch: u64,
-        tip: crate::protocol::PayoutTip,
-    ) -> impl Future<Output = Result<commonware_clearing::bajillion::custody::Source<Key, Digest>>> + Send
-    {
+        head: LogHead<Digest>,
+        start: u64,
+    ) -> impl Future<Output = Result<(u64, Vec<PayoutOperation>)>> + Send {
         let deployment = self.deployment();
         let holders = self.holders();
         async move {
             ensure!(
-                tip.finalized.is_some_and(|last| epoch <= last),
-                "source epoch is not finalized at this checkpoint"
+                start < head.operations,
+                "payout discovery cursor is outside the authenticated head"
             );
-            let request = EvidenceRequest::new(
-                deployment,
-                EvidenceLookup::Source {
-                    epoch,
-                    heads: tip.heads,
-                },
-            );
-            for address in holders? {
+            let holders = holders?;
+            for &address in &holders {
+                if let Ok(operations) =
+                    fetch_payout_operations_at(ctx, address, deployment, head, start).await
+                {
+                    return Ok((start, operations));
+                }
+            }
+
+            // A checkpoint retention cut is availability advice only. It may skip an unavailable
+            // prefix, but the returned suffix is still authenticated against the wallet's exact
+            // certified payout head. Exhaust the exact cursor at every holder before using it.
+            let mut best = None;
+            for address in holders {
+                let hint_request = NativeRequest {
+                    deployment,
+                    query: NativeQuery::Checkpoint { max_next: u64::MAX },
+                };
                 let Ok(body) = rpc::invoke(
                     ctx,
                     address,
-                    "source custodian",
-                    METHOD_EVIDENCE,
-                    request.encode(),
+                    "payout log custodian",
+                    METHOD_NATIVE,
+                    hint_request.encode(),
                 )
                 .await
                 else {
                     continue;
                 };
-                let Ok(EvidenceResponse::Served(Evidence::Source(proof))) =
-                    EvidenceResponse::decode(body)
-                else {
+                let Ok(NativeResponse::Checkpoint(transfer)) = NativeResponse::decode(body) else {
                     continue;
                 };
-                let Ok(source) = proof.verify::<Sha256, Key>(&tip.heads) else {
-                    continue;
-                };
-                if source.context().deployment() == &deployment
-                    && source.context().payment().epoch() == epoch
+                let hint = transfer.checkpoint.retained.payouts;
+                if transfer.checkpoint.deployment != deployment
+                    || hint <= start
+                    || hint >= head.operations
                 {
-                    return Ok(source);
+                    continue;
+                }
+                if let Ok(operations) =
+                    fetch_payout_operations_at(ctx, address, deployment, head, hint).await
+                    && best
+                        .as_ref()
+                        .is_none_or(|(best_start, _)| hint < *best_start)
+                {
+                    best = Some((hint, operations));
                 }
             }
-            bail!("no custodian can authenticate the epoch's original sources")
+            if let Some(page) = best {
+                return Ok(page);
+            }
+            bail!("no custodian can authenticate the requested payout-log page")
         }
     }
 
@@ -422,18 +510,19 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// Status and the finalized payout identity authenticated at one recent checkpoint.
+    /// The finalized payout identity authenticated at one recent checkpoint.
     fn payout_checkpoint<E: Env>(
         &mut self,
         ctx: &E,
-    ) -> impl Future<Output = Result<(StatusRecord, crate::protocol::PayoutTip)>> + Send {
+    ) -> impl Future<Output = Result<crate::protocol::PayoutTip>> + Send {
         async move {
-            let request = self.request(Lookup::Status);
+            let request = self.request(Lookup::PayoutHead);
             let verified = self.recent(ctx, &request).await?;
-            let tip = verified
-                .payout_tip
-                .context("status omitted its certified payout tip")?;
-            Ok((extract_status(verified)?, tip))
+            match verified.record {
+                Some(Record::PayoutHead(tip)) => Ok(tip),
+                Some(_) => bail!("certified payout-head read returned a foreign record"),
+                None => bail!("the chain has not committed a payout head yet"),
+            }
         }
     }
 
@@ -456,7 +545,7 @@ pub(crate) trait Chain: Send + 'static {
                     if let Some(tip) = verified.payout_tip
                         && tip.finalized.is_some_and(|latest| epoch <= latest)
                     {
-                        bail!("the epoch anchor is retired; authenticate its finalized source")
+                        bail!("the epoch anchor is retired")
                     }
                     Ok(None)
                 }
@@ -483,7 +572,7 @@ pub(crate) trait Chain: Send + 'static {
                     if let Some(tip) = verified.payout_tip
                         && tip.finalized.is_some_and(|latest| epoch <= latest)
                     {
-                        bail!("the admission is retired; authenticate its finalized source")
+                        bail!("the admission is retired")
                     }
                     Ok(None)
                 }
@@ -504,7 +593,6 @@ pub(crate) trait Chain: Send + 'static {
                 head: verified
                     .payout_tip
                     .context("payout lookup omitted its certified head")?
-                    .heads
                     .payouts,
                 interval: verified.unclaimed,
             })

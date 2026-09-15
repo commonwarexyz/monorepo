@@ -3,7 +3,6 @@
 use crate::{
     chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
     protocol::{MAX_DESTINATION_BYTES, state_config},
-    rpc,
 };
 use commonware_clearing::bajillion::{logs, replica};
 use commonware_codec::RangeCfg;
@@ -11,12 +10,16 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{BufferPooler, buffer::paged::CacheRef};
 use commonware_storage::{journal::contiguous, merkle::full, qmdb::keyless};
 use commonware_utils::NZU64;
+use std::num::NonZeroU64;
 
-/// Remove a generation whose native owner has been dropped. Repeating removal after a crash
-/// is safe even when an earlier attempt already removed some partitions.
-pub(super) async fn remove_generation<E: commonware_storage::Context>(
+pub(super) const LOG_OPERATIONS_PER_SECTION: NonZeroU64 = NZU64!(128);
+pub(super) const LOG_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(1024);
+
+/// Remove a recorded generation when no intact native owner is available. Intact owners use
+/// `destroy` to drain pending work. Repeating removal is safe when some partitions are absent.
+pub(super) async fn remove_generation<E: commonware_storage::Context, S: Strategy>(
     context: &E,
-    config: replica::Config,
+    config: replica::Config<S>,
 ) -> anyhow::Result<()> {
     let journals = [
         config.state.merkle_config.journal_partition,
@@ -58,7 +61,7 @@ pub(crate) fn replica_config<S: Strategy>(
     let merkle = |role: &str| full::Config {
         journal_partition: format!("{prefix}-{role}-merkle"),
         metadata_partition: format!("{prefix}-{role}-pins"),
-        items_per_blob: NZU64!(1024),
+        items_per_blob: LOG_MERKLE_NODES_PER_BLOB,
         write_buffer: IO_BUFFER_SIZE,
         replay_buffer: IO_BUFFER_SIZE,
         strategy: strategy.clone(),
@@ -71,9 +74,9 @@ pub(crate) fn replica_config<S: Strategy>(
                 merkle: merkle("activity"),
                 log: contiguous::variable::Config {
                     partition: format!("{prefix}-activity-log"),
-                    items_per_section: NZU64!(128),
+                    items_per_section: LOG_OPERATIONS_PER_SECTION,
                     compression: None,
-                    codec_config: RangeCfg::new(0..=rpc::MAX_BODY_SIZE),
+                    codec_config: (),
                     page_cache: cache.clone(),
                     write_buffer: IO_BUFFER_SIZE,
                     replay_buffer: IO_BUFFER_SIZE,
@@ -83,7 +86,7 @@ pub(crate) fn replica_config<S: Strategy>(
                 merkle: merkle("payouts"),
                 log: contiguous::variable::Config {
                     partition: format!("{prefix}-payouts-log"),
-                    items_per_section: NZU64!(128),
+                    items_per_section: LOG_OPERATIONS_PER_SECTION,
                     compression: None,
                     codec_config: RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                     page_cache: cache,

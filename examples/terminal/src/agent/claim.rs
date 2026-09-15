@@ -1,10 +1,6 @@
-//! Finalized withdrawal claims bound to the wallet's retained authorization.
+//! Permissionless claims for wallet-owned outputs in the finalized payout MMR.
 
-use super::{
-    Agent,
-    evidence::verify_payout_proof,
-    store::{PendingWithdrawalClaim, RefreshedWithdrawalClaim, WithdrawalSource},
-};
+use super::{Agent, evidence::verify_payout_proof, store::PendingWithdrawalClaim};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -14,62 +10,61 @@ use crate::{
     operator::rpc as operator_rpc,
 };
 use anyhow::{Context, Result, ensure};
+use commonware_clearing::bajillion::logs::PayoutOperation;
 use std::net::SocketAddr;
 
 impl Agent {
-    /// Retains immutable source evidence and retries refreshable proof/hint bytes until the
-    /// globally positioned output is proven spent in the same certified payout snapshot.
+    /// Retains an authenticated payout identity and retries refreshable proof bytes until the
+    /// append-only certified payout log proves that globally positioned output spent.
     pub(crate) async fn claim_withdrawal<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<WithdrawalResponse> {
-        let pending = self
-            .pending_withdrawal_claim
-            .clone()
-            .context("no withdrawal claim is pending")?;
-        let source = match pending.source {
-            // SQLite contains this identity only after a finalized SourceProof bound the exact
-            // request and output. Current payout inclusion below re-establishes issuance without
-            // depending on source retention after restart.
-            Some(source) => source,
+        ensure!(
+            chain.deployment() == self.deployment,
+            "withdrawal client is bound to another deployment"
+        );
+        let mut candidate = match self.pending_withdrawal_claim.clone() {
+            Some(candidate) => candidate,
             None => {
-                let source = self.withdrawal_source(ctx, chain).await?;
+                let candidate = self.withdrawal_source(ctx, chain).await?;
                 self.store
-                    .cache_withdrawal_source(&source)
-                    .context("cache immutable withdrawal source")?;
-                self.pending_withdrawal_claim = Some(PendingWithdrawalClaim {
-                    source: Some(source.clone()),
-                    refreshed: None,
-                });
-                source
+                    .cache_withdrawal_claim(&candidate)
+                    .context("cache discovered withdrawal proof")?;
+                self.pending_withdrawal_claim = Some(candidate.clone());
+                candidate
             }
         };
-
-        let index = source.position;
-        let output = source.output.clone();
-        let mut cached = self
-            .pending_withdrawal_claim
-            .as_ref()
-            .and_then(|pending| pending.refreshed.clone());
+        let index = candidate.claim.position();
+        let output = candidate.claim.output().clone();
         let mut last_submission = None;
 
         for _ in 0..EFFECT_ATTEMPTS {
-            // Head and interval are authenticated under one chain root. Only after current-head
-            // inclusion verifies can interval absence mean that this issued output was spent.
+            // The cached candidate was authenticated at a finalized payout head. Payout positions
+            // are append-only, so a newer certified count beyond this index proves that the same
+            // identity was issued even when its current interval is absent.
             let status = chain
                 .payout_status(ctx, index)
                 .await
                 .context("read coherent payout status")?;
-            let claim = match cached.as_ref() {
-                Some(refreshed)
-                    if refreshed.head == status.head
-                        && refreshed.claim.position() == index
-                        && refreshed.claim.output() == &output =>
-                {
-                    refreshed.claim.clone()
-                }
+            ensure!(
+                index < status.head.operations,
+                "current payout head predates the cached candidate"
+            );
+            let Some(interval) = status.interval else {
+                self.store
+                    .complete_withdrawal_claim(index)
+                    .context("record delivered payout candidate")?;
+                self.pending_withdrawal_claim = None;
+                return Ok(WithdrawalResponse {
+                    destination: output.destination().clone(),
+                    amount: output.amount(),
+                });
+            };
+            let claim = match &candidate {
+                cached if cached.head == status.head => cached.claim.clone(),
                 _ => match operator_rpc::payout_proof(
                     ctx,
                     operator,
@@ -89,38 +84,20 @@ impl Agent {
                         .context("refresh payout proof from configured custodians")?,
                 },
             };
-
-            let Some(interval) = status.interval else {
-                self.store
-                    .complete_withdrawal_claim(&source)
-                    .context("complete spent withdrawal claim")?;
-                self.pending_withdrawal_claim = None;
-                self.pending_withdrawal = None;
-                let release = WithdrawalResponse {
-                    destination: output.destination().clone(),
-                    amount: output.amount(),
-                };
-
-                return Ok(release);
-            };
-
             ensure!(
                 interval.start <= index && index < interval.end,
                 "certified interval does not contain the payout index"
             );
-            let refreshed = RefreshedWithdrawalClaim {
-                head: status.head,
-                start: interval.start,
-                claim: claim.clone(),
-            };
-            self.store
-                .cache_withdrawal_refresh(&source, &refreshed)
-                .context("cache current withdrawal proof")?;
-            cached = Some(refreshed.clone());
-            self.pending_withdrawal_claim = Some(PendingWithdrawalClaim {
-                source: Some(source.clone()),
-                refreshed: Some(refreshed),
-            });
+            if candidate.head != status.head {
+                candidate = PendingWithdrawalClaim {
+                    head: status.head,
+                    claim: claim.clone(),
+                };
+                self.store
+                    .cache_withdrawal_claim(&candidate)
+                    .context("cache current withdrawal proof")?;
+                self.pending_withdrawal_claim = Some(candidate.clone());
+            }
 
             let tx = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: self.deployment,
@@ -134,7 +111,7 @@ impl Agent {
         }
 
         let error = anyhow::anyhow!(
-            "the withdrawal remains unclaimed; immutable source and current proof are retained"
+            "the withdrawal remains unclaimed; payout identity and current proof are retained"
         );
         match last_submission {
             Some(source) => Err(error.context(source)),
@@ -142,19 +119,70 @@ impl Agent {
         }
     }
 
-    /// Obtains an exact finalized source identity from the bounded native-custody window.
+    /// Discovers one unspent wallet-owned output in the finalized native payout log.
+    ///
+    /// The destination match is advisory discovery. The point opening and coherent current
+    /// unclaimed interval authenticate the candidate before it becomes durable.
     async fn withdrawal_source<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
-    ) -> Result<WithdrawalSource> {
-        let request = self
-            .pending_withdrawal
-            .clone()
-            .context("no immutable withdrawal request is available for source discovery")?;
-        self.withdrawal_source_in_notice_window(ctx, chain, &request)
+    ) -> Result<PendingWithdrawalClaim> {
+        let tip = chain
+            .payout_checkpoint(ctx)
             .await
-            .context("search native custody for the withdrawal source")?
-            .context("the bounded custody window contains no exact withdrawal source")
+            .context("read withdrawal payout checkpoint")?;
+        ensure!(tip.finalized.is_some(), "no withdrawal epoch is finalized");
+        let head = tip.payouts;
+        let mut cursor = 0;
+        while cursor < head.operations {
+            let (start, operations) = chain
+                .payout_operations(ctx, head, cursor)
+                .await
+                .context("discover finalized wallet payouts")?;
+            ensure!(
+                cursor <= start && start < head.operations && !operations.is_empty(),
+                "payout discovery returned an invalid cursor"
+            );
+            for (offset, operation) in operations.iter().enumerate() {
+                let PayoutOperation::Append(output) = operation else {
+                    continue;
+                };
+                if output.destination().as_ref() != self.account().as_ref() {
+                    continue;
+                }
+                let position = start
+                    .checked_add(u64::try_from(offset).context("payout offset overflow")?)
+                    .context("payout position overflow")?;
+                let Ok(status) = chain.payout_status(ctx, position).await else {
+                    continue;
+                };
+                if position >= status.head.operations {
+                    continue;
+                }
+                if let Some(interval) = status.interval {
+                    if !(interval.start <= position && position < interval.end) {
+                        continue;
+                    }
+                    let Ok(claim) = chain.payout_proof(ctx, status.head, position).await else {
+                        continue;
+                    };
+                    let Ok(claim) = verify_payout_proof(&status.head, position, output, claim)
+                    else {
+                        continue;
+                    };
+                    return Ok(PendingWithdrawalClaim {
+                        head: status.head,
+                        claim,
+                    });
+                }
+            }
+            cursor = start
+                .checked_add(
+                    u64::try_from(operations.len()).context("payout page length overflow")?,
+                )
+                .context("payout cursor overflow")?;
+        }
+        anyhow::bail!("no unspent wallet-owned payout is available")
     }
 }

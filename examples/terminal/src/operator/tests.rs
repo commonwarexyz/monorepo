@@ -1,17 +1,22 @@
 fn activity_range(
     operator: &Operator,
-    batch: BatchId<Digest>,
+    epoch: u64,
 ) -> commonware_clearing::bajillion::transition::ActivityRange<Digest> {
-    let result = (0..=operator.registration.context.payment().epoch())
-        .find_map(|epoch| {
-            operator
-                .store
-                .stored_result(epoch)
-                .unwrap()
-                .filter(|result| result.header.batch_id::<Sha256>() == batch)
-        })
-        .unwrap();
+    let result = operator.store.stored_result(epoch).unwrap().unwrap();
     result.roots.activity_range(&result.context).unwrap()
+}
+
+fn payout_claim(
+    operator: &Operator,
+    result: &SettlementResult,
+    ordinal: u64,
+) -> WithdrawalClaim<Digest> {
+    operator
+        .payout_proof(
+            result.roots.withdrawal_outputs,
+            result.context.predecessor_logs().payouts.operations + ordinal,
+        )
+        .unwrap()
 }
 
 use super::*;
@@ -142,7 +147,6 @@ fn disabled_proof_replica_accepts_proposes_certifies_and_reopens_without_native_
         header: derived.header,
         roots: derived.roots,
         withdrawal_total: derived.withdrawal_total,
-        withdrawal_claims: derived.withdrawal_claims,
         certificate: derived.certificate,
     };
     let result = prepared.certify(certified, 0, 0).unwrap();
@@ -1417,12 +1421,7 @@ fn restarted_observer_finishes_the_retired_certified_prefix_once() {
             .advance(deadline.saturating_sub(height) + 1)
             .await;
         assert_eq!(
-            serving
-                .payout_checkpoint(&context)
-                .await
-                .unwrap()
-                .1
-                .finalized,
+            serving.payout_checkpoint(&context).await.unwrap().finalized,
             Some(2)
         );
         assert!(serving.admitted(&context, 0).await.is_err());
@@ -1873,10 +1872,11 @@ impl ChainBackend for PendingAdmission {
                 .lookup
                 .requires_payout_tip()
                 .then(|| crate::protocol::PayoutTip {
-                    heads: commonware_clearing::bajillion::logs::Heads::empty::<
+                    payouts: commonware_clearing::bajillion::logs::Heads::empty::<
                         crate::protocol::Key,
                         Sha256,
-                    >(),
+                    >()
+                    .payouts,
                     finalized: None,
                 }),
             height: 1,
@@ -2065,7 +2065,7 @@ impl Chain {
         else {
             return None;
         };
-        let head = head.heads.payouts;
+        let head = head.payouts;
         let EvidenceResponse::Served(Evidence::Payout(refreshed)) = self
             .control
             .evidence(EvidenceRequest {
@@ -2448,9 +2448,8 @@ fn certified_close_survives_unknown_retention_commit_without_recertification() {
         .unwrap();
     assert_eq!(
         evidence
-            .lookup
             .resolve::<Sha256>(
-                &activity_range(&operator, evidence.batch_id),
+                &activity_range(&operator, 0),
                 &payer,
                 &operator.wallets[1].public_key()
             )
@@ -2963,12 +2962,7 @@ fn finalized_cache_retirement_preserves_receipts_and_live_vectors() {
         let evidence = operator.committed_entry(&payer, &recipient, 0).unwrap();
         assert_eq!(
             evidence
-                .lookup
-                .resolve::<Sha256>(
-                    &activity_range(&operator, evidence.batch_id),
-                    &payer,
-                    &recipient
-                )
+                .resolve::<Sha256>(&activity_range(&operator, 0), &payer, &recipient)
                 .unwrap(),
             (5, 2)
         );
@@ -2980,9 +2974,8 @@ fn finalized_cache_retirement_preserves_receipts_and_live_vectors() {
         .unwrap();
     assert_eq!(
         evidence
-            .lookup
             .resolve::<Sha256>(
-                &activity_range(&operator, evidence.batch_id),
+                &activity_range(&operator, 1),
                 &recipient,
                 &operator.wallets[2].public_key(),
             )
@@ -3002,15 +2995,9 @@ fn committed_entry_serves_the_retained_close() {
 
     // The credited edge resolves to its committed terminal entry.
     let evidence = operator.committed_entry(&payer, &receiver, epoch).unwrap();
-    let change_root = evidence.change_root;
     assert_eq!(
         evidence
-            .lookup
-            .resolve::<Sha256>(
-                &activity_range(&operator, evidence.batch_id),
-                &payer,
-                &receiver
-            )
+            .resolve::<Sha256>(&activity_range(&operator, epoch), &payer, &receiver)
             .unwrap(),
         (7, 1)
     );
@@ -3021,12 +3008,7 @@ fn committed_entry_serves_the_retained_close() {
     let evidence = operator.committed_entry(&receiver, &payer, epoch).unwrap();
     assert_eq!(
         evidence
-            .lookup
-            .resolve::<Sha256>(
-                &activity_range(&operator, evidence.batch_id),
-                &receiver,
-                &payer
-            )
+            .resolve::<Sha256>(&activity_range(&operator, epoch), &receiver, &payer)
             .unwrap(),
         (0, 0)
     );
@@ -3034,12 +3016,7 @@ fn committed_entry_serves_the_retained_close() {
     let evidence = operator.committed_entry(&idle, &receiver, epoch).unwrap();
     assert_eq!(
         evidence
-            .lookup
-            .resolve::<Sha256>(
-                &activity_range(&operator, evidence.batch_id),
-                &idle,
-                &receiver
-            )
+            .resolve::<Sha256>(&activity_range(&operator, epoch), &idle, &receiver)
             .unwrap(),
         (0, 0)
     );
@@ -3052,15 +3029,9 @@ fn committed_entry_serves_the_retained_close() {
     };
     let served = |operator: &Operator| {
         let evidence = operator.committed_entry(&payer, &receiver, epoch).unwrap();
-        assert_eq!(evidence.change_root, change_root);
         assert_eq!(
             evidence
-                .lookup
-                .resolve::<Sha256>(
-                    &activity_range(operator, evidence.batch_id),
-                    &payer,
-                    &receiver
-                )
+                .resolve::<Sha256>(&activity_range(operator, epoch), &payer, &receiver)
                 .unwrap(),
             (7, 1)
         );
@@ -3073,15 +3044,9 @@ fn committed_entry_serves_the_retained_close() {
     }
     close_successor(&mut operator);
     let retained = operator.committed_entry(&payer, &receiver, epoch).unwrap();
-    assert_eq!(retained.change_root, change_root);
     assert_eq!(
         retained
-            .lookup
-            .resolve::<Sha256>(
-                &activity_range(&operator, retained.batch_id),
-                &payer,
-                &receiver
-            )
+            .resolve::<Sha256>(&activity_range(&operator, epoch), &payer, &receiver)
             .unwrap(),
         (7, 1)
     );
@@ -3200,7 +3165,7 @@ fn registered_empty_epoch_survives_restart_and_finalizes() {
                 _ => panic!("expected exactly one close"),
             }
             let result = operator.store.stored_result(0).unwrap().unwrap();
-            assert_eq!(result.rows, 0);
+            assert_eq!(result.roots.row_count, 0);
             assert_eq!(result.withdrawal_total, 0);
             for wallet in &operator.wallets {
                 assert_eq!(
@@ -3621,7 +3586,7 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     let result = operator.complete_prepared(prepared, 44).unwrap();
     assert_eq!(result.withdrawal_total, 95);
     assert_eq!(
-        result.withdrawal_claims[0]
+        payout_claim(&operator, &result, 0)
             .verify::<Sha256>(&result.roots.withdrawal_outputs)
             .unwrap()
             .amount(),
@@ -3636,7 +3601,6 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
 #[test]
 fn close_can_spend_to_zero_and_retains_a_consumable_zero_output() {
     let mut operator = operator();
-    let account = operator.wallets[0].public_key();
     operator.withdraw(0, WithdrawalAction::Close).unwrap();
     operator.pay(0, 1, 100).unwrap();
 
@@ -3650,7 +3614,7 @@ fn close_can_spend_to_zero_and_retains_a_consumable_zero_output() {
     let result = operator.complete_prepared(prepared, 45).unwrap();
     assert_eq!(result.withdrawal_total, 0);
     assert_eq!(
-        result.withdrawal_claims[0]
+        payout_claim(&operator, &result, 0)
             .verify::<Sha256>(&result.roots.withdrawal_outputs)
             .unwrap()
             .amount(),
@@ -3661,8 +3625,7 @@ fn close_can_spend_to_zero_and_retains_a_consumable_zero_output() {
         .finish_close(&result, operator.genesis.root())
         .unwrap();
     let retained = operator.store.stored_result(0).unwrap().unwrap();
-    assert_eq!(retained.withdrawals.requests()[0].account(), &account);
-    assert_eq!(retained.withdrawal_claims[0].output().amount(), 0);
+    assert_eq!(payout_claim(&operator, &retained, 0).output().amount(), 0);
 }
 
 #[test]
@@ -4931,13 +4894,13 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
             .unwrap();
 
         let first_batch = first.header.batch_id::<Sha256>();
-        let first_claim = first.withdrawal_claims.first().unwrap();
+        let first_claim = payout_claim(&operator, &first, 0);
         assert_eq!(
             first_claim.position(),
             first.context.predecessor_logs().payouts.operations
         );
 
-        let first_output = released(chain.claim_withdrawal(first_batch, first_claim).await);
+        let first_output = released(chain.claim_withdrawal(first_batch, &first_claim).await);
         assert_eq!(chain.status().await.claimable, 0);
 
         operator.withdraw(1, amount(30)).unwrap();
@@ -4959,22 +4922,22 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
         assert_eq!(chain.status().await.claimable, 30);
 
         let second_batch = second.header.batch_id::<Sha256>();
-        let second_claim = second.withdrawal_claims.first().unwrap();
+        let second_claim = payout_claim(&operator, &second, 0);
         assert_eq!(
             second_claim.position(),
             second.context.predecessor_logs().payouts.operations
         );
         assert_ne!(second_batch, first_batch);
-        let second_output = released(chain.claim_withdrawal(second_batch, second_claim).await);
+        let second_output = released(chain.claim_withdrawal(second_batch, &second_claim).await);
         assert_eq!(chain.status().await.claimable, 0);
         assert_eq!(
-            released(chain.claim_withdrawal(second_batch, second_claim).await),
+            released(chain.claim_withdrawal(second_batch, &second_claim).await),
             second_output
         );
 
         // Completion identity remains the native position and output across later finalizations.
         assert_eq!(
-            released(chain.claim_withdrawal(first_batch, first_claim).await),
+            released(chain.claim_withdrawal(first_batch, &first_claim).await),
             first_output
         );
         assert_eq!(chain.status().await.claimable, 0);
@@ -5041,14 +5004,14 @@ fn ordinary_withdrawal_is_included_and_claimable() {
             .unwrap();
 
         let retained = operator.store.stored_result(epoch).unwrap().unwrap();
-        let evidence = &retained.withdrawal_claims[0];
+        let evidence = payout_claim(&operator, &retained, 0);
         assert_eq!(evidence.output().amount(), 25);
         assert_eq!(
             evidence.output().destination().as_ref(),
             operator.wallets[0].public_key().as_ref()
         );
         chain.admit(&result).await;
-        let release = released(chain.claim_withdrawal(batch_id, evidence).await);
+        let release = released(chain.claim_withdrawal(batch_id, &evidence).await);
         assert_eq!(release.amount, 25);
         assert_eq!(
             release.destination.as_ref(),
@@ -5057,7 +5020,7 @@ fn ordinary_withdrawal_is_included_and_claimable() {
         assert_eq!(release.amount, evidence.output().amount());
         assert_eq!(&release.destination, evidence.output().destination());
         assert_eq!(
-            released(chain.claim_withdrawal(batch_id, evidence).await,),
+            released(chain.claim_withdrawal(batch_id, &evidence).await,),
             release
         );
     });
@@ -5099,12 +5062,10 @@ fn offset_boundaries_settle_in_their_registered_epoch() {
             .unwrap();
         assert_eq!(operator.payment_head(&account).unwrap().balance, 95);
         assert!(operator.registration.deposits.records().is_empty());
+        let claim = payout_claim(&operator, &result, 0);
         let release = released(
             chain
-                .claim_withdrawal(
-                    result.header.batch_id::<Sha256>(),
-                    &result.withdrawal_claims[0],
-                )
+                .claim_withdrawal(result.header.batch_id::<Sha256>(), &claim)
                 .await,
         );
         assert_eq!(release.amount, 7);
@@ -5210,12 +5171,10 @@ fn queued_withdrawal_uses_the_settled_offset_balance() {
 
         // Both withdrawal reserves release.
         for result in [&first_close, &second_close] {
+            let claim = payout_claim(&operator, result, 0);
             let release = released(
                 chain
-                    .claim_withdrawal(
-                        result.header.batch_id::<Sha256>(),
-                        &result.withdrawal_claims[0],
-                    )
+                    .claim_withdrawal(result.header.batch_id::<Sha256>(), &claim)
                     .await,
             );
             assert_eq!(release.amount, 7);
@@ -5376,7 +5335,7 @@ fn close_removes_the_account_and_claims_the_final_tail() {
         .unwrap();
     assert!(!alice.present);
     let retained = operator.store.stored_result(epoch).unwrap().unwrap();
-    let evidence = &retained.withdrawal_claims[0];
+    let evidence = payout_claim(&operator, &retained, 0);
     assert_eq!(evidence.output().amount(), INITIAL_BALANCE);
     assert_eq!(
         evidence.output().destination().as_ref(),
@@ -5623,7 +5582,7 @@ fn virtual_amount_reservation_and_incoming_credit_survive_restart() {
     let result = operator.complete_close(92).unwrap();
     assert_eq!(result.withdrawal_total, 70);
     assert_eq!(
-        result.withdrawal_claims[0]
+        payout_claim(&operator, &result, 0)
             .verify::<Sha256>(&result.roots.withdrawal_outputs)
             .unwrap()
             .amount(),
@@ -5643,7 +5602,10 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
         operator.accept_send(send, entries).unwrap();
         let result = operator.complete_close(100 + epoch as u64).unwrap();
         assert_eq!(result.withdrawal_total, 0);
-        assert!(result.withdrawal_claims.is_empty());
+        assert_eq!(
+            result.roots.withdrawal_outputs.operations,
+            result.context.predecessor_logs().payouts.operations + 1
+        );
     }
     assert_eq!(operator.payment_head(&key).unwrap().balance, 90);
     let opening = operator.withdrawal_opening(&key).unwrap();
@@ -5658,7 +5620,7 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
     operator.apply_withdrawal(request.clone(), false).unwrap();
     let closed = operator.complete_close(103).unwrap();
     assert_eq!(closed.withdrawal_total, 90);
-    assert_eq!(closed.withdrawal_claims.len(), 1);
+    assert_eq!(payout_claim(&operator, &closed, 0).output().amount(), 90);
     assert!(operator.store.current_account(&key).unwrap().is_none());
     assert!(
         operator
@@ -5674,7 +5636,10 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
     assert_eq!(operator.apply_withdrawal(request, false).unwrap().epoch, 3);
     let recreated = operator.complete_close(104).unwrap();
     assert_eq!(recreated.withdrawal_total, 0);
-    assert!(recreated.withdrawal_claims.is_empty());
+    assert_eq!(
+        recreated.roots.withdrawal_outputs.operations,
+        recreated.context.predecessor_logs().payouts.operations + 1
+    );
     assert_eq!(operator.payment_head(&key).unwrap().balance, 8);
     assert_eq!(operator.store.current_liability().unwrap(), 310);
     assert_eq!(
@@ -5747,7 +5712,7 @@ fn virtual_capacity_allows_new_recipients_beyond_the_genesis_account_bound() {
     assert_eq!(operator.store.load_current().unwrap().accounts.len(), 1_025);
     let result = operator.complete_close(106).unwrap();
     assert_eq!(result.withdrawal_total, 0);
-    assert_eq!(result.rows, 1_025);
+    assert_eq!(result.roots.row_count, 1_025);
     assert_eq!(operator.payment_head(&recipients[0]).unwrap().balance, 1);
 }
 
@@ -5769,14 +5734,20 @@ fn virtual_capacity_counts_deposits_and_payment_accounts_in_one_close() {
     let (send, entries) = operator.sign_send(0, &deltas).unwrap();
     operator.accept_send(send, entries).unwrap();
     let result = operator.complete_close(107).unwrap();
-    assert_eq!(result.rows, crate::protocol::MAX_DEPOSIT_EVENTS + 3);
+    assert_eq!(
+        result.roots.row_count,
+        crate::protocol::MAX_DEPOSIT_EVENTS as u64 + 3
+    );
     assert_eq!(result.withdrawal_total, 0);
     assert_eq!(
         operator.store.current_liability().unwrap(),
         400 + crate::protocol::MAX_DEPOSIT_EVENTS as u64
     );
     let encoded = result.encode();
-    assert_eq!(SettlementResult::decode(encoded).unwrap().rows, result.rows);
+    assert_eq!(
+        SettlementResult::decode(encoded).unwrap().roots.row_count,
+        result.roots.row_count
+    );
 }
 
 fn capacity_genesis(path: &Path) -> (Operator, Vec<Wallet>) {
@@ -5838,11 +5809,14 @@ fn virtual_capacity_allows_more_activity_rows_without_more_live_accounts() {
     let (mut operator, wallets) = capacity_genesis(Path::new(":memory:"));
     let recipients = capacity_transfers(&mut operator, &wallets, 513);
     let result = operator.complete_close(108).unwrap();
-    assert_eq!(result.rows, 1_026);
+    assert_eq!(result.roots.row_count, 1_026);
     assert_eq!(operator.store.load_current().unwrap().accounts.len(), 1_024);
     assert_eq!(operator.payment_head(&recipients[0]).unwrap().balance, 1);
     assert_eq!(
-        SettlementResult::decode(result.encode()).unwrap().rows,
+        SettlementResult::decode(result.encode())
+            .unwrap()
+            .roots
+            .row_count,
         1_026
     );
 }
@@ -5866,9 +5840,12 @@ fn virtual_capacity_reuses_a_large_retained_close_after_unknown_commit() {
     assert_eq!(operator.store.load_current().unwrap().accounts.len(), 1_023);
     assert_eq!(operator.payment_head(&recipients[0]).unwrap().balance, 2);
     let result = operator.store.stored_result(0).unwrap().unwrap();
-    assert_eq!(result.rows, 1_025);
+    assert_eq!(result.roots.row_count, 1_025);
     assert_eq!(
-        SettlementResult::decode(result.encode()).unwrap().rows,
+        SettlementResult::decode(result.encode())
+            .unwrap()
+            .roots
+            .row_count,
         1_025
     );
     drop(operator);

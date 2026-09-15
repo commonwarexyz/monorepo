@@ -5,17 +5,14 @@ use super::{
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::AccountLookup,
-    custody::{Epoch, SourceProof},
-    logs::{Floors, Heads},
     posted,
     transition::{
-        CloseContext, EpochContext, OperatorKey, OperatorVariant, PreparedClose, Terminal,
-        WithdrawalClaim, prepare_close_with_strategy, validate_close_with_strategy,
+        CloseContext, OperatorKey, OperatorVariant, PreparedClose, Terminal,
+        prepare_close_with_strategy, validate_close_with_strategy,
     },
     vector::OutEntry,
 };
-use commonware_codec::{Decode as _, Encode as _, RangeCfg};
+use commonware_codec::Encode as _;
 use commonware_cryptography::{
     Sha256, Signer as _,
     bls12381::primitives::{
@@ -110,6 +107,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         let rows = remaining.min(workload.accounts);
         let context = fixtures::epoch_context(
             &state,
+            workload.accounts,
             epoch,
             committee,
             &operator,
@@ -132,11 +130,12 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         remaining -= rows;
         epoch += 1;
     }
-    state = Box::pin(state.commit()).await.unwrap();
+    state = Box::pin(state.sync()).await.unwrap();
 
     // Signed full-exit requests exercise balance deletions and payout Appends when W=N.
     let deployment = *fixtures::epoch_context(
         &state,
+        workload.accounts,
         epoch,
         committee,
         &operator,
@@ -160,8 +159,15 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
             .collect(),
     )
     .unwrap();
-    let context =
-        fixtures::epoch_context(&state, epoch, committee, &operator, &deposits, &withdrawals);
+    let context = fixtures::epoch_context(
+        &state,
+        workload.accounts,
+        epoch,
+        committee,
+        &operator,
+        &deposits,
+        &withdrawals,
+    );
     let material = terminals(&keys, workload.rows, &context, &operator);
     let expected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -183,7 +189,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         workload.rows.max(workload.payouts) as u64
     );
     assert_eq!(
-        expected.close().withdrawal_evidence().0.len(),
+        expected.close().withdrawal_outputs().len(),
         workload.payouts
     );
     assert_eq!(
@@ -255,8 +261,8 @@ async fn measure(
     let expected_head = expected.replica().head();
     let encoded = expected.encoded().clone();
     let mutations = expected.state().mutations().to_vec();
-    let guards = expected.close().activity_input();
-    let outputs = expected.close().withdrawal_evidence().0.to_vec();
+    let activity = expected.close().activity_input::<Sha256>();
+    let outputs = expected.close().withdrawal_outputs().to_vec();
     let mut elapsed = Duration::ZERO;
     let mut rng = TestRng::new(0);
     for iteration in 0..iterations {
@@ -266,11 +272,11 @@ async fn measure(
         }
         if matches!(phase, Phase::NativePrepare) {
             let mutations = mutations.clone();
-            let guards = guards.clone();
+            let activity = activity.clone();
             let outputs = outputs.clone();
             let start = Instant::now();
             let batch = state
-                .prepare(&baseline, mutations, guards, outputs, context.floors())
+                .prepare(&baseline, mutations, activity, outputs, context.floors())
                 .await
                 .unwrap();
             elapsed += start.elapsed();
@@ -323,34 +329,44 @@ async fn measure(
         black_box(&state);
     }
     if report {
-        let epoch = Epoch::<VerifyingKey, Digest>::load(state.logs(), context.payment().epoch())
-            .await
-            .unwrap();
-        let proof = epoch
-            .source_proof(state.logs(), &expected_head.logs)
-            .await
-            .unwrap();
-        proof
-            .verify::<Sha256, VerifyingKey>(&expected_head.logs)
-            .unwrap();
+        let (_, activity_operations) = expected.replica().logs().activity_operations();
+        let (activity_append_operations, activity_append_bytes) = activity_operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    commonware_clearing::bajillion::logs::ActivityOperation::Append(_)
+                )
+            })
+            .fold((0, 0), |(count, bytes), operation| {
+                (count + 1, bytes + operation.encode().len())
+            });
+        let (_, payout_operations) = expected.replica().logs().payout_operations();
+        let (payout_output_operations, payout_output_bytes) = payout_operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    commonware_clearing::bajillion::logs::PayoutOperation::Append(_)
+                )
+            })
+            .fold((0, 0), |(count, bytes), operation| {
+                (count + 1, bytes + operation.encode().len())
+            });
         println!(
-            "native_transition {} dealing_bytes={} roots_bytes={} descriptor_bytes={} context_bytes={} source_metadata_bytes={} source_proof_bytes={} payout_commit_bytes={} predecessor_state_operations={} predecessor_activity_operations={} predecessor_payout_operations={} successor_state_operations={} successor_activity_operations={} successor_payout_operations={} history_epochs={}",
+            "native_transition {} dealing_bytes={} roots_bytes={} descriptor_bytes={} context_bytes={} row_count={} activity_append_operations={} activity_append_bytes={} activity_commit_bytes={} payout_output_operations={} payout_output_bytes={} payout_commit_bytes={} predecessor_state_operations={} predecessor_activity_operations={} predecessor_payout_operations={} successor_state_operations={} successor_activity_operations={} successor_payout_operations={} history_epochs={}",
             workload.label(),
             encoded.len(),
             expected.close().roots.encode().len(),
             expected.close().roots.encode().len() + 8,
             context.encode().len(),
-            expected.close().activity_input().metadata().len(),
-            proof.encode().len(),
-            expected
-                .replica()
-                .logs()
-                .payout_operations()
-                .1
-                .last()
-                .unwrap()
-                .encode()
-                .len(),
+            expected.close().roots.row_count,
+            activity_append_operations,
+            activity_append_bytes,
+            activity_operations.last().unwrap().encode().len(),
+            payout_output_operations,
+            payout_output_bytes,
+            payout_operations.last().unwrap().encode().len(),
             baseline.state.operations(),
             baseline.logs.activity.operations,
             baseline.logs.payouts.operations,
@@ -415,180 +431,3 @@ fn bench_transition(c: &mut Criterion) {
 }
 
 criterion_group! { name = benches; config = Criterion::default().sample_size(10); targets = bench_transition, }
-
-struct SourceCase {
-    label: String,
-    heads: Heads<Digest>,
-    proof: SourceProof<Digest>,
-    account: VerifyingKey,
-    lookup: AccountLookup<VerifyingKey, Digest>,
-    withdrawal: Option<(
-        SignedWithdrawal<VerifyingKey, Digest>,
-        WithdrawalClaim<Digest>,
-    )>,
-}
-
-impl SourceCase {
-    fn verify(&self) {
-        let source = self
-            .proof
-            .verify::<Sha256, VerifyingKey>(&self.heads)
-            .unwrap();
-        self.lookup
-            .resolve::<Sha256>(source.activity_range(), &self.account)
-            .unwrap();
-        if let Some((request, claim)) = &self.withdrawal {
-            source.verify_withdrawal::<Sha256>(request, claim).unwrap();
-        }
-    }
-}
-
-#[commonware_macros::boxed]
-async fn source_cases(runtime: deterministic::Context, workload: Workload) -> Vec<SourceCase> {
-    let Input {
-        state,
-        context,
-        deposits,
-        withdrawals,
-        expected,
-        ..
-    } = input(runtime, workload).await;
-    let account = fixtures::accounts(workload.accounts)[0].0.clone();
-    let (mut state, _) = Box::pin(expected.apply::<_, Sha256>(state)).await.unwrap();
-    let issued = *state.logs().head();
-    let epoch = Epoch::<VerifyingKey, Digest>::load(state.logs(), context.payment().epoch())
-        .await
-        .unwrap();
-    let mut cases = Vec::new();
-    for kind in ["current", "refreshed_after_append_floor"] {
-        if !cases.is_empty() {
-            let empty = WithdrawalBatch::empty();
-            let next = EpochContext::new::<Sha256>(
-                *context.deployment(),
-                context.payment().epoch() + 1,
-                SigningKey::from_seed(1).public_key(),
-                &deposits,
-                &empty,
-                state.state().liability(),
-                100,
-                101,
-                *context.limits(),
-                *context.committee(),
-            )
-            .unwrap()
-            .bind::<Sha256, _, _>(
-                &state,
-                &deposits,
-                &empty,
-                Floors {
-                    activity: issued.activity.operations - 1,
-                    payouts: issued.payouts.operations - 1,
-                },
-            )
-            .unwrap();
-            let batch = prepare_close_with_strategy::<Sha256, _, _, _, _>(
-                &state,
-                &next,
-                &deposits,
-                &empty,
-                vec![],
-                fixtures::strategy(),
-            )
-            .await
-            .unwrap();
-            state = Box::pin(batch.apply::<_, Sha256>(state)).await.unwrap().0;
-        }
-        let heads = *state.logs().head();
-        let proof = epoch.source_proof(state.logs(), &heads).await.unwrap();
-        let lookup = epoch
-            .account_lookup(state.logs(), &heads, &account)
-            .await
-            .unwrap();
-        let withdrawal = if let Some(request) = withdrawals.request_for(&account) {
-            Some((
-                request.clone(),
-                epoch
-                    .withdrawal_claim(state.logs(), &heads, &account)
-                    .await
-                    .unwrap(),
-            ))
-        } else {
-            None
-        };
-        let case = SourceCase {
-            label: format!("{kind}/{}", workload.label()),
-            heads,
-            proof,
-            account: account.clone(),
-            lookup,
-            withdrawal,
-        };
-        case.verify();
-        assert_eq!(
-            SourceProof::<Digest>::decode_cfg(
-                case.proof.encode(),
-                &RangeCfg::new(..=case.proof.metadata.len())
-            )
-            .unwrap(),
-            case.proof
-        );
-        cases.push(case);
-    }
-    cases
-}
-
-pub(crate) fn source_sizes() {
-    for workload in workloads() {
-        for case in fixtures::runner().start(|runtime| source_cases(runtime, workload)) {
-            let claim_bytes = case
-                .withdrawal
-                .as_ref()
-                .map_or(0, |(_, claim)| claim.encode().len());
-            println!(
-                "native_source {} activity_operations={} activity_floor={} payout_operations={} payout_floor={} source_metadata_bytes={} source_opening_bytes={} source_proof_bytes={} account_lookup_bytes={} payout_claim_bytes={} source_plus_claim_bytes={}",
-                case.label,
-                case.heads.activity.operations,
-                case.heads.activity.floor,
-                case.heads.payouts.operations,
-                case.heads.payouts.floor,
-                case.proof.metadata.len(),
-                case.proof.opening.encode().len(),
-                case.proof.encode().len(),
-                case.lookup.encode().len(),
-                claim_bytes,
-                case.proof.encode().len() + claim_bytes,
-            );
-        }
-    }
-}
-
-fn bench_sources(c: &mut Criterion) {
-    for workload in workloads() {
-        for case in fixtures::runner().start(|runtime| source_cases(runtime, workload)) {
-            c.bench_function(
-                &format!("{}::source_verify/{}", module_path!(), case.label),
-                |b| {
-                    b.iter(|| {
-                        black_box(
-                            case.proof
-                                .verify::<Sha256, VerifyingKey>(black_box(&case.heads))
-                                .unwrap(),
-                        )
-                    });
-                },
-            );
-            c.bench_function(
-                &format!(
-                    "{}::source_account_claim_verify/{}",
-                    module_path!(),
-                    case.label
-                ),
-                |b| {
-                    b.iter(|| black_box(&case).verify());
-                },
-            );
-        }
-    }
-}
-
-criterion_group! { name = source_benches; config = Criterion::default().sample_size(20); targets = bench_sources }

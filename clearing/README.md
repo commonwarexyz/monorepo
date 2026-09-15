@@ -45,10 +45,12 @@ and withdrawals, and reconstructs three commitments:
 ```
 
 The header binds the three roots, operation counts, and pruning floors to the
-registered epoch and its predecessor. Each signer synchronizes all three native
-databases and records their common checkpoint and signing decision before
-publishing a vote. A committee of `n = 3f + 1` validators certifies a close with
-exactly `2f + 1` votes.
+registered epoch and its predecessor. Each signer durably commits all three native
+candidates and records its private signing decision before publishing a vote.
+Native stores recover their durable heads after interruptions; authenticated
+synchronization maintains and catches up replicas independently of the vote
+barrier. A committee of `n = 3f + 1` validators certifies a close with exactly
+`2f + 1` votes.
 
 Admission adds the close to an ordered queue and permits the next epoch to
 register. Finalization waits for the challenge deadline and all earlier closes,
@@ -63,13 +65,16 @@ eight-byte balance. Absence means zero. Payments can create a recipient's balanc
 without an onchain account. Balances can accumulate across closes until their
 owners choose to withdraw.
 
-A close writes only changed balances. Activity that nets to zero still appears
-in its sorted range of the cumulative activity log. Payer-vector BMTs authenticate
-individual payment entries. The activity Commit retains the original context,
-terminal sequences and entries, and exact withdrawal requests needed to rebuild
-source proofs from native history. Withdrawal claims prove output membership
-under the current finalized payout head; balance recovery uses historical Current
-QMDB proofs.
+A close writes only changed balances. Every activity participant, including one
+whose balance nets to zero, appears as a full row in the sorted prefix of its
+cumulative activity-log range. Account membership and ordered absence are proved
+directly from these native rows. A flat suffix retains the original outgoing
+entries, whose positive amounts delimit each payer vector; its BMT is reconstructed
+only when a requested entry proof needs it. Public Commit operations carry no
+metadata: the certified close descriptor and registered context authenticate the
+epoch and range. Withdrawal outputs live in the separate cumulative payout log,
+and claims prove output membership under its current finalized head. Balance
+recovery uses historical Current QMDB proofs.
 
 Receipts let their holders challenge omitted or contradictory payments. Wallets
 save verified receipts and keep them available through the challenge deadline.
@@ -79,9 +84,10 @@ save verified receipts and keep them available through the challenge deadline.
 Applications supply networking, authenticated time, durable storage, and custody.
 The main responsibilities are:
 
-- Synchronize the three databases and checkpoint before publishing votes.
-- Rewind all three to their common durable checkpoint after an interrupted update,
-  then catch up from an authenticated native replica.
+- Durably commit all three native databases and the private signing decision before
+  publishing votes.
+- Recover each native database from its durable state after an interrupted update;
+  synchronize and catch up from authenticated native replicas as maintenance.
 - Serve proofs for pending closes and the finalized recovery state.
 - Retain receipts and get any challenge included before its deadline.
 - Persist protocol decisions and their asset transfers atomically.

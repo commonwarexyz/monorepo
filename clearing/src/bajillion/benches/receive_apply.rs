@@ -54,6 +54,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                             let measured = iteration < iterations;
                             let context = epoch_context(
                                 &state,
+                                profile.live_accounts,
                                 EPOCH + iteration,
                                 committee,
                                 &operator,
@@ -98,10 +99,6 @@ fn bench_receive_apply(c: &mut Criterion) {
                                 result
                             };
                             assert_eq!(advanced.state().root(), close.roots.successor);
-                            assert_eq!(
-                                advanced.state().liability(),
-                                profile.live_accounts as u64 * super::fixtures::OPENING_BALANCE
-                            );
                             black_box((&advanced, &close));
                             state = advanced;
 

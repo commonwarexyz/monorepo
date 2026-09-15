@@ -1,191 +1,58 @@
-# Bajillion flat-MMR benchmark artifacts: September 15, 2026
+# Bajillion million-account benchmark artifacts: September 15, 2026
 
-This directory contains the encoded-byte checks and Criterion measurements for
-the flat activity and payout MMR implementation. All 12 selectors completed
-successfully from one frozen source snapshot and one optimized benchmark binary.
+This directory contains the completed publication subset: every successfully
+completed activity, payout, and preparation Criterion record, three short
+durable-ACK profiles, and all completed encoded-size checks. It explicitly omits
+the interrupted fourth preparation profile; verify-claim, adjudication,
+sign-vote, and certificate-verification timings; dense durable ACK; and full-exit
+durable ACK. This is not a complete benchmark matrix.
 
 | Artifact | Contents |
 | --- | --- |
-| [bytes.csv](bytes.csv) | Long-form encoded-byte results from all checked fixtures. |
-| [timings.csv](timings.csv) | Criterion median point estimates and 95% confidence intervals in nanoseconds. |
-| [samples.jsonl.gz](samples.jsonl.gz) | Raw Criterion benchmark metadata, estimates, iteration counts, and sample times. |
-| [raw-checks.jsonl.gz](raw-checks.jsonl.gz) | Every relevant line emitted by the four untimed size/transition checks. |
-| [manifest.json](manifest.json) | Commands, dimensions, source, lockfile, binary, log, table, and archive hashes. |
-| [source-inputs.tar.gz](source-inputs.tar.gz) | Base patch, exact lockfile, and untracked source inputs; no binaries. |
+| [bytes.csv](bytes.csv) | Encoded byte results emitted by completed check commands. |
+| [timings.csv](timings.csv) | Arithmetic sample means for 77 Criterion records and three durable-ACK profiles. |
+| [samples.jsonl.gz](samples.jsonl.gz) | Raw Criterion metadata, estimates, iterations and times, plus raw ACK records. |
+| [raw-checks.jsonl.gz](raw-checks.jsonl.gz) | Source command and exact emitted line for every byte row. |
+| [manifest.json](manifest.json) | Scope, omissions, source, binary, host, raw-evidence paths, and artifact hashes. |
+| [source-inputs.tar.gz](source-inputs.tar.gz) | Exact Cargo.lock, tracked patch, and untracked-source archive used for the measured binaries. |
 
-## Encoded bytes
+## Statistics and completed timing scope
 
-All sizes are actual codec outputs before transport or chain transaction
-framing. The 184-byte close descriptor is the 176-byte `RootBundle` plus the
-8-byte withdrawal/outflow total. The Header plus exact-quorum certificate is
-101 bytes. Their combined publication payload is 285 bytes. These are separate
-from the encoded operator Dealing.
+Each Criterion `mean_ns` is the equal-weight arithmetic mean of its 20 per-sample ratios, `mean(times_i / iters_i)`. It is not a bootstrap median, confidence interval, or pooled iteration-weighted rate. Each durable-ACK `mean_ns` is the arithmetic mean of three raw timer values; these profiles used zero warmup samples.
 
-The signed transition matrix is selected in `bytes.csv` with
-`source=native-transition-check,record=pipeline,N=1024,payment_rows=128`:
+The retained Criterion subset contains the complete selected activity-proof and payout-proof families plus three preparation profiles:
 
-| H | Payment rows | W | Dealing | Source metadata | SourceProof | Descriptor |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 128 | 0 | 13,107 | 7,731 | 7,809 | 184 |
-| 0 | 128 | 1,024 | 43,571 | 206,260 | 206,339 | 184 |
-| 1,024 | 128 | 0 | 13,107 | 7,731 | 7,841 | 184 |
-| 1,024 | 128 | 1,024 | 43,571 | 206,260 | 206,339 | 184 |
-
-A `SourceProof` transmits the complete source metadata: context, terminal
-sequences, outgoing leaves, and signed withdrawals. `source_metadata` is that
-frame alone; `source_proof` adds its length prefix and native Commit opening;
-`source_plus_claim` adds the optional payout claim. It excludes transaction
-envelopes and is not part of the original operator Dealing.
-
-The compact claim fixture's encoded output frame is 30 bytes (`394 - 364` for
-`H=0,W=1024`). The signed-pipeline fixture uses a different output value and its
-frame is 25 bytes (`389 - 364`). The aggregation checks derive these values from
-matching emitted claim/opening rows and reject a changed or ambiguous result.
-The two fixture-specific output sizes must not be substituted for one another.
-
-Compact activity rows use
-`source=native-sizes,record=activity,metric=lookup`, with
-`H=0,1024,65536` and `R=0,1,2,128,1024`. Cases cover presence, empty-range
-absence, adjacent interior absence, and left/right edge absence. Compact payout
-rows use `source=native-sizes,record=payout,metric=artifact`, with the same `H`
-values and `W=0,1,512,1024` for `N=1024`. Cases cover first, middle, and last
-new outputs, historical outputs at old and refreshed heads, and an older output
-after append and floor advancement. `W=0` is a Commit proof, not a withdrawal
-claim. `metric=opening` excludes the output and `metric=head` is the independently
-encoded 48-byte log head.
-
-Complete profile-0 challenges are selected with
-`source=challenge-sizes,record=challenge`: debit is 623 bytes, entry is 674
-bytes, and fork is 417 bytes. The omitted-payer case is a separate 641-byte
-challenge with a 432-byte activity absence proof. Profile 0 is
-`N=1024,A=1024,B=512,K=1` and performs actual nonzero balance updates.
-
-## Native transition timings
-
-Values are median milliseconds with the Criterion 95% confidence interval in
-brackets. All four cases use `N=1024`, 128 self-payment rows, 16 Rayon workers,
-and deterministic-memory storage. Individual rows are independently sampled,
-overlap, and must not be summed.
-
-| Phase | H=0,W=0 | H=0,W=1024 | H=1024,W=0 | H=1024,W=1024 |
-| --- | ---: | ---: | ---: | ---: |
-| Native prepare state/logs | 0.049 [0.048, 0.050] | 0.725 [0.705, 0.742] | 0.046 [0.044, 0.050] | 0.717 [0.701, 0.744] |
-| Decode | 1.982 [1.979, 1.984] | 15.722 [15.702, 15.737] | 1.991 [1.971, 2.007] | 15.702 [15.688, 15.712] |
-| Validate + prepare state/logs | 1.562 [1.539, 1.588] | 3.390 [3.228, 3.532] | 1.672 [1.639, 1.796] | 3.328 [3.308, 3.499] |
-| Apply state/logs | 0.016 [0.016, 0.017] | 0.240 [0.235, 0.251] | 0.022 [0.021, 0.025] | 0.269 [0.244, 0.273] |
-| Commit state/logs in memory | 0.052 [0.051, 0.053] | 0.232 [0.215, 0.241] | 0.074 [0.067, 0.078] | 0.261 [0.244, 0.267] |
-| Decode + validate + apply | 3.543 [3.519, 3.579] | 19.352 [19.242, 19.440] | 3.727 [3.574, 3.796] | 19.375 [19.297, 19.497] |
-| Decode + validate + apply + memory commit | 3.634 [3.580, 3.659] | 19.555 [19.475, 19.636] | 3.789 [3.763, 3.845] | 19.595 [19.530, 19.711] |
-
-The fixed predecessor is restored before each timer. Fixture construction,
-signing, cloning native prepare inputs, and rewind are also outside the timers.
-`native_prepare_state_logs` starts from derived mutations, exact activity Guards
-and metadata, and payout outputs. `validate_prepare_state_logs` starts from a
-decoded Dealing and includes cryptographic validation and all native batches.
-The two complete-pipeline rows start from encoded Dealing bytes and end after all
-three stores apply, with the latter additionally calling `Replica::commit`.
-The terminal validator persists its checkpoint and vote in a local QMDB outside
-these timers, so they do not measure the full path to publishing an ACK.
-
-The transition history and measured payments are valid zero-net self-payments.
-They exercise native state/log transitions but are not evidence for profile 0's
-nonzero balance updates. `W` counts independently signed full-exit requests from
-the same key prefix; their authorizations are separate inputs and are not bytes
-in the Dealing. `activity_rows=max(payment_rows,W)` includes withdrawal-only
-accounts. A full `W=N` close deletes every balance.
-
-## Source verification timings
-
-The source selector fixes `payment_rows=128`. Proofs are constructed outside the
-timers; verification authenticates the complete metadata. Values are median
-milliseconds and 95% confidence intervals.
-
-| Case | H | W | Source verify | Source + account/claim verify |
-| --- | ---: | ---: | ---: | ---: |
-| Current | 0 | 0 | 4.025 [4.024, 4.027] | 4.026 [4.022, 4.030] |
-| Current | 0 | 1,024 | 35.780 [35.769, 35.809] | 35.747 [35.720, 35.766] |
-| Current | 1,024 | 0 | 3.999 [3.998, 4.000] | 4.008 [4.003, 4.010] |
-| Current | 1,024 | 1,024 | 35.683 [35.644, 35.705] | 35.665 [35.638, 35.707] |
-| Refreshed after append/floor | 0 | 0 | 4.025 [4.023, 4.026] | 4.019 [4.014, 4.029] |
-| Refreshed after append/floor | 0 | 1,024 | 35.790 [35.765, 35.813] | 35.755 [35.729, 35.801] |
-| Refreshed after append/floor | 1,024 | 0 | 4.000 [3.998, 4.002] | 3.995 [3.993, 4.000] |
-| Refreshed after append/floor | 1,024 | 1,024 | 35.623 [35.595, 35.645] | 35.643 [35.620, 35.658] |
-
-The account/claim boundary includes SourceProof authentication, an account
-lookup, and the optional payout claim. Because these columns are independently
-sampled overlapping timers, small inversions between their estimates are not
-subtraction opportunities.
-
-## Profile and certificate timings
-
-| Operation | Workload | Median ms [95% CI] |
-| --- | --- | ---: |
-| Prepare | profile 0, `E=1024` | 0.678 [0.667, 0.698] |
-| Receive and apply | profile 0, `E=1024`, consecutive epochs, 16 workers | 7.695 [7.629, 8.064] |
-| Adjudicate debit | profile 0, bounded decode plus adjudication | 0.172 [0.172, 0.172] |
-| Adjudicate entry | profile 0, bounded decode plus adjudication | 0.203 [0.203, 0.203] |
-| Adjudicate fork | profile 0, bounded decode plus adjudication | 0.199 [0.199, 0.200] |
-| Sign vote | prepared Header, 100-validator fixture | 0.071 [0.071, 0.071] |
-| Verify certificate | exact quorum, `n=100,f=33,q=67` | 0.455 [0.454, 0.455] |
-
-Prepare times Dealing preparation from already signed terminal inputs. Cloning
-those inputs and constructing the fixture occur outside the timer. Receive-apply
-starts from encoded Dealing bytes, performs decode, validation, vote signing, and applies
-Current plus both logs. It advances consecutive epochs in one native replica.
-
-## Dimensions, samples, and storage boundary
-
-`N` is the live-account count. `H` is prior activity rows or payout outputs,
-excluding Commit markers. In source/transition workloads, `H=1024` is one prior
-signed epoch. `R` is the current row count in compact activity fixtures and the
-self-payment count in transition fixtures. `W` is the current payout-output or
-signed-withdrawal count. `A`, `B`, and `K` are profile senders, recipient pool,
-and recipients per sender. Reported operation counts include bootstrap and
-epoch Commit markers.
-
-The archive contains 163 Criterion benchmarks and 2,940 samples:
-
-| Group | Benchmarks | Samples each |
+| Preparation profile | Samples | Arithmetic mean |
 | --- | ---: | ---: |
-| Compact activity verification | 48 | 20 |
-| Compact payout verification | 64 | 20 |
-| Source verification boundaries | 16 | 20 |
-| Native transition phases | 28 | 10 |
-| Challenge adjudication | 3 | 20 |
-| Prepare, receive-apply, sign-vote, certificate verify | 4 | 10 |
+| `N=1000000 A=1000000 B=512 K=1 E=1000000` | 20 | 1.6126350934 s |
+| `N=1000000 A=1024 B=512 K=1 E=1024` | 20 | 1.16289775 ms |
+| `N=1000000 A=1024 B=512 K=8 E=8192` | 20 | 3.2958474 ms |
 
-Criterion used a 0.25-second warmup and one-second measurement target for each
-benchmark. Compact proof artifacts were decoded and constructed before their
-verification timers. Native Commit uses the deterministic runtime's in-memory
-storage and includes native journal processing; it is not durable SSD I/O. No
-chain admission, SQL, network transfer, application checkpoint or vote persistence,
-or SSD I/O is measured by the native transition groups.
+Preparation times only `prepare_dealing`. The measured binary rebuilt the million-account fixture once per Criterion sample outside the returned elapsed interval. A later setup-only source patch hoists detached immutable inputs for future runs; it does not change production code, timer boundaries, or these measured values, and it is not represented as part of the measured binary.
 
-## Host and reproduction
+The durable timer begins with an encoded dealing and covers seal, signing, validation, concurrent durable commits of Current, Activity, and Payout, then the private Compact QMDB checkpoint and Ballot durability barrier. It does not include fixture/key/baseline construction or the subsequent same-Runner raw reopen verification. The public commit is the selected recovery contract and is not a full maintenance sync.
 
-The serial run started at `2026-09-15T08:56:26Z` and ended at
-`2026-09-15T09:02:45.197268Z`. It ran locally on an Apple M5 Pro (`Mac17,8`),
-18 logical CPUs, 64 GiB RAM, macOS 26.5.1, using
-`rustc 1.98.1 (48a229cea 2026-09-01)` for `aarch64-apple-darwin`. Rayon uses 16
-workers where the benchmark label or scope specifies it. The selectors ran
-serially, but the machine was not isolated and ordinary background processes
-were present.
+| Durable-ACK profile | Raw samples (ns) | Arithmetic mean |
+| --- | --- | ---: |
+| `N=1000000 A=1024 B=512 K=1 W=0 H=0` | 276117278, 276964412, 275402922 | 276.161537333 ms |
+| `N=1000000 A=1024 B=512 K=8 W=0 H=0` | 1155153371, 1150354468, 1150134307 | 1.151880715333 s |
+| `N=1000000 A=1024 B=8 K=8 W=0 H=0` | 1152286810, 1150308349, 1155347904 | 1.152647687667 s |
 
-No `RUSTFLAGS`, Cargo profile, or Cargo build override was set. The compiler
-wrapper only removes `CARGO_TARGET_DIR` from its child environment and invokes
-`sccache`; it adds no compiler flags. All selectors used the same optimized
-benchmark binary, SHA-256
-`6a2401d1bfb1a21b623bc1d12c96d998a414e5670e4ea0460ec711aa8b6ad75e`.
+All nine ACK samples report `reopen_verified=true`. The fixture uses explicit benchmark limits; exact `context_limits` remain in the raw records. These local storage measurements do not claim to exercise deployed terminal transport or body-size limits.
 
-To reproduce, obtain base commit
-`c71324e3c4619e10e8f6ebe619484f782547ff7e`, extract
-`source-inputs.tar.gz` separately, apply `tracked.patch` to the base checkout,
-restore the archived untracked files at their relative paths, and use the
-archived `Cargo.lock`. Verify all source hashes in `manifest.json`, then execute
-its commands with the recorded environment matrices. The source archive has no
-binaries or local process logs; the measured binary identity and every command
-log are retained by SHA-256. Generated Criterion plot HTML is intentionally not
-published.
+The interrupted fourth preparation profile, verify-claim, adjudication, sign-vote, certificate verification, dense `N=A=1000000` ACK, and `W=1000000` full-exit ACK have no published timing row.
 
-The archive pins the measured source. Subsequent benchmark edits only clarify
-comments and leave the executable code unchanged.
+## Host, storage, and production geometry
+
+Measurements ran serially on an AWS c8a.4xlarge with 16 AMD EPYC 9R45 vCPUs, 32 GiB RAM, Ubuntu 24.04.4, and rustc 1.98.1. The ext4 volume was a 160 GiB gp3 device provisioned for 6,000 IOPS and 250 MiB/s.
+
+The ACK records retain the actual storage geometry: 128 activity/payout log operations per section, 1,024 log Merkle nodes per blob, 4,096 Current operations per blob, 4,096 Current Merkle nodes per blob, 1,024-byte native pages, 16 cache pages for each of three native stores, and 2,048-byte log and private I/O buffers. They used one adaptive 16-worker Rayon pool, two Tokio I/O workers, and three concurrent public stores.
+
+## Provenance and retained evidence
+
+The measured binaries came from HEAD `1bd5f46162be55ed5858a63adf3e20d78814dc5f` and compiled-source fingerprint `4b0e3134888282c902cfe319107e7233fb7d1bd35a42dcc53058e8ddddd7c7ca` over 1,668 files. Binary SHA-256 values are:
+
+- Criterion: `d4eab40b648c34030baae562f183c6de44a49a32b97820425f44e002e3ee97b7`
+- durable ACK: `3007a1d67af28292d24e7c292f1f1ce1a3594e6879cc7abf4d76fdf5d9b91144`
+
+The final setup-only `prepare.rs` source has SHA-256 `ccf5b4c843b5cb8e901faf0caddb82f20f9664112cb24aff399ddff43c9c01b4` and landed after these binaries were built. `manifest.json` binds every published artifact and each ACK raw file by SHA-256. Full command directories, telemetry, incomplete attempts, source snapshots, and copied binaries remain in the local session scratchpad paths recorded there.

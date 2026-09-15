@@ -1,15 +1,12 @@
-//! Native metadata and on-demand proof reconstruction use the same certified leaves.
+//! Served proofs resolve to the activity derived by full close validation.
 
 use super::*;
-use crate::chain::da::{
-    tests::{Fixture, sealer},
-    *,
-};
-use commonware_clearing::bajillion::{challenge::AccountLookup, serve::Index};
+use crate::chain::da::{tests::Fixture, *};
+use commonware_clearing::bajillion::challenge::HigherEntryLookup;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
 #[test]
-fn native_answers_match_prepared_account_and_vector_proofs() {
+fn served_account_and_entry_proofs_resolve_to_the_validated_activity() {
     deterministic::Runner::default().start(|context| async move {
         for (case, (outgoing, withdrawals)) in
             [(0, 0), (0, 2), (2, 2), (4, 3)].into_iter().enumerate()
@@ -27,24 +24,42 @@ fn native_answers_match_prepared_account_and_vector_proofs() {
                     },
                 )
                 .await;
-            let expected = Index::new(prepared.close());
             let payer = fixture.active(0).public_key();
             let recipient = fixture.active(1).public_key();
-            let account = expected.account_lookup::<Sha256>(&payer).unwrap();
-            let entry = expected
-                .higher_entry_lookup::<Sha256>(&payer, &recipient)
-                .unwrap();
+            let expected_account = prepared
+                .close()
+                .rows
+                .iter()
+                .find(|row| row.account == payer)
+                .map(|row| {
+                    row.outgoing.as_ref().map_or((0, 0), |authorization| {
+                        (
+                            authorization.body().cumulative_debit(),
+                            authorization.body().seq(),
+                        )
+                    })
+                });
+            let expected_entry = prepared
+                .close()
+                .out_vectors
+                .iter()
+                .find(|vector| vector.payer() == &payer)
+                .and_then(|vector| {
+                    vector
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.recipient == recipient)
+                })
+                .map(|entry| (entry.cumulative, entry.count))
+                .unwrap_or((0, 0));
             fixture.candidate(ballot.clone(), prepared).await;
-            let (owner, _) =
-                sealer(&context, &format!("unused{case}"), &fixture.lane.deployment).await;
-            let heads = ballot.roots.logs();
+            let range = ballot.roots.activity_range(&ballot.context).unwrap();
             let lookup = EvidenceLookup::Account {
                 epoch: 0,
-                heads,
+                range,
                 account: payer.clone(),
             };
             let response = serve(
-                &owner.db,
                 std::slice::from_ref(&fixture.lane),
                 EvidenceRequest::new(ballot.deployment, lookup),
             )
@@ -53,15 +68,20 @@ fn native_answers_match_prepared_account_and_vector_proofs() {
             let EvidenceResponse::Served(Evidence::Account(actual)) = response else {
                 panic!("account proof");
             };
-            assert_eq!(actual, account);
+            let (debit, change) = actual.resolve::<Sha256>(&range, &payer).unwrap();
+            assert_eq!(change.is_some(), expected_account.is_some());
+            assert_eq!(debit, expected_account.map_or(0, |expected| expected.0));
+            assert_eq!(
+                change.map(|change| change.terminal_seq()),
+                expected_account.map(|expected| expected.1)
+            );
             let lookup = EvidenceLookup::CommittedEntry {
                 epoch: 0,
-                heads,
-                payer,
-                recipient,
+                range,
+                payer: payer.clone(),
+                recipient: recipient.clone(),
             };
             let response = serve(
-                &owner.db,
                 std::slice::from_ref(&fixture.lane),
                 EvidenceRequest::new(ballot.deployment, lookup),
             )
@@ -70,48 +90,28 @@ fn native_answers_match_prepared_account_and_vector_proofs() {
             let EvidenceResponse::Served(Evidence::CommittedEntry(actual)) = response else {
                 panic!("entry proof");
             };
-            assert_eq!(actual, entry);
-            let lookup = EvidenceLookup::CloseEvidence {
-                epoch: 0,
-                batch_id: ballot.header.batch_id::<Sha256>(),
-            };
-            let response = serve(
-                &owner.db,
-                std::slice::from_ref(&fixture.lane),
-                EvidenceRequest::new(ballot.deployment, lookup),
-            )
-            .await
-            .unwrap();
-            let EvidenceResponse::Served(Evidence::Close {
-                header,
-                context: restored,
-                withdrawal_claims,
-                ..
-            }) = response
-            else {
-                panic!("complete native close");
-            };
-            assert_eq!(header, ballot.header);
-            assert_eq!(restored, ballot.context);
-            assert_eq!(withdrawal_claims.len(), withdrawals);
-            let mut wrong = heads;
-            wrong.activity.root = Digest::from([0u8; 32]);
+            assert_eq!(
+                matches!(&actual, HigherEntryLookup::Present { .. }),
+                expected_account.is_some()
+            );
+            assert_eq!(
+                actual
+                    .resolve::<Sha256>(&range, &payer, &recipient)
+                    .unwrap(),
+                expected_entry
+            );
+            let mut wrong = range;
+            wrong.head.root = Digest::from([0u8; 32]);
             let query = EvidenceRequest::new(
                 ballot.deployment,
                 EvidenceLookup::Account {
                     epoch: 0,
-                    heads: wrong,
+                    range: wrong,
                     account: fixture.active(0).public_key(),
                 },
             );
-            assert!(
-                serve(&owner.db, std::slice::from_ref(&fixture.lane), query)
-                    .await
-                    .is_err()
-            );
-            if outgoing == 0 && withdrawals == 0 {
-                assert!(matches!(account, AccountLookup::Absent(_)));
-            }
+            let response = serve(std::slice::from_ref(&fixture.lane), query).await;
+            assert!(response.is_err());
         }
     });
 }

@@ -24,11 +24,11 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::select;
-use commonware_parallel::Sequential;
+use commonware_parallel::Rayon;
 use commonware_runtime::{Clock, Network, Spawner};
 use commonware_storage::{
     Context as StorageContext,
-    merkle::{Location, mmb, mmr},
+    merkle::{Family as _, Location, mmb, mmr},
     qmdb::{
         current::proof::OpsRootWitness,
         sync::{self, Request, Source},
@@ -55,19 +55,12 @@ impl Authorities {
         self.entries
             .get(usize::try_from(epoch.checked_sub(self.first)?).ok()?)
     }
-    pub(super) fn retention(
-        &self,
-        target: &Checkpoint,
-        source: &commonware_clearing::bajillion::custody::Source<Key, Digest>,
-    ) -> Result<Retention> {
+    pub(super) fn retention(&self, target: &Checkpoint, payout_commit: u64) -> Result<Retention> {
         let first = self.entries.first().context("empty admitted suffix")?;
         ensure!(
-            source.context().deployment() == &target.deployment
-                && source.context().payment().epoch() == self.first
-                && source.heads() == first.roots.logs(),
-            "protected source does not match finalized authority"
+            payout_commit < first.roots.withdrawal_outputs.operations - 1,
+            "protected payout boundary is not a predecessor"
         );
-        let predecessor = source.context().predecessor_logs();
         Ok(Retention {
             epoch: self.first,
             state: if self.finalized.is_some() {
@@ -75,14 +68,8 @@ impl Authorities {
             } else {
                 0
             },
-            activity: predecessor
-                .activity
-                .operations
-                .min(target.head.logs.activity.floor),
-            payouts: predecessor
-                .payouts
-                .operations
-                .min(target.head.logs.payouts.floor),
+            activity: first.activity_start.min(target.head.logs.activity.floor),
+            payouts: payout_commit.min(target.head.logs.payouts.floor),
         })
     }
 }
@@ -115,7 +102,7 @@ pub(super) async fn download<E: StorageContext + Spawner + Network>(
     context: E,
     authority: Authorities,
     deployment: Deployment,
-    config: commonware_clearing::bajillion::replica::Config<Sequential>,
+    config: commonware_clearing::bajillion::replica::Config<Rayon>,
     base: Checkpoint,
     generation: u64,
     retain_history: bool,
@@ -152,42 +139,19 @@ pub(super) async fn download<E: StorageContext + Spawner + Network>(
         Retention::default()
     } else {
         let first = authority.entries.first().context("empty admitted suffix")?;
-        let commit = first
-            .roots
-            .change
-            .operations
-            .checked_sub(1)
-            .context("empty finalized activity")?;
-        let remote = Remote::<_, Activity>::new(
-            context.child("retention_source"),
+        let remote = Remote::<_, Payouts>::new(
+            context.child("retention_payouts"),
             address,
             timeout,
             *deployment.digest(),
         );
-        let (response, _) = remote
-            .serve(Request::Operations {
-                size: Location::new(first.roots.change.operations),
-                start: Location::new(commit),
-                max_ops: std::num::NonZeroU64::MIN,
-            })
-            .await?;
-        let sync::Response::Operations { proof, operations } = response else {
-            anyhow::bail!("source did not return the finalized Commit");
-        };
-        let [logs::ActivityOperation::Commit(Some(logs::ActivityRecord::Metadata(metadata)), _)] =
-            operations.as_slice()
-        else {
-            anyhow::bail!("finalized activity boundary is not source metadata");
-        };
-        let proof = commonware_clearing::bajillion::custody::SourceProof {
-            metadata: metadata.clone(),
-            opening: logs::Opening {
-                start: commit,
-                proof,
-            },
-        };
-        let source = proof.verify::<Sha256, Key>(&first.roots.logs())?;
-        authority.retention(&transfer.checkpoint, &source)?
+        let payout_commit = payout_predecessor(
+            &remote,
+            &first.roots.withdrawal_outputs,
+            transfer.checkpoint.retained.payouts,
+        )
+        .await?;
+        authority.retention(&transfer.checkpoint, payout_commit)?
     };
     let replica = Box::pin(import(
         context,
@@ -207,6 +171,67 @@ pub(super) async fn download<E: StorageContext + Spawner + Network>(
 
 pub(crate) const METHOD_NATIVE: u8 = 4;
 const FETCH_OPERATIONS: usize = 128;
+
+/// Authenticate the complete payout interval back to its preceding native Commit.
+/// The retained start only bounds reads; finding the delimiter proves the boundary.
+pub(super) async fn payout_predecessor<S>(
+    source: &S,
+    head: &logs::LogHead<Digest>,
+    retained: u64,
+) -> Result<u64>
+where
+    S: Source<Family = mmr::Family, Digest = Digest, Op = logs::PayoutOperation>,
+{
+    logs::LogHead::try_new(head.root, head.operations, head.floor)?;
+    let terminal = head.operations - 1;
+    ensure!(retained < terminal, "payout predecessor is not retained");
+    let size = Location::new(head.operations);
+    let mut end = head.operations;
+    while end > retained {
+        let start = end.saturating_sub(FETCH_OPERATIONS as u64).max(retained);
+        let count = end - start;
+        let (response, _) = source
+            .serve(Request::Operations {
+                size,
+                start: Location::new(start),
+                max_ops: std::num::NonZeroU64::new(count).unwrap(),
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("payout boundary source: {error}"))?;
+        let sync::Response::Operations { proof, operations } = response else {
+            anyhow::bail!("source did not return payout operations");
+        };
+        ensure!(
+            operations.len() == count as usize
+                && proof.leaves == size
+                && proof.inactive_peaks
+                    == mmr::Family::inactive_peaks(size, Location::new(head.floor))
+                && commonware_storage::qmdb::verify_proof::<Sha256, mmr::Family, _>(
+                    &proof,
+                    Location::new(start),
+                    &operations,
+                    &head.root,
+                ),
+            "invalid payout boundary proof"
+        );
+        for (offset, operation) in operations.into_iter().enumerate().rev() {
+            let position = start + offset as u64;
+            match operation {
+                logs::PayoutOperation::Commit(None, floor) if position == terminal => {
+                    ensure!(*floor == head.floor, "payout terminal floor mismatch");
+                }
+                logs::PayoutOperation::Commit(None, floor) => {
+                    ensure!(*floor <= position, "invalid predecessor payout floor");
+                    return Ok(position);
+                }
+                logs::PayoutOperation::Append(_) if position < terminal => {}
+                _ => anyhow::bail!("invalid payout boundary operation"),
+            }
+        }
+        end = start;
+    }
+    anyhow::bail!("payout predecessor is not retained")
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum Query {
@@ -547,7 +572,7 @@ macro_rules! source {
     };
 }
 source!(Balances, mmb::Family, qmdb::StateOperation, State, ());
-source!(Activity, mmr::Family, logs::ActivityOperation<Key, Digest>, Activity, RangeCfg::new(0..=rpc::MAX_BODY_SIZE));
+source!(Activity, mmr::Family, logs::ActivityOperation<Key, Digest>, Activity, ());
 source!(
     Payouts,
     mmr::Family,
@@ -591,7 +616,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn import<E>(
     context: E,
-    config: commonware_clearing::bajillion::replica::Config<Sequential>,
+    config: commonware_clearing::bajillion::replica::Config<Rayon>,
     deployment: &Deployment,
     transfer: &Transfer,
     retained: Retention,
@@ -611,7 +636,7 @@ where
         witness: transfer.witness.clone(),
         start: retained.state,
     };
-    let native = database::<qmdb::StateDb<E, Sha256, Sequential>, _>(
+    let native = database::<qmdb::StateDb<E, Sha256, Rayon>, _>(
         context.child("state_sync"),
         config.state,
         current.native::<Sha256>()?,
@@ -627,7 +652,7 @@ where
         native.root() == expected.head.state.root().digest,
         "imported Current root mismatch"
     );
-    let state = qmdb::State::<_, Sha256>::from_db(native, &expected.head.state).await?;
+    let state = qmdb::State::<_, Sha256, Rayon>::from_db(native, &expected.head.state)?;
     let target =
         |head: logs::LogHead<Digest>, start: u64| -> Result<sync::Target<mmr::Family, Digest>> {
             Ok(sync::Target::new(
@@ -637,9 +662,8 @@ where
                 )?,
             ))
         };
-    let activity_cfg = config.logs.activity.log.codec_config;
     let payout_cfg = config.logs.payouts.log.codec_config;
-    let activity = database::<logs::ActivityDb<E, Sha256, Key, Sequential>, _>(
+    let activity = database::<logs::ActivityDb<E, Sha256, Key, Rayon>, _>(
         context.child("activity_sync"),
         config.logs.activity,
         target(expected.head.logs.activity, retained.activity)?,
@@ -651,20 +675,17 @@ where
         ),
     )
     .await?;
-    let payouts = database::<logs::PayoutDb<E, Sha256, Sequential>, _>(
+    let payouts = database::<logs::PayoutDb<E, Sha256, Rayon>, _>(
         context.child("payout_sync"),
         config.logs.payouts,
         target(expected.head.logs.payouts, retained.payouts)?,
         Remote::<_, Payouts>::new(context, address, timeout, *deployment.digest()),
     )
     .await?;
-    let replica = Replica::from_parts(
-        state,
-        logs::Logs::from_parts(activity, payouts, activity_cfg, payout_cfg),
-    );
+    let replica = Replica::from_parts(state, logs::Logs::from_parts(activity, payouts, payout_cfg));
     ensure!(
         replica.head() == expected.head,
         "native import mixed checkpoint heads"
     );
-    replica.sync().await.map_err(Into::into)
+    Ok(replica)
 }

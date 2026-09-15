@@ -1524,7 +1524,12 @@ mod tests {
                             );
                             assert_eq!(chain.registration(&context).await.unwrap(), Some(first));
                             let first_close = operator.lock().complete_close(1).unwrap();
-                            assert!(first_close.withdrawals.requests().is_empty());
+                            assert_eq!(
+                                first_close.context.withdrawal_root(),
+                                &WithdrawalBatch::<crate::protocol::Key, Digest>::empty()
+                                    .root::<Sha256>()
+                                    .unwrap()
+                            );
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &first_close,
@@ -1592,15 +1597,8 @@ mod tests {
                                 WithdrawalAction::Close => tail,
                             };
                             assert_eq!(close.withdrawal_total, expected);
-                            assert_eq!(close.withdrawal_claims.len(), 1);
-                            let claim = &close.withdrawal_claims[0];
-                            assert_eq!(
-                                claim
-                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                                    .unwrap()
-                                    .amount(),
-                                expected
-                            );
+                            let position = close.context.predecessor_logs().payouts.operations;
+                            assert_eq!(close.roots.withdrawal_outputs.operations, position + 2);
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &close,
@@ -1616,6 +1614,17 @@ mod tests {
                                     .finalized
                             );
                             assert_eq!(status(&control).await.claimable, expected);
+                            let claim = chain
+                                .payout_proof(&context, close.roots.withdrawal_outputs, position)
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                claim
+                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
+                                    .unwrap()
+                                    .amount(),
+                                expected
+                            );
                             let before = chain
                                 .payout_status(&context, claim.position())
                                 .await
@@ -2053,10 +2062,11 @@ mod tests {
                 unclaimed: None,
                 payout_tip: request.lookup.requires_payout_tip().then(|| {
                     crate::protocol::PayoutTip {
-                        heads: commonware_clearing::bajillion::logs::Heads::empty::<
+                        payouts: commonware_clearing::bajillion::logs::Heads::empty::<
                             crate::protocol::Key,
                             Sha256,
-                        >(),
+                        >()
+                        .payouts,
                         finalized: None,
                     }
                 }),

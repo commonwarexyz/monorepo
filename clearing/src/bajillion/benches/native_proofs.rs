@@ -73,11 +73,8 @@ async fn activity_cases(
             .prepare(
                 logs.head(),
                 commonware_clearing::bajillion::logs::ActivityInput::new(
-                    changes[..history]
-                        .iter()
-                        .map(|c| c.guard::<Sha256>())
-                        .collect(),
-                    Bytes::new(),
+                    changes[..history].to_vec(),
+                    vec![],
                 ),
                 vec![],
                 FLOORS,
@@ -91,11 +88,8 @@ async fn activity_cases(
         .prepare(
             logs.head(),
             commonware_clearing::bajillion::logs::ActivityInput::new(
-                changes[..rows]
-                    .iter()
-                    .map(|c| c.guard::<Sha256>())
-                    .collect(),
-                Bytes::new(),
+                changes[..rows].to_vec(),
+                vec![],
             ),
             vec![],
             FLOORS,
@@ -162,11 +156,8 @@ async fn activity_cases(
                 .0
                 .clone(),
             lookup: AccountLookup::Absent(ChangeAbsence {
-                predecessor: gap.checked_sub(1).map(|i| changes[i].guard::<Sha256>()),
-                successor: changes
-                    .get(gap)
-                    .filter(|_| gap < rows)
-                    .map(|c| c.guard::<Sha256>()),
+                predecessor: gap.checked_sub(1).map(|i| changes[i].clone()),
+                successor: changes.get(gap).filter(|_| gap < rows).cloned(),
                 opening,
             }),
             present: false,
@@ -273,7 +264,7 @@ async fn payout_cases(
         let batch = logs
             .prepare(
                 logs.head(),
-                commonware_clearing::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+                commonware_clearing::bajillion::logs::ActivityInput::new(vec![], vec![]),
                 (0..history).map(output).collect(),
                 FLOORS,
             )
@@ -286,7 +277,7 @@ async fn payout_cases(
     let batch = logs
         .prepare(
             logs.head(),
-            commonware_clearing::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+            commonware_clearing::bajillion::logs::ActivityInput::new(vec![], vec![]),
             (0..count).map(output).collect(),
             FLOORS,
         )
@@ -333,7 +324,7 @@ async fn payout_cases(
             let batch = logs
                 .prepare(
                     logs.head(),
-                    commonware_clearing::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+                    commonware_clearing::bajillion::logs::ActivityInput::new(vec![], vec![]),
                     vec![output(count)],
                     floors,
                 )
@@ -348,52 +339,61 @@ async fn payout_cases(
     cases
 }
 
-fn visit(mut activity: impl FnMut(ActivityCase), mut payout: impl FnMut(PayoutCase)) {
-    let accounts = native_fixtures::accounts();
+fn visit_activity(mut visit: impl FnMut(ActivityCase)) {
     for history in native_fixtures::histories() {
         for rows in native_fixtures::rows() {
             for case in fixtures::runner().start(|runtime| activity_cases(runtime, history, rows)) {
-                activity(case);
-            }
-        }
-        for count in native_fixtures::payouts(accounts) {
-            for case in
-                fixtures::runner().start(|runtime| payout_cases(runtime, history, count, accounts))
-            {
-                payout(case);
+                visit(case);
             }
         }
     }
 }
 
-pub(crate) fn sizes() {
-    visit(
-        |case| {
-            println!(
-                "native_activity {} lookup_bytes={} head_bytes={}",
-                case.label,
-                case.lookup.encode().len(),
-                case.range.head.encode().len()
-            )
-        },
-        |case| {
-            let (opening, complete) = case.bytes();
-            println!(
-                "native_payout {} operations={} floor={} opening_bytes={opening} artifact_bytes={complete} head_bytes={}",
-                case.label,
-                case.head.operations,
-                case.head.floor,
-                case.head.encode().len()
-            );
-        },
-    );
+fn visit_payout(mut visit: impl FnMut(PayoutCase)) {
+    let accounts = native_fixtures::accounts();
+    for history in native_fixtures::histories() {
+        for count in native_fixtures::payouts(accounts) {
+            for case in
+                fixtures::runner().start(|runtime| payout_cases(runtime, history, count, accounts))
+            {
+                visit(case);
+            }
+        }
+    }
 }
 
-fn bench_proofs(c: &mut Criterion) {
-    // Material is generated and checked once, outside every verification timer.
+pub(crate) fn activity_sizes() {
+    visit_activity(|case| {
+        println!(
+            "native_activity {} lookup_bytes={} head_bytes={}",
+            case.label,
+            case.lookup.encode().len(),
+            case.range.head.encode().len()
+        )
+    });
+}
+
+pub(crate) fn payout_sizes() {
+    visit_payout(|case| {
+        let (opening, complete) = case.bytes();
+        println!(
+            "native_payout {} operations={} floor={} opening_bytes={opening} artifact_bytes={complete} head_bytes={}",
+            case.label,
+            case.head.operations,
+            case.head.floor,
+            case.head.encode().len()
+        );
+    });
+}
+
+pub(crate) fn sizes() {
+    activity_sizes();
+    payout_sizes();
+}
+
+fn bench_activity(c: &mut Criterion) {
     let mut activity = Vec::new();
-    let mut payout = Vec::new();
-    visit(|case| activity.push(case), |case| payout.push(case));
+    visit_activity(|case| activity.push(case));
     for case in activity {
         c.bench_function(
             &format!("{}::activity_verify/{}", module_path!(), case.label),
@@ -407,6 +407,11 @@ fn bench_proofs(c: &mut Criterion) {
             },
         );
     }
+}
+
+fn bench_payout(c: &mut Criterion) {
+    let mut payout = Vec::new();
+    visit_payout(|case| payout.push(case));
     for case in payout {
         c.bench_function(
             &format!(
@@ -433,4 +438,6 @@ fn bench_proofs(c: &mut Criterion) {
     }
 }
 
-criterion_group! { name = benches; config = Criterion::default().sample_size(20); targets = bench_proofs, }
+criterion_group! { name = activity_benches; config = Criterion::default().sample_size(20); targets = bench_activity, }
+criterion_group! { name = payout_benches; config = Criterion::default().sample_size(20); targets = bench_payout, }
+criterion_group! { name = benches; config = Criterion::default().sample_size(20); targets = bench_activity, bench_payout, }

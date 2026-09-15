@@ -1,11 +1,10 @@
-//! Full-replica close construction, validation, and immediate claim proofs.
+//! Full-replica close construction, validation, and native log inputs.
 
 use crate::bajillion::{
     boundary::{
         BoundaryError, Deadline, DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
     },
-    commitment::{self, VectorRoot},
-    custody::SourceMetadata,
+    commitment::{self, VectorKind, VectorRoot},
     logs::{self, Heads, LogHead, Opening},
     payment::{
         AckError, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
@@ -14,12 +13,11 @@ use crate::bajillion::{
     posted::{self, Dealing},
     qmdb::{self, PreparedState, StateRoot, account_key},
     replica::{self, PreparedReplica, Replica},
-    state::{AccountChange, AccountRow, ChangeGuard, SettlementOutput},
-    vector::{self, OutVector},
+    state::{AccountChange, AccountRow, SettlementOutput},
+    vector::{self, OutEntry, OutVector},
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
     vec::Vec,
 };
 use bytes::{BufMut, Bytes};
@@ -37,8 +35,7 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
-    merkle::{self, Family as _, Location, mmr, verification::ProofStore},
-    qmdb::{self as native},
+    merkle::{self, Family as _, mmr},
 };
 use commonware_utils::iter::NonEmpty;
 use core::num::NonZeroU64;
@@ -152,6 +149,8 @@ impl<D: Digest> Read for ProposalId<D> {
 pub struct RootBundle<D: Digest> {
     /// Cumulative activity log, including participants with unchanged balances.
     pub change: LogHead<D>,
+    /// Number of sorted account rows before the epoch's original entries.
+    pub row_count: u64,
     /// Cumulative log of every registered withdrawal output, including zero releases.
     pub withdrawal_outputs: LogHead<D>,
     /// Current Ordered balance state after this epoch's canonical batch.
@@ -178,15 +177,21 @@ impl<D: Digest> RootBundle<D> {
         context: &CloseContext<P, D>,
     ) -> Result<ActivityRange<D>, TransitionError> {
         let start = context.predecessor_logs.activity.operations;
-        let end = self
+        let end = start
+            .checked_add(self.row_count)
+            .ok_or(TransitionError::LogRange)?;
+        let commit = self
             .change
             .operations
             .checked_sub(1)
             .ok_or(TransitionError::LogRange)?;
         if self.change.operations > mmr::Family::MAX_LEAVES
             || start == 0
-            || start > end
-            || end - start > context.limits().max_rows()
+            || end > commit
+            || self.row_count > context.limits().max_rows()
+            || self.row_count > u64::from(commitment::MAX_VECTOR_LENGTH)
+            || commit - end > context.limits().max_total_entries()
+            || (self.row_count == 0 && end != commit)
             || self.change.floor != context.floors.activity
             || self.change.floor < context.predecessor_logs.activity.floor
             || self.change.floor >= start
@@ -203,13 +208,12 @@ impl<D: Digest> RootBundle<D> {
 
 /// Authenticated epoch offsets and the cumulative activity head that contains them.
 ///
-/// Obtain this descriptor from a certified RootBundle and registered CloseContext, or from a
-/// verified native SourceProof for an older epoch under the current finalized activity head.
+/// Obtain this descriptor from a certified RootBundle and its registered CloseContext.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActivityRange<D: Digest> {
     /// First activity Append location for this epoch.
     pub start: u64,
-    /// Exclusive end of activity Append locations, immediately before the Commit.
+    /// Exclusive end of the contiguous account-row prefix.
     pub end: u64,
     /// Certified cumulative log root, operation count, and floor.
     pub head: LogHead<D>,
@@ -226,6 +230,49 @@ impl<D: Digest> ActivityRange<D> {
     }
 }
 #[cfg(feature = "arbitrary")]
+impl<'a, D: Digest + arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for ActivityRange<D> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let operations = u.int_in_range(2..=*mmr::Family::MAX_LEAVES)?;
+        let start = u.int_in_range(1..=operations - 1)?;
+        let end = u.int_in_range(
+            start..=(operations - 1).min(start + u64::from(commitment::MAX_VECTOR_LENGTH)),
+        )?;
+        Ok(Self {
+            start,
+            end,
+            head: LogHead {
+                root: u.arbitrary()?,
+                operations,
+                floor: u.int_in_range(0..=operations - 1)?,
+            },
+        })
+    }
+}
+impl<D: Digest> Write for ActivityRange<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.start.write(writer);
+        self.end.write(writer);
+        self.head.write(writer);
+    }
+}
+impl<D: Digest> FixedSize for ActivityRange<D> {
+    const SIZE: usize = u64::SIZE * 2 + LogHead::<D>::SIZE;
+}
+impl<D: Digest> Read for ActivityRange<D> {
+    type Cfg = ();
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range = Self {
+            start: u64::read(reader)?,
+            end: u64::read(reader)?,
+            head: LogHead::read(reader)?,
+        };
+        if !range.contains(range.start, 0) {
+            return Err(CodecError::Invalid("ActivityRange", "invalid row interval"));
+        }
+        Ok(range)
+    }
+}
+#[cfg(feature = "arbitrary")]
 impl<D> arbitrary::Arbitrary<'_> for RootBundle<D>
 where
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
@@ -233,6 +280,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             change: u.arbitrary()?,
+            row_count: u.arbitrary()?,
             withdrawal_outputs: u.arbitrary()?,
             successor: u.arbitrary()?,
             successor_operations: u.arbitrary()?,
@@ -244,6 +292,7 @@ where
 impl<D: Digest> Write for RootBundle<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.change.write(writer);
+        self.row_count.write(writer);
         self.withdrawal_outputs.write(writer);
         self.successor.write(writer);
         self.successor_operations.write(writer);
@@ -252,13 +301,14 @@ impl<D: Digest> Write for RootBundle<D> {
     }
 }
 impl<D: Digest> FixedSize for RootBundle<D> {
-    const SIZE: usize = LogHead::<D>::SIZE * 2 + D::SIZE * 2 + u64::SIZE * 2;
+    const SIZE: usize = LogHead::<D>::SIZE * 2 + D::SIZE * 2 + u64::SIZE * 3;
 }
 impl<D: Digest> Read for RootBundle<D> {
     type Cfg = ();
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
             change: LogHead::read(reader)?,
+            row_count: u64::read(reader)?,
             withdrawal_outputs: LogHead::read(reader)?,
             successor: StateRoot::read(reader)?,
             successor_operations: u64::read(reader)?,
@@ -1032,7 +1082,7 @@ pub struct Terminal<P: PublicKey, D: Digest> {
     pub operator_signature: OperatorSignature,
 }
 
-/// Complete derived activity and reusable proof material for one close.
+/// Complete derived activity and native append inputs for one close.
 #[derive(Clone, Debug)]
 pub struct Close<P: PublicKey, D: Digest> {
     /// Commitment to the validated close.
@@ -1046,11 +1096,7 @@ pub struct Close<P: PublicKey, D: Digest> {
     /// Terminal vectors aligned with activity rows.
     pub out_vectors: Vec<OutVector<P>>,
     encoded: Bytes,
-    source_metadata: Bytes,
-    pub(crate) changes: ChallengeIndex<P, D>,
     withdrawals: Vec<WithdrawalOutput>,
-    withdrawal_rows: Vec<usize>,
-    withdrawal_evidence: LogEvidence<D>,
 }
 impl<P: PublicKey, D: Digest> Close<P, D> {
     /// Shares the single full-validator dealing.
@@ -1058,50 +1104,24 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
         &self.encoded
     }
     /// Returns the exact native activity input derived by full close validation.
-    pub fn activity_input(&self) -> logs::ActivityInput<P, D> {
-        logs::ActivityInput::new(
-            self.changes.material.guards.clone(),
-            self.source_metadata.clone(),
-        )
+    pub fn activity_input<H: Hasher<Digest = D>>(&self) -> logs::ActivityInput<P, D> {
+        let empty_send_root = commitment::empty_root::<H>(VectorKind::OutEntry);
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                let send_root = row
+                    .outgoing
+                    .as_ref()
+                    .map_or(empty_send_root, |send| send.body().send_root());
+                AccountChange::from_row(row, send_root)
+            })
+            .collect::<Vec<_>>();
+        logs::ActivityInput::new(rows, activity_entries(&self.out_vectors))
     }
-    /// Returns activity values, guards, and the native range proof including the epoch Commit.
-    #[allow(clippy::type_complexity)]
-    pub fn change_evidence(&self) -> (&[AccountChange<P, D>], &[ChangeGuard<P, D>], &Opening<D>) {
-        let material = &self.changes.material;
-        (
-            &material.leaves,
-            &material.guards,
-            &material.evidence.opening,
-        )
-    }
-    /// Returns withdrawal outputs and their native range proof including the epoch Commit.
-    pub fn withdrawal_evidence(&self) -> (&[WithdrawalOutput], &Opening<D>) {
-        (&self.withdrawals, &self.withdrawal_evidence.opening)
-    }
-    /// Returns this close's authenticated activity range.
-    pub fn activity_range(&self) -> &ActivityRange<D> {
-        &self.changes.material.range
-    }
-    /// Opens a registered withdrawal, including a zero release.
-    pub fn withdrawal_claim<H: Hasher<Digest = D>>(
-        &self,
-        account: &P,
-    ) -> Result<WithdrawalClaim<D>, TransitionError> {
-        let row = self
-            .changes
-            .material
-            .leaves
-            .binary_search_by(|leaf| leaf.account().as_ref().cmp(account.as_ref()))
-            .map_err(|_| TransitionError::WithdrawalClaim)?;
-        let index = self
-            .withdrawal_rows
-            .binary_search(&row)
-            .map_err(|_| TransitionError::WithdrawalClaim)?;
-        Ok(WithdrawalClaim::new(
-            self.withdrawals[index].clone(),
-            self.withdrawal_evidence
-                .proof::<H>(self.withdrawal_evidence.opening.start + index as u64, 1)?,
-        ))
+    /// Returns the withdrawal outputs in registered request order.
+    pub fn withdrawal_outputs(&self) -> &[WithdrawalOutput] {
+        &self.withdrawals
     }
 }
 
@@ -1142,166 +1162,11 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
     {
         Ok((replica.apply(self.replica).await?, self.close))
     }
-    /// Opens a registered withdrawal from the derived close.
-    pub fn withdrawal_claim<H: Hasher<Digest = D>>(
-        &self,
-        account: &P,
-    ) -> Result<WithdrawalClaim<D>, TransitionError> {
-        self.close.withdrawal_claim::<H>(account)
-    }
-}
-
-#[derive(Clone)]
-struct LogEvidence<D: Digest> {
-    opening: Opening<D>,
-    store: Arc<ProofStore<mmr::Family, D>>,
-}
-impl<D: Digest> core::fmt::Debug for LogEvidence<D> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("LogEvidence")
-            .field("opening", &self.opening)
-            .finish_non_exhaustive()
-    }
-}
-impl<D: Digest> LogEvidence<D> {
-    fn new<H: Hasher<Digest = D>, Op: Encode>(
-        opening: Opening<D>,
-        head: &LogHead<D>,
-        operations: &[Op],
-    ) -> Result<Self, TransitionError> {
-        if LogHead::try_new(head.root, head.operations, head.floor).is_err()
-            || opening.start == 0
-            || *opening.proof.leaves != head.operations
-            || !opening.proof.matches_canonical_inactive_peaks(
-                Location::new(head.operations),
-                Location::new(head.floor),
-            )
-            || opening.start.checked_add(operations.len() as u64) != Some(head.operations)
-        {
-            return Err(TransitionError::LogRange);
-        }
-        let store = native::create_proof_store::<H, mmr::Family, _>(
-            &opening.proof,
-            Location::new(opening.start),
-            operations,
-            &head.root,
-        )?;
-        Ok(Self {
-            opening,
-            store: Arc::new(store),
-        })
-    }
-
-    fn proof<H: Hasher<Digest = D>>(
-        &self,
-        start: u64,
-        count: u64,
-    ) -> Result<Opening<D>, TransitionError> {
-        let end = start
-            .checked_add(count)
-            .ok_or(TransitionError::Arithmetic)?;
-        if count == 0 || start < self.opening.start || end >= *self.opening.proof.leaves {
-            return Err(TransitionError::LogRange);
-        }
-        let proof = self.store.range_proof(
-            &native::hasher::<H>(),
-            Location::new(start)..Location::new(end),
-        )?;
-        Ok(Opening { start, proof })
-    }
-}
-
-/// Epoch activity values and native subrange proof material shared by validated closes.
-#[derive(Clone, Debug)]
-pub struct ChallengeIndex<P: PublicKey, D: Digest> {
-    material: Arc<ChallengeMaterial<P, D>>,
-}
-#[derive(Debug)]
-struct ChallengeMaterial<P: PublicKey, D: Digest> {
-    leaves: Vec<AccountChange<P, D>>,
-    guards: Vec<ChangeGuard<P, D>>,
-    range: ActivityRange<D>,
-    evidence: LogEvidence<D>,
-}
-impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
-    /// Authenticates the retained activity range against the registered certified close.
-    pub fn new<H: Hasher<Digest = D>>(
-        context: &CloseContext<P, D>,
-        close: &Close<P, D>,
-    ) -> Result<Self, TransitionError> {
-        validate_header::<H, P, D>(context, &close.header, &close.roots, close.withdrawal_total)?;
-        if close.changes.material.range != close.roots.activity_range(context)? {
-            return Err(TransitionError::ChangeRoot);
-        }
-        Ok(close.changes.clone())
-    }
-    /// Returns the cumulative activity head.
-    pub fn head(&self) -> LogHead<D> {
-        self.material.range.head
-    }
-    /// Returns the authenticated epoch range.
-    pub fn range(&self) -> &ActivityRange<D> {
-        &self.material.range
-    }
-    /// Opens membership or the exact adjacent-key absence bracket within this epoch.
-    pub fn change_parts<H: Hasher<Digest = D>>(
-        &self,
-        account: &P,
-    ) -> Result<ChangeParts<P, D>, TransitionError> {
-        let material = &self.material;
-        match material
-            .leaves
-            .binary_search_by(|leaf| leaf.account().as_ref().cmp(account.as_ref()))
-        {
-            Ok(position) => Ok(ChangeParts::Present {
-                leaf: material.leaves[position].clone(),
-                proof: material
-                    .evidence
-                    .proof::<H>(material.range.start + position as u64, 1)?,
-            }),
-            Err(position) => {
-                let predecessor = position.checked_sub(1).map(|i| material.guards[i].clone());
-                let successor = material.guards.get(position).cloned();
-                let count = u64::from(predecessor.is_some()) + u64::from(successor.is_some());
-                let opening = if count == 0 {
-                    None
-                } else {
-                    let start =
-                        material.range.start + position as u64 - u64::from(predecessor.is_some());
-                    Some(material.evidence.proof::<H>(start, count)?)
-                };
-                Ok(ChangeParts::Absent {
-                    predecessor,
-                    successor,
-                    opening,
-                })
-            }
-        }
-    }
-}
-/// Activity membership or a compact ordered absence witness.
-#[derive(Clone, Debug)]
-pub enum ChangeParts<P: PublicKey, D: Digest> {
-    /// The account participated in this epoch.
-    Present {
-        /// Committed activity projection.
-        leaf: AccountChange<P, D>,
-        /// Native membership proof of its guard.
-        proof: Opening<D>,
-    },
-    /// The account did not participate in this epoch.
-    Absent {
-        /// Immediate previous guard within the epoch.
-        predecessor: Option<ChangeGuard<P, D>>,
-        /// Immediate following guard within the epoch.
-        successor: Option<ChangeGuard<P, D>>,
-        /// Shared native proof, absent only for an empty epoch range.
-        opening: Option<Opening<D>>,
-    },
 }
 
 /// Constructs a state candidate from terminal activity without authenticating signatures.
 ///
+/// The caller authenticates the registered context, including its predecessor liability.
 /// Validators authenticate an untrusted dealing with [`validate_close_with_strategy`].
 /// This constructor is useful when the caller already owns the accepted endpoints.
 pub async fn prepare_close_with_strategy<H, P, D, E, S>(
@@ -1435,6 +1300,9 @@ pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
 }
 
 /// Authenticates the full dealing against the retained predecessor before any state installation.
+///
+/// The caller must authenticate the context against settlement registration; native account
+/// storage authenticates predecessor balances and roots, while settlement owns total liability.
 #[allow(clippy::too_many_arguments)]
 pub async fn validate_close_with_strategy<H, P, D, E, S, B, R>(
     replica: &Replica<E, H, P, S>,
@@ -1473,13 +1341,20 @@ where
     Ok(prepared)
 }
 
+fn activity_entries<P: PublicKey>(vectors: &[OutVector<P>]) -> Vec<OutEntry<P>> {
+    vectors
+        .iter()
+        .flat_map(|vector| vector.entries().iter().cloned())
+        .collect()
+}
+
 async fn derive<H, P, D, E, S>(
     replica: &Replica<E, H, P, S>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     dealing: Dealing<P>,
-    strategy: &S,
+    _strategy: &S,
 ) -> Result<PreparedClose<P, D, S>, TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -1568,7 +1443,7 @@ where
     let mut rows = Vec::with_capacity(input.len());
     let mut vectors = Vec::with_capacity(input.len());
     let mut updates = Vec::new();
-    let mut leaves = Vec::with_capacity(input.len());
+    let mut activity_rows = Vec::with_capacity(input.len());
     for (((input, old), key), (credit, in_count)) in
         input.into_iter().zip(balances).zip(keys).zip(incoming)
     {
@@ -1629,16 +1504,14 @@ where
             outgoing,
             output,
         };
-        leaves.push(AccountChange::from_row(&row, send_root));
+        activity_rows.push(AccountChange::from_row(&row, send_root));
         if predecessor != successor {
             updates.push((key, NonZeroU64::new(successor)));
         }
         rows.push(row);
         vectors.push(input.vector);
     }
-    let guards = strategy.map_collect_vec(leaves.iter(), |leaf| leaf.guard::<H>());
     let mut outputs = Vec::with_capacity(withdrawals.len());
-    let mut withdrawal_rows = Vec::with_capacity(withdrawals.len());
     for request in withdrawals.requests() {
         let index = rows
             .binary_search_by(|row| row.account.as_ref().cmp(request.account().as_ref()))
@@ -1647,58 +1520,33 @@ where
             return Err(TransitionError::SettlementOutput);
         };
         outputs.push(WithdrawalOutput::from_request(request, amount));
-        withdrawal_rows.push(index);
     }
-    let source_metadata =
-        SourceMetadata::from_close(context, &leaves, &vectors, withdrawals).encode();
-    let prepared_logs = replica
-        .logs()
-        .prepare(
-            context.predecessor_logs(),
-            logs::ActivityInput::new(guards.clone(), source_metadata.clone()),
-            outputs.clone(),
-            context.floors(),
-        )
-        .await?;
+    let row_count = activity_rows.len() as u64;
+    let entries = activity_entries(&vectors);
+    let log_preparation = replica.logs().prepare(
+        context.predecessor_logs(),
+        logs::ActivityInput::new(activity_rows, entries),
+        outputs.clone(),
+        context.floors(),
+    );
+    let state_preparation = state.prepare(state.head(), updates);
+    let (prepared_logs, candidate) = logs::join(log_preparation, state_preparation).await;
+    let prepared_logs = prepared_logs?;
+    let candidate = candidate?;
     let log_heads = *prepared_logs.head();
-    let activity_opening = prepared_logs.activity_proof(replica.logs())?;
-    let payout_opening = prepared_logs.payout_proof(replica.logs())?;
-    let (_, activity_ops) = prepared_logs.activity_operations();
-    let (_, payout_ops) = prepared_logs.payout_operations();
-    let activity_evidence =
-        LogEvidence::new::<H, _>(activity_opening, &log_heads.activity, &activity_ops)?;
-    let withdrawal_evidence =
-        LogEvidence::new::<H, _>(payout_opening, &log_heads.payouts, &payout_ops)?;
-    let candidate = state.prepare(state.head(), updates).await?;
     if candidate.head().live_accounts() > limits.max_states() {
         return Err(TransitionError::CloseLimit);
     }
     let roots = RootBundle {
         change: log_heads.activity,
+        row_count,
         withdrawal_outputs: log_heads.payouts,
         successor: candidate.root(),
         successor_operations: candidate.head().operations(),
         successor_sync_boundary: candidate.head().sync_boundary(),
         proposal: ProposalId::for_dealing::<H, P>(context.epoch_context(), encoded.as_ref()),
     };
-    let liability = validate_close_amounts::<H, P, D>(
-        context,
-        deposits,
-        withdrawals,
-        &roots,
-        withdrawal_total,
-    )?;
-    if candidate.head().liability() != liability {
-        return Err(TransitionError::LiabilityEquation);
-    }
-    let changes = ChallengeIndex {
-        material: Arc::new(ChallengeMaterial {
-            leaves,
-            guards,
-            range: roots.activity_range(context)?,
-            evidence: activity_evidence,
-        }),
-    };
+    validate_close_amounts::<H, P, D>(context, deposits, withdrawals, &roots, withdrawal_total)?;
     let header = Header::new::<H, P>(context, &roots, withdrawal_total);
     Ok(PreparedClose {
         close: Close {
@@ -1708,11 +1556,7 @@ where
             rows,
             out_vectors: vectors,
             encoded,
-            source_metadata,
-            changes,
             withdrawals: outputs,
-            withdrawal_rows,
-            withdrawal_evidence,
         },
         replica: PreparedReplica::new(candidate, prepared_logs),
     })
@@ -1742,9 +1586,6 @@ where
     }
     if state.root() != *context.predecessor_root() {
         return Err(TransitionError::PredecessorRoot);
-    }
-    if state.liability() != context.predecessor_liability() {
-        return Err(TransitionError::PredecessorLiability);
     }
     if state.live_accounts() > context.limits().max_states() {
         return Err(TransitionError::CloseLimit);
@@ -1891,9 +1732,6 @@ pub enum TransitionError {
     /// Native triplet mutation failed and consumed the owner.
     #[error(transparent)]
     Replica(#[from] replica::Error),
-    /// Native MMR proof reconstruction failed.
-    #[error(transparent)]
-    Merkle(#[from] merkle::Error<mmr::Family>),
     /// The payment anchor does not authenticate the supplied epoch parameters.
     #[error("epoch parameters do not match the payment anchor")]
     EpochAnchor,
@@ -1904,9 +1742,6 @@ pub enum TransitionError {
     /// A different predecessor was supplied.
     #[error("wrong predecessor root")]
     PredecessorRoot,
-    /// Registered liability differs from retained state.
-    #[error("wrong predecessor liability")]
-    PredecessorLiability,
     /// Accounts must be uniquely sorted by canonical key bytes.
     #[error("noncanonical account order")]
     NonCanonicalRows,
@@ -1952,18 +1787,9 @@ pub enum TransitionError {
     /// Liability cannot be represented.
     #[error("liability overflow")]
     LiabilityOverflow,
-    /// Activity values do not match their committed root.
-    #[error("wrong activity root")]
-    ChangeRoot,
     /// Withdrawal outputs do not match their committed root.
     #[error("wrong withdrawal output root")]
     WithdrawalOutputRoot,
-    /// The requested original source is outside retained native history.
-    #[error("source is unavailable from retained native history")]
-    SourceUnavailable,
-    /// No valid withdrawal claim exists for the account.
-    #[error("invalid withdrawal claim")]
-    WithdrawalClaim,
     /// Registration deadlines are not ordered.
     #[error("invalid deadline order")]
     DeadlineOrder,

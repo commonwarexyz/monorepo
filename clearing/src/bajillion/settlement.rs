@@ -28,7 +28,7 @@ use crate::bajillion::{
     challenge::{self, Challenge, ChallengeError, ChallengeKind, Verdict},
     commitment,
     logs::{Floors, Heads, LogHead},
-    qmdb::{self, StateHead, StateOpening, StateRoot},
+    qmdb::{self, StateOpening, StateRoot},
     transition::{
         self, BatchId, CloseContext, EpochContext, Header, RootBundle, TransitionError,
         WithdrawalClaim, WithdrawalOutput,
@@ -524,16 +524,6 @@ impl<D: Digest> Genesis<D> {
     /// Returns the total positive account balance.
     pub const fn liability(&self) -> u64 {
         self.liability
-    }
-}
-
-impl<D: Digest> From<&StateHead<D>> for Genesis<D> {
-    fn from(head: &StateHead<D>) -> Self {
-        Self {
-            root: head.root(),
-            operations: head.operations(),
-            liability: head.liability(),
-        }
     }
 }
 
@@ -2940,18 +2930,17 @@ mod tests {
     use super::*;
     use crate::bajillion::{
         boundary::WithdrawalBody,
-        challenge::{
-            AccountLookup, AckWitness, ChangeAbsence, EntryWitness, account_lookup,
-            higher_entry_lookup,
-        },
+        challenge::{AccountLookup, AckWitness, ChangeAbsence, EntryWitness, HigherEntryLookup},
         commitment::{VectorKind, VectorRoot},
+        custody::Epoch,
         logs::{Floors, Heads},
         payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
-        qmdb::{Mutations, StateLookup, account_key},
+        qmdb::{Mutations, StateHead, StateLookup, account_key},
+        state::SettlementOutput,
         tests::{Accepted, TestState, new_state, replay_state},
         transition::{
-            ChallengeIndex, CloseLimits, OperatorKey, OperatorVariant, Terminal,
-            prepare_close_with_strategy, validate_close_with_strategy,
+            CloseLimits, OperatorKey, OperatorVariant, Terminal, prepare_close_with_strategy,
+            validate_close_with_strategy,
         },
         vector::{OutEntry, OutVector},
     };
@@ -2972,7 +2961,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{Array, Span, test_rng};
-    use core::{fmt, ops::Deref};
+    use core::{fmt, future::Future, ops::Deref};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -3130,7 +3119,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let configured = Genesis::new(head.root(), head.operations(), &accounts).unwrap();
-        assert_eq!(configured, Genesis::from(head));
+        assert_eq!(configured.root(), head.root());
+        assert_eq!(configured.operations(), head.operations());
+        assert_eq!(configured.liability(), 12);
         let chain = TestChain::new(
             fixture.deployment,
             fixture.operator.public_key(),
@@ -3149,10 +3140,15 @@ mod tests {
     #[derive(Clone)]
     struct Snapshot {
         history: Vec<Accepted>,
+        liability: u64,
     }
 
     impl Snapshot {
         fn new(balances: Vec<(VerifyingKey, u64)>) -> Self {
+            let liability = balances
+                .iter()
+                .try_fold(0u64, |total, (_, balance)| total.checked_add(*balance))
+                .unwrap();
             deterministic::Runner::default().start(|runtime| async move {
                 let mut mutations = balances
                     .iter()
@@ -3164,14 +3160,15 @@ mod tests {
                 let state = new_state(runtime, "snapshot", balances).await;
                 Self {
                     history: vec![Accepted::genesis(&state, mutations)],
+                    liability,
                 }
             })
         }
 
-        fn extended(&self, accepted: Accepted) -> Self {
+        fn extended(&self, accepted: Accepted, liability: u64) -> Self {
             let mut history = self.history.clone();
             history.push(accepted);
-            Self { history }
+            Self { history, liability }
         }
 
         fn head(&self) -> &StateHead<ShaDigest> {
@@ -3185,40 +3182,111 @@ mod tests {
             self.head().root()
         }
         fn liability(&self) -> u64 {
-            self.head().liability()
+            self.liability
+        }
+
+        fn configured_state(&self) -> Genesis<ShaDigest> {
+            let accounts = self
+                .balances()
+                .into_iter()
+                .map(|(account, balance)| {
+                    (
+                        account_key(&account).unwrap(),
+                        NonZeroU64::new(balance).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let configured =
+                Genesis::new(self.root(), self.head().operations(), &accounts).unwrap();
+            assert_eq!(configured.liability(), self.liability);
+            configured
         }
 
         async fn reopen(&self, runtime: deterministic::Context, prefix: &str) -> TestState {
             replay_state(runtime, prefix, &self.history).await.unwrap()
         }
 
+        fn with_state<T, F, Fut>(&self, prefix: &'static str, f: F) -> T
+        where
+            F: FnOnce(TestState) -> Fut,
+            Fut: Future<Output = T>,
+        {
+            let snapshot = self.clone();
+            deterministic::Runner::default().start(|runtime| async move {
+                let state = snapshot.reopen(runtime, prefix).await;
+                f(state).await
+            })
+        }
+
         fn opening(
             &self,
             account: &VerifyingKey,
         ) -> Result<StateOpening<VerifyingKey, ShaDigest>, qmdb::Error> {
-            let snapshot = self.clone();
             let account = account.clone();
-            deterministic::Runner::default().start(|runtime| async move {
-                snapshot
-                    .reopen(runtime, "opening")
-                    .await
-                    .state()
-                    .opening(account)
-                    .await
+            self.with_state("opening", |state| async move {
+                state.state().opening(account).await
             })
         }
 
         fn lookup(&self, account: &VerifyingKey) -> StateLookup<ShaDigest> {
-            let snapshot = self.clone();
             let key = account_key(account).unwrap();
-            deterministic::Runner::default().start(|runtime| async move {
-                snapshot
-                    .reopen(runtime, "lookup")
-                    .await
-                    .state()
-                    .lookup(&key)
+            self.with_state("lookup", |state| async move {
+                state.state().lookup(&key).await.unwrap()
+            })
+        }
+
+        fn account_lookup(
+            &self,
+            context: &TestContext,
+            roots: &RootBundle<ShaDigest>,
+            account: &VerifyingKey,
+        ) -> AccountLookup<VerifyingKey, ShaDigest> {
+            let epoch = context.payment().epoch();
+            let range = roots.activity_range(context).unwrap();
+            let account = account.clone();
+            self.with_state("account-lookup", |state| async move {
+                let view = Epoch::at(state.logs(), epoch, range).await.unwrap();
+                view.account_lookup(state.logs(), &account).await.unwrap()
+            })
+        }
+
+        fn higher_entry_lookup(
+            &self,
+            context: &TestContext,
+            roots: &RootBundle<ShaDigest>,
+            payer: &VerifyingKey,
+            recipient: &VerifyingKey,
+        ) -> HigherEntryLookup<VerifyingKey, ShaDigest> {
+            let epoch = context.payment().epoch();
+            let range = roots.activity_range(context).unwrap();
+            let payer = payer.clone();
+            let recipient = recipient.clone();
+            self.with_state("higher-entry-lookup", |state| async move {
+                let view = Epoch::at(state.logs(), epoch, range).await.unwrap();
+                view.higher_entry_lookup(state.logs(), &payer, &recipient)
                     .await
                     .unwrap()
+            })
+        }
+
+        fn payout_claim(
+            &self,
+            head: &LogHead<ShaDigest>,
+            position: u64,
+        ) -> WithdrawalClaim<ShaDigest> {
+            let head = *head;
+            self.with_state("payout-claim", |state| async move {
+                let (opening, operations) = state
+                    .logs()
+                    .payout_opening(&head, position, NonZeroU64::MIN)
+                    .await
+                    .unwrap();
+                let [crate::bajillion::logs::PayoutOperation::Append(output)] =
+                    operations.as_slice()
+                else {
+                    panic!("a one-output proof contains its payout append");
+                };
+                WithdrawalClaim::new(output.clone(), opening)
             })
         }
 
@@ -3251,7 +3319,7 @@ mod tests {
             self.history.last().unwrap().logs
         }
 
-        fn synthetic_next(&self, updates: Mutations) -> Self {
+        fn synthetic_next(&self, updates: Mutations, liability: u64) -> Self {
             let snapshot = self.clone();
             deterministic::Runner::default().start(|runtime| async move {
                 let state = snapshot.reopen(runtime, "next").await;
@@ -3264,7 +3332,7 @@ mod tests {
                     .logs()
                     .prepare(
                         state.logs().head(),
-                        crate::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
+                        crate::bajillion::logs::ActivityInput::new(vec![], Vec::new()),
                         vec![],
                         Floors {
                             activity: snapshot.logs().activity.floor,
@@ -3273,13 +3341,16 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                snapshot.extended(Accepted {
-                    head: *prepared.head(),
-                    mutations: prepared.mutations().to_vec(),
-                    logs: *logs.head(),
-                    activity: crate::bajillion::logs::ActivityInput::new(vec![], Bytes::new()),
-                    outputs: vec![],
-                })
+                snapshot.extended(
+                    Accepted {
+                        head: *prepared.head(),
+                        mutations: prepared.mutations().to_vec(),
+                        logs: *logs.head(),
+                        activity: crate::bajillion::logs::ActivityInput::new(vec![], Vec::new()),
+                        outputs: vec![],
+                    },
+                    liability,
+                )
             })
         }
 
@@ -3288,21 +3359,9 @@ mod tests {
             claim: &WithdrawalClaim<ShaDigest>,
             head: &crate::bajillion::logs::LogHead<ShaDigest>,
         ) -> WithdrawalClaim<ShaDigest> {
-            let snapshot = self.clone();
-            let position = claim.position();
-            let head = *head;
-            deterministic::Runner::default().start(|runtime| async move {
-                let replica = snapshot.reopen(runtime, "refresh").await;
-                let (opening, operations) = replica
-                    .logs()
-                    .payout_opening(&head, position, NonZeroU64::MIN)
-                    .await
-                    .unwrap();
-                let crate::bajillion::logs::PayoutOperation::Append(record) = &operations[0] else {
-                    panic!("claim is an append")
-                };
-                WithdrawalClaim::new(record.clone(), opening)
-            })
+            let refreshed = self.payout_claim(head, claim.position());
+            assert_eq!(refreshed.output(), claim.output());
+            refreshed
         }
     }
 
@@ -3341,14 +3400,29 @@ mod tests {
             .map(|(index, _)| SigningKey::from_seed(10 + index as u64))
             .collect::<Vec<_>>();
         accounts.sort_unstable_by_key(SigningKey::public_key);
-        let cache = Snapshot::new(
-            accounts
-                .iter()
-                .zip(balances)
-                .filter(|(_, balance)| **balance > 0)
-                .map(|(account, balance)| (account.public_key(), *balance))
-                .collect(),
-        );
+        let initial_balances = accounts
+            .iter()
+            .zip(balances)
+            .filter(|(_, balance)| **balance > 0)
+            .map(|(account, balance)| (account.public_key(), *balance))
+            .collect::<Vec<_>>();
+        let mut original_allocations = initial_balances
+            .iter()
+            .map(|(account, balance)| {
+                (
+                    account_key(account).unwrap(),
+                    NonZeroU64::new(*balance).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        original_allocations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let cache = Snapshot::new(initial_balances);
+        let genesis = Genesis::new(
+            cache.root(),
+            cache.head().operations(),
+            &original_allocations,
+        )
+        .unwrap();
         let deployment = Sha256::hash(&[b"settlement-test-deployment"]);
         let operator = SigningKey::from_seed(100);
         let validator = BlsPrivate::new(Scalar::from(101_u64));
@@ -3361,7 +3435,7 @@ mod tests {
             deployment,
             operator.public_key(),
             committee_keys,
-            &cache.head().into(),
+            &genesis,
             0,
             settlement_config,
         )
@@ -3450,6 +3524,7 @@ mod tests {
     fn empty_roots(snapshot: &Snapshot, context: &TestContext) -> RootBundle<ShaDigest> {
         RootBundle {
             change: snapshot.logs().activity,
+            row_count: 0,
             withdrawal_outputs: snapshot.logs().payouts,
             successor: snapshot.root(),
             successor_operations: snapshot.head().operations(),
@@ -3481,7 +3556,7 @@ mod tests {
         admit_at: u64,
         deadline: u64,
     ) -> (Snapshot, BatchId<ShaDigest>, TestContext) {
-        let next = cache.synthetic_next(vec![]);
+        let next = cache.synthetic_next(vec![], cache.liability());
         let ctx = context(
             fixture.deployment,
             &fixture.operator,
@@ -3551,9 +3626,10 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let next = fixture
-            .cache
-            .synthetic_next(vec![(account_key(&account).unwrap(), NonZeroU64::new(15))]);
+        let next = fixture.cache.synthetic_next(
+            vec![(account_key(&account).unwrap(), NonZeroU64::new(15))],
+            15,
+        );
         let roots = empty_roots(&next, &ctx);
         let withdrawal_total = 0;
         let (header, certificate) = certify(&fixture.signer, &ctx, &roots, withdrawal_total);
@@ -3657,7 +3733,7 @@ mod tests {
         assert_eq!(fixture.chain.encode(), before);
         let next = fixture
             .cache
-            .synthetic_next(vec![(account_key(&a).unwrap(), NonZeroU64::new(9))]);
+            .synthetic_next(vec![(account_key(&a).unwrap(), NonZeroU64::new(9))], 14);
         assert!(
             fixture
                 .chain
@@ -3752,7 +3828,9 @@ mod tests {
             2,
             fixture.chain.registration_floors(),
         );
-        let next = fixture.cache.synthetic_next(vec![]);
+        let next = fixture
+            .cache
+            .synthetic_next(vec![], fixture.cache.liability());
         let roots = empty_roots(&next, &ctx);
         let withdrawal_total = 0;
         let (header, certificate) = certify(&fixture.signer, &ctx, &roots, withdrawal_total);
@@ -3801,6 +3879,29 @@ mod tests {
             &self.prepared
         }
     }
+    impl Built {
+        fn withdrawal_claim(&self, account: &VerifyingKey) -> WithdrawalClaim<ShaDigest> {
+            let index = self
+                .prepared
+                .rows
+                .iter()
+                .filter(|row| matches!(row.output, SettlementOutput::Withdrawal(_)))
+                .position(|row| &row.account == account)
+                .expect("the account has a withdrawal output");
+            let position = self
+                .predecessor
+                .logs()
+                .payouts
+                .operations
+                .checked_add(u64::try_from(index).unwrap())
+                .unwrap();
+            let claim = self
+                .successor
+                .payout_claim(&self.prepared.roots.withdrawal_outputs, position);
+            assert_eq!(claim.output(), &self.prepared.withdrawal_outputs()[index]);
+            claim
+        }
+    }
     fn build(
         cache: &Snapshot,
         context: &TestContext,
@@ -3825,9 +3926,15 @@ mod tests {
             )
             .await
             .unwrap();
+            let successor_liability = transition::checked_successor_liability(
+                context.predecessor_liability(),
+                deposits.total(),
+                prepared.close().withdrawal_total,
+            )
+            .unwrap();
             let accepted = Accepted::prepared(&prepared);
             let (_, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
-            (close, snapshot.extended(accepted))
+            (close, snapshot.extended(accepted, successor_liability))
         });
         (
             Built {
@@ -4484,7 +4591,7 @@ mod tests {
                 base.deployment,
                 base.operator.public_key(),
                 committee(211),
-                &base.cache.head().into(),
+                &base.cache.configured_state(),
                 0,
                 invalid_policy,
             ),
@@ -5119,18 +5226,12 @@ mod tests {
             opening,
         };
 
-        let index = ChallengeIndex::new::<Sha256>(&close_context, &close).unwrap();
-        let payer_position = close
-            .rows
-            .binary_search_by(|row| row.account.cmp(&payer.public_key()))
-            .unwrap();
-        let sender_lookup = higher_entry_lookup::<Sha256, _, _>(
-            &index,
+        let sender_lookup = close.successor.higher_entry_lookup(
+            &close_context,
+            &close.roots,
             &payer.public_key(),
-            Some(&close.out_vectors[payer_position]),
             &recipient.public_key(),
-        )
-        .unwrap();
+        );
         let challenge = Challenge::HigherAckEntry {
             entry: Box::new(entry),
             sender: Box::new(sender_lookup),
@@ -6024,10 +6125,7 @@ mod tests {
                         credit,
                     )
                 };
-                let claim = close
-                    .prepared
-                    .withdrawal_claim::<Sha256>(&account.public_key())
-                    .unwrap();
+                let claim = close.withdrawal_claim(&account.public_key());
                 register_and_admit(
                     &mut fixture.chain,
                     &fixture.signer,
@@ -6206,10 +6304,7 @@ mod tests {
         );
         let (close, successor) =
             boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&account.public_key())
-            .unwrap();
+        let claim = close.withdrawal_claim(&account.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -6783,6 +6878,83 @@ mod tests {
     }
 
     #[test]
+    fn registration_binds_liability_to_the_exact_state_and_log_ancestry() {
+        let mut fixture = harness(&[7, 13]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let floors = fixture.chain.registration_floors();
+        let shifted = EpochContext::new::<Sha256>(
+            fixture.deployment,
+            0,
+            fixture.operator.public_key(),
+            &deposits,
+            &withdrawals,
+            fixture.cache.liability() + 1,
+            6,
+            8,
+            CloseLimits::protocol_maximum(),
+            fixture.committee,
+        )
+        .unwrap()
+        .bind_settlement_root(fixture.cache.root(), fixture.cache.logs(), floors);
+        assert!(shifted.epoch_context().verify_anchor::<Sha256>());
+        assert_eq!(shifted.predecessor_root(), &fixture.cache.root());
+        assert_eq!(shifted.predecessor_logs(), &fixture.cache.logs());
+        assert!(matches!(
+            fixture
+                .chain
+                .register_close(4, shifted, WithdrawalBatch::empty(), &[], |_| true,),
+            Err(SettlementError::LiabilityAncestry)
+        ));
+        assert!(fixture.chain.registered.is_none());
+
+        let foreign = fixture
+            .cache
+            .synthetic_next(vec![], fixture.cache.liability());
+        assert_eq!(foreign.liability(), fixture.cache.liability());
+        assert_ne!(foreign.root(), fixture.cache.root());
+        assert_ne!(foreign.logs(), fixture.cache.logs());
+        let foreign_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &foreign,
+            &deposits,
+            &withdrawals,
+            6,
+            8,
+            floors,
+        );
+        assert!(foreign_context.epoch_context().verify_anchor::<Sha256>());
+        assert!(matches!(
+            fixture
+                .chain
+                .register_close(4, foreign_context, WithdrawalBatch::empty(), &[], |_| true,),
+            Err(SettlementError::StateAncestry)
+        ));
+        assert!(fixture.chain.registered.is_none());
+
+        let valid = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            6,
+            8,
+            floors,
+        );
+        fixture
+            .chain
+            .register_close(4, valid.clone(), WithdrawalBatch::empty(), &[], |_| true)
+            .unwrap();
+        assert_eq!(fixture.chain.registered().unwrap().context, &valid);
+    }
+
+    #[test]
     fn registration_against_the_finalized_root_behind_a_pending_tail_is_rejected() {
         let mut fixture = harness(&[7, 11, 13]);
         let withdrawing = fixture.accounts[0].clone();
@@ -6988,10 +7160,10 @@ mod tests {
                     boundary_close(&fixture.cache, &ctx, &deposits, &withdrawals);
                 assert_eq!(successor.balances(), fixture.cache.balances());
                 assert!(matches!(
-                    close.changes.change_parts::<Sha256>(&account).unwrap(),
-                    crate::bajillion::transition::ChangeParts::Present { .. }
+                    successor.account_lookup(&ctx, &close.roots, &account),
+                    AccountLookup::Present(_)
                 ));
-                let claim = close.withdrawal_claim::<Sha256>(&account).unwrap();
+                let claim = close.withdrawal_claim(&account);
                 let extra_openings = if queued {
                     Vec::new()
                 } else {
@@ -7051,7 +7223,7 @@ mod tests {
                 invalid_fixture.deployment,
                 invalid_fixture.operator.public_key(),
                 committee(202),
-                &invalid_fixture.cache.head().into(),
+                &invalid_fixture.cache.configured_state(),
                 0,
                 invalid_notice,
             ),
@@ -7161,10 +7333,7 @@ mod tests {
         );
         let (close, successor) =
             boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&account.public_key())
-            .unwrap();
+        let claim = close.withdrawal_claim(&account.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -7549,10 +7718,7 @@ mod tests {
         let (destroy, destroyed) =
             boundary_close(&created, &destroy_context, &deposits, &withdrawals);
         assert!(destroyed.balances().is_empty());
-        let claim = destroy
-            .prepared
-            .withdrawal_claim::<Sha256>(&public_key)
-            .unwrap();
+        let claim = destroy.withdrawal_claim(&public_key);
         let output = claim
             .verify::<Sha256>(&destroy.roots.withdrawal_outputs)
             .unwrap();
@@ -7701,10 +7867,7 @@ mod tests {
         );
         let (close, closed_state) =
             boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&closed.public_key())
-            .unwrap();
+        let claim = close.withdrawal_claim(&closed.public_key());
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -8040,7 +8203,7 @@ mod tests {
         let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
         let claims = queued
             .iter()
-            .map(|(account, _, _, _)| close.prepared.withdrawal_claim::<Sha256>(account).unwrap())
+            .map(|(account, _, _, _)| close.withdrawal_claim(account))
             .collect::<Vec<_>>();
         register_and_admit(
             &mut fixture.chain,
@@ -8154,10 +8317,7 @@ mod tests {
             &deposits,
             &first_withdrawals,
         );
-        let first_claim = first_close
-            .prepared
-            .withdrawal_claim::<Sha256>(&account)
-            .unwrap();
+        let first_claim = first_close.withdrawal_claim(&account);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -8208,10 +8368,7 @@ mod tests {
             &deposits,
             &second_withdrawals,
         );
-        let second_claim = second_close
-            .prepared
-            .withdrawal_claim::<Sha256>(&account)
-            .unwrap();
+        let second_claim = second_close.withdrawal_claim(&account);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -8357,7 +8514,7 @@ mod tests {
         );
         let (first, first_successor) =
             boundary_close(&fixture.cache, &first_context, &deposits, &withdrawals);
-        let claim = first.prepared.withdrawal_claim::<Sha256>(&account).unwrap();
+        let claim = first.withdrawal_claim(&account);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -8702,8 +8859,10 @@ mod tests {
         );
         let acknowledged = fork_ack(&close_context, &fixture.operator, payer, 1, 3);
         let close = empty_close(&fixture.cache, &close_context);
-        let index = ChallengeIndex::new::<Sha256>(&close_context, &close).unwrap();
-        let payer_lookup = account_lookup::<Sha256, _, _>(&index, &payer.public_key()).unwrap();
+        let payer_lookup =
+            close
+                .successor
+                .account_lookup(&close_context, &close.roots, &payer.public_key());
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -9246,7 +9405,7 @@ mod tests {
         let openings = (0..4)
             .map(|_| {
                 let opening = snapshot.opening(&withdrawing.public_key()).unwrap();
-                snapshot = snapshot.synthetic_next(vec![]);
+                snapshot = snapshot.synthetic_next(vec![], snapshot.liability());
                 opening
             })
             .collect::<Vec<_>>();
@@ -9327,7 +9486,10 @@ mod tests {
         assert_eq!(
             claim_frozen_state(
                 &mut fixture.chain,
-                &fixture.cache.synthetic_next(vec![]).synthetic_next(vec![])
+                &fixture
+                    .cache
+                    .synthetic_next(vec![], fixture.cache.liability())
+                    .synthetic_next(vec![], fixture.cache.liability())
             )
             .iter()
             .map(|release| release.released_custody)
@@ -9544,10 +9706,7 @@ mod tests {
             &withdrawals,
             10,
         );
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&payer.public_key())
-            .unwrap();
+        let claim = close.withdrawal_claim(&payer.public_key());
         let output = claim
             .verify::<Sha256>(&close.roots.withdrawal_outputs)
             .unwrap();
@@ -9827,18 +9986,21 @@ mod tests {
             Err(SettlementError::OperatorHardFaulted)
         ));
 
-        let malformed = fixture.cache.synthetic_next(vec![(
-            account_key(&source.public_key()).unwrap(),
-            NonZeroU64::new(
-                fixture
-                    .cache
-                    .opening(&source.public_key())
-                    .unwrap()
-                    .balance
-                    .get()
-                    - 1,
-            ),
-        )]);
+        let malformed = fixture.cache.synthetic_next(
+            vec![(
+                account_key(&source.public_key()).unwrap(),
+                NonZeroU64::new(
+                    fixture
+                        .cache
+                        .opening(&source.public_key())
+                        .unwrap()
+                        .balance
+                        .get()
+                        - 1,
+                ),
+            )],
+            14,
+        );
         let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
         assert_eq!(
             fixture.chain.begin_hard_fault_settlement().unwrap(),
@@ -9924,7 +10086,7 @@ mod tests {
             fixture.deployment,
             fixture.operator.public_key(),
             committee(205),
-            &fixture.cache.head().into(),
+            &fixture.cache.configured_state(),
             u64::MAX - 2,
             config(1),
         )
@@ -9950,7 +10112,7 @@ mod tests {
                 fixture.deployment,
                 fixture.operator.public_key(),
                 committee(206),
-                &fixture.cache.head().into(),
+                &fixture.cache.configured_state(),
                 u64::MAX - 3,
                 config(1),
             )
@@ -9991,7 +10153,7 @@ mod tests {
             deposit_fixture.deployment,
             deposit_fixture.operator.public_key(),
             committee(202),
-            &deposit_fixture.cache.head().into(),
+            &deposit_fixture.cache.configured_state(),
             u64::MAX - 1,
             config(1),
         )
@@ -10013,7 +10175,7 @@ mod tests {
             withdrawal_fixture.deployment,
             withdrawal_fixture.operator.public_key(),
             committee(203),
-            &withdrawal_fixture.cache.head().into(),
+            &withdrawal_fixture.cache.configured_state(),
             u64::MAX - 1,
             config(1),
         )
@@ -10105,7 +10267,7 @@ mod tests {
             fixture.deployment,
             fixture.operator.public_key(),
             committee(101),
-            &fixture.cache.head().into(),
+            &fixture.cache.configured_state(),
             u64::MAX - 2,
             config(2),
         )
@@ -10257,10 +10419,7 @@ mod tests {
             fixture.chain.registration_floors(),
         );
         let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&public_key)
-            .unwrap();
+        let claim = close.withdrawal_claim(&public_key);
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
@@ -10319,7 +10478,7 @@ mod tests {
             deadline_harness.deployment,
             deadline_harness.operator.public_key(),
             committee(204),
-            &deadline_harness.cache.head().into(),
+            &deadline_harness.cache.configured_state(),
             0,
             settlement_config,
         )
@@ -10366,7 +10525,7 @@ mod tests {
                 epoch_harness.deployment,
                 epoch_harness.operator.public_key(),
                 committee(202),
-                &epoch_harness.cache.head().into(),
+                &epoch_harness.cache.configured_state(),
                 u64::MAX,
                 config(1),
             ),
@@ -10421,10 +10580,7 @@ mod tests {
             fixture.chain.registration_floors(),
         );
         let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = close
-            .prepared
-            .withdrawal_claim::<Sha256>(&signer.public_key())
-            .unwrap();
+        let claim = close.withdrawal_claim(&signer.public_key());
         let certificate = certificate(
             &fixture.signer,
             &fixture.operator_bls,
@@ -10623,11 +10779,7 @@ mod tests {
             let claims = fixture
                 .accounts
                 .iter()
-                .map(|account| {
-                    close
-                        .withdrawal_claim::<Sha256>(&account.public_key())
-                        .unwrap()
-                })
+                .map(|account| close.withdrawal_claim(&account.public_key()))
                 .collect::<Vec<_>>();
             register_and_admit(
                 &mut fixture.chain,

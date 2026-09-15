@@ -208,7 +208,7 @@ fn first_credit(invalidated: bool) {
                 )),
                 "credits accumulate in the virtual leaf"
             );
-            assert!(result.withdrawal_claims.is_empty());
+            assert_eq!(result.withdrawal_total, 0);
             balances = balances.apply(candidate).await.unwrap();
             let mut transactions = if epoch == 0 {
                 queues(
@@ -338,11 +338,22 @@ fn first_credit(invalidated: bool) {
                 .mutations()
                 .contains(&(account_key(&recipient.public_key()).unwrap(), None))
         );
-        assert_eq!(result.withdrawal_claims.len(), 1);
+        let payout_position = result.context.predecessor_logs().payouts.operations;
+        let balances = balances.apply(candidate).await.unwrap();
+        let output = balances.logs().payout_at(payout_position).await.unwrap();
+        let (payout_opening, _) = balances
+            .logs()
+            .payout_opening(
+                &result.roots.withdrawal_outputs,
+                payout_position,
+                NonZeroU64::MIN,
+            )
+            .await
+            .unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: result.context.predecessor_logs().payouts.operations,
-            claim: result.withdrawal_claims[0].clone(),
+            start: payout_position,
+            claim: WithdrawalClaim::new(output, payout_opening),
         });
         seal_native(
             &db,

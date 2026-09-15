@@ -18,8 +18,7 @@
 //!   [`crate::chain::light`].
 //! - [`METHOD_EVIDENCE`] answers one [`EvidenceRequest`] with an
 //!   [`EvidenceResponse`] from the validator's native QMDBs (see
-//!   [`crate::chain::da`]): state, activity, payout, and original source
-//!   proofs. Every served opening
+//!   [`crate::chain::da`]): state, activity, and payout proofs. Every served opening
 //!   verifies against certified roots the client already holds, so nothing
 //!   here is trusted unverified.
 //!
@@ -44,10 +43,9 @@ use crate::{
 use bytes::{BufMut, Bytes};
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, HigherEntryLookup},
-    custody::SourceProof,
-    logs::Heads,
+    logs::LogHead,
     qmdb::{StateLookup, StateRoot},
-    transition::{BatchId, CloseContext, Header, RootBundle},
+    transition::{ActivityRange, WithdrawalClaim},
 };
 use commonware_codec::{
     Buf, Decode as _, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
@@ -131,11 +129,7 @@ impl Lookup {
     pub(crate) const fn requires_payout_tip(&self) -> bool {
         matches!(
             self,
-            Self::Unclaimed { .. }
-                | Self::Anchor { .. }
-                | Self::Admitted { .. }
-                | Self::Status
-                | Self::Fault
+            Self::Unclaimed { .. } | Self::Anchor { .. } | Self::Admitted { .. } | Self::Fault
         )
     }
 }
@@ -552,43 +546,21 @@ pub(crate) enum EvidenceLookup {
         operations: u64,
         account: Key,
     },
-    /// A payer terminal entry or its authenticated absence.
+    /// A payer's committed outgoing entry or its authenticated absence.
     CommittedEntry {
         epoch: u64,
-        heads: Heads<Digest>,
+        range: ActivityRange<Digest>,
         payer: Key,
         recipient: Key,
     },
     /// The account activity lookup within an independently authenticated epoch range.
     Account {
         epoch: u64,
-        heads: Heads<Digest>,
+        range: ActivityRange<Digest>,
         account: Key,
     },
-    /// Registered context and ready claims for one retained candidate or admitted close.
-    CloseEvidence {
-        epoch: u64,
-        batch_id: BatchId<Digest>,
-    },
     /// A native payout at the supplied finalized head and global index.
-    Payout {
-        head: commonware_clearing::bajillion::logs::LogHead<Digest>,
-        index: u64,
-    },
-    /// Original epoch sources authenticated under the supplied paired finalized heads.
-    Source { epoch: u64, heads: Heads<Digest> },
-}
-impl EvidenceLookup {
-    /// The source epoch whose operations should be opened.
-    pub(crate) const fn epoch(&self) -> Option<u64> {
-        match self {
-            Self::CommittedEntry { epoch, .. }
-            | Self::Account { epoch, .. }
-            | Self::CloseEvidence { epoch, .. }
-            | Self::Source { epoch, .. } => Some(*epoch),
-            Self::State { .. } | Self::Payout { .. } => None,
-        }
-    }
+    Payout { head: LogHead<Digest>, index: u64 },
 }
 impl Write for EvidenceLookup {
     fn write(&self, buf: &mut impl BufMut) {
@@ -605,40 +577,30 @@ impl Write for EvidenceLookup {
             }
             Self::CommittedEntry {
                 epoch,
-                heads,
+                range,
                 payer,
                 recipient,
             } => {
                 3u8.write(buf);
                 epoch.write(buf);
-                heads.write(buf);
+                range.write(buf);
                 payer.write(buf);
                 recipient.write(buf);
             }
             Self::Account {
                 epoch,
-                heads,
+                range,
                 account,
             } => {
                 4u8.write(buf);
                 epoch.write(buf);
-                heads.write(buf);
+                range.write(buf);
                 account.write(buf);
-            }
-            Self::CloseEvidence { epoch, batch_id } => {
-                9u8.write(buf);
-                epoch.write(buf);
-                batch_id.write(buf);
             }
             Self::Payout { head, index } => {
                 10u8.write(buf);
                 head.write(buf);
                 index.write(buf);
-            }
-            Self::Source { epoch, heads } => {
-                12u8.write(buf);
-                epoch.write(buf);
-                heads.write(buf);
             }
         }
     }
@@ -653,23 +615,21 @@ impl EncodeSize for EvidenceLookup {
             } => root.encode_size() + operations.encode_size() + account.encode_size(),
             Self::CommittedEntry {
                 epoch,
-                heads,
+                range,
                 payer,
                 recipient,
             } => {
                 epoch.encode_size()
-                    + heads.encode_size()
+                    + range.encode_size()
                     + payer.encode_size()
                     + recipient.encode_size()
             }
             Self::Account {
                 epoch,
-                heads,
+                range,
                 account,
-            } => epoch.encode_size() + heads.encode_size() + account.encode_size(),
-            Self::CloseEvidence { epoch, batch_id } => epoch.encode_size() + batch_id.encode_size(),
+            } => epoch.encode_size() + range.encode_size() + account.encode_size(),
             Self::Payout { head, index } => head.encode_size() + index.encode_size(),
-            Self::Source { epoch, heads } => epoch.encode_size() + heads.encode_size(),
         }
     }
 }
@@ -684,26 +644,18 @@ impl Read for EvidenceLookup {
             }),
             3 => Ok(Self::CommittedEntry {
                 epoch: u64::read(buf)?,
-                heads: Heads::read(buf)?,
+                range: ActivityRange::read(buf)?,
                 payer: Key::read(buf)?,
                 recipient: Key::read(buf)?,
             }),
             4 => Ok(Self::Account {
                 epoch: u64::read(buf)?,
-                heads: Heads::read(buf)?,
+                range: ActivityRange::read(buf)?,
                 account: Key::read(buf)?,
             }),
-            9 => Ok(Self::CloseEvidence {
-                epoch: u64::read(buf)?,
-                batch_id: BatchId::read(buf)?,
-            }),
             10 => Ok(Self::Payout {
-                head: commonware_clearing::bajillion::logs::LogHead::read(buf)?,
+                head: LogHead::read(buf)?,
                 index: u64::read(buf)?,
-            }),
-            12 => Ok(Self::Source {
-                epoch: u64::read(buf)?,
-                heads: Heads::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -753,13 +705,6 @@ impl Read for EvidenceRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Evidence {
-    /// The candidate's exact Header and ready outputs; certification authenticates the Header.
-    Close {
-        header: Header<Digest>,
-        roots: RootBundle<Digest>,
-        context: CloseContext<Key, Digest>,
-        withdrawal_claims: Vec<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>>,
-    },
     /// Current membership or absence under an independently trusted root and key.
     State(StateLookup<Digest>),
     /// Account activity under an independently authenticated epoch range.
@@ -767,25 +712,11 @@ pub(crate) enum Evidence {
     /// A payer's terminal entry under an independently authenticated epoch range.
     CommittedEntry(HigherEntryLookup<Key, Digest>),
     /// A payout opened under the caller's independently trusted payout head.
-    Payout(commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>),
-    /// Original epoch sources opened under the caller's paired finalized heads.
-    Source(SourceProof<Digest>),
+    Payout(WithdrawalClaim<Digest>),
 }
 impl Write for Evidence {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Close {
-                header,
-                roots,
-                context,
-                withdrawal_claims,
-            } => {
-                0u8.write(buf);
-                header.write(buf);
-                roots.write(buf);
-                context.write(buf);
-                withdrawal_claims.write(buf);
-            }
             Self::State(value) => {
                 1u8.write(buf);
                 value.write(buf);
@@ -802,32 +733,16 @@ impl Write for Evidence {
                 4u8.write(buf);
                 value.write(buf);
             }
-            Self::Source(value) => {
-                5u8.write(buf);
-                value.write(buf);
-            }
         }
     }
 }
 impl EncodeSize for Evidence {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Close {
-                header,
-                roots,
-                context,
-                withdrawal_claims,
-            } => {
-                header.encode_size()
-                    + roots.encode_size()
-                    + context.encode_size()
-                    + withdrawal_claims.encode_size()
-            }
             Self::State(value) => value.encode_size(),
             Self::Account(value) => value.encode_size(),
             Self::CommittedEntry(value) => value.encode_size(),
             Self::Payout(value) => value.encode_size(),
-            Self::Source(value) => value.encode_size(),
         }
     }
 }
@@ -835,32 +750,12 @@ impl Read for Evidence {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(Self::Close {
-                header: Header::read(buf)?,
-                roots: RootBundle::read(buf)?,
-                context: CloseContext::read(buf)?,
-                withdrawal_claims: Vec::<
-                    commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>,
-                >::read_cfg(
-                    buf,
-                    &(
-                        RangeCfg::new(..=crate::protocol::MAX_WITHDRAWALS),
-                        RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
-                    ),
-                )?,
-            }),
             1 => Ok(Self::State(StateLookup::read_cfg(buf, &MAX_PROOF_DIGESTS)?)),
             2 => Ok(Self::Account(AccountLookup::read(buf)?)),
             3 => Ok(Self::CommittedEntry(HigherEntryLookup::read(buf)?)),
-            4 => Ok(Self::Payout(
-                commonware_clearing::bajillion::transition::WithdrawalClaim::read_cfg(
-                    buf,
-                    &RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
-                )?,
-            )),
-            5 => Ok(Self::Source(SourceProof::read_cfg(
+            4 => Ok(Self::Payout(WithdrawalClaim::read_cfg(
                 buf,
-                &RangeCfg::new(..=rpc::MAX_BODY_SIZE),
+                &RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
             )?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -1304,7 +1199,9 @@ mod tests {
     fn evidence_request_codecs_round_trip() {
         let account = identities()[0].key.clone();
         let batch = Sha256::hash(&[b"batch"]);
-        let heads = Heads::empty::<Key, Sha256>();
+        let result = crate::chain::tests::epoch_fixture().result;
+        let heads = result.roots.logs();
+        let range = result.roots.activity_range(&result.context).unwrap();
         let lookups = vec![
             EvidenceLookup::State {
                 root: StateRoot { digest: batch },
@@ -1313,26 +1210,18 @@ mod tests {
             },
             EvidenceLookup::Account {
                 epoch: 7,
-                heads,
+                range,
                 account: account.clone(),
             },
             EvidenceLookup::CommittedEntry {
                 epoch: 7,
-                heads,
+                range,
                 payer: account,
                 recipient: identities()[1].key.clone(),
-            },
-            EvidenceLookup::Source {
-                epoch: u64::MAX,
-                heads,
             },
             EvidenceLookup::Payout {
                 head: heads.payouts,
                 index: u64::MAX,
-            },
-            EvidenceLookup::CloseEvidence {
-                epoch: 7,
-                batch_id: BatchId::new(batch),
             },
         ];
         for lookup in lookups {
@@ -1341,33 +1230,33 @@ mod tests {
             assert_eq!(bytes.len(), request.encode_size());
             assert_eq!(EvidenceRequest::decode(bytes).unwrap(), request);
         }
-        for tag in [2, 6, 10, 255] {
+        for tag in [2, 6, 9, 11, 12, 13, 255] {
             assert!(EvidenceLookup::decode(Bytes::from(vec![tag])).is_err());
         }
     }
 
     #[test]
-    fn complete_evidence_codec_round_trips_and_bounds_claims() {
-        let result = crate::chain::tests::epoch_fixture().result;
-        let evidence = Evidence::Close {
-            header: result.header,
-            roots: result.roots,
-            context: result.context.clone(),
-            withdrawal_claims: result.withdrawal_claims.clone(),
-        };
+    fn payout_evidence_codec_round_trips() {
+        let mut bytes = bytes::BytesMut::new();
+        Bytes::from_static(b"destination").write(&mut bytes);
+        7u64.write(&mut bytes);
+        commonware_clearing::bajillion::logs::Opening::<Digest> {
+            start: 9,
+            proof: Default::default(),
+        }
+        .write(&mut bytes);
+        let claim = WithdrawalClaim::decode_cfg(
+            bytes.freeze(),
+            &RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
+        )
+        .unwrap();
+        let evidence = Evidence::Payout(claim);
         let encoded = evidence.encode();
         assert_eq!(encoded.len(), evidence.encode_size());
         assert_eq!(Evidence::decode(encoded.clone()).unwrap(), evidence);
         for end in 0..encoded.len() {
             assert!(Evidence::decode(encoded.slice(..end)).is_err());
         }
-        let mut oversized = bytes::BytesMut::new();
-        0u8.write(&mut oversized);
-        result.header.write(&mut oversized);
-        result.roots.write(&mut oversized);
-        result.context.write(&mut oversized);
-        (crate::protocol::MAX_WITHDRAWALS + 1).write(&mut oversized);
-        assert!(Evidence::decode(oversized.freeze()).is_err());
     }
 
     #[test]
@@ -1415,7 +1304,7 @@ mod tests {
             assert!(
                 StateLookup::<Digest>::decode_cfg(StateLookup::Absent(proof).encode(), &0).is_err()
             );
-            for tag in [5, 8, 255] {
+            for tag in [5, 6, 7, 8, 255] {
                 assert!(Evidence::decode(Bytes::from(vec![tag])).is_err());
             }
         });

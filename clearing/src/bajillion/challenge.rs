@@ -12,12 +12,9 @@ use crate::bajillion::{
         AckError, VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck,
         VectorSendBody,
     },
-    state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore},
-    transition::{
-        ActivityRange, ChallengeIndex, ChangeParts, CloseContext, Header, RootBundle,
-        TransitionError,
-    },
-    vector::{OutTipLookup, OutVector},
+    state::{AccountChange, ChangeValue, ChangeValueCore},
+    transition::{ActivityRange, CloseContext, Header, RootBundle},
+    vector::OutTipLookup,
 };
 use alloc::{boxed::Box, vec::Vec};
 use bytes::BufMut;
@@ -194,10 +191,10 @@ impl<P: PublicKey, D: Digest> Read for EntryWitness<P, D> {
     }
 }
 
-/// One account-relative change value and the membership opening for its compact guard.
+/// One account-relative change value and its native row membership opening.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeOpening<D: Digest> {
-    /// Account-relative compact changed-account value.
+    /// Account-relative compact activity value.
     pub value: ChangeValue<D>,
     /// Global activity location and native MMR authentication path.
     pub proof: Opening<D>,
@@ -227,13 +224,13 @@ impl<D: Digest> Read for ChangeOpening<D> {
     }
 }
 
-/// Adjacent compact guards and one native proof authenticating absence within an epoch.
+/// Adjacent activity rows and one native proof authenticating absence within an epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeAbsence<P: PublicKey, D: Digest> {
     /// Immediate predecessor, or `None` at the beginning of the epoch range.
-    pub predecessor: Option<ChangeGuard<P, D>>,
+    pub predecessor: Option<AccountChange<P, D>>,
     /// Immediate successor, or `None` at the end of the epoch range.
-    pub successor: Option<ChangeGuard<P, D>>,
+    pub successor: Option<AccountChange<P, D>>,
     /// One contiguous proof for the disclosed adjacent leaves.
     pub opening: Option<Opening<D>>,
 }
@@ -270,13 +267,13 @@ impl<P: PublicKey, D: Digest> ChangeAbsence<P, D> {
         {
             return Err(ChallengeError::LookupOrder);
         }
-        let guards = self
+        let rows = self
             .predecessor
             .iter()
             .chain(self.successor.iter())
             .cloned()
             .collect::<Vec<_>>();
-        opening.verify_activity::<H, P>(&range.head, &guards)?;
+        opening.verify_activity::<H, P>(&range.head, &rows)?;
         Ok(())
     }
 }
@@ -300,8 +297,8 @@ impl<P: PublicKey, D: Digest> Read for ChangeAbsence<P, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            predecessor: Option::<ChangeGuard<P, D>>::read(buf)?,
-            successor: Option::<ChangeGuard<P, D>>::read(buf)?,
+            predecessor: Option::<AccountChange<P, D>>::read(buf)?,
+            successor: Option::<AccountChange<P, D>>::read(buf)?,
             opening: Option::<Opening<D>>::read(buf)?,
         })
     }
@@ -310,7 +307,7 @@ impl<P: PublicKey, D: Digest> Read for ChangeAbsence<P, D> {
 /// Public terminal debit authenticated by the epoch activity commitment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountLookup<P: PublicKey, D: Digest> {
-    /// The account changed and exposes its compact terminal projection.
+    /// The account participated and exposes its compact terminal projection.
     Present(Box<ChangeOpening<D>>),
     /// The account has no public activity and therefore has epoch debit zero.
     Absent(ChangeAbsence<P, D>),
@@ -325,15 +322,14 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
     ) -> Result<(u64, Option<AccountChange<P, D>>), ChallengeError> {
         match self {
             Self::Present(opening) => {
-                let guard = ChangeGuard::from_value::<H>(account.clone(), &opening.value);
+                let row = AccountChange::from_value(account.clone(), opening.value);
                 if !range.contains(opening.proof.start, 1) {
                     return Err(ChallengeError::LookupOrder);
                 }
                 opening
                     .proof
-                    .verify_activity::<H, P>(&range.head, &[guard])?;
-                let leaf = AccountChange::from_value(account.clone(), opening.value);
-                Ok((leaf.terminal_debit(), Some(leaf)))
+                    .verify_activity::<H, P>(&range.head, core::slice::from_ref(&row))?;
+                Ok((row.terminal_debit(), Some(row)))
             }
             Self::Absent(change) => {
                 change.resolve::<H>(range, account)?;
@@ -383,7 +379,7 @@ impl<P: PublicKey, D: Digest> Read for AccountLookup<P, D> {
 /// Composed sender-row and vector-entry proof for a higher-entry challenge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HigherEntryLookup<P: PublicKey, D: Digest> {
-    /// The sender changed, so its child proof reconstructs the committed vector root.
+    /// The sender participated, so its child proof reconstructs the committed vector root.
     Present {
         /// Change value fields preceding the reconstructed vector root.
         value: ChangeValueCore,
@@ -412,11 +408,11 @@ impl<P: PublicKey, D: Digest> HigherEntryLookup<P, D> {
             } => {
                 let (send_root, cumulative, count) = entry.reconstruct::<H>(recipient)?;
                 let value = ChangeValue::from_core(*value, send_root);
-                let guard = ChangeGuard::from_value::<H>(payer.clone(), &value);
+                let row = AccountChange::from_value(payer.clone(), value);
                 if !range.contains(proof.start, 1) {
                     return Err(ChallengeError::LookupOrder);
                 }
-                proof.verify_activity::<H, P>(&range.head, &[guard])?;
+                proof.verify_activity::<H, P>(&range.head, core::slice::from_ref(&row))?;
                 Ok((cumulative, count))
             }
             Self::Absent(absence) => {
@@ -672,83 +668,6 @@ where
     }
 }
 
-/// Builds the composed sender lookup for a higher-entry challenge.
-pub fn higher_entry_lookup<H, P, D>(
-    index: &ChallengeIndex<P, D>,
-    payer: &P,
-    out_vector: Option<&OutVector<P>>,
-    recipient: &P,
-) -> Result<HigherEntryLookup<P, D>, TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    match index.change_parts::<H>(payer)? {
-        ChangeParts::Present { leaf, proof } => {
-            let out_vector = out_vector.ok_or(TransitionError::VectorAlignment)?;
-            if out_vector.payer() != payer {
-                return Err(TransitionError::VectorAlignment);
-            }
-            let entry = out_vector.lookup::<H, D>(recipient)?;
-            let (send_root, _, _) = entry
-                .reconstruct::<H>(recipient)
-                .map_err(TransitionError::Vector)?;
-            if send_root != leaf.send_root() {
-                return Err(TransitionError::VectorAlignment);
-            }
-            Ok(HigherEntryLookup::Present {
-                value: leaf.value().core(),
-                proof,
-                entry,
-            })
-        }
-        ChangeParts::Absent {
-            predecessor,
-            successor,
-            opening,
-        } => {
-            if out_vector.is_some() {
-                return Err(TransitionError::VectorAlignment);
-            }
-            Ok(HigherEntryLookup::Absent(ChangeAbsence {
-                predecessor,
-                successor,
-                opening,
-            }))
-        }
-    }
-}
-
-/// Builds the payer lookup for a higher-debit challenge.
-pub fn account_lookup<H, P, D>(
-    index: &ChallengeIndex<P, D>,
-    account: &P,
-) -> Result<AccountLookup<P, D>, TransitionError>
-where
-    H: Hasher<Digest = D>,
-    P: PublicKey,
-    D: Digest,
-{
-    match index.change_parts::<H>(account)? {
-        ChangeParts::Present { leaf, proof } => {
-            Ok(AccountLookup::Present(Box::new(ChangeOpening {
-                value: leaf.value(),
-                proof,
-            })))
-        }
-        ChangeParts::Absent {
-            predecessor,
-            successor,
-            opening,
-        } => Ok(AccountLookup::Absent(ChangeAbsence {
-            predecessor,
-            successor,
-            opening,
-        })),
-    }
-}
-
 /// Malformed, unauthenticated, mistimed, or noncanonical challenge evidence.
 #[derive(Debug, Error)]
 pub enum ChallengeError {
@@ -839,7 +758,7 @@ mod arbitrary_impls {
     where
         P: PublicKey + arbitrary::Arbitrary<'a>,
         D: Digest + for<'b> arbitrary::Arbitrary<'b>,
-        ChangeGuard<P, D>: arbitrary::Arbitrary<'a>,
+        AccountChange<P, D>: arbitrary::Arbitrary<'a>,
         Opening<D>: arbitrary::Arbitrary<'a>,
     {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {

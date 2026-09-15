@@ -64,9 +64,16 @@ fn check(
 #[test]
 fn challenges_adjudicate() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 16, 16, 8, 2).await;
+        let fixture = fixture(context.child("fixture"), 16, 16, 8, 2).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let position = 3;
         let (payer, private) = &fixture.accounts[position];
         let committed = &close.out_vectors[position];
@@ -76,9 +83,7 @@ fn challenges_adjudicate() {
         let recipient = entries[0].recipient.clone();
         let retained = OutVector::new(EPOCH, payer.clone(), entries).unwrap();
         let ack = acknowledge(&fixture, private, &retained, 1, 3);
-        let sender =
-            higher_entry_lookup::<Sha256, _, _>(&index, payer, Some(committed), &recipient)
-                .unwrap();
+        let sender = index.higher_entry_lookup(payer, &recipient).await;
         assert_eq!(
             check(
                 &fixture,
@@ -91,7 +96,7 @@ fn challenges_adjudicate() {
             .unwrap(),
             Verdict::Proven(ChallengeKind::HigherAckEntry)
         );
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
+        let lookup = index.account_lookup(payer).await;
         assert_eq!(
             check(
                 &fixture,
@@ -148,11 +153,18 @@ fn challenges_adjudicate() {
 #[test]
 fn ack_debit_arms_convict_same_seq_forks_and_later_batches() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 16, 16, 8, 2).await;
+        let fixture = fixture(context.child("fixture"), 16, 16, 8, 2).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let (payer, private) = &fixture.accounts[3];
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
+        let lookup = index.account_lookup(payer).await;
         let mut entries = close.out_vectors[3].entries().to_vec();
         let moved = entries.remove(0).cumulative;
         entries[0].cumulative += moved;
@@ -186,7 +198,7 @@ fn ack_debit_arms_convict_same_seq_forks_and_later_batches() {
 #[test]
 fn ack_debit_arms_decline_earlier_retries() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 16, 16, 8, 2).await;
+        let fixture = fixture(context.child("fixture"), 16, 16, 8, 2).await;
         let (payer, private) = &fixture.accounts[3];
         let mut terminals = fixture.terminals.clone();
         let terminal = &mut terminals[3];
@@ -204,8 +216,15 @@ fn ack_debit_arms_decline_earlier_retries() {
         .await
         .unwrap();
         let close = prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &prepared,
+        )
+        .await;
+        let lookup = index.account_lookup(payer).await;
         let mut entries = close.out_vectors[3].entries().to_vec();
         let moved = entries.remove(0).cumulative;
         entries[0].cumulative += moved;
@@ -236,9 +255,16 @@ fn ack_debit_arms_decline_earlier_retries() {
 #[test]
 fn credit_only_rows_decline_zero_debit_retries() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 1, 4, 2).await;
+        let fixture = fixture(context.child("fixture"), 8, 1, 4, 2).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let row = close
             .rows
             .iter()
@@ -251,7 +277,7 @@ fn credit_only_rows_decline_zero_debit_retries() {
             .find(|(key, _)| key == &row.account)
             .unwrap();
         let vector = OutVector::empty(EPOCH, payer.clone());
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
+        let lookup = index.account_lookup(payer).await;
         assert!(matches!(lookup, AccountLookup::Present(_)));
         for seq in [0, 1, 7] {
             let ack = acknowledge(&fixture, private, &vector, seq, 0);
@@ -275,9 +301,16 @@ fn credit_only_rows_decline_zero_debit_retries() {
 #[test]
 fn absent_payer_arms_convict_from_zero() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 4, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 4, 4, 1).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let phantom = SigningKey::from_seed(999_999);
         // Both a funded inactive payer and a payer absent from state resolve to no activity.
         for private in [&fixture.accounts[7].1, &phantom] {
@@ -294,7 +327,7 @@ fn absent_payer_arms_convict_from_zero() {
             )
             .unwrap();
             let ack = acknowledge(&fixture, private, &vector, 0, 5);
-            let lookup = account_lookup::<Sha256, _, _>(&index, &payer).unwrap();
+            let lookup = index.account_lookup(&payer).await;
             assert!(matches!(lookup, AccountLookup::Absent(_)));
             assert_eq!(
                 check(
@@ -308,8 +341,7 @@ fn absent_payer_arms_convict_from_zero() {
                 .unwrap(),
                 Verdict::Proven(ChallengeKind::HigherAckDebit)
             );
-            let sender =
-                higher_entry_lookup::<Sha256, _, _>(&index, &payer, None, &recipient).unwrap();
+            let sender = index.higher_entry_lookup(&payer, &recipient).await;
             assert!(matches!(sender, HigherEntryLookup::Absent(_)));
             assert_eq!(
                 check(
@@ -330,7 +362,7 @@ fn absent_payer_arms_convict_from_zero() {
 #[test]
 fn entry_amount_and_count_contradictions_are_independent() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let (payer, private) = &fixture.accounts[2];
         let mut terminals = fixture.terminals.clone();
         let mut entries = terminals[2].vector.entries().to_vec();
@@ -351,14 +383,15 @@ fn entry_amount_and_count_contradictions_are_independent() {
         .await
         .unwrap();
         let close = prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
-        let sender = higher_entry_lookup::<Sha256, _, _>(
-            &index,
-            payer,
-            Some(&close.out_vectors[2]),
-            &recipient,
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &prepared,
         )
-        .unwrap();
+        .await;
+        let sender = index.higher_entry_lookup(payer, &recipient).await;
         assert!(matches!(
             sender,
             HigherEntryLookup::Present {
@@ -403,9 +436,16 @@ fn entry_amount_and_count_contradictions_are_independent() {
 #[test]
 fn entry_absence_and_empty_vectors_convict() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 1, 4, 2).await;
+        let fixture = fixture(context.child("fixture"), 8, 1, 4, 2).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let recipient = fixture.accounts[7].0.clone();
         for row in &close.rows {
             let (payer, private) = fixture
@@ -430,9 +470,7 @@ fn entry_absence_and_empty_vectors_convict() {
             )
             .unwrap();
             let ack = acknowledge(&fixture, private, &retained, 1, 1);
-            let sender =
-                higher_entry_lookup::<Sha256, _, _>(&index, payer, Some(committed), &recipient)
-                    .unwrap();
+            let sender = index.higher_entry_lookup(payer, &recipient).await;
             assert!(matches!(sender, HigherEntryLookup::Present { .. }));
             assert_eq!(
                 sender
@@ -463,14 +501,19 @@ fn entry_absence_and_empty_vectors_convict() {
 #[test]
 fn infeasible_retained_entries_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let vector = &close.out_vectors[2];
         let recipient = &vector.entries()[0].recipient;
-        let sender =
-            higher_entry_lookup::<Sha256, _, _>(&index, vector.payer(), Some(vector), recipient)
-                .unwrap();
+        let sender = index.higher_entry_lookup(vector.payer(), recipient).await;
         for (cumulative, count) in [(1, 2), (0, 1), (1, 0), (0, 0)] {
             let mut entry = entry_witness(&fixture.acks[2], vector, recipient);
             entry.cumulative = cumulative;
@@ -493,14 +536,20 @@ fn infeasible_retained_entries_are_rejected() {
 #[test]
 fn forged_entry_openings_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let (payer, private) = &fixture.accounts[2];
         let committed = &close.out_vectors[2];
         let recipient = &committed.entries()[0].recipient;
-        let sender =
-            higher_entry_lookup::<Sha256, _, _>(&index, payer, Some(committed), recipient).unwrap();
+        let sender = index.higher_entry_lookup(payer, recipient).await;
         let doubled = OutVector::new(
             EPOCH,
             payer.clone(),
@@ -549,7 +598,7 @@ fn forged_entry_openings_are_rejected() {
 #[test]
 fn ack_fork_requires_only_operator_signatures() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let close = fixture.prepared.close();
         let (payer, private) = &fixture.accounts[2];
         let ack = acknowledge(&fixture, private, &close.out_vectors[2], 0, 2);
@@ -628,7 +677,7 @@ fn ack_fork_requires_only_operator_signatures() {
 #[test]
 fn foreign_context_acks_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let (payer, private) = &fixture.accounts[2];
         let committed = fixture.acks[2].body();
         for (anchor, epoch) in [
@@ -665,15 +714,21 @@ fn foreign_context_acks_are_rejected() {
 #[test]
 fn cross_epoch_and_anchor_challenge_replays_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let (payer, private) = &fixture.accounts[2];
         let vector = &close.out_vectors[2];
         let recipient = &vector.entries()[0].recipient;
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
-        let sender =
-            higher_entry_lookup::<Sha256, _, _>(&index, payer, Some(vector), recipient).unwrap();
+        let lookup = index.account_lookup(payer).await;
+        let sender = index.higher_entry_lookup(payer, recipient).await;
         for (anchor, epoch) in [
             (*fixture.context.payment().anchor(), EPOCH + 1),
             (Sha256::hash(&[b"foreign-payment-anchor"]), EPOCH),
@@ -731,12 +786,19 @@ fn cross_epoch_and_anchor_challenge_replays_are_rejected() {
 #[test]
 fn signatures_for_other_roles_cannot_authorize_challenges() {
     deterministic::Runner::default().start(|context| async move {
-        let fixture = fixture(context, 8, 8, 4, 1).await;
+        let fixture = fixture(context.child("fixture"), 8, 8, 4, 1).await;
         let close = fixture.prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let index = NativeIndex::replay(
+            context.child("native"),
+            "challenge-index",
+            &fixture.genesis,
+            &fixture.context,
+            &fixture.prepared,
+        )
+        .await;
         let (payer, private) = &fixture.accounts[2];
         let ack = acknowledge(&fixture, private, &close.out_vectors[2], 0, 2);
-        let lookup = account_lookup::<Sha256, _, _>(&index, payer).unwrap();
+        let lookup = index.account_lookup(payer).await;
         let mut wrong_payer_role = AckWitness::from_ack(&ack);
         wrong_payer_role.payer_signature = private.sign(
             crate::bajillion::payment::VECTOR_ACK_SIGNATURE_NAMESPACE,

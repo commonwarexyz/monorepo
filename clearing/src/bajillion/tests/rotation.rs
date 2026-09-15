@@ -42,6 +42,7 @@ async fn prepare_epoch(
     state: &TestState,
     fixture: &Fixture,
     epoch: u64,
+    predecessor_liability: u64,
     committee: &Committee,
 ) -> Epoch {
     let deployment = *fixture.context.deployment();
@@ -66,7 +67,7 @@ async fn prepare_epoch(
         fixture.operator.public_key(),
         &deposits,
         &withdrawals,
-        state.state().liability(),
+        predecessor_liability,
         98,
         99,
         CloseLimits::protocol_maximum(),
@@ -144,7 +145,14 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         committee_out.commitment::<Sha256>(),
         committee_in.commitment::<Sha256>()
     );
-    let first = prepare_epoch(&fixture.state, &fixture, EPOCH, &committee_out).await;
+    let first = prepare_epoch(
+        &fixture.state,
+        &fixture,
+        EPOCH,
+        fixture.context.predecessor_liability(),
+        &committee_out,
+    )
+    .await;
     let first_close = first.prepared.close();
     let genesis = vec![fixture.genesis.clone()];
     let mut rng = TestRng::new(41);
@@ -179,7 +187,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
             .await
             .unwrap();
-        outgoing_replicas.push(Box::pin(replica.commit()).await.unwrap());
+        outgoing_replicas.push(Box::pin(replica.sync()).await.unwrap());
         votes.push(vote);
     }
     let quorum_out = committee_out.quorum();
@@ -219,7 +227,14 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         assert_eq!(replica.state().root(), accepted_root);
         assert_eq!(replica.state().head(), &journal.last().unwrap().head);
     }
-    let second = prepare_epoch(&outgoing_replicas[0], &fixture, EPOCH + 1, &committee_in).await;
+    let second = prepare_epoch(
+        &outgoing_replicas[0],
+        &fixture,
+        EPOCH + 1,
+        first.context.predecessor_liability() + 50 - first_close.withdrawal_total,
+        &committee_in,
+    )
+    .await;
     assert_eq!(*second.context.predecessor_root(), accepted_root);
 
     let mut incomplete = journal.clone();
@@ -287,7 +302,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         let replica = if index == 0 {
             replica
         } else {
-            drop(Box::pin(replica.commit()).await.unwrap());
+            drop(Box::pin(replica.sync()).await.unwrap());
 
             // Already-applied mutation bodies are unavailable to the restart owner. Their
             // authenticated heads still identify the native root and operation count.
@@ -419,7 +434,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
                     .await
                     .unwrap();
-                let replica = Box::pin(replica.commit()).await.unwrap();
+                let replica = Box::pin(replica.sync()).await.unwrap();
                 assert_eq!(
                     replica.state().root(),
                     second.prepared.close().roots.successor

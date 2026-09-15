@@ -17,13 +17,15 @@ use commonware_consensus::types::Height;
 use commonware_cryptography::Signer as _;
 use commonware_glue::stateful::db::{DatabaseSet as _, Unmerkleized as _};
 use commonware_p2p::simulated::{Config as NetConfig, Link, Network as SimulatedNetwork};
-use commonware_runtime::{Clock as _, Metrics as _, Runner as _, Supervisor as _, deterministic};
+use commonware_runtime::{
+    Clock as _, Metrics as _, Runner as _, Strategizer as _, Supervisor as _, deterministic,
+};
 use commonware_utils::{NZUsize, probability};
 use std::num::NonZeroU64;
 
 pub(crate) async fn init_config<E: StorageContext + Spawner>(
     context: E,
-    config: commonware_clearing::bajillion::replica::Config,
+    config: commonware_clearing::bajillion::replica::Config<Rayon>,
     genesis: Vec<(commonware_clearing::bajillion::qmdb::AccountKey, NonZeroU64)>,
 ) -> Result<NativeReplica<E>> {
     let replica = NativeReplica::open(context, config).await?;
@@ -42,6 +44,8 @@ pub(crate) async fn init_config<E: StorageContext + Spawner>(
 
 pub(super) struct Fixture {
     pub(super) lane: Lane<deterministic::Context>,
+    strategy: Rayon,
+    liability: u64,
     wallets: Vec<Wallet>,
 }
 impl Fixture {
@@ -64,18 +68,22 @@ impl Fixture {
                 })
                 .collect(),
         );
+        let liability = deployment.accounts.iter().fold(0u64, |total, account| {
+            total.checked_add(account.balance).unwrap()
+        });
+        let strategy = context.strategy(NZUsize!(1));
         let state = Box::pin(init_config(
             context.child("fixture"),
             replica_config(
                 &format!("{prefix}-replica-{}-0", deployment.digest()),
                 context,
-                Sequential,
+                strategy.clone(),
             ),
             genesis_balances(&deployment).unwrap(),
         ))
         .await
         .unwrap();
-        let state = Box::pin(state.commit()).await.unwrap();
+        let state = Box::pin(state.sync()).await.unwrap();
         let deployment = Deployment::configured(
             *deployment.digest(),
             deployment.operator,
@@ -93,11 +101,12 @@ impl Fixture {
         Self {
             lane: Lane {
                 deployment,
-                fetching: false,
                 pending: None,
                 state: Some(state),
                 checkpoint: Some(checkpoints),
             },
+            strategy,
+            liability,
             wallets,
         }
     }
@@ -112,7 +121,7 @@ impl Fixture {
     ) -> (
         Ballot,
         WithdrawalBatch<Key, Digest>,
-        PreparedClose<Key, Digest>,
+        PreparedClose<Key, Digest, Rayon>,
     ) {
         let replica = self.lane.state.as_ref().unwrap();
         let epoch = self.lane.next();
@@ -138,7 +147,7 @@ impl Fixture {
                 epoch,
                 deposits.clone(),
                 withdrawals.clone(),
-                replica.state().liability(),
+                self.liability,
                 11 + epoch * 20,
                 12 + epoch * 20,
             )
@@ -181,7 +190,7 @@ impl Fixture {
             &deposits,
             &withdrawals,
             terminals,
-            &Sequential,
+            &self.strategy,
         ))
         .await
         .unwrap();
@@ -200,10 +209,16 @@ impl Fixture {
         };
         (ballot, withdrawals, prepared)
     }
-    pub(super) async fn candidate(&mut self, ballot: Ballot, prepared: PreparedClose<Key, Digest>) {
+    pub(super) async fn candidate(
+        &mut self,
+        ballot: Ballot,
+        prepared: PreparedClose<Key, Digest, Rayon>,
+    ) {
+        let liability = self.liability.checked_sub(ballot.withdrawal_total).unwrap();
         persist_candidate(&mut self.lane, prepared.into_parts().1, ballot)
             .await
             .unwrap();
+        self.liability = liability;
     }
     pub(super) async fn promote(&mut self) {
         let mut manifest = self.lane.manifest().as_ref().clone();
@@ -275,9 +290,10 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     let mut deployment = deployments().remove(0);
     deployment.generate(context.child("genesis")).await.unwrap();
     let protocol = Protocol::new(NZUsize!(1)).unwrap();
+    let strategy = context.strategy(NZUsize!(1));
     let state = init_config(
         context.child("operator"),
-        replica_config(&format!("{prefix}-operator"), context, Sequential),
+        replica_config(&format!("{prefix}-operator"), context, strategy.clone()),
         genesis_balances(&deployment).unwrap(),
     )
     .await
@@ -285,7 +301,9 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let deposit_root = deposits.root::<Sha256>().unwrap();
-    let liability = state.state().liability();
+    let liability = deployment.accounts.iter().fold(0u64, |total, account| {
+        total.checked_add(account.balance).unwrap()
+    });
     let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
         deployment: *deployment.digest(),
         epoch: 0,
@@ -335,7 +353,7 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
         &deposits,
         &withdrawals,
         Vec::new(),
-        &Sequential,
+        &strategy,
     ))
     .await
     .unwrap();
@@ -374,7 +392,7 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
             authorization: SendAuthorization::sign(body, wallets[0].signer()),
             vector,
         }],
-        &Sequential,
+        &strategy,
     ))
     .await
     .unwrap();
@@ -395,10 +413,7 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
 
 #[test]
 fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
-    use crate::chain::{
-        query::{Evidence, EvidenceLookup},
-        state::{AdmittedRootsResponse, admitted_key},
-    };
+    use crate::chain::state::{AdmittedRootsResponse, admitted_key};
     deterministic::Runner::default().start(|context| async move {
         let VoteCase { deployment, initial, registered, expected, dealing, alternate } = vote_case(&context, "saved-vote").await;
         let db = initial.db.clone();
@@ -409,7 +424,7 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
         for restart in 0..2 {
             let run = context.child(if restart == 0 { "vote_initial" } else { "vote_restart" });
             let ((mut sender, mut receiver), channel) = network(&run, &operator, &validator, true, true).await;
-            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
+            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { strategy: run.strategy(NZUsize!(1)), scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
             let handle = actor.start(channel);
             let mut other = dealing.clone();
             other.bytes = if restart == 0 { Bytes::from_static(&[0]) } else { alternate.bytes.clone() };
@@ -425,7 +440,6 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
             sender.send(Recipients::One(validator.clone()), Message::Dealing(Box::new(alternate.clone())).encode(), true);
             select! { vote = receiver.recv() => panic!("decided epoch signed another valid proposal: {vote:?}"), _ = run.sleep(Duration::from_millis(10)) => {}, }
             if let Some(saved) = &decision { assert_eq!(&ballot.encode(), saved); } else { decision = Some(ballot.encode()); }
-            assert!(matches!(mailbox.serve(EvidenceRequest::new(*deployment.digest(), EvidenceLookup::CloseEvidence { epoch: 0, batch_id: expected.batch_id::<Sha256>() })).await.unwrap(), EvidenceResponse::Served(Evidence::Close { header, .. }) if header == expected));
             if restart == 1 {
                 assert_eq!(metric(&run, "vote_restart_owner_replica_state_balances_apply_batch_calls_total"), 0);
                 let admitted = AdmittedRootsResponse::new(expected.batch_id::<Sha256>(), ballot.roots, registered.predecessor_logs().activity.operations, false);
@@ -454,6 +468,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
             let validator = ed25519::PrivateKey::from_seed(91).public_key();
             let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
             let (actor, _mailbox) = Sealer::new(context.child("initial_owner"), Config {
+                strategy: context.strategy(NZUsize!(1)),
                 scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
                 partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
             });
@@ -500,10 +515,11 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
         assert!(height <= registered.context.admission_deadline());
         assert_eq!(registered.context.epoch_context(), &alternate.context);
         let mut validation_context = context.child("alternate_validation");
+        let strategy = context.strategy(NZUsize!(1));
         let (_, prepared) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &initial.scheme, lane.state.as_ref().unwrap(), registered.context,
             &deployment.operator_ack, registered.deposits, registered.withdrawals,
-            alternate.bytes.clone(), &mut validation_context, &Sequential,
+            alternate.bytes.clone(), &mut validation_context, &strategy,
         ).await.unwrap();
         assert_ne!(prepared.close().header, lane.manifest().decision.as_ref().unwrap().header);
         drop(prepared);
@@ -512,6 +528,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
         let validator = ed25519::PrivateKey::from_seed(91).public_key();
         let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
         let (actor, mailbox) = Sealer::new(context.child("restarted_owner"), Config {
+            strategy: context.strategy(NZUsize!(1)),
             scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
             partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
         });
@@ -614,6 +631,7 @@ pub(super) async fn sealer(
     Sealer::new(
         context.child("sealer"),
         Config {
+            strategy: context.strategy(NZUsize!(1)),
             scheme: bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap())
                 .unwrap(),
             registry: RegistryView::new(vec![RegistryEntry {

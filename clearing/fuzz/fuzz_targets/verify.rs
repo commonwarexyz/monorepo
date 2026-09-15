@@ -9,8 +9,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, WithdrawalBatch},
     challenge::{
         AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness,
-        HigherEntryLookup, Verdict, account_lookup, adjudicate, decode_bounded,
-        higher_entry_lookup,
+        HigherEntryLookup, Verdict, adjudicate, decode_bounded,
     },
     commitment::{Builder, Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{
@@ -20,9 +19,8 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{StateOpening, StateRoot, account_key},
     transition::{
-        ChallengeIndex, Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature,
-        OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
-        validate_close_with_strategy,
+        Close, CloseContext, CloseLimits, Header, OperatorKey, OperatorSignature, OperatorVariant,
+        RootBundle, Terminal, prepare_close_with_strategy, validate_close_with_strategy,
     },
     vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
 };
@@ -468,6 +466,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         case.seed,
         operator.public_key(),
         &cache,
+        896,
         &deposits,
         &withdrawals,
         98,
@@ -532,9 +531,16 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     )
     .await
     .unwrap();
-    let close = prepared.close();
-    let index = ChallengeIndex::new::<Sha256>(&context, close)
-        .expect("validated close has a canonical challenge index");
+    let (cache, close) = prepared.apply(cache).await.unwrap();
+    let cache = cache.sync().await.unwrap();
+    let range = close.roots.activity_range(&context).unwrap();
+    let custody = commonware_clearing::bajillion::custody::Epoch::at(
+        cache.logs(),
+        context.payment().epoch(),
+        range,
+    )
+    .await
+    .unwrap();
     let payer_position = close
         .rows
         .binary_search_by(|row| row.account.cmp(&payer_public))
@@ -561,7 +567,9 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         &payer,
         &operator,
     );
-    let payer_lookup = account_lookup::<Sha256, _, _>(&index, &payer_public)
+    let payer_lookup = custody
+        .account_lookup(cache.logs(), &payer_public)
+        .await
         .expect("validated close has canonical payer evidence");
     let higher_debit = Challenge::HigherAckDebit {
         ack: Box::new(AckWitness::from_ack(&retained_ack)),
@@ -578,7 +586,9 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let absent_debit = Challenge::HigherAckDebit {
         ack: Box::new(AckWitness::from_ack(&absent_ack)),
         payer: Box::new(
-            account_lookup::<Sha256, _, _>(&index, &other_public)
+            custody
+                .account_lookup(cache.logs(), &other_public)
+                .await
                 .expect("validated close has canonical absent-payer evidence"),
         ),
     };
@@ -602,13 +612,10 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
             opening,
         }),
         sender: Box::new(
-            higher_entry_lookup::<Sha256, _, _>(
-                &index,
-                &payer_public,
-                Some(committed_vector),
-                &recipient_public,
-            )
-            .expect("validated close has canonical composed sender evidence"),
+            custody
+                .higher_entry_lookup(cache.logs(), &payer_public, &recipient_public)
+                .await
+                .expect("validated close has canonical composed sender evidence"),
         ),
     };
 
@@ -638,7 +645,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     for (offset, (kind, challenge)) in challenges.iter().enumerate() {
         exercise_challenge(
             &context,
-            close,
+            &close,
             *kind,
             challenge,
             &wrong,
@@ -652,7 +659,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         ack: Box::new(AckWitness::from_ack(&committed_ack)),
         payer: Box::new(payer_lookup),
     };
-    exercise_no_contradiction(&context, close, &clean_debit, &wrong);
+    exercise_no_contradiction(&context, &close, &clean_debit, &wrong);
     let OutTipLookup::Present {
         cumulative,
         count,
@@ -672,21 +679,18 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
             opening,
         }),
         sender: Box::new(
-            higher_entry_lookup::<Sha256, _, _>(
-                &index,
-                &payer_public,
-                Some(committed_vector),
-                &recipient_public,
-            )
-            .expect("validated close has canonical composed sender evidence"),
+            custody
+                .higher_entry_lookup(cache.logs(), &payer_public, &recipient_public)
+                .await
+                .expect("validated close has canonical composed sender evidence"),
         ),
     };
-    exercise_no_contradiction(&context, close, &clean_entry, &wrong);
+    exercise_no_contradiction(&context, &close, &clean_entry, &wrong);
     let clean_fork = Challenge::AckFork {
         left: Box::new(AckWitness::from_ack(&committed_ack)),
         right: Box::new(AckWitness::from_ack(&committed_ack)),
     };
-    exercise_no_contradiction(&context, close, &clean_fork, &wrong);
+    exercise_no_contradiction(&context, &close, &clean_fork, &wrong);
 }
 
 fn bounded_values(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -904,6 +908,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         case.seed,
         operator.public_key(),
         &state,
+        balance * 2,
         &deposits,
         &withdrawals,
         98,
@@ -1018,32 +1023,6 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         prepared.state().mutations().len(),
         if case.zero_net { 0 } else { 2 }
     );
-    let index = ChallengeIndex::new::<Sha256>(&context, prepared.close()).unwrap();
-    for terminal in &terminals {
-        let account = terminal.authorization.body().payer();
-        let lookup = account_lookup::<Sha256, _, _>(&index, account).unwrap();
-        assert_eq!(
-            lookup
-                .resolve::<Sha256>(
-                    &prepared.close().roots.activity_range(&context).unwrap(),
-                    account
-                )
-                .unwrap()
-                .0,
-            amount
-        );
-    }
-    assert_eq!(
-        account_lookup::<Sha256, _, _>(&index, &absent.public_key())
-            .unwrap()
-            .resolve::<Sha256>(
-                &prepared.close().roots.activity_range(&context).unwrap(),
-                &absent.public_key()
-            )
-            .unwrap(),
-        (0, None)
-    );
-
     // Canonical account positions bind every recipient index to one key.
     let second_key = 1 + 32;
     let mut duplicate = encoded.to_vec();
@@ -1112,6 +1091,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         case.seed,
         operator.public_key(),
         &state,
+        balance * 2,
         &deposits,
         &withdrawals,
         98,
@@ -1200,30 +1180,41 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         None
     );
     let (next, close) = prepared.apply(state).await.unwrap();
-    state = next.commit().await.unwrap();
-    let epoch = commonware_clearing::bajillion::custody::Epoch::load(
+    state = next.sync().await.unwrap();
+    let range = close.roots.activity_range(&context).unwrap();
+    let custody = commonware_clearing::bajillion::custody::Epoch::at(
         state.logs(),
         context.payment().epoch(),
+        range,
     )
     .await
     .unwrap();
     let heads = *state.logs().head();
-    let source_proof = epoch.source_proof(state.logs(), &heads).await.unwrap();
-    let source = source_proof.verify::<Sha256, VerifyingKey>(&heads).unwrap();
-    assert_eq!(source.context(), &context);
-    let mut foreign_heads = heads;
-    foreign_heads.activity.root = Sha256::hash(&[b"foreign-source-head"]);
-    assert!(
-        source_proof
-            .verify::<Sha256, VerifyingKey>(&foreign_heads)
-            .is_err()
+    for terminal in &terminals {
+        let account = terminal.authorization.body().payer();
+        let lookup = custody.account_lookup(state.logs(), account).await.unwrap();
+        assert_eq!(lookup.resolve::<Sha256>(&range, account).unwrap().0, amount);
+    }
+    let absent_account = absent.public_key();
+    assert_eq!(
+        custody
+            .account_lookup(state.logs(), &absent_account)
+            .await
+            .unwrap()
+            .resolve::<Sha256>(&range, &absent_account)
+            .unwrap(),
+        (0, None)
     );
-    let mut damaged = source_proof.clone();
-    let mut metadata = damaged.metadata.to_vec();
-    let last = metadata.len() - 1;
-    metadata[last] ^= 1;
-    damaged.metadata = metadata.into();
-    assert!(damaged.verify::<Sha256, VerifyingKey>(&heads).is_err());
+    let account = payer.public_key();
+    let lookup = custody
+        .account_lookup(state.logs(), &account)
+        .await
+        .unwrap();
+    let mut foreign_heads = heads;
+    foreign_heads.activity.root = Sha256::hash(&[b"foreign-activity-head"]);
+    let mut foreign_range = range;
+    foreign_range.head = foreign_heads.activity;
+    assert!(lookup.resolve::<Sha256>(&foreign_range, &account).is_err());
 
     let expected_payer = if case.zero_net {
         balance
@@ -1276,7 +1267,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         );
     }
     assert_eq!(state.state().root(), close.roots.successor);
-    assert_eq!(state.state().liability(), balance * 2);
+    assert_eq!(expected_payer + expected_recipient, balance * 2);
     let current = *state.state().head();
     let foreign_root = StateRoot::new(Sha256::hash(&[b"unretained"]));
     assert!(
@@ -1326,6 +1317,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         case.seed,
         operator.public_key(),
         &state,
+        0,
         &deposits,
         &withdrawals,
         98,

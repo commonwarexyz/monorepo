@@ -64,7 +64,7 @@ use commonware_clearing::bajillion::{
     payment::{SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{Mutations, State as BalanceState, StateHead, StateOpening, StateRoot, account_key},
     replica::Replica,
-    transition::{BatchId, Terminal},
+    transition::{BatchId, Terminal, WithdrawalClaim},
     vector::{OutEntry, OutVector},
 };
 use commonware_codec::{
@@ -117,7 +117,7 @@ use commonware_glue::{
 use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{
     BufferPooler, Clock as _, Handle, Listener, Network as _, Quota, Runner as _, Spawner as _,
-    Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
@@ -342,6 +342,7 @@ async fn status(db: &Database<deterministic::Context>) -> super::state::StatusRe
 struct TestState {
     history: Vec<(StateRoot<Digest>, Mutations, Option<SettlementResult>)>,
     head: StateHead<Digest>,
+    liability: u64,
     accounts: Vec<crate::protocol::Account>,
     openings: std::collections::BTreeMap<Key, StateOpening<Key, Digest>>,
     registration_floors: Option<commonware_clearing::bajillion::logs::Floors>,
@@ -380,8 +381,8 @@ async fn replay_state<S: Strategy>(
             .prepare(
                 &replica.head(),
                 mutations.clone(),
-                close.activity_input(),
-                close.withdrawal_evidence().0.to_vec(),
+                close.activity_input::<Sha256>(),
+                close.withdrawal_outputs().to_vec(),
                 result.context.floors(),
             )
             .await
@@ -415,7 +416,7 @@ impl TestState {
         self.head.root()
     }
     fn liability(&self) -> u64 {
-        self.head.liability()
+        self.liability
     }
     fn opening(&self, key: &Key) -> anyhow::Result<StateOpening<Key, Digest>> {
         self.openings.get(key).cloned().context("missing account")
@@ -444,9 +445,11 @@ impl TestState {
                 );
             }
         }
+        let liability = accounts.iter().map(|account| account.balance).sum();
         Self {
             history,
             head: *state.state().head(),
+            liability,
             accounts,
             openings,
             registration_floors: None,
@@ -794,9 +797,9 @@ fn harness_serves_validator_evidence() {
             client
                 .evidence(
                     &context,
-                    EvidenceLookup::CloseEvidence {
-                        epoch: 1,
-                        batch_id: txs.result.header.batch_id::<Sha256>()
+                    EvidenceLookup::Payout {
+                        head: txs.result.roots.withdrawal_outputs,
+                        index: txs.result.roots.withdrawal_outputs.operations - 1,
                     }
                 )
                 .await
@@ -809,6 +812,27 @@ fn harness_serves_validator_evidence() {
                 .any(|line| line.starts_with(metric)),
             "unavailable evidence dropped its state owner"
         );
+        let applied = commonware_runtime::Metrics::encode(&context)
+            .lines()
+            .find(|line| line.starts_with(metric))
+            .unwrap()
+            .to_owned();
+        let head = txs.result.roots.withdrawal_outputs;
+        for _ in 0..2 {
+            let (start, operations) = client
+                .payout_operations(&context, head, head.operations - 1)
+                .await
+                .unwrap();
+            assert_eq!(start, head.operations - 1);
+            assert_eq!(operations.len(), 1);
+            assert_eq!(
+                commonware_runtime::Metrics::encode(&context)
+                    .lines()
+                    .find(|line| line.starts_with(metric)),
+                Some(applied.as_str()),
+                "native requests must retain the advanced replica without replay"
+            );
+        }
         for leaf in &state.accounts {
             let account = leaf.key.clone();
             for cache in [&state, &successor] {
@@ -1314,20 +1338,28 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
             crate::protocol::state_config("withdrawal", &context, protocol.strategy().clone());
         let balances = replay_state(context, config, &state.history).await;
         let prepared = protocol.prepare(registration, Vec::new()).unwrap();
-        protocol
+        let (result, candidate) = protocol
             .complete(prepared, &balances, &mut TestRng::new(91))
             .await
-            .unwrap()
-            .0
+            .unwrap();
+        let replica = balances.apply(candidate).await.unwrap();
+        let position = result.context.predecessor_logs().payouts.operations;
+        let output = replica.logs().payout_at(position).await.unwrap();
+        let (opening, _) = replica
+            .logs()
+            .payout_opening(&result.roots.withdrawal_outputs, position, NonZeroU64::MIN)
+            .await
+            .unwrap();
+        (result, WithdrawalClaim::new(output, opening))
     });
     let claim = WithdrawalClaimRequest {
         deployment: deployment(),
-        start: result.context.predecessor_logs().payouts.operations,
-        claim: result.withdrawal_claims[0].clone(),
+        start: result.0.context.predecessor_logs().payouts.operations,
+        claim: result.1,
     };
     (
         register,
-        SettlementTx::Admit(AdmitRequest::from(&result)),
+        SettlementTx::Admit(AdmitRequest::from(&result.0)),
         claim,
     )
 }
@@ -1736,7 +1768,7 @@ fn admitted_close_finalizes_at_real_heights() {
         assert_eq!(
             read(&db, &payout_head_key(&deployment())).await,
             Some(Record::PayoutHead(crate::protocol::PayoutTip {
-                heads: fixture.result.roots.logs(),
+                payouts: fixture.result.roots.withdrawal_outputs,
                 finalized: Some(0)
             }))
         );
@@ -4369,11 +4401,9 @@ impl EngineDefinition for Distributed {
             let verdict = self.driver.clone();
             let plan = Drive {
                 expect_fault: self.expect_fault,
-                silent: self.silent.clone(),
                 epochs: self.epochs,
                 undealt: self.undealt.clone(),
                 fetcher: self.fetcher,
-                impaired: self.impaired.map(|(index, _)| index),
             };
             let scheme_for_reads = scheme.clone();
             context.child("driver").spawn(move |context| async move {
@@ -4486,6 +4516,7 @@ impl EngineDefinition for Distributed {
             let (sealer, mailbox) = da::Sealer::new(
                 context.child("sealer"),
                 da::Config {
+                    strategy: context.strategy(NZUsize!(1)),
                     retain_history: self.fetcher.is_some(),
                     scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
                         committee().unwrap(),
@@ -4595,17 +4626,12 @@ struct Drive {
     /// Whether epoch 0's registration is expected to expire into the
     /// deadline fault instead of certifying.
     expect_fault: bool,
-    /// Validator indices that run no sealer.
-    silent: std::collections::BTreeSet<usize>,
     /// Epochs closed back to back.
     epochs: u64,
     /// Per epoch, the validator left out of the operator's deals.
     undealt: std::collections::BTreeMap<u64, usize>,
-    /// The validator whose recovered epoch-0 descriptor is compared with its peers.
+    /// Whether a validator recovering missed history must expose the finalized checkpoint.
     fetcher: Option<usize>,
-    /// The validator whose query server is impaired, skipped as a comparison
-    /// co-holder.
-    impaired: Option<usize>,
 }
 
 /// The operator's distributed close worker flow, driven end to end against
@@ -4614,7 +4640,7 @@ struct Drive {
 /// dealing dissemination and vote collection through the pipeline, certified
 /// admission, and finally the agent-visible certified reads over a
 /// validator's query server. When a validator was planned to miss epoch 0,
-/// its recovered epoch-0 descriptor is compared with every healthy holder.
+/// the driver checks that catchup reaches the latest finalized checkpoint.
 async fn drive(
     mut context: deterministic::Context,
     mut chain: Node<deterministic::Context, TxSender>,
@@ -4704,22 +4730,7 @@ async fn drive(
         }
 
         if plan.expect_fault {
-            // A voter must keep its native candidate queryable while certification is pending.
-            let expected_context = prepared.context().clone();
-            let expected_header = build
-                .successor
-                .history
-                .last()
-                .unwrap()
-                .2
-                .as_ref()
-                .unwrap()
-                .header;
-            let expected_proposal =
-                commonware_clearing::bajillion::transition::ProposalId::for_dealing::<Sha256, Key>(
-                    &expected_context,
-                    prepared.encoded(),
-                );
+            // Missing voters leave certification pending until the registered deadline faults.
             let certification: Arc<Mutex<Option<Result<(), String>>>> = Arc::default();
             {
                 let certification = certification.clone();
@@ -4732,46 +4743,7 @@ async fn drive(
                     *certification.lock() = Some(result);
                 });
             }
-            let request = rpc::Request {
-                method: query::METHOD_EVIDENCE,
-                body: EvidenceRequest::new(
-                    deployment(),
-                    EvidenceLookup::CloseEvidence {
-                        epoch,
-                        batch_id: expected_header.batch_id::<Sha256>(),
-                    },
-                )
-                .encode(),
-            };
-            let expected_retained = validators
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !plan.silent.contains(index))
-                .count();
-            let mut retained = std::collections::BTreeSet::new();
             for _ in 0..600 {
-                for index in 0..validators.len() {
-                    if plan.silent.contains(&index) || retained.contains(&index) {
-                        continue;
-                    }
-                    if let Ok(rpc::Response::Success { body }) =
-                        rpc::call(&context, query_address(index), &request).await
-                        && let Ok(EvidenceResponse::Served(Evidence::Close {
-                            header,
-                            roots,
-                            context: saved,
-                            ..
-                        })) = EvidenceResponse::decode(body)
-                    {
-                        anyhow::ensure!(
-                            saved.epoch_context() == &expected_context
-                                && header == expected_header
-                                && roots.proposal == expected_proposal,
-                            "validator {index} retained a foreign dealing"
-                        );
-                        retained.insert(index);
-                    }
-                }
                 let fault = chain.fault(&context).await?;
                 if let Some(result) = certification.lock().as_ref() {
                     match result {
@@ -4791,10 +4763,6 @@ async fn drive(
                             anyhow::ensure!(
                                 expired_at == admission_deadline,
                                 "the registration expired at {expired_at}, not its deadline"
-                            );
-                            anyhow::ensure!(
-                                retained.len() == expected_retained,
-                                "registration expired before every healthy validator retained the exact dealing"
                             );
                             return Ok(());
                         }
@@ -4868,83 +4836,12 @@ async fn drive(
         "unregistered epoch anchor was certified present"
     );
 
-    if let Some(fetcher) = plan.fetcher {
-        let expected = settled
-            .first()
-            .context("the catchup scenario closes epoch zero")?;
-        let (_, tip) = chain.payout_checkpoint(&context).await?;
+    if plan.fetcher.is_some() {
+        let tip = chain.payout_checkpoint(&context).await?;
         anyhow::ensure!(
             tip.finalized == Some(plan.epochs - 1)
-                && tip.heads == settled.last().unwrap().roots.logs(),
-            "catchup proofs are not anchored to the last finalized close"
-        );
-        let expected_range = expected.roots.activity_range(&expected.context)?;
-        let request = rpc::Request {
-            method: query::METHOD_EVIDENCE,
-            body: EvidenceRequest::new(
-                deployment(),
-                EvidenceLookup::Source {
-                    epoch: 0,
-                    heads: tip.heads,
-                },
-            )
-            .encode(),
-        };
-        let mut compared = 0;
-        let mut metadata = None;
-        for index in
-            std::iter::once(fetcher).chain((0..validators.len()).filter(|index| *index != fetcher))
-        {
-            if plan.impaired == Some(index) {
-                continue;
-            }
-            let mut proof = None;
-            for _ in 0..EFFECT_ATTEMPTS {
-                let rpc::Response::Success { body } =
-                    rpc::call(&context, query_address(index), &request).await?
-                else {
-                    anyhow::bail!("validator {index} did not answer native catchup evidence");
-                };
-                match EvidenceResponse::decode(body)? {
-                    EvidenceResponse::Served(Evidence::Source(found)) => {
-                        proof = Some(found);
-                        break;
-                    }
-                    EvidenceResponse::Unsealed => context.sleep(POLL).await,
-                    response => anyhow::bail!(
-                        "validator {index} returned foreign source evidence: {response:?}"
-                    ),
-                }
-            }
-            let proof = proof.with_context(|| {
-                format!(
-                    "validator {index} cannot serve epoch0 under finalized epoch{} heads",
-                    plan.epochs - 1
-                )
-            })?;
-            let source = proof.verify::<Sha256, Key>(&tip.heads)?;
-            anyhow::ensure!(
-                source.context() == &expected.context
-                    && source.withdrawals() == &expected.withdrawals
-                    && source.activity_range().start == expected_range.start
-                    && source.activity_range().end == expected_range.end,
-                "native catchup differs from the certified epoch sources"
-            );
-            if let Some(metadata) = &metadata {
-                anyhow::ensure!(
-                    proof.metadata == metadata,
-                    "native catchup reconstructed different original sources"
-                );
-            } else {
-                metadata = Some(proof.metadata);
-            }
-            if index != fetcher {
-                compared += 1;
-            }
-        }
-        anyhow::ensure!(
-            compared > 0,
-            "no healthy holder answered catchup comparison"
+                && tip.payouts == settled.last().unwrap().roots.withdrawal_outputs,
+            "catchup checkpoint is not the last finalized close"
         );
     }
 
@@ -5085,9 +4982,8 @@ impl Property<ed25519::PublicKey, State> for Recovered {
 }
 
 /// Validator 1 misses epoch 0, imports native operations from its co-holders,
-/// and casts the required third vote for epoch 1. Both the restored replica
-/// and healthy holders must authenticate identical old source metadata under
-/// the latest finalized heads.
+/// and casts the required third vote for epoch 1. The restored replica and
+/// healthy holders must converge on the same certified checkpoint.
 fn recover(impairment: Option<Impairment>) {
     let engine = Distributed::recovering(impairment);
     let expected_root = engine.expected_root;
@@ -6431,7 +6327,9 @@ impl EngineDefinition for Walkthrough {
                     )?;
                     let request = ReadRequest::new(digest, Lookup::Fault);
                     let expected = crate::protocol::PayoutTip {
-                        heads: commonware_clearing::bajillion::logs::Heads::empty::<Key, Sha256>(),
+                        payouts: commonware_clearing::bajillion::logs::Heads::empty::<Key, Sha256>(
+                        )
+                        .payouts,
                         finalized: None,
                     };
                     for verified in [
@@ -6547,6 +6445,7 @@ impl EngineDefinition for Walkthrough {
         let (sealer, sealer_mailbox) = da::Sealer::new(
             context.child("sealer"),
             da::Config {
+                strategy: context.strategy(NZUsize!(1)),
                 retain_history: false,
                 scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
                     committee().unwrap(),
@@ -6718,11 +6617,11 @@ async fn walkthrough_close(
 }
 
 /// The entire example flow, driven with the production wallets against the
-/// running deployment: Alice's deposit, her carried fast-lane withdrawal,
-/// her payment to Bob with Bob's anchored intake gating acceptance before
+/// running deployment: Alice's deposit and carried fast-lane withdrawal,
+/// Bob's payment to Carol with Carol's anchored intake gating acceptance before
 /// the close is cut, the distributed close of epoch 0 through real blocks to
 /// certified finalization, Alice's claim against the certified release
-/// record, Bob's reconciliation of epoch 0, the successor payment that
+/// record, Carol's reconciliation of epoch 0, the successor payment that
 /// registers epoch 1, its close, and the settled end state, every
 /// guarantee-bearing read verified through the light client.
 async fn walkthrough(
@@ -6734,13 +6633,20 @@ async fn walkthrough(
 ) -> anyhow::Result<()> {
     let mut alice = Agent::new(0)?;
     let mut bob = Agent::new(1)?;
+    let mut carol = Agent::new(2)?;
     let mut alice_chain = Client::new(
         &genesis,
         deployment(),
         queries.clone(),
         context.child("alice_rng"),
     )?;
-    let mut bob_chain = Client::new(&genesis, deployment(), queries, context.child("bob_rng"))?;
+    let mut bob_chain = Client::new(
+        &genesis,
+        deployment(),
+        queries.clone(),
+        context.child("bob_rng"),
+    )?;
+    let mut carol_chain = Client::new(&genesis, deployment(), queries, context.child("carol_rng"))?;
 
     // Alice deposits in one step: the Deposit transaction completes on the
     // certified custody record alone. The operator is never told: its
@@ -6752,7 +6658,7 @@ async fn walkthrough(
     observed_balance(&context, &mut alice, &mut alice_chain, operator, 110).await?;
 
     // Alice authorizes the fast-lane withdrawal the operator carries in the
-    // close. It must precede her first payment: the first receipt registers
+    // close. It must precede Bob's payment: the first receipt registers
     // the epoch on the chain, which permanently commits the boundary the
     // close must reproduce.
     let withdrawal = NonZeroU64::new(3).expect("the withdrawal amount is positive");
@@ -6781,13 +6687,13 @@ async fn walkthrough(
     }
     anyhow::ensure!(applied, "the operator never carried the signed withdrawal");
 
-    // Alice pays Bob optimistically. The first receipt registers epoch 0 on
+    // Bob pays Carol optimistically. The first receipt registers epoch 0 on
     // the chain (the operator's service loop completes on the certified
     // registration record and adopts the assigned deadlines), the wallet
     // re-signs once from the corrective rejection, and the acceptance passes
     // the certified anchor gate before the verified receipts are held.
-    let payment = match alice
-        .pay(&context, &mut alice_chain, operator, &[(1, 5)])
+    let payment = match bob
+        .pay(&context, &mut bob_chain, operator, &[(2, 5)])
         .await?
     {
         PaymentOutcome::Accepted(payment) => *payment,
@@ -6798,23 +6704,24 @@ async fn walkthrough(
     anyhow::ensure!(payment.epoch == 0, "the payment landed in a foreign epoch");
     anyhow::ensure!(payment.total == 5, "the payment debited another total");
     anyhow::ensure!(
-        payment.acceptance.entries.len() == 1 && alice.receipt_count() == 1,
+        payment.acceptance.entries.len() == 1 && bob.receipt_count() == 1,
         "the payment's verified receipt is not held durably"
     );
     let receipt_id = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
 
-    // Bob's receiver intake fetches, verifies, and settlement-anchors the
-    // pair, and his acceptance gate answers from the durably held evidence
+    // Carol's receiver intake fetches, verifies, and settlement-anchors the
+    // pair, and her acceptance gate answers from the durably held evidence
     // BEFORE the close is cut.
-    bob.intake_incoming(&context, &mut bob_chain, operator)
+    carol
+        .intake_incoming(&context, &mut carol_chain, operator)
         .await?;
-    let held = bob.incoming();
+    let held = carol.incoming();
     anyhow::ensure!(
         held.total == 5 && held.count == 1,
         "the receiver ledger does not hold the verified pair"
     );
     anyhow::ensure!(
-        bob.has_receipt(&alice.account(), &receipt_id)?,
+        carol.has_receipt(&bob.account(), &receipt_id)?,
         "the receiver holds no evidence for the accepted batch"
     );
 
@@ -6830,13 +6737,13 @@ async fn walkthrough(
         "epoch 0 did not certifiably finalize"
     );
     anyhow::ensure!(
-        settled.custody == WALKTHROUGH_CUSTODY && settled.claimable == 3,
+        settled.custody == WALKTHROUGH_CUSTODY && settled.claimable == withdrawal.get(),
         "finalization left unexpected custody {} and claimable {}",
         settled.custody,
         settled.claimable
     );
 
-    // Alice verifies the exact carried request and consumes its native payout position.
+    // Alice verifies the current payout opening and consumes its native position.
     let release = alice
         .claim_withdrawal(&context, &mut alice_chain, operator)
         .await?;
@@ -6851,10 +6758,26 @@ async fn walkthrough(
         claimed.custody,
         claimed.claimable
     );
+    let mut withdrawal_retired = false;
+    for _ in 0..EFFECT_ATTEMPTS {
+        alice
+            .observe_withdrawal_expiry(&context, &mut alice_chain)
+            .await?;
+        if !alice.has_pending_withdrawal_claim() {
+            withdrawal_retired = true;
+            break;
+        }
+        context.sleep(POLL).await;
+    }
+    anyhow::ensure!(
+        withdrawal_retired,
+        "the claimed withdrawal authorization never retired"
+    );
 
-    // Bob reconciles epoch 0 against finalized source and activity proofs, then
-    // marks every verified held credit RECONCILED durably.
-    let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
+    // Carol reconciles her held epoch-zero receipts and persists the result.
+    let summary = carol
+        .reconcile(&context, &mut carol_chain, operator)
+        .await?;
     anyhow::ensure!(
         summary.reconciled == vec![0]
             && summary.convicted.is_empty()
@@ -6864,7 +6787,7 @@ async fn walkthrough(
         "epoch 0 did not reconcile cleanly: {summary:?}"
     );
     anyhow::ensure!(
-        bob.last_reconciled_epoch() == Some(0),
+        carol.last_reconciled_epoch() == Some(0),
         "the RECONCILED mark is not durable"
     );
 
@@ -6907,7 +6830,7 @@ async fn walkthrough(
         &mut bob,
         &mut bob_chain,
         operator,
-        105 + UNREPORTED_DEPOSIT,
+        95 + UNREPORTED_DEPOSIT,
     )
     .await?;
 
@@ -6923,15 +6846,15 @@ async fn walkthrough(
         }
     };
     anyhow::ensure!(
-        successor.epoch == 1 && alice.receipt_count() == 2,
+        successor.epoch == 1 && alice.receipt_count() == 1,
         "the successor payment did not land in epoch 1"
     );
     bob.intake_incoming(&context, &mut bob_chain, operator)
         .await?;
     let held = bob.incoming();
     anyhow::ensure!(
-        held.total == 6 && held.count == 2,
-        "the receiver ledger does not hold both verified pairs"
+        held.total == 1 && held.count == 1,
+        "the receiver ledger does not hold the verified successor pair"
     );
 
     // Close epoch 1 inside its admission runway and reconcile it: nothing
@@ -6990,17 +6913,18 @@ async fn walkthrough(
         "the walkthrough left a fault record"
     );
 
-    // Alice's balances: the verified head read against the certified state
-    // root. Initial 100, plus the deposit of 10, minus the withdrawal of 3
-    // and the payments of 5 and 1. Bob holds his credits plus the observed
-    // unreported deposit.
+    // The verified head reads reflect Alice's deposit, withdrawal, and successor
+    // payment; Bob's initial payment and successor credit; and Carol's epoch-zero
+    // credit. Bob also receives the observed unreported deposit.
     let balance = alice.balance(&context, &mut alice_chain, operator).await?;
-    anyhow::ensure!(balance == 101, "Alice's verified balance is {balance}");
+    anyhow::ensure!(balance == 106, "Alice's verified balance is {balance}");
     let balance = bob.balance(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
-        balance == 106 + UNREPORTED_DEPOSIT,
+        balance == 96 + UNREPORTED_DEPOSIT,
         "Bob's verified balance is {balance}"
     );
+    let balance = carol.balance(&context, &mut carol_chain, operator).await?;
+    anyhow::ensure!(balance == 105, "Carol's verified balance is {balance}");
     Ok(())
 }
 
@@ -7110,29 +7034,22 @@ async fn tenant(
         "the certified custody record does not prove the deposit"
     );
 
-    // Source Commit proofs bind each tenant's anchor to its own finalized paired heads.
+    // Certified reads remain scoped to the requested deployment.
     let other = *genesis.native.deployments[(op + 1) % genesis.native.deployments.len()]
         .deployment
         .digest();
     let mut foreign = Client::new(&genesis, other, queries, context.child("foreign_rng"))?;
-    let (_, tip) = alice_chain.payout_checkpoint(&context).await?;
-    let mine = alice_chain.source(&context, 1, tip).await?;
-    let mut theirs = None;
+    let mut foreign_status = None;
     for _ in 0..EFFECT_ATTEMPTS {
-        if let Ok((_, tip)) = foreign.payout_checkpoint(&context).await
-            && let Ok(source) = foreign.source(&context, 1, tip).await
+        if let Ok(status) = foreign.status(&context).await
+            && status.last_finalized == Some(1)
         {
-            theirs = Some(source);
+            foreign_status = Some(status);
             break;
         }
         context.sleep(POLL).await;
     }
-    let theirs = theirs.context("the other deployment's finalized source never appeared")?;
-    anyhow::ensure!(
-        mine.context().payment().anchor() != theirs.context().payment().anchor(),
-        "two deployment scopes served one source anchor"
-    );
-    let status = foreign.status(&context).await?;
+    let status = foreign_status.context("the other deployment never finalized epoch 1")?;
     anyhow::ensure!(
         status.deployment == other,
         "the foreign-scoped status names the wrong deployment"

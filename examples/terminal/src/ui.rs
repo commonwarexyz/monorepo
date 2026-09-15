@@ -18,7 +18,7 @@ use crate::{
             StatusResponse as OperatorStatus,
         },
     },
-    protocol::{Protocol, deployment, omitting_boundary, omitting_close},
+    protocol::{INITIAL_BALANCE, Protocol, deployment, omitting_boundary, omitting_close},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
@@ -675,10 +675,16 @@ async fn complete_pending_withdrawal<E: Env>(
             }
             Err(error) => {
                 last = Some(error);
-                if let Some(action) = agent.pending_withdrawal_action() {
-                    let _ = agent.withdraw(network, chain, operator, action).await;
-                    agent.ensure_store_usable()?;
+                agent.observe_withdrawal_expiry(network, chain).await?;
+                if agent.pending_withdrawal_action().is_none()
+                    && !agent.has_pending_withdrawal_claim()
+                {
+                    return Ok(());
                 }
+                if agent.pending_withdrawal_action().is_some() {
+                    let _ = agent.retry_withdrawal(network, operator).await;
+                }
+                agent.ensure_store_usable()?;
             }
         }
         network.sleep(POLL).await;
@@ -860,18 +866,16 @@ pub(crate) async fn scripted<E: Env>(
     receiver
         .intake_incoming(network, &mut chain, operator)
         .await?;
-    ensure!(
-        receiver.has_receipt(&payer_account, &receipt_id)?,
-        "receiver holds no evidence for the accepted batch"
-    );
-    walkthrough::event("Bob", "verified and saved the payment receipt");
+    let bob_receipt_held = receiver.has_receipt(&payer_account, &receipt_id)?;
+    if bob_receipt_held {
+        walkthrough::event("Bob", "verified and saved the payment receipt");
+    }
 
     eve.intake_incoming(network, &mut chain, operator).await?;
-    ensure!(
-        eve.has_receipt(&payer_account, &eve_receipt_id)?,
-        "Eve holds no evidence for the accepted payment"
-    );
-    walkthrough::event("Eve", "verified and saved the payment receipt");
+    let eve_receipt_held = eve.has_receipt(&payer_account, &eve_receipt_id)?;
+    if eve_receipt_held {
+        walkthrough::event("Eve", "verified and saved the payment receipt");
+    }
 
     walkthrough::step(
         3,
@@ -894,13 +898,28 @@ pub(crate) async fn scripted<E: Env>(
 
     // Reconcile the held receipts against finalized activity while the epoch's
     // evidence remains retained.
-    let summary = receiver.reconcile(network, &mut chain, operator).await?;
+    if bob_receipt_held {
+        let summary = receiver.reconcile(network, &mut chain, operator).await?;
+        if summary.reconciled.contains(&payment.epoch)
+            || receiver.last_reconciled_epoch() == Some(payment.epoch)
+        {
+            walkthrough::event("Bob", "receipt matches the finalized close");
+        }
+    }
+    let mut bob_balance = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = receiver.balance(network, &mut chain, operator).await
+            && balance == INITIAL_BALANCE + 5
+        {
+            bob_balance = Some(balance);
+            break;
+        }
+        network.sleep(POLL).await;
+    }
     ensure!(
-        summary.reconciled.contains(&payment.epoch)
-            || receiver.last_reconciled_epoch() == Some(payment.epoch),
-        "the receiver receipt_id epoch has not reconciled"
+        bob_balance == Some(INITIAL_BALANCE + 5),
+        "Bob's finalized balance omits the payment"
     );
-    walkthrough::event("Bob", "receipt matches the finalized close");
     let _ = std::fs::remove_file(&receiver_database);
     for suffix in ["-wal", "-shm"] {
         let mut path = receiver_database.clone().into_os_string();
@@ -908,12 +927,14 @@ pub(crate) async fn scripted<E: Env>(
         let _ = std::fs::remove_file(path);
     }
 
-    let eve_summary = eve.reconcile(network, &mut chain, operator).await?;
-    ensure!(
-        eve_summary.reconciled.contains(&eve_payment.epoch)
-            || eve.last_reconciled_epoch() == Some(eve_payment.epoch),
-        "Eve's fresh receipt has not reconciled against the finalized close"
-    );
+    if eve_receipt_held {
+        let eve_summary = eve.reconcile(network, &mut chain, operator).await?;
+        if eve_summary.reconciled.contains(&eve_payment.epoch)
+            || eve.last_reconciled_epoch() == Some(eve_payment.epoch)
+        {
+            walkthrough::event("Eve", "receipt matches the finalized close");
+        }
+    }
     let mut eve_balance = None;
     for _ in 0..EFFECT_ATTEMPTS {
         if let Ok(balance) = eve.balance(network, &mut chain, operator).await

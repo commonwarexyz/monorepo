@@ -467,7 +467,7 @@ impl AdmittedRootsResponse {
     ) -> commonware_clearing::bajillion::transition::ActivityRange<Digest> {
         commonware_clearing::bajillion::transition::ActivityRange {
             start: self.activity_start,
-            end: self.roots.change.operations - 1,
+            end: self.activity_start + self.roots.row_count,
             head: self.roots.change,
         }
     }
@@ -509,12 +509,26 @@ impl Read for AdmittedRootsResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self::new(
+        let admitted = Self::new(
             BatchId::read(buf)?,
             RootBundle::read(buf)?,
             u64::read(buf)?,
             bool::read(buf)?,
-        ))
+        );
+        if admitted.activity_start == 0
+            || admitted.roots.row_count
+                > u64::from(commonware_clearing::bajillion::commitment::MAX_VECTOR_LENGTH)
+            || !admitted
+                .activity_start
+                .checked_add(admitted.roots.row_count)
+                .is_some_and(|end| end < admitted.roots.change.operations)
+        {
+            return Err(CodecError::Invalid(
+                "AdmittedRootsResponse",
+                "invalid account-row interval",
+            ));
+        }
+        Ok(admitted)
     }
 }
 
@@ -2605,7 +2619,7 @@ where
         writes.insert(
             payout_head_key(deployment),
             Some(Record::PayoutHead(crate::protocol::PayoutTip {
-                heads: machine.chain.finalized_logs(),
+                payouts: machine.chain.finalized_payouts(),
                 finalized: machine.finalized_epoch(),
             })),
         );
@@ -2756,6 +2770,12 @@ mod codec_tests {
         let batch_id = BatchId::new(Sha256::hash(&[b"anchored-record-batch"]));
         let result = crate::chain::tests::epoch_fixture().result;
         let roots = result.roots;
+        for (start, count) in [(0, 0), (u64::MAX, 1), (1, roots.change.operations)] {
+            let mut malformed = roots;
+            malformed.row_count = count;
+            let admitted = AdmittedRootsResponse::new(batch_id, malformed, start, false);
+            assert!(AdmittedRootsResponse::decode(admitted.encode()).is_err());
+        }
         for admitted in [
             AdmittedRootsResponse::new(batch_id, roots, 1, false),
             AdmittedRootsResponse::new(batch_id, roots, 1, true),
@@ -2773,7 +2793,7 @@ mod codec_tests {
         }
         for record in [
             Record::PayoutHead(crate::protocol::PayoutTip {
-                heads: roots.logs(),
+                payouts: roots.withdrawal_outputs,
                 finalized: None,
             }),
             Record::Unclaimed(7),
