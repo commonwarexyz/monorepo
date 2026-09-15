@@ -1,6 +1,6 @@
 //! Benchmarks for `runtime::iobuf`.
 //!
-//! This entry point registers four suites:
+//! This entry point registers buffer and allocation suites:
 //!
 //! - [`iobuf`]: fixed-size decode benchmarks comparing `Bytes` with `IoBuf`
 //!   backed by external `Bytes` or native heap storage. `Vec<u8>` modes
@@ -12,6 +12,8 @@
 //! - [`freelist`]: microbenchmarks of the global freelist that stores free
 //!   pooled buffers shared across threads, compared against `Mutex<Vec<_>>` and
 //!   `ArrayQueue`.
+//! - [`split_front`], [`put_slice`], [`decode`], and [`emptiness`]: fragmented
+//!   buffer operations, with single-chunk cases for comparison.
 //!
 //! Shared threading and measurement helpers live in [`utils`].
 //!
@@ -20,9 +22,13 @@
 use criterion::{criterion_group, criterion_main};
 
 mod allocation;
+mod decode;
+mod emptiness;
 mod freelist;
 mod iobuf;
+mod put_slice;
 mod reuse;
+mod split_front;
 mod utils;
 
 criterion_group!(
@@ -30,7 +36,11 @@ criterion_group!(
     iobuf::bench,
     allocation::bench,
     reuse::bench,
-    freelist::bench
+    freelist::bench,
+    split_front::bench,
+    put_slice::bench,
+    decode::bench,
+    emptiness::bench
 );
 
 criterion_main!(benches);

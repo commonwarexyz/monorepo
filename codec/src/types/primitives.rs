@@ -20,7 +20,7 @@
 
 use crate::{
     Buf, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
-    util::{at_least, at_least_items, read_fixed_vec},
+    util::{at_least, at_least_items, read_fixed, read_fixed_vec},
     varint::UInt,
 };
 #[cfg(not(feature = "std"))]
@@ -32,7 +32,7 @@ use std::vec::Vec;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
-    ($type:ty, $try_read_method:ident, $read_method:ident, $write_method:ident) => {
+    ($type:ty, $write_method:ident) => {
         impl Write for $type {
             #[inline]
             fn write(&self, buf: &mut impl BufMut) {
@@ -44,17 +44,16 @@ macro_rules! impl_numeric {
             type Cfg = ();
             #[inline]
             fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-                buf.$try_read_method().map_err(|_| Error::EndOfBuffer)
+                Ok(Self::from_be_bytes(read_fixed(buf)?))
             }
 
-            // The upfront check bounds the allocation and lets the infallible getters
-            // below run without panicking.
+            // Bound the allocation before decoding any elements.
             #[inline]
             fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
                 at_least_items(buf, len, Self::SIZE)?;
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
-                    values.push(buf.$read_method());
+                    values.push(Self::read_cfg(buf, &())?);
                 }
                 Ok(values)
             }
@@ -62,7 +61,9 @@ macro_rules! impl_numeric {
             #[inline]
             fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
                 at_least_items(buf, N, Self::SIZE)?;
-                Ok(core::array::from_fn(|_| buf.$read_method()))
+                Ok(core::array::from_fn(|_| {
+                    Self::read_cfg(buf, &()).expect("array length checked above")
+                }))
             }
         }
 
@@ -72,17 +73,17 @@ macro_rules! impl_numeric {
     };
 }
 
-impl_numeric!(u16, try_get_u16, get_u16, put_u16);
-impl_numeric!(u32, try_get_u32, get_u32, put_u32);
-impl_numeric!(u64, try_get_u64, get_u64, put_u64);
-impl_numeric!(u128, try_get_u128, get_u128, put_u128);
-impl_numeric!(i8, try_get_i8, get_i8, put_i8);
-impl_numeric!(i16, try_get_i16, get_i16, put_i16);
-impl_numeric!(i32, try_get_i32, get_i32, put_i32);
-impl_numeric!(i64, try_get_i64, get_i64, put_i64);
-impl_numeric!(i128, try_get_i128, get_i128, put_i128);
-impl_numeric!(f32, try_get_f32, get_f32, put_f32);
-impl_numeric!(f64, try_get_f64, get_f64, put_f64);
+impl_numeric!(u16, put_u16);
+impl_numeric!(u32, put_u32);
+impl_numeric!(u64, put_u64);
+impl_numeric!(u128, put_u128);
+impl_numeric!(i8, put_i8);
+impl_numeric!(i16, put_i16);
+impl_numeric!(i32, put_i32);
+impl_numeric!(i64, put_i64);
+impl_numeric!(i128, put_i128);
+impl_numeric!(f32, put_f32);
+impl_numeric!(f64, put_f64);
 
 impl Write for u8 {
     #[inline]
@@ -106,7 +107,7 @@ impl Read for u8 {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        buf.try_get_u8().map_err(|_| Error::EndOfBuffer)
+        Ok(read_fixed::<1>(buf)?[0])
     }
 
     // The upfront check bounds the allocation and guarantees `take` yields exactly `len` bytes.
@@ -120,10 +121,7 @@ impl Read for u8 {
 
     #[inline]
     fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
-        let mut values = [0; N];
-        buf.try_copy_to_slice(&mut values)
-            .map_err(|_| Error::EndOfBuffer)?;
-        Ok(values)
+        read_fixed(buf)
     }
 }
 
@@ -362,6 +360,37 @@ mod tests {
             Err(Error::EndOfBuffer)
         ));
         assert_eq!(buf.remaining(), 1);
+    }
+
+    #[test]
+    fn test_numeric_reads_at_every_chunk_boundary() {
+        macro_rules! check {
+            ($($type:ty),+ $(,)?) => {
+                $(
+                    let data: [u8; core::mem::size_of::<$type>()] =
+                        core::array::from_fn(|index| 0x80u8.wrapping_add(index as u8));
+                    for split in 0..=data.len() {
+                        let mut tail = data[split..].to_vec();
+                        tail.push(7);
+                        let mut buf = Bytes::copy_from_slice(&data[..split]).chain(Bytes::from(tail));
+                        let value = <$type>::read(&mut buf).unwrap();
+                        assert_eq!(value.to_be_bytes(), data);
+                        assert_eq!(u8::read(&mut buf).unwrap(), 7);
+                        assert!(!buf.has_remaining());
+                    }
+                    for len in 0..data.len() {
+                        for split in 0..=len {
+                            let mut buf = Bytes::copy_from_slice(&data[..split])
+                                .chain(Bytes::copy_from_slice(&data[split..len]));
+                            assert!(matches!(<$type>::read(&mut buf), Err(Error::EndOfBuffer)));
+                            assert_eq!(buf.remaining(), len);
+                            assert_eq!(buf.copy_to_bytes(len).as_ref(), &data[..len]);
+                        }
+                    }
+                )+
+            };
+        }
+        check!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64);
     }
 
     #[test]

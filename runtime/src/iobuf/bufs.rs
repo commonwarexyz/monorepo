@@ -292,6 +292,22 @@ impl IoBufs {
             return Self::default();
         }
 
+        // The first chunk alone proves these splits are in bounds.
+        if let IoBufsInner::Chunked(bufs) = &mut self.inner
+            && let Some(front) = bufs.front_mut()
+            && at <= front.len()
+        {
+            let prefix = if at == front.len() {
+                bufs.pop_front().expect("front checked above")
+            } else {
+                front.split_to(at)
+            };
+            if bufs.len() <= 3 {
+                self.canonicalize();
+            }
+            return Self::from(prefix);
+        }
+
         let remaining = self.remaining();
         assert!(
             at <= remaining,
@@ -853,7 +869,12 @@ impl IoBufsMut {
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.is_empty(),
+            IoBufsMutInner::Pair([a, b]) => a.is_empty() && b.is_empty(),
+            IoBufsMutInner::Triple([a, b, c]) => a.is_empty() && b.is_empty() && c.is_empty(),
+            IoBufsMutInner::Chunked(bufs) => bufs.iter().all(IoBufMut::is_empty),
+        }
     }
 
     /// Whether this contains a single contiguous buffer.
@@ -1042,6 +1063,11 @@ impl From<IoBufsMut> for IoBufs {
 
 impl bytes::Buf for IoBufsMut {
     #[inline]
+    fn has_remaining(&self) -> bool {
+        !self.is_empty()
+    }
+
+    #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufsMutInner::Single(buf) => buf.remaining(),
@@ -1168,6 +1194,23 @@ impl bytes::Buf for IoBufsMut {
 
 // SAFETY: Delegates to IoBufMut which implements BufMut safely.
 unsafe impl BufMut for IoBufsMut {
+    #[inline]
+    fn put_slice(&mut self, mut src: &[u8]) {
+        let available = self.remaining_mut();
+        if src.len() > available {
+            panic_advance(src.len(), available);
+        }
+
+        // Visit writable tails once, including when earlier chunks are already full.
+        self.for_each_chunk_mut(|buf| {
+            let count = src.len().min(buf.remaining_mut());
+            if count != 0 {
+                buf.put_slice(&src[..count]);
+                src = &src[count..];
+            }
+        });
+    }
+
     #[inline]
     fn remaining_mut(&self) -> usize {
         match &self.inner {
@@ -1656,7 +1699,10 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -1982,6 +2028,146 @@ mod tests {
     fn test_iobufs_split_to_out_of_bounds() {
         let mut bufs = IoBufs::from(b"abc");
         let _ = bufs.split_to(4);
+    }
+
+    #[test]
+    fn test_iobufs_split_first_chunk_preserves_views() {
+        for count in 1..=8 {
+            for at in 0..=4 {
+                let mut chunks = VecDeque::with_capacity(count);
+                for index in 0..count {
+                    chunks.push_back(IoBuf::from(vec![index as u8; 4]));
+                }
+                let mut bufs = if count >= 4 {
+                    // Keep the deque wrapped to exercise its logical front.
+                    let first = chunks.pop_front().unwrap();
+                    chunks.push_back(first);
+                    assert!(!chunks.as_slices().1.is_empty());
+                    IoBufs {
+                        inner: IoBufsInner::Chunked(chunks),
+                    }
+                } else {
+                    IoBufs::from_chunks_iter(chunks)
+                };
+                let expected = bufs.clone().coalesce();
+                let front = bufs.chunk().as_ptr();
+                let second = bufs.chunk_at(1).map(<[u8]>::as_ptr);
+                let prefix = bufs.split_to(at);
+                assert!(prefix.is_single());
+                if at != 0 {
+                    assert_eq!(prefix.chunk().as_ptr(), front);
+                }
+                assert_eq!(prefix.coalesce().as_ref(), &expected.as_ref()[..at]);
+                assert_eq!(bufs.clone().coalesce().as_ref(), &expected.as_ref()[at..]);
+                assert_eq!(bufs.chunk_count(), count - usize::from(at == 4));
+
+                if at < 4 {
+                    assert_eq!(bufs.chunk().as_ptr(), front.wrapping_add(at));
+                } else if let Some(second) = second {
+                    assert_eq!(bufs.chunk().as_ptr(), second);
+                } else {
+                    assert!(bufs.is_empty());
+                    assert!(bufs.is_single());
+                }
+
+                // An invalid split must fail before mutating the remaining buffers.
+                let before = bufs.clone().coalesce();
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        bufs.split_to(before.len() + 1);
+                    }))
+                    .is_err()
+                );
+                assert_eq!(bufs.coalesce(), before);
+            }
+        }
+    }
+
+    fn writable_chunks(count: usize) -> IoBufsMut {
+        let mut chunks = VecDeque::with_capacity(count);
+        for index in 0..count {
+            let mut chunk = IoBufMut::with_capacity(4);
+            let initialized = match index % 3 {
+                0 => 0,
+                1 => 4,
+                _ => 2,
+            };
+            chunk.put_bytes(0xEE, initialized);
+            chunks.push_back(chunk);
+        }
+        if count >= 4 {
+            let first = chunks.pop_front().unwrap();
+            chunks.push_back(first);
+            assert!(!chunks.as_slices().1.is_empty());
+            IoBufsMut {
+                inner: IoBufsMutInner::Chunked(chunks),
+            }
+        } else {
+            IoBufsMut::from_chunks_iter(chunks)
+        }
+    }
+
+    fn mutable_chunk_state(bufs: &mut IoBufsMut) -> Vec<(Vec<u8>, usize)> {
+        let mut state = Vec::new();
+        bufs.for_each_chunk_mut(|chunk| state.push((chunk.as_ref().to_vec(), chunk.capacity())));
+        state
+    }
+
+    #[test]
+    fn test_iobufsmut_put_slice_matches_chunked_put() {
+        for count in 0..=8 {
+            let available = writable_chunks(count).remaining_mut();
+            for len in 0..=available {
+                let mut actual = writable_chunks(count);
+                let mut expected = writable_chunks(count);
+                let input: Vec<_> = (0..len as u8).collect();
+                actual.put_slice(&input);
+                expected.put(input.as_slice());
+                assert_eq!(
+                    mutable_chunk_state(&mut actual),
+                    mutable_chunk_state(&mut expected)
+                );
+                assert_eq!(actual.remaining_mut(), available - len);
+                assert_eq!(actual.is_empty(), actual.remaining() == 0);
+                assert_eq!(actual.has_remaining(), actual.remaining() != 0);
+            }
+
+            let mut bufs = writable_chunks(count);
+            let before = mutable_chunk_state(&mut bufs);
+            let oversized = vec![0; available + 1];
+            assert!(catch_unwind(AssertUnwindSafe(|| bufs.put_slice(&oversized))).is_err());
+            assert_eq!(mutable_chunk_state(&mut bufs), before);
+            assert_eq!(bufs.remaining_mut(), available);
+        }
+    }
+
+    #[test]
+    fn test_iobufsmut_emptiness_with_reserved_capacity() {
+        for count in 0..=8 {
+            for readable in 0..=count {
+                let mut chunks = Vec::new();
+                for index in 0..count {
+                    let mut chunk = IoBufMut::with_capacity(4);
+                    if index == readable {
+                        chunk.put_u8(7);
+                    }
+                    chunks.push(chunk);
+                }
+                let mut bufs = IoBufsMut::from(chunks);
+                assert_eq!(bufs.is_empty(), readable == count);
+                assert_eq!(bufs.has_remaining(), readable != count);
+                if readable != count {
+                    bufs.advance(1);
+                    assert!(bufs.is_empty());
+                    assert!(!bufs.has_remaining());
+                }
+                if bufs.remaining_mut() > 0 {
+                    bufs.put_slice(&[9]);
+                    assert!(!bufs.is_empty());
+                    assert!(bufs.has_remaining());
+                }
+            }
+        }
     }
 
     #[test]

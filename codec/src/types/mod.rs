@@ -233,7 +233,11 @@ pub(crate) mod tests {
         }
 
         fn advance(&mut self, cnt: usize) {
-            self.bulk_reads += 1;
+            if cnt == 1 {
+                self.byte_reads += 1;
+            } else if cnt > 1 {
+                self.bulk_reads += 1;
+            }
             self.inner.advance(cnt)
         }
 
