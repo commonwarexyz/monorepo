@@ -467,9 +467,9 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         max_valid_epoch: Option<u64>,
         max_epoch: &mut u64,
         max_section: &mut u64,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         if entry.is_empty() {
-            return Ok(false);
+            return Ok(());
         }
 
         if !entry.is_valid()
@@ -484,21 +484,17 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
             blob.write_at(entry_offset, zero_buf, WriteOptions::default())
                 .await?;
-            Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
             *max_epoch = entry.epoch;
             *max_section = entry.section;
-            Ok(false)
-        } else {
-            Ok(false)
         }
+        Ok(())
     }
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable) where:
-    /// - modified: whether any entries were cleaned
+    /// Returns (max_epoch, max_section, resizable) where:
     /// - max_epoch: the maximum valid epoch found
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
@@ -509,14 +505,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(bool, u64, u64, u32), Error> {
+    ) -> Result<(u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader =
             buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
-        let mut modified = false;
         let mut max_epoch = 0u64;
         let mut max_section = 0u64;
         let mut resizable = 0u32;
@@ -528,7 +523,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
-            let entry1_cleared = Self::recover_entry(
+            Self::recover_entry(
                 blob,
                 &mut entry1,
                 offset,
@@ -537,7 +532,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 &mut max_section,
             )
             .await?;
-            let entry2_cleared = Self::recover_entry(
+            Self::recover_entry(
                 blob,
                 &mut entry2,
                 offset + Entry::SIZE as u64,
@@ -546,7 +541,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 &mut max_section,
             )
             .await?;
-            modified |= entry1_cleared || entry2_cleared;
 
             // If the latest entry has reached the resize frequency, increment the resizable entries
             if let Some((_, _, added)) = Self::read_latest_entry(&entry1, &entry2)
@@ -556,7 +550,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
-        Ok((modified, max_epoch, max_section, resizable))
+        Ok((max_epoch, max_section, resizable))
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
@@ -714,15 +708,12 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 if table_len < expected_table_len {
                     return Err(Error::CheckpointMismatch);
                 }
-                let mut modified = if table_len != expected_table_len {
+                if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
-                    true
-                } else {
-                    false
-                };
+                }
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _, resizable) = Self::recover_table(
+                let (_, _, resizable) = Self::recover_table(
                     &context,
                     &table,
                     checkpoint.table_size,
@@ -731,14 +722,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     config.table_replay_buffer,
                 )
                 .await?;
-                if table_modified {
-                    modified = true;
-                }
-
-                // Sync table if needed
-                if modified {
-                    table.sync().await?;
-                }
+                table.sync().await?;
 
                 (checkpoint, resizable)
             }
