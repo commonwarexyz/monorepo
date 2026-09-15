@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, Error, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -176,6 +176,7 @@ where
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
+    use bytes::Buf as _;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
 

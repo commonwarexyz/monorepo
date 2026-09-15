@@ -40,8 +40,8 @@ pub mod run;
 use alloc::{boxed::Box, vec::Vec};
 pub use array::Array;
 pub use bitmap::Bitmap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 pub use run::Run;
 

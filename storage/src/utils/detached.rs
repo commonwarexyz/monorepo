@@ -1,8 +1,8 @@
 //! Test support for detached strategy jobs.
 
-use commonware_codec::{Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
 use commonware_parallel::{Rayon, Strategy as _};
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::sync::Mutex;
 use std::{
     sync::{Arc, mpsc},

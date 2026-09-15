@@ -1,5 +1,7 @@
-use bytes::{Buf, BufMut};
-use commonware_codec::{Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+};
 use commonware_consensus::{
     marshal::core::{ExpectedCommitment, Variant},
     simplex::{scheme::Scheme, types::Finalization},

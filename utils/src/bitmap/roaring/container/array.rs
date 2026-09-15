@@ -5,8 +5,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum cardinality before converting to a bitmap container.

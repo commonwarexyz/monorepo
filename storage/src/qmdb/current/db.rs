@@ -22,12 +22,12 @@ use crate::{
         },
         current::{
             grafting,
-            proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
+            proof::{OpsRootWitness, RangeProof, RangeProofSpec, constant::OperationProof},
         },
         operation::Floored as _,
     },
 };
-use commonware_codec::{Codec, CodecShared, DecodeExt};
+use commonware_codec::{Codec, CodecShared, Copying, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -38,7 +38,7 @@ use commonware_runtime::{
         histogram::{ScopedTimer, Timed},
     },
 };
-use commonware_utils::{bitmap, sequence::prefixed_u64::U64};
+use commonware_utils::{Widen, bitmap, sequence::prefixed_u64::U64};
 use core::{num::NonZeroU64, ops::Range};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
@@ -893,30 +893,29 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     Some((last_chunk, next_bit))
 }
 
-/// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
+/// Return the graftable chunk count, enforcing the pending and pruning invariants.
 ///
-/// Returns [`Error::DataCorrupted`] if `bitmap` and `ops_leaves` imply more than one
+/// Returns [`Error::DataCorrupted`] if `complete` and `ops_leaves` imply more than one
 /// pending chunk, or if pruning has advanced past the graftable chunk boundary.
-fn graftable_chunk_window<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
-    bitmap: &B,
+pub(super) fn graftable_chunk_window<F: merkle::Graftable>(
     ops_leaves: Location<F>,
+    complete: u64,
+    pruned: u64,
     grafting_height: u32,
-) -> Result<(u64, u64), Error<F>> {
-    let complete = bitmap.complete_chunks() as u64;
+) -> Result<u64, Error<F>> {
     let graftable = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height).min(complete);
     let pending = complete - graftable;
     if pending > 1 {
         return Err(Error::DataCorrupted("multiple pending bitmap chunks"));
     }
 
-    let pruned = bitmap.pruned_chunks() as u64;
     if pruned > graftable {
         return Err(Error::DataCorrupted(
             "pruned chunks exceed graftable chunks",
         ));
     }
 
-    Ok((complete, graftable))
+    Ok(graftable)
 }
 
 /// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
@@ -936,8 +935,13 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
     ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<Option<[u8; N]>, Error<F>> {
-    let (complete, graftable) =
-        graftable_chunk_window::<F, B, N>(bitmap, ops_leaves, grafting_height)?;
+    let complete = Widen::widen(bitmap.complete_chunks());
+    let graftable = graftable_chunk_window(
+        ops_leaves,
+        complete,
+        Widen::widen(bitmap.pruned_chunks()),
+        grafting_height,
+    )?;
     if complete - graftable != 1 {
         return Ok(None);
     }
@@ -1100,8 +1104,12 @@ pub(super) async fn compute_grafted_root<
 
     // Validate bitmap invariants (pending <= 1, pruned <= graftable).
     let grafting_height = grafting::height::<N>();
-    let (_complete_chunks, _graftable_chunks) =
-        graftable_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
+    graftable_chunk_window(
+        ops_leaves,
+        Widen::widen(status.complete_chunks()),
+        Widen::widen(status.pruned_chunks()),
+        grafting_height,
+    )?;
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
@@ -1288,7 +1296,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
                     "missing pinned node in grafted tree metadata",
                 ));
             };
-            let digest = D::decode(bytes.as_ref())
+            let digest = D::decode(Copying(bytes))
                 .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
             pinned.push(digest);
         }

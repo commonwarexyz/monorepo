@@ -276,7 +276,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                     .expect("initial immutable archive init failed");
             for entry in &phase_floor {
                 archive = archive
-                    .put(entry.index, entry.key.clone(), entry.value.clone())
+                    .put(entry.index, entry.key.clone(), &entry.value)
                     .await
                     .expect("baseline put failed");
             }
@@ -290,7 +290,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             .filter(|entry| !phase_floor.iter().any(|floor| floor.index == entry.index))
         {
             archive = match archive
-                .put(entry.index, entry.key.clone(), entry.value.clone())
+                .put(entry.index, entry.key.clone(), &entry.value)
                 .await
             {
                 Ok(archive) => archive,
@@ -339,7 +339,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         // consumers.
         let sentinel = entry(&recovery_input, 4, 0xEF);
         archive = archive
-            .put(sentinel.index, sentinel.key.clone(), sentinel.value.clone())
+            .put(sentinel.index, sentinel.key.clone(), &sentinel.value)
             .await
             .expect("post-recovery put failed");
         archive = archive.sync().await.expect("post-recovery sync failed");

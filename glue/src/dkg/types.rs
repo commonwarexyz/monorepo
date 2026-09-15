@@ -1,8 +1,8 @@
 //! Shared types for the DKG module.
 
 use crate::dkg::network::Directory;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     PublicKey, Signer,

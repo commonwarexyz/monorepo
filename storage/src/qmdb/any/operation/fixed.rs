@@ -13,10 +13,10 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
+    Buf, Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.

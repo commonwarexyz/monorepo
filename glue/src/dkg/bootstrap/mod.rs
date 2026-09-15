@@ -18,7 +18,7 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -49,7 +49,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
@@ -443,7 +443,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
-                start: Start::Genesis(genesis.clone()),
+                start: Start::Genesis(genesis.clone().into()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention: ViewDelta::new(10),

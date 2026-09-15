@@ -2,6 +2,38 @@
 
 ## v2026.9.0
 
+<details>
+<summary>Rollback Support</summary>
+
+_These instructions do not cover changes to ALPHA primitives._
+
+To retain a path back to v2026.7.1:
+
+**Defer incompatible changes:**
+
+- **V1 blobs:** Set
+  `tokio::Config::with_storage_blob_layouts(BlobLayout::V0..=BlobLayout::V0)`
+  before the upgraded binary first opens storage. The previous binary cannot
+  read V1 blobs, and this release has no V1-to-V0 downgrade tool. Narrowing the
+  range after V1 blobs exist rejects them instead of converting them ([#4595]).
+- **Page-size changes:** Keep each existing store's logical page size.
+  Replacing a logical size of 4096 with `buffer::paged::page_size(4096)` changes
+  it to 4084 and can truncate existing data. Switching the setting back cannot
+  recover discarded data ([#4184]).
+
+**To roll back:**
+
+1. Sync storage, then stop every process using the storage directory.
+2. Remove each prunable archive's `metadata_partition`. The archive will
+   revalidate its stored values on the next upgrade ([#4610]). For marshal's
+   epoch caches (which use the prunable archive), remove
+   `{partition_prefix}-cache-{epoch}-{name}-metadata` for each epoch and each of
+   `verified`, `notarized`, `certified`, `notarizations`, and `finalizations`
+   ([#4610]).
+3. Restart with v2026.7.1.
+
+</details>
+
 ### Aligned Blob Layout
 
 New runtime storage blobs use a V1 layout whose header is padded to one

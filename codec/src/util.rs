@@ -1,9 +1,8 @@
-//! Codec utility functions
+//! Helpers for reading and validating encoded values.
 
-use crate::{Error, FixedSize, Read};
+use crate::{Buf, Error, FixedSize, Read};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::Buf;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
@@ -66,27 +65,29 @@ pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Copying;
+    use bytes::Buf as _;
 
     #[test]
     fn test_ensure_zeros() {
         // Consumes exactly `size` bytes of an all-zero region.
-        let mut buf = &[0u8, 0, 0, 0, 7][..];
+        let mut buf = Copying(&[0u8, 0, 0, 0, 7]);
         ensure_zeros(&mut buf, 4).unwrap();
         assert_eq!(buf.remaining(), 1);
 
         // A zero-length check consumes nothing, even on an empty buffer.
-        let mut buf = &[][..];
+        let mut buf = Copying(&[]);
         ensure_zeros(&mut buf, 0).unwrap();
 
         // A short buffer fails without panicking.
-        let mut buf = &[0u8, 0][..];
+        let mut buf = Copying(&[0u8, 0]);
         assert!(matches!(ensure_zeros(&mut buf, 3), Err(Error::EndOfBuffer)));
 
         // A non-zero byte anywhere in the region fails.
         for i in 0..4 {
             let mut bytes = [0u8; 4];
             bytes[i] = 1;
-            let mut buf = &bytes[..];
+            let mut buf = Copying(&bytes);
             assert!(matches!(
                 ensure_zeros(&mut buf, 4),
                 Err(Error::Invalid(_, _))
@@ -97,12 +98,12 @@ mod tests {
     #[test]
     fn test_ensure_zeros_across_chunks() {
         // A chained buffer exposes the region as multiple chunks, exercising the chunk loop.
-        let mut buf = (&[0u8, 0][..]).chain(&[0u8, 0, 0][..]);
+        let mut buf = Copying(&[0u8, 0]).chain(Copying(&[0u8, 0, 0]));
         ensure_zeros(&mut buf, 5).unwrap();
         assert_eq!(buf.remaining(), 0);
 
         // A non-zero byte in the second chunk still fails.
-        let mut buf = (&[0u8, 0][..]).chain(&[0u8, 2][..]);
+        let mut buf = Copying(&[0u8, 0]).chain(Copying(&[0u8, 2]));
         assert!(matches!(
             ensure_zeros(&mut buf, 4),
             Err(Error::Invalid(_, _))

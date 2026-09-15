@@ -1325,7 +1325,7 @@ mod tests {
         mocks::{DelayedSyncBlob, RecordingContext, next_pending_sync},
         telemetry::metrics::Registry,
     };
-    use commonware_codec::ReadExt;
+    use commonware_codec::{Copying, ReadExt};
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
     use futures::FutureExt as _;
@@ -3486,7 +3486,7 @@ mod tests {
     /// Helper to read the CRC record from raw blob bytes at the end of a physical page.
     fn read_crc_record_from_page(page_bytes: &[u8]) -> Checksum {
         let crc_start = page_bytes.len() - CHECKSUM_SIZE as usize;
-        Checksum::read(&mut &page_bytes[crc_start..]).unwrap()
+        Checksum::read(&mut Copying(&page_bytes[crc_start..])).unwrap()
     }
 
     /// Blob wrapper that turns one write into a durable partial write followed by an error.

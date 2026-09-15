@@ -92,8 +92,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{Additive, CryptoGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;

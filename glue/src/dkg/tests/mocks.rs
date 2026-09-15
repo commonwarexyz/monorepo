@@ -6,10 +6,10 @@ use crate::dkg::{
     orchestrator, reshare,
     types::{Payload, SchemeInfo},
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+    Buf, Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_consensus::{
     Automaton, Block, CertifiableAutomaton, Heightable, Relay, Reporter,
@@ -307,7 +307,7 @@ impl EncodedPayload {
         Dir: DkgDirectory<S::PublicKey>,
     {
         Payload::decode_cfg(
-            self.bytes.as_slice(),
+            commonware_codec::Copying(&self.bytes),
             &(
                 self.max_participants,
                 crate::dkg::tests::max_supported_mode(),
@@ -671,7 +671,7 @@ pub(crate) async fn closed_marshal_mailbox(
         marshal::Config {
             provider: TestProvider::new(scheme),
             epocher: FixedEpocher::new(blocks_per_epoch),
-            start: MarshalStart::Genesis(genesis_block(signer.public_key())),
+            start: MarshalStart::Genesis(genesis_block(signer.public_key()).into()),
             partition_prefix: format!("{partition_prefix}-marshal"),
             mailbox_size: NZUsize!(16),
             view_retention: ViewDelta::new(8),

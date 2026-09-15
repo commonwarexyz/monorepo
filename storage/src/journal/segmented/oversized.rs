@@ -1207,11 +1207,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{FixedSize, Read, ReadExt, Write};
+    use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, Buf, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
+        Blob as _, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},

@@ -333,7 +333,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
@@ -354,9 +354,10 @@ where
                         "verified",
                     );
                 } else {
+                    let stored: V::StoredBlock = block.clone().into();
                     let result = cache
                         .verified_blocks
-                        .put_multi_start_sync(view, digest, block)
+                        .put_multi_start_sync(view, digest, &stored)
                         .await;
                     (cache.verified_blocks, handle) =
                         Self::handle_start_result(result, round, "verified");
@@ -373,7 +374,7 @@ where
         epoch: Epoch,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> Self {
         (self, _) = self
             .with_epoch(epoch, |mut cache| async move {
@@ -384,9 +385,10 @@ where
                     Err(e) => panic!("failed to check certified block: {e}"),
                 };
                 if !exists {
+                    let stored: V::StoredBlock = block.clone().into();
                     cache.certified_blocks = cache
                         .certified_blocks
-                        .put_multi_sync(height.get(), digest, block)
+                        .put_multi_sync(height.get(), digest, &stored)
                         .await
                         .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
                     debug!(%height, "cached certified block");
@@ -402,15 +404,16 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
         (self, handle) = self
             .with_epoch(round.epoch(), |mut cache| async move {
+                let stored: V::StoredBlock = block.clone().into();
                 let result = cache
                     .notarized_blocks
-                    .put_start_sync(view, digest, block)
+                    .put_start_sync(view, digest, &stored)
                     .await;
                 let handle;
                 (cache.notarized_blocks, handle) =
@@ -463,7 +466,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        notarization: Notarization<S, V::Commitment>,
+        notarization: &Notarization<S, V::Commitment>,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
@@ -492,7 +495,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        finalization: Finalization<S, V::Commitment>,
+        finalization: &Finalization<S, V::Commitment>,
     ) -> Self {
         let view = round.view().get();
         (self, _) = self

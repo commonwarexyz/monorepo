@@ -10,8 +10,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
