@@ -783,6 +783,92 @@ macro_rules! current_sync_tests_for_harness {
     };
 }
 
+/// A sync that reuses a client's existing journal seeds the bitmap from the chunk-aligned
+/// `range.start` while the journal keeps the blob floor below it, so the bitmap sits ahead of the
+/// log. The prune glue issues right after the sync must leave that state alone rather than fail.
+#[test_traced]
+fn test_prune_after_sync_reusing_journal() {
+    use crate::{
+        merkle::mmr,
+        qmdb::{
+            any::{
+                operation::{Unordered as Op, update::Unordered as Update},
+                sync::tests::SyncTestHarness as _,
+                value::FixedEncoding,
+            },
+            sync::{self, Target, engine::Config},
+        },
+    };
+    use commonware_cryptography::Hasher as _;
+    use harnesses::UnorderedFixedMmrHarness as Harness;
+    use std::sync::Arc;
+
+    type Db = <Harness as crate::qmdb::any::sync::tests::SyncTestHarness>::Db;
+
+    fn generation(g: u64) -> Vec<Op<mmr::Family, Digest, FixedEncoding<Digest>>> {
+        (0..384u64)
+            .map(|i| {
+                Op::Update(Update(
+                    Sha256::hash(&[&i.to_be_bytes()]),
+                    Sha256::hash(&[&(g * 1_000 + i).to_be_bytes()]),
+                ))
+            })
+            .collect()
+    }
+
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut target_db: Db = Harness::init_db(context.child("target")).await;
+        let sync_db_config = Harness::config(&context.next_u64().to_string(), &context);
+        let client_context = context.child("client");
+        let mut sync_db: Db =
+            Harness::init_db_with_config(client_context.child("client"), sync_db_config.clone())
+                .await;
+        // Both sides apply the same generations, then the target moves one commit ahead.
+        for g in 0..4u64 {
+            target_db = Harness::apply_ops(target_db, generation(g)).await;
+            sync_db = Harness::apply_ops(sync_db, generation(g)).await;
+        }
+        drop(sync_db);
+        target_db = Harness::apply_ops(
+            target_db,
+            vec![Op::Update(Update(
+                Sha256::hash(&[b"extra".as_slice()]),
+                Sha256::hash(&[b"v".as_slice()]),
+            ))],
+        )
+        .await;
+
+        let lower_bound = target_db.sync_boundary();
+        let upper_bound = target_db.bounds().end;
+        let target_db = Arc::new(target_db);
+        let synced_db: Db = sync::sync(Config {
+            db_config: sync_db_config,
+            fetch_batch_size: NZU64!(10),
+            target: Target {
+                root: Harness::sync_target_root(&target_db),
+                range: non_empty_range!(lower_bound, upper_bound),
+            },
+            context: client_context.child("sync"),
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+        let pruned_bits = synced_db.any.bitmap.pruned_bits();
+
+        // Glue prunes to the target's range start right after a sync.
+        let synced_db = synced_db.prune(lower_bound).await.unwrap();
+        assert!(synced_db.bounds().start <= lower_bound);
+        assert_eq!(synced_db.any.bitmap.pruned_bits(), pruned_bits);
+        synced_db.destroy().await.unwrap();
+    });
+}
+
 current_sync_tests_for_harness!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
 current_sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
 current_sync_tests_for_harness!(
