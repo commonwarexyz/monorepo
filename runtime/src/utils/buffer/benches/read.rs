@@ -66,4 +66,51 @@ pub fn bench(c: &mut Criterion) {
         bench_backend::<deterministic::Runner>(c, "deterministic", read_size);
         bench_backend::<tokio::Runner>(c, "tokio", read_size);
     }
+    #[cfg(feature = "test-utils")]
+    for pages in [1, 16, 256] {
+        for cold in [false, true] {
+            bench_range::<deterministic::Runner>(c, "deterministic", pages, cold);
+            bench_range::<tokio::Runner>(c, "tokio", pages, cold);
+        }
+    }
+}
+
+/// Compare contiguous range reads with a cold application cache and with all pages resident.
+/// Run with `--features test-utils` to enable explicit cache eviction between samples.
+#[cfg(feature = "test-utils")]
+fn bench_range<R>(c: &mut Criterion, backend: &str, pages: usize, cold: bool)
+where
+    R: Runner + Default,
+    R::Context: Storage + BufferPooler,
+{
+    let cache = if cold { "cold" } else { "warm" };
+    c.bench_function(
+        &format!(
+            "{}/backend={backend} pages={pages} cache={cache}",
+            module_path!()
+        ),
+        |b| {
+            b.iter_custom(|iters| {
+                R::default().start(|ctx| async move {
+                    let name = b"read_range";
+                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(512));
+                    let mut append = create_append(&ctx, name, cache_ref.clone()).await;
+                    let len = pages * PAGE_SIZE_USIZE;
+                    append.append(&vec![0xAB; len]).await.unwrap();
+                    append.sync().await.unwrap();
+                    let mut elapsed = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        if cold {
+                            cache_ref.clear();
+                        }
+                        let start = Instant::now();
+                        std::hint::black_box(append.read_at(0, len).await.unwrap());
+                        elapsed += start.elapsed();
+                    }
+                    destroy_append(&ctx, append, name).await;
+                    elapsed
+                })
+            });
+        },
+    );
 }
