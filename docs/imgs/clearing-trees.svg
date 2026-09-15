@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1010" role="img" aria-labelledby="title description">
   <title id="title">The Commitments Behind a Close</title>
-  <desc id="description">Each validator derives the state, activity, and payout roots, which the close commitment binds with the close context. QMDB retains balances a: 85, b: 58, c: 26, and d: 31. The activity MMR appends this close's four sorted Rows, then original Entries grouped by payer, then Commit(None), after earlier closes. The highlighted Row for c contains debit 11, sequence 2, and c's signed outgoing-payment BMT root. Original Entries reconstruct that BMT: 4 to b and 7 to d, one payment each. The payout MMR appends withdrawal outputs; this example has no new payouts and appends only Commit(None).</desc>
+  <desc id="description">Each validator derives three QMDB roots: state, activity, and payout. The close commitment binds them with the close context. The state database retains balances a: 85, b: 58, c: 26, and d: 31. The activity and payout logs use flat MMRs. This close appends four sorted account Rows, then payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and c's signed outgoing-payment BMT root. Its Entries reconstruct that BMT: 4 to b and 7 to d, one payment each. This close creates no payouts.</desc>
   <rect width="1120" height="1010" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -18,7 +18,7 @@
   </style>
 
   <text class="title" x="32" y="40">The Commitments Behind a Close</text>
-  <text class="note" x="32" y="74">Three shared roots, all derived by validators</text>
+  <text class="note" x="32" y="74">Three QMDB roots, all derived by validators</text>
 
   <rect class="selected" x="344" y="108" width="432" height="76" rx="5"/>
   <text class="heading center blue" x="560" y="140">32-byte close commitment</text>
@@ -35,19 +35,19 @@
 
   <rect class="selected" x="396" y="246" width="328" height="176" rx="5"/>
   <text class="heading center blue" x="560" y="282">Activity root</text>
-  <text class="note center" x="560" y="315">MMR · cumulative activity</text>
-  <text class="label center" x="560" y="361">Rows, then Entries,</text>
-  <text class="label center" x="560" y="395">then Commit(None)</text>
+  <text class="note center" x="560" y="315">QMDB · flat MMR</text>
+  <text class="label center" x="560" y="361">Account Rows</text>
+  <text class="label center" x="560" y="395">Payment Entries</text>
 
   <rect class="panel" x="760" y="246" width="328" height="176" rx="5"/>
   <text class="heading center" x="924" y="282">Payout root</text>
-  <text class="note center" x="924" y="315">MMR · withdrawal outputs</text>
-  <text class="note center" x="924" y="361">No new payouts here;</text>
-  <text class="note center" x="924" y="395">append Commit(None).</text>
+  <text class="note center" x="924" y="315">QMDB · flat MMR</text>
+  <text class="label center" x="924" y="361">Withdrawal outputs</text>
+  <text class="note center" x="924" y="395">None created in this close</text>
 
   <text class="heading" x="32" y="477">Inside the activity log</text>
   <text class="note center blue" x="337" y="516">4 sorted Rows</text>
-  <path class="link" d="M182 569 H216 M462 569 H510 M816 569 H852"/>
+  <path class="link" d="M182 569 H216 M462 569 H510"/>
   <rect class="panel" x="32" y="534" width="150" height="70" rx="4"/>
   <text class="note center" x="107" y="563">Earlier</text>
   <text class="note center" x="107" y="588">closes</text>
@@ -59,11 +59,9 @@
   <text class="label center" x="306.5" y="577">b</text>
   <text class="label center blue" x="371.5" y="577">c</text>
   <text class="label center" x="436.5" y="577">d</text>
-  <rect class="record" x="510" y="534" width="306" height="70" rx="4"/>
-  <text class="label center" x="663" y="563">Original Entries</text>
-  <text class="note center" x="663" y="589">grouped by payer</text>
-  <rect class="record" x="852" y="534" width="236" height="70" rx="4"/>
-  <text class="label center" x="970" y="577">Commit(None)</text>
+  <rect class="record" x="510" y="534" width="578" height="70" rx="4"/>
+  <text class="label center" x="799" y="563">Payment Entries, grouped by payer</text>
+  <text class="note center" x="799" y="589">a→b · b→c · c→b · c→d · d→a · d→b</text>
   <path class="focus" d="M216 616 V626 H1088 V616"/>
   <text class="note center blue" x="652" y="654">This close appends left to right</text>
 

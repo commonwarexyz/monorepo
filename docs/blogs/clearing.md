@@ -192,47 +192,35 @@ Every validator retains the complete account state in QMDB. At each close, the o
 
 Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 
-From these results, every validator derives the same three shared roots:
+From these results, every validator derives three roots, all backed by QMDB:
 
 - The **state root** commits the current positive balances.
 - The **activity root** commits the cumulative log of account Rows and payment Entries.
 - The **payout root** commits the cumulative log of external payout outputs.
 
-The two logs use Merkle mountain ranges (MMRs), which commit all appended records under one root.
+The activity and payout databases are keyless logs backed by flat Merkle mountain ranges (MMRs). Each log commits its cumulative records under one root.
 
-The activity log starts each epoch with a sorted Row for every participant, including zero-net accounts so their receipts remain challengeable. Each Row records the account's final debit, sequence number, and the root of its outgoing-payment binary Merkle tree (BMT). Individual Entry records follow the Row prefix in payer-row order. A positive-debit Row consumes entries until their cumulative values sum to its debit; a zero-debit Row consumes none. Commit(None) ends the epoch. In Figure 4, the blue branch expands the BMT for $c$'s outgoing payment vector: $c$ signs that root, and the leaves below are $c$'s payments. The payout log appends the output for each authorized withdrawal, followed by its own Commit(None).
+Each close appends its sorted account Rows, then its payment Entries grouped by payer. A Row records the account's final debit, sequence number, and outgoing-payment binary Merkle tree (BMT) root. The certified row range includes zero-net participants, so their receipts remain challengeable even when their balances do not change. A proof server can read the Entries directly from QMDB to reconstruct the payer's signed BMT.
 
-The certified activity start and row count $G_e$ identify exactly the contiguous Row prefix $[A_e^0,A_e^0+G_e)$. The Entry records and Commit(None) follow outside that compact proof range. The payout interval $[P_e^0,P_e^1)$ identifies exactly the candidate output positions; once those outputs finalize, their global indices are never reused. Its Commit(None) follows them. An empty epoch certifies $G_e=0$; an epoch without outputs certifies equal payout offsets. QMDB updates positive balance records incrementally and removes an account when its balance reaches zero.
+A 32-byte close commitment binds these results to the operator's dealing and the epoch's context. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof.
 
-All three roots are results of validation. A 32-byte commitment binds the dealing, the three resulting roots, log counts and ranges, and the close's totals to its epoch and exact predecessor state. Validators hold the balances needed to compute the new state, so the dealing needs no state-change proof. They promote the selected candidate state once the close is admitted.
+Tree construction belongs to validators. The operator collects signed activity and proposes the dealing; it may also run QMDB replicas to serve best-effort queries.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived roots: state, activity, and payout. A separate activity-log strip shows earlier closes followed by this close's four sorted Rows, original Entries grouped by payer, and Commit(None). The highlighted Row for c contains debit 11, sequence 2, and a link to the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. QMDB retains the resulting balances; this close appends no new payout outputs.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. The activity and payout logs use flat MMRs. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances; this close creates no payouts.">
 ```
 
 ::: {.image-caption}
 Figure 4: The close binds three validator-derived roots. The activity log appends this close's Rows and original Entries after those from earlier closes. Below, $c$'s Row names the BMT root that $c$ signs; its two entries sum to the Row's debit of 11.
 :::
 
-The settlement chain holds pooled custody, the certified state root, finalized log roots and counts, bounded pending log metadata, control and boundary state, and a map of unclaimed payout intervals. It does not store every account row, output, claimed index, or finalized epoch descriptor.
-
-Validators own the authenticated state and log construction. The operator only has to collect signed payer and boundary data and propose the dealing; serving payments and preparing a close do not require it to construct QMDB or either MMR. It may run best-effort replicas to serve balance, challenge, and payout openings directly.
-
-Validators use QMDB for all four databases: account balances, the two public logs, and a private record of checkpoints and signing decisions. The public logs are keyless QMDBs built on MMRs. The private database retains a bounded set of local control snapshots; it is never imported from a peer or rewound with the public stores.
-
-The activity and payout logs grow across closes. To answer an entry challenge, a validator walks retained Entry operations, rebuilds the requested payer's BMT, and checks it against the root in that payer's Row. Wallets retain the private signed receipts used with these public openings.
-
-Even an empty close adds a Commit marker to each log. Registration fixes the pruning boundary used in the signed log commitments. Physical deletion may lag behind that boundary while records are still needed locally.
-
-The private control QMDB records one checkpoint naming the three shared roots, operation counts, and native recovery boundaries. Before a vote or acknowledgment can leave a validator, the Current, activity, and payout candidates commit durably in parallel. The coherent checkpoint and exact immutable signing decision are then made durable in the private QMDB; completion of that operation is the local publication barrier. Public-store synchronization and pruning run when their own import, retention, or cleanup lifecycles require them, not as extra work before every acknowledgment.
-
-After a mixed crash, the validator recovers the latest durable private checkpoint first, opens the three public stores, and aligns them to its selected common target. Native recovery rebuilds derived Merkle, offset, and bitmap bookkeeping from the durable journals; it does not rescan application balances. While the coherent candidate remains retained, an exact retry reissues the saved vote. Discarding a candidate durably selects the canonical parent in the private QMDB before rewinding the public stores; it preserves the signing decision and blocks every further vote for that epoch until canonical advancement. A validator catching up imports the three authenticated public stores from a coherent replica; peer control state can never authorize local signing. The validator does not keep a full-close corpus merely to redo local state. Finalized activity locations and issued payout locations are never repurposed. Public-store deletion stays behind every protected proof and recovery boundary, and older protected roots are served from retained historical operations rather than by rewinding the live stores.
+The settlement chain keeps these commitments and counts, bounded pending-close metadata, custody and timing controls, and unclaimed payout ranges. Replicas store the underlying account and log records.
 
 ## Certify the Whole Close
 
 A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, derives the same transitions, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
 
-The canonical dealing bytes also receive a separate $\mathsf{ProposalId}$. It hashes a distinct domain, the authenticated epoch context, and a length-framed encoding of the dealing. The certified transition binds that identifier, the exact predecessor snapshot, all three successor roots, both log counts and epoch ranges, and the outflow totals. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' cumulative logs.
+The dealing's $\mathsf{ProposalId}$ hashes its canonical bytes with the authenticated epoch context. The certified close binds that identifier, the exact predecessor snapshot, all three successor roots, both log counts and epoch ranges, and the outflow totals. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' logs.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the state root, activity root, and payout root and bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
@@ -242,13 +230,17 @@ The canonical dealing bytes also receive a separate $\mathsf{ProposalId}$. It ha
 Figure 5: Every validator derives the same state, activity, and payout roots before signing one close commitment. Before its vote leaves, it durably commits the three public candidates and then its private checkpoint and signing decision.
 :::
 
-Once the accepted transition is present in all three durable shared stores and the validator's private checkpoint is durable, validation-only inputs can be retired. Validators keep native Rows and Entry records, payout outputs, log nodes, and QMDB history for every FIFO, challenge, and recovery obligation that can still reach them. Once no live obligation can refer to a prefix, they may prune its rows and nodes while retaining the authenticated prefix hashes needed to continue each log. Pruning saves replica storage without changing the root or global positions; it does not make proofs shorter. A new validator synchronizes the three shared native stores from an authenticated boundary and checks the resulting roots and counts; private signer state is initialized locally, never accepted from a peer.
-
-Proof availability can outlive a hot validator's retention window. Roots authenticate data without supplying it, so a user, operator, or proof service can run the same native QMDB replicas with longer retention and serve old balance, activity, receipt, and payout openings. Native state synchronization transfers the proof-bearing records; no parallel Bajillion proof archive or full-close copy is required. Hot-validator pruning is not pinned by the oldest unclaimed output or by an offline optional replica, and consensus does not require every validator to retain lifetime history. If every longer-retention replica discards a needed prefix, its proof is unavailable, but that absence neither expires the entitlement nor proves that a request was never carried.
-
 The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator signed header and certificate are 101 bytes. The validator-derived root bundle is 184 bytes; adding the eight-byte withdrawal total makes its descriptor 192 bytes, or 293 bytes together before chain transaction framing. These values are separate from the operator's dealing.
 
 The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. Candidate log storage may already contain a pending descendant, but a successful challenge discards that logical suffix. Discarded outputs never advance the finalized payout root or create unclaimed claim intervals.
+
+## Keeping Proofs Available
+
+Before releasing a vote, a validator durably commits the three public QMDBs in parallel, then durably records their checkpoint and its exact signing decision in a private QMDB. After a crash, QMDB recovery and rewind align the public stores to that checkpoint. Local signing decisions survive public-store rewind and are never imported from peers. The same databases provide synchronization, historical reads, and proof generation.
+
+Validators retain the records needed by pending closes, challenges, and recovery. Once those obligations pass, QMDB can prune old records while preserving the roots and global positions. Users, operators, or proof services can run replicas with longer retention to serve old openings. Validators need not retain lifetime history or wait for every optional replica before pruning.
+
+A root authenticates data but cannot supply it. Payouts have no claim deadline, so someone must retain the data needed to refresh payout proofs against the latest finalized root. If every replica discards those records, the entitlement remains but its proof is unavailable. Wallets must also retain their private signed receipts; the public logs cannot recreate them.
 
 ## The Unavoidable Challenge
 
@@ -262,7 +254,7 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A committee, TEE, or SNARK/STARK can verify the published inputs. Certifying those inputs cannot rule out an additional private receipt.
 
-The certified activity Row prefix records one final activity value for every disclosed account. A missing payer counts as zero debit, so a proof of absence can challenge an omitted payment. For a nonempty prefix, absence is proved by MMR membership for the adjacent full Rows at adjacent positions, or by membership at the left or right edge. A certified row count of zero proves that the prefix is empty. Strict key ordering and uniqueness make these cases exhaustive.
+Each close's certified account range records the final activity of every disclosed account. A missing payer counts as zero debit, so a proof of absence can challenge an omitted payment. For a nonempty range, absence is proved by MMR membership for the adjacent full Rows at adjacent positions, or by membership at the left or right edge. A certified row count of zero proves that the range is empty. Strict key ordering and uniqueness make these cases exhaustive.
 
 Receipt holders can prove three kinds of contradiction:
 
@@ -504,7 +496,7 @@ A complete challenge also carries the signed receipt and, when needed, a payer-v
 ```
 
 ::: {.image-caption}
-Figure 10: Activity lookups and complete challenges. The activity fixtures append account Rows and one Commit per close. Lookup sizes include the Row or neighboring Rows and MMR opening; the certified 48-byte log header and account range are separate. Challenges use a 512-account recipient pool. Omitted payer is the absence case of debit mismatch.
+Figure 10: Activity lookups and complete challenges. The activity fixtures contain account Rows without payment Entries. Lookup sizes include the Row or neighboring Rows and MMR opening; the certified 48-byte log header and account range are separate. Challenges use a 512-account recipient pool. Omitted payer is the absence case of debit mismatch.
 
 An empty close proves absence in 4 B (8.03 ns). The smallest presence and interior-absence cases use one and two accounts: 124 B (427 ns) and 239 B (679 ns), respectively.
 :::
@@ -558,7 +550,7 @@ Next, a new close appends one payout after an earlier close. We prove both the n
 ```
 
 ::: {.image-caption}
-Figure 11: Payout claims include a 30-byte output and its MMR opening. The first table opens the middle output. In the second, both claims use the root after the new payout was appended. The chain holds the 48-byte finalized log header separately; transaction framing is excluded. An empty close's Commit opening is 46 B (285 ns). Pruning stored records does not shorten the MMR path.
+Figure 11: Payout claims include a 30-byte output and its MMR opening. The first table opens the middle output. In the second, both claims use the root after the new payout was appended. The chain holds the 48-byte finalized log header separately; transaction framing is excluded. Pruning stored records does not shorten the MMR path.
 :::
 
 QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root. Here we start with one million accounts, then apply a close that updates either 1,024 or all one million balances.
