@@ -11,7 +11,7 @@
 //! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
 //! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Avx512` `Ssse3` |
-//! | `MulGfni`    | 8 MiB   | yes              | yes              | `Avx512` with GFNI |
+//! | `MulGfni`    | 2 MiB   | yes              | yes              | `Avx512` with GFNI |
 //! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
@@ -54,17 +54,21 @@ pub type Mul128 = [Multiply128lutT; GF_ORDER];
 #[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) type MulGfni = [MultiplyGfni; GF_ORDER];
 
-/// Ready-to-load affine operands for one field multiplier.
+/// Canonical affine matrices for one field multiplier.
 ///
 /// Multiplication is a 16 x 16 binary linear map, split into four 8 x 8 maps between
-/// the input and output byte halves. Each map is repeated across four 64-bit lanes.
+/// the input and output byte halves.
 #[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
 #[derive(Clone, Debug)]
 pub(crate) struct MultiplyGfni {
-    /// Direct terms: `A` maps low input to low output, and `D` maps high input to high output.
-    pub(crate) direct: [u64; 8],
-    /// Cross terms: `B` maps high input to low output, and `C` maps low input to high output.
-    pub(crate) cross: [u64; 8],
+    /// Maps the low input byte to the low output byte.
+    pub(crate) low_from_low: u64,
+    /// Maps the high input byte to the low output byte.
+    pub(crate) low_from_high: u64,
+    /// Maps the low input byte to the high output byte.
+    pub(crate) high_from_low: u64,
+    /// Maps the high input byte to the high output byte.
+    pub(crate) high_from_high: u64,
 }
 
 /// Multiplication lookup bytes for the four nibbles of a field element.
@@ -322,13 +326,17 @@ fn initialize_mul_gfni() -> Box<MulGfni> {
     let log = &get_exp_log().log;
     let mut table = vec![
         MultiplyGfni {
-            direct: [0; 8],
-            cross: [0; 8],
+            low_from_low: 0,
+            low_from_high: 0,
+            high_from_low: 0,
+            high_from_high: 0,
         };
         GF_ORDER
     ];
 
-    for log_m in 0..=GF_MODULUS {
+    let mut basis_matrices = [[0u64; 4]; GF_BITS];
+    for (coefficient_bit, matrix) in basis_matrices.iter_mut().enumerate() {
+        let log_m = log[1 << coefficient_bit];
         let mut rows = [[0u8; 8]; 4];
         for input_bit in 0..16 {
             let product = mul(1u16 << input_bit, log_m, exp, log);
@@ -340,12 +348,33 @@ fn initialize_mul_gfni() -> Box<MulGfni> {
         }
 
         // GF2P8AFFINEQB reads row i from byte 7-i of each 64-bit matrix.
-        let [a, b, c, d] = rows.map(u64::from_be_bytes);
-        table[log_m as usize] = MultiplyGfni {
-            direct: [a, a, a, a, d, d, d, d],
-            cross: [b, b, b, b, c, c, c, c],
+        *matrix = rows.map(u64::from_be_bytes);
+    }
+
+    // Multiplication is linear in the coefficient. After each basis-matrix XOR, `current` is
+    // the multiplication matrix for `step ^ (step >> 1)` because consecutive binary-reflected
+    // Gray codes differ in bit `step.trailing_zeros()`.
+    let mut current = [0u64; 4];
+    for step in 1..GF_ORDER {
+        let toggled_bit = step.trailing_zeros() as usize;
+        for (row, basis_row) in current.iter_mut().zip(basis_matrices[toggled_bit]) {
+            *row ^= basis_row;
+        }
+
+        let coefficient = step ^ (step >> 1);
+        let [a, b, c, d] = current;
+        table[log[coefficient] as usize] = MultiplyGfni {
+            low_from_low: a,
+            low_from_high: b,
+            high_from_low: c,
+            high_from_high: d,
         };
     }
+
+    // Exponents are taken modulo `GF_MODULUS`, the multiplicative group order, so exponent
+    // `GF_MODULUS` intentionally duplicates the identity at exponent zero.
+    let identity = table[0].clone();
+    table[GF_MODULUS as usize] = identity;
 
     table.into_boxed_slice().try_into().unwrap()
 }
@@ -421,16 +450,22 @@ mod tests {
 
     #[test]
     fn mul_gfni_matrix_semantics() {
+        assert_eq!(
+            core::mem::size_of::<MultiplyGfni>(),
+            4 * core::mem::size_of::<u64>()
+        );
+        assert_eq!(core::mem::size_of::<MulGfni>(), 2 * 1024 * 1024);
+
         let exp_log = get_exp_log();
         for (log_m, matrices) in get_mul_gfni().iter().enumerate() {
             for input_bit in 0..16 {
                 let input = 1u16 << input_bit;
                 let input_lo = input as u8;
                 let input_hi = (input >> 8) as u8;
-                let output_lo =
-                    affine(matrices.direct[0], input_lo) ^ affine(matrices.cross[0], input_hi);
-                let output_hi =
-                    affine(matrices.cross[4], input_lo) ^ affine(matrices.direct[4], input_hi);
+                let output_lo = affine(matrices.low_from_low, input_lo)
+                    ^ affine(matrices.low_from_high, input_hi);
+                let output_hi = affine(matrices.high_from_low, input_lo)
+                    ^ affine(matrices.high_from_high, input_hi);
                 let actual = output_lo as u16 | (output_hi as u16) << 8;
                 let expected = mul(input, log_m as GfElement, &exp_log.exp, &exp_log.log);
                 assert_eq!(actual, expected, "log_m={log_m} input_bit={input_bit}");
@@ -439,8 +474,10 @@ mod tests {
 
         for log_m in [0, GF_MODULUS as usize] {
             let identity = &get_mul_gfni()[log_m];
-            assert_eq!(identity.direct, [0x0102_0408_1020_4080; 8]);
-            assert_eq!(identity.cross, [0; 8]);
+            assert_eq!(identity.low_from_low, 0x0102_0408_1020_4080);
+            assert_eq!(identity.low_from_high, 0);
+            assert_eq!(identity.high_from_low, 0);
+            assert_eq!(identity.high_from_high, 0x0102_0408_1020_4080);
         }
     }
 }

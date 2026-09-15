@@ -239,11 +239,16 @@ struct LutGfni {
 impl From<&MultiplyGfni> for LutGfni {
     #[inline(always)]
     fn from(lut: &MultiplyGfni) -> Self {
-        // SAFETY: Callers execute within a GFNI target-feature boundary, and each operand is exactly 64 bytes.
+        // SAFETY: Callers execute within a GFNI target-feature boundary.
         unsafe {
+            let direct_low = _mm256_set1_epi64x(lut.low_from_low.cast_signed());
+            let direct_high = _mm256_set1_epi64x(lut.high_from_high.cast_signed());
+            let cross_low = _mm256_set1_epi64x(lut.low_from_high.cast_signed());
+            let cross_high = _mm256_set1_epi64x(lut.high_from_low.cast_signed());
+
             Self {
-                direct: _mm512_loadu_si512(lut.direct.as_ptr().cast::<__m512i>()),
-                cross: _mm512_loadu_si512(lut.cross.as_ptr().cast::<__m512i>()),
+                direct: _mm512_inserti64x4(_mm512_castsi256_si512(direct_low), direct_high, 1),
+                cross: _mm512_inserti64x4(_mm512_castsi256_si512(cross_low), cross_high, 1),
             }
         }
     }
