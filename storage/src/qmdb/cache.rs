@@ -7,6 +7,7 @@
 //! its oldest location, which tracks FIFO by age without per-entry policy state or a
 //! general-purpose hash table. Entries store the full location and key, so lookups are exact.
 
+use commonware_utils::GOLDEN_RATIO;
 use core::num::NonZeroUsize;
 
 /// Slots per set. Wide enough that oldest-in-set eviction tracks global FIFO closely, at two
@@ -17,7 +18,7 @@ const WAYS: usize = 16;
 const EMPTY: u64 = u64::MAX;
 
 /// Maps operation locations to their keys up to a fixed entry capacity.
-pub(crate) struct LocationCache<K> {
+pub(crate) struct Cache<K> {
     /// Slot locations; slot `i` belongs to set `i / ways`.
     locations: Vec<u64>,
     /// Slot keys, parallel to `locations`.
@@ -28,7 +29,7 @@ pub(crate) struct LocationCache<K> {
     ways: usize,
 }
 
-impl<K> LocationCache<K> {
+impl<K> Cache<K> {
     /// Creates a cache holding at most `capacity` entries, rounded down to whole sets.
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         let capacity = capacity.get();
@@ -47,7 +48,7 @@ impl<K> LocationCache<K> {
     const fn set_start(&self, location: u64) -> usize {
         // A multiplicative hash spreads partition-routed locations across sets, and the
         // multiply-high range reduction maps it onto exactly `sets` without a division.
-        let hash = location.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let hash = location.wrapping_mul(GOLDEN_RATIO);
         let set = ((hash as u128 * self.sets as u128) >> 64) as usize;
         set * self.ways
     }
@@ -110,7 +111,7 @@ mod tests {
     use super::*;
     use commonware_utils::NZUsize;
 
-    fn present(cache: &LocationCache<u64>, locations: impl IntoIterator<Item = u64>) -> usize {
+    fn present(cache: &Cache<u64>, locations: impl IntoIterator<Item = u64>) -> usize {
         locations
             .into_iter()
             .filter(|&loc| cache.get(loc).is_some())
@@ -120,7 +121,7 @@ mod tests {
     #[test]
     fn test_capacity_is_an_upper_bound() {
         for capacity in [1, 3, 15, 16, 17, 31, 32, 33, 100, 1000] {
-            let mut cache = LocationCache::<u64>::new(NZUsize!(capacity));
+            let mut cache = Cache::<u64>::new(NZUsize!(capacity));
             assert!(cache.locations.len() <= capacity);
             let inserted = 10 * capacity as u64;
             for loc in 0..inserted {
@@ -132,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_get_put_remove() {
-        let mut cache = LocationCache::<&str>::new(NZUsize!(16));
+        let mut cache = Cache::<&str>::new(NZUsize!(16));
         assert!(cache.get(7).is_none());
         cache.put(7, "a");
         assert_eq!(cache.get(7), Some(&"a"));
@@ -147,7 +148,7 @@ mod tests {
     #[test]
     fn test_overwrite_leaves_single_entry() {
         // Fill a one-set cache so a later overwrite has both a hole and a match to choose from.
-        let mut cache = LocationCache::new(NZUsize!(16));
+        let mut cache = Cache::new(NZUsize!(16));
         for loc in 0..16 {
             cache.put(loc, loc);
         }
@@ -161,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_full_set_evicts_oldest_location() {
-        let mut cache = LocationCache::new(NZUsize!(16));
+        let mut cache = Cache::new(NZUsize!(16));
         for loc in 0..16 {
             cache.put(loc, loc);
         }
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_empty_slot_is_used_before_eviction() {
-        let mut cache = LocationCache::new(NZUsize!(16));
+        let mut cache = Cache::new(NZUsize!(16));
         for loc in 0..16 {
             cache.put(loc, loc);
         }
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_small_capacity_holds_one_entry() {
-        let mut cache = LocationCache::new(NZUsize!(1));
+        let mut cache = Cache::new(NZUsize!(1));
         assert_eq!(cache.locations.len(), 1);
         cache.put(1, 1);
         cache.put(2, 2);
@@ -197,7 +198,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "reserved for empty slots")]
     fn test_put_rejects_empty_marker() {
-        let mut cache = LocationCache::new(NZUsize!(16));
+        let mut cache = Cache::new(NZUsize!(16));
         cache.put(u64::MAX, 0);
     }
 }

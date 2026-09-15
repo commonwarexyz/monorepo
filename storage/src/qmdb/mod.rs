@@ -68,6 +68,7 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use cache::Cache;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
@@ -77,20 +78,19 @@ use commonware_utils::{
 };
 use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
-use location_cache::LocationCache;
 use std::{collections::VecDeque, sync::Arc};
 use thiserror::Error;
 
 pub mod any;
-pub mod batch_chain;
 pub(crate) mod bitmap;
+mod cache;
+pub mod chain;
 pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
-mod location_cache;
 mod metrics;
 pub mod operation;
 pub mod store;
@@ -223,7 +223,7 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     ///
-    /// See [`batch_chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
@@ -291,7 +291,7 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(LocationCache::<<C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -330,7 +330,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -352,7 +352,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -382,7 +382,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -407,7 +407,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -441,7 +441,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut LocationCache<<R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -576,7 +576,7 @@ where
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(LocationCache::<<C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
