@@ -666,7 +666,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         )
                         && scheme.verify_certificate::<_, D>(
                             &mut rng,
-                            Subject::<D>::Nullify { round },
+                            Subject::Nullify { round },
                             &certificate,
                             &strategy,
                         )
