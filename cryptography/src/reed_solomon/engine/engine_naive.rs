@@ -49,8 +49,7 @@ impl Engine for Naive {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        assert!(size.is_power_of_two());
-        assert!(truncated_size <= size);
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
 
         let mut dist = size / 2;
         while dist > 0 {
@@ -81,8 +80,7 @@ impl Engine for Naive {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        assert!(size.is_power_of_two());
-        assert!(truncated_size <= size);
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
 
         let mut dist = 1;
         while dist < size {

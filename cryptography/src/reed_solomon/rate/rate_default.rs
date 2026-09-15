@@ -2,8 +2,8 @@ use crate::reed_solomon::{
     DecoderResult, EncoderResult, Error,
     engine::{Engine, GF_ORDER},
     rate::{
-        DecoderWork, EncoderWork, HighRate, HighRateDecoder, HighRateEncoder, LowRate,
-        LowRateDecoder, LowRateEncoder, Rate, RateDecoder, RateEncoder,
+        DecoderWork, EncoderWork, HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder,
+        Rate, RateDecoder, RateEncoder,
     },
 };
 use core::{cmp::Ordering, marker::PhantomData};
@@ -62,20 +62,6 @@ fn use_high_rate(original_count: usize, recovery_count: usize) -> Result<bool, E
     }
 }
 
-fn validate_rate<E: Engine>(
-    original_count: usize,
-    recovery_count: usize,
-    shard_bytes: usize,
-) -> Result<bool, Error> {
-    let use_high = use_high_rate(original_count, recovery_count)?;
-    if use_high {
-        HighRate::<E>::validate(original_count, recovery_count, shard_bytes)?;
-    } else {
-        LowRate::<E>::validate(original_count, recovery_count, shard_bytes)?;
-    }
-    Ok(use_high)
-}
-
 // ======================================================================
 // DefaultRate - PUBLIC
 
@@ -118,6 +104,18 @@ pub struct DefaultRateEncoder<E: Engine>(InnerEncoder<E>);
 
 impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
     type Rate = DefaultRate<E>;
+
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        if use_high_rate(original_count, recovery_count)? {
+            HighRateEncoder::<E>::validate(original_count, recovery_count, shard_bytes)
+        } else {
+            LowRateEncoder::<E>::validate(original_count, recovery_count, shard_bytes)
+        }
+    }
 
     fn add_original_shard<T: AsRef<[u8]>>(&mut self, original_shard: T) -> Result<(), Error> {
         match &mut self.0 {
@@ -177,7 +175,8 @@ impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
         recovery_count: usize,
         shard_bytes: usize,
     ) -> Result<(), Error> {
-        let new_rate_is_high = validate_rate::<E>(original_count, recovery_count, shard_bytes)?;
+        Self::validate(original_count, recovery_count, shard_bytes)?;
+        let new_rate_is_high = use_high_rate(original_count, recovery_count)?;
 
         match &mut self.0 {
             InnerEncoder::High(high) if new_rate_is_high => {
@@ -253,6 +252,18 @@ pub struct DefaultRateDecoder<E: Engine>(InnerDecoder<E>);
 impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
     type Rate = DefaultRate<E>;
 
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        if use_high_rate(original_count, recovery_count)? {
+            HighRateDecoder::<E>::validate(original_count, recovery_count, shard_bytes)
+        } else {
+            LowRateDecoder::<E>::validate(original_count, recovery_count, shard_bytes)
+        }
+    }
+
     fn add_original_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,
@@ -327,7 +338,8 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         recovery_count: usize,
         shard_bytes: usize,
     ) -> Result<(), Error> {
-        let new_rate_is_high = validate_rate::<E>(original_count, recovery_count, shard_bytes)?;
+        Self::validate(original_count, recovery_count, shard_bytes)?;
+        let new_rate_is_high = use_high_rate(original_count, recovery_count)?;
 
         match &mut self.0 {
             InnerDecoder::High(high) if new_rate_is_high => {
