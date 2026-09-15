@@ -1189,7 +1189,7 @@ unsafe impl BufMut for IoBufsMut {
             }
         }
         // A safe Buf implementation may underreport its remaining bytes.
-        assert!(!src.has_remaining(), "source exceeds writable capacity");
+        panic!("source exceeds writable capacity");
     }
 
     #[inline]
@@ -2627,7 +2627,8 @@ mod tests {
 
     struct DefaultPut<'a>(&'a mut IoBufsMut);
 
-    // SAFETY: All required methods delegate to IoBufsMut without changing its state.
+    // SAFETY: All required methods delegate directly to IoBufsMut,
+    // preserving its BufMut contract.
     unsafe impl BufMut for DefaultPut<'_> {
         fn remaining_mut(&self) -> usize {
             self.0.remaining_mut()
@@ -2739,11 +2740,14 @@ mod tests {
         for chunk in [&[][..], &[0xAB; 64][..]] {
             for count in 1..=8 {
                 let mut bufs = writable_chunks(count);
+                let before = mutable_chunk_state(&mut bufs);
                 assert!(
                     catch_unwind(AssertUnwindSafe(|| bufs.put(MalformedSource(chunk)))).is_err()
                 );
-                for buf in bufs.chunks_mut() {
-                    assert!(buf.len() <= buf.capacity());
+                if chunk.is_empty() {
+                    assert_eq!(mutable_chunk_state(&mut bufs), before);
+                } else {
+                    assert_eq!(bufs.remaining_mut(), 0);
                 }
             }
         }
