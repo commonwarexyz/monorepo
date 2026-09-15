@@ -56,7 +56,10 @@ impl<K> Cache<K> {
     /// Returns the slot holding `location`, if any.
     fn slot(&self, location: u64) -> Option<usize> {
         let start = self.set_start(location);
-        (start..start + self.ways).find(|&i| self.locations[i] == location)
+        self.locations[start..start + self.ways]
+            .iter()
+            .position(|&resident| resident == location)
+            .map(|offset| start + offset)
     }
 
     /// Returns the key cached for `location`.
@@ -170,6 +173,24 @@ mod tests {
         assert!(cache.get(0).is_none());
         assert_eq!(present(&cache, 1..16), 15);
         assert_eq!(cache.get(100), Some(&100));
+    }
+
+    #[test]
+    fn test_eviction_is_confined_to_its_set() {
+        let mut cache = Cache::new(NZUsize!(2 * WAYS));
+        let (first, second): (Vec<_>, Vec<_>) =
+            (0..(4 * WAYS) as u64).partition(|&loc| cache.set_start(loc) == 0);
+        assert!(first.len() > WAYS && second.len() > WAYS);
+
+        for &loc in first[..WAYS].iter().chain(&second[..WAYS]) {
+            cache.put(loc, loc);
+        }
+        cache.put(second[WAYS], second[WAYS]);
+
+        assert!(cache.get(second[0]).is_none());
+        for &loc in first[..WAYS].iter().chain(&second[1..=WAYS]) {
+            assert_eq!(cache.get(loc), Some(&loc));
+        }
     }
 
     #[test]
