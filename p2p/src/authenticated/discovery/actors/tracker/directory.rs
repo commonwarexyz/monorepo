@@ -422,6 +422,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Compile peers to send
+        let now = self.context.current().epoch_millis();
         let peers: Vec<_> = bit_vec
             .bits
             .iter()
@@ -433,7 +434,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 // but within our synchrony bound. Avoid sharing this information as it could get us
                 // blocked by other peers due to clock skew. Consider timestamps earlier than the
                 // current time to be safe enough to share.
-                info.filter(|i| i.timestamp <= self.context.current().epoch_millis())
+                info.filter(|i| i.timestamp <= now)
             })
             .collect();
 
@@ -1813,6 +1814,69 @@ mod tests {
                 !record.deletable(),
                 "Bootstrapper should remain not deletable after unblock"
             );
+        });
+    }
+
+    #[test]
+    fn test_infos_timestamp_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            context.sleep(Duration::from_millis(10)).await;
+            let now = context.current().epoch_millis();
+            let signer = PrivateKey::from_seed(0);
+            let config = Config {
+                allow_private_ips: true,
+                allow_dns: true,
+                max_sets: NZUsize!(1),
+                dial_fail_limit: 1,
+                peer_connection_cooldown: Duration::from_millis(100),
+                block_duration: Duration::from_secs(100),
+            };
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                create_myself_info(&signer, test_socket(), now),
+                config,
+                new_releaser(context.child("releaser")),
+            );
+            let infos: Vec<_> = [now - 1, now, now + 1]
+                .into_iter()
+                .enumerate()
+                .map(|(i, timestamp)| {
+                    types::Info::sign(
+                        &PrivateKey::from_seed(i as u64 + 1),
+                        NAMESPACE,
+                        test_socket(),
+                        timestamp,
+                    )
+                })
+                .collect();
+            let peers: OrderedSet<_> = infos
+                .iter()
+                .map(|info| info.public_key.clone())
+                .try_collect()
+                .unwrap();
+            directory.track(0, TrackedPeers::from(peers)).unwrap();
+            directory.update_peers(infos.clone());
+            let reservations: Vec<_> = infos
+                .iter()
+                .map(|info| {
+                    let reservation = directory.dial(&info.public_key).unwrap();
+                    directory.connect(&info.public_key, true);
+                    reservation
+                })
+                .collect();
+            let requested = types::BitVec {
+                index: 0,
+                bits: BitMap::zeroes(3),
+            };
+            let shared = directory.infos(requested.clone()).unwrap();
+            assert_eq!(shared.len(), 2);
+            assert!(shared.iter().any(|info| info.timestamp == now - 1));
+            assert!(shared.iter().any(|info| info.timestamp == now));
+
+            context.sleep(Duration::from_millis(1)).await;
+            assert_eq!(directory.infos(requested).unwrap().len(), 3);
+            drop(reservations);
         });
     }
 

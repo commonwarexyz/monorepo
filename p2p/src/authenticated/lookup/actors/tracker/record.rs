@@ -2,13 +2,7 @@ use crate::{
     authenticated::dialing::{DialStatus, ReserveResult},
     types::{self, Ingress},
 };
-use commonware_runtime::Clock;
-use commonware_utils::SystemTimeExt;
-use rand_core::Rng;
-use std::{
-    net::IpAddr,
-    time::{Duration, SystemTime},
-};
+use std::{net::IpAddr, time::SystemTime};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -29,11 +23,17 @@ pub enum Status {
 
     /// The peer connection is reserved by an actor that is attempting to establish a connection.
     /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
-    Reserved,
+    Reserved {
+        /// Whether the address changed after reservation.
+        stale: bool,
+    },
 
     /// The peer is connected.
     /// Must return to [Status::Inert] after the connection is closed.
-    Active,
+    Active {
+        /// Whether the address changed after connection.
+        stale: bool,
+    },
 }
 
 /// Represents a record of a peer's address and associated information.
@@ -44,9 +44,6 @@ pub struct Record {
 
     /// Connection status of the peer.
     status: Status,
-
-    /// If `true`, the reserved or active connection state was created before the latest address.
-    stale_connection: bool,
 
     /// Number of primary peer sets this peer is part of.
     primary_sets: usize,
@@ -72,7 +69,6 @@ impl Record {
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
-            stale_connection: false,
             primary_sets: 0,
             secondary_sets: 0,
             persistent: false,
@@ -86,7 +82,6 @@ impl Record {
         Self {
             address: Address::Myself,
             status: Status::Inert,
-            stale_connection: false,
             primary_sets: 0,
             secondary_sets: 0,
             persistent: true,
@@ -108,8 +103,9 @@ impl Record {
                     return false;
                 }
                 *existing = addr;
-                if self.is_reserved_or_connected() {
-                    self.stale_connection = true;
+                match &mut self.status {
+                    Status::Reserved { stale } | Status::Active { stale } => *stale = true,
+                    Status::Inert => {}
                 }
                 true
             }
@@ -136,28 +132,31 @@ impl Record {
         self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
     }
 
-    /// Attempt to reserve the peer for connection.
+    /// Check reservation eligibility at `now` without changing the record.
     ///
-    /// Checks that the peer is not ourselves, is currently inert, and that
-    /// `next_reservable_at` has passed. On success, computes a jittered
-    /// `next_dial_at` and sets `next_reservable_at` to `now + interval`.
-    pub fn reserve(
-        &mut self,
-        context: &mut (impl Rng + Clock),
-        interval: Duration,
-    ) -> ReserveResult {
+    /// Returns [ReserveResult::Reserved] if the peer is not ourselves, is inert,
+    /// and its reservation cooldown has elapsed. Peer set membership and blocks
+    /// are checked by the directory.
+    pub fn reservation_status(&self, now: SystemTime) -> ReserveResult {
         if matches!(self.address, Address::Myself) || !matches!(self.status, Status::Inert) {
             return ReserveResult::Unavailable;
         }
-        let now = context.current();
         if now < self.next_reservable_at {
             return ReserveResult::RateLimited;
         }
-        self.status = Status::Reserved;
-        self.stale_connection = false;
-        self.next_reservable_at = now.saturating_add_ext(interval);
-        self.next_dial_at = self.next_reservable_at.add_jittered(context, interval / 2);
         ReserveResult::Reserved
+    }
+
+    /// Reserve an eligible peer with the supplied cooldown and dial deadlines.
+    ///
+    /// The caller must first check [Self::reservation_status] and compute both
+    /// deadlines from the same timestamp, sampling jitter only after eligibility succeeds.
+    pub fn reserve(&mut self, next_reservable_at: SystemTime, next_dial_at: SystemTime) {
+        assert!(!matches!(self.address, Address::Myself));
+        assert!(matches!(self.status, Status::Inert));
+        self.status = Status::Reserved { stale: false };
+        self.next_reservable_at = next_reservable_at;
+        self.next_dial_at = next_dial_at;
     }
 
     /// Marks the peer as connected.
@@ -166,11 +165,13 @@ impl Record {
     ///
     /// Returns `false` if the reservation was invalidated by an address change.
     pub fn connect(&mut self) -> bool {
-        assert!(matches!(self.status, Status::Reserved));
-        if self.stale_connection {
+        let Status::Reserved { stale } = self.status else {
+            panic!("Cannot connect a peer that is not Reserved");
+        };
+        if stale {
             return false;
         }
-        self.status = Status::Active;
+        self.status = Status::Active { stale: false };
         true
     }
 
@@ -178,7 +179,6 @@ impl Record {
     pub fn release(&mut self) {
         assert!(self.status != Status::Inert, "Cannot release an Inert peer");
         self.status = Status::Inert;
-        self.stale_connection = false;
     }
 
     // ---------- Getters ----------
@@ -198,7 +198,10 @@ impl Record {
 
     /// Returns `true` when reserved or active connection state should be torn down.
     pub const fn needs_teardown(&self) -> bool {
-        self.is_reserved_or_connected() && (self.stale_connection || !self.eligible())
+        match self.status {
+            Status::Inert => false,
+            Status::Reserved { stale } | Status::Active { stale } => stale || !self.eligible(),
+        }
     }
 
     /// Returns the number of primary peer sets this peer is part of.
@@ -309,7 +312,6 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner, deterministic};
     use std::{net::SocketAddr, time::Duration};
 
     fn test_socket() -> SocketAddr {
@@ -318,6 +320,15 @@ mod tests {
 
     fn test_address() -> types::Address {
         types::Address::Symmetric(test_socket())
+    }
+
+    fn try_reserve(record: &mut Record) -> ReserveResult {
+        let now = SystemTime::UNIX_EPOCH;
+        let result = record.reservation_status(now);
+        if result == ReserveResult::Reserved {
+            record.reserve(now, now);
+        }
+        result
     }
 
     #[test]
@@ -385,96 +396,126 @@ mod tests {
 
     #[test]
     fn test_status_transitions_reserve_connect_release() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
+        let mut record = Record::known(test_address());
 
-            assert_eq!(record.status, Status::Inert);
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert_eq!(record.status, Status::Reserved);
+        assert_eq!(record.status, Status::Inert);
+        assert_eq!(try_reserve(&mut record), ReserveResult::Reserved);
+        assert_eq!(record.status, Status::Reserved { stale: false });
 
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Unavailable,
-                "Cannot re-reserve when Reserved"
-            );
-            assert_eq!(record.status, Status::Reserved);
+        assert_eq!(
+            try_reserve(&mut record),
+            ReserveResult::Unavailable,
+            "Cannot re-reserve when Reserved"
+        );
+        assert_eq!(record.status, Status::Reserved { stale: false });
 
-            record.connect();
-            assert_eq!(record.status, Status::Active);
+        record.connect();
+        assert_eq!(record.status, Status::Active { stale: false });
 
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Unavailable,
-                "Cannot reserve when Active"
-            );
-            assert_eq!(record.status, Status::Active);
+        assert_eq!(
+            try_reserve(&mut record),
+            ReserveResult::Unavailable,
+            "Cannot reserve when Active"
+        );
+        assert_eq!(record.status, Status::Active { stale: false });
 
-            record.release();
-            assert_eq!(record.status, Status::Inert);
+        record.release();
+        assert_eq!(record.status, Status::Inert);
 
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert_eq!(record.status, Status::Reserved);
-            record.release();
-            assert_eq!(record.status, Status::Inert);
-        });
+        assert_eq!(try_reserve(&mut record), ReserveResult::Reserved);
+        assert_eq!(record.status, Status::Reserved { stale: false });
+        record.release();
+        assert_eq!(record.status, Status::Inert);
     }
 
     #[test]
     fn test_needs_teardown_after_losing_eligibility() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            record.increment_primary();
+        let mut record = Record::known(test_address());
+        record.increment_primary();
 
-            assert!(!record.needs_teardown());
-            assert!(!record.is_reserved_or_connected());
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert!(!record.needs_teardown());
-            assert!(record.is_reserved_or_connected());
+        assert!(!record.needs_teardown());
+        assert!(!record.is_reserved_or_connected());
+        assert_eq!(try_reserve(&mut record), ReserveResult::Reserved);
+        assert!(!record.needs_teardown());
+        assert!(record.is_reserved_or_connected());
 
-            record.decrement_primary();
-            assert!(record.needs_teardown());
-            assert!(record.is_reserved_or_connected());
+        record.decrement_primary();
+        assert!(record.needs_teardown());
+        assert!(record.is_reserved_or_connected());
 
-            record.connect();
-            assert!(record.needs_teardown());
-            assert!(record.is_reserved_or_connected());
+        record.connect();
+        assert!(record.needs_teardown());
+        assert!(record.is_reserved_or_connected());
 
-            record.release();
-            assert!(!record.needs_teardown());
-            assert!(!record.is_reserved_or_connected());
-        });
+        record.release();
+        assert!(!record.needs_teardown());
+        assert!(!record.is_reserved_or_connected());
     }
 
     #[test]
-    fn test_reserved_connect_rejected_after_address_change() {
-        deterministic::Runner::default().start(|mut context| async move {
+    fn test_address_change_transitions() {
+        let now = SystemTime::UNIX_EPOCH;
+        let changed = types::Address::Symmetric(SocketAddr::from(([54, 12, 1, 10], 8081)));
+        for (initial, updated) in [
+            (Status::Inert, Status::Inert),
+            (
+                Status::Reserved { stale: false },
+                Status::Reserved { stale: true },
+            ),
+            (
+                Status::Active { stale: false },
+                Status::Active { stale: true },
+            ),
+        ] {
             let mut record = Record::known(test_address());
             record.increment_primary();
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-
-            assert!(record.update(types::Address::Symmetric(SocketAddr::from((
-                [54, 12, 1, 10],
-                8081,
-            )))));
-            assert!(record.needs_teardown());
-            assert!(!record.connect());
-            assert_eq!(record.status, Status::Reserved);
-
-            record.release();
+            record.status = initial;
+            assert!(!record.update(test_address()));
+            assert_eq!(record.status, initial);
             assert!(!record.needs_teardown());
-        });
+
+            assert!(record.update(changed.clone()));
+            assert_eq!(record.status, updated);
+            assert_eq!(record.needs_teardown(), initial != Status::Inert);
+
+            // Returning to the original address does not revive a stale connection.
+            assert!(record.update(test_address()));
+            assert!(!record.update(test_address()));
+            assert_eq!(record.status, updated);
+            if matches!(initial, Status::Reserved { .. }) {
+                assert!(!record.connect());
+                assert_eq!(record.status, updated);
+            }
+            if initial != Status::Inert {
+                record.release();
+            }
+            assert!(!record.needs_teardown());
+            assert_eq!(record.reservation_status(now), ReserveResult::Reserved);
+            record.reserve(now, now);
+            assert!(record.connect());
+            assert_eq!(record.status, Status::Active { stale: false });
+        }
+    }
+
+    #[test]
+    fn test_reservation_unavailable_before_cooldown() {
+        let now = SystemTime::UNIX_EPOCH;
+        for status in [
+            Status::Reserved { stale: false },
+            Status::Reserved { stale: true },
+            Status::Active { stale: false },
+            Status::Active { stale: true },
+        ] {
+            let mut record = Record::known(test_address());
+            record.status = status;
+            record.next_reservable_at = now + Duration::from_secs(1);
+            assert_eq!(record.reservation_status(now), ReserveResult::Unavailable);
+            assert_eq!(record.status, status);
+        }
+        let mut myself = Record::myself();
+        myself.next_reservable_at = now + Duration::from_secs(1);
+        assert_eq!(myself.reservation_status(now), ReserveResult::Unavailable);
+        assert!(!myself.update(test_address()));
     }
 
     #[test]
@@ -487,15 +528,10 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_connect_when_active_panics() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            record.connect();
-            record.connect();
-        });
+        let mut record = Record::known(test_address());
+        assert_eq!(try_reserve(&mut record), ReserveResult::Reserved);
+        record.connect();
+        record.connect();
     }
 
     #[test]
@@ -507,32 +543,27 @@ mod tests {
 
     #[test]
     fn test_deletable_logic_detailed() {
-        deterministic::Runner::default().start(|mut context| async move {
-            assert!(!Record::myself().deletable());
+        assert!(!Record::myself().deletable());
 
-            let mut record = Record::known(test_address());
-            assert_eq!(record.primary_sets, 0);
-            assert_eq!(record.status, Status::Inert);
-            assert!(record.deletable());
+        let mut record = Record::known(test_address());
+        assert_eq!(record.primary_sets, 0);
+        assert_eq!(record.status, Status::Inert);
+        assert!(record.deletable());
 
-            record.increment_primary();
-            assert!(!record.deletable());
+        record.increment_primary();
+        assert!(!record.deletable());
 
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert!(!record.deletable());
+        assert_eq!(try_reserve(&mut record), ReserveResult::Reserved);
+        assert!(!record.deletable());
 
-            record.connect();
-            assert!(!record.deletable());
+        record.connect();
+        assert!(!record.deletable());
 
-            record.release();
-            assert!(!record.deletable());
+        record.release();
+        assert!(!record.deletable());
 
-            record.decrement_primary();
-            assert!(record.deletable());
-        });
+        record.decrement_primary();
+        assert!(record.deletable());
     }
 
     #[test]
@@ -551,124 +582,106 @@ mod tests {
 
     #[test]
     fn test_acceptable_checks_eligibility_status_and_ip() {
-        deterministic::Runner::default().start(|mut context| async move {
-            use std::net::IpAddr;
+        let egress_ip: IpAddr = [8, 8, 8, 8].into();
+        let wrong_ip: IpAddr = [1, 2, 3, 4].into();
+        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-            let egress_ip: IpAddr = [8, 8, 8, 8].into();
-            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        let mut record = Record::known(types::Address::Symmetric(public_socket));
+        record.increment_primary();
+        assert!(record.acceptable(egress_ip, false));
+        assert!(!record.acceptable(wrong_ip, false));
 
-            let mut record = Record::known(types::Address::Symmetric(public_socket));
-            record.increment_primary();
-            assert!(record.acceptable(egress_ip, false));
-            assert!(!record.acceptable(wrong_ip, false));
+        let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
+        assert!(!record_not_eligible.acceptable(egress_ip, false));
 
-            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-            assert!(!record_not_eligible.acceptable(egress_ip, false));
+        let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
+        record_reserved.increment_primary();
+        try_reserve(&mut record_reserved);
+        assert!(!record_reserved.acceptable(egress_ip, false));
 
-            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-            record_reserved.increment_primary();
-            record_reserved.reserve(&mut context, Duration::ZERO);
-            assert!(!record_reserved.acceptable(egress_ip, false));
-
-            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-            record_connected.increment_primary();
-            record_connected.reserve(&mut context, Duration::ZERO);
-            record_connected.connect();
-            assert!(!record_connected.acceptable(egress_ip, false));
-        });
+        let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
+        record_connected.increment_primary();
+        try_reserve(&mut record_connected);
+        record_connected.connect();
+        assert!(!record_connected.acceptable(egress_ip, false));
     }
 
     #[test]
     fn test_acceptable_bypass_ip_check() {
-        deterministic::Runner::default().start(|mut context| async move {
-            use std::net::IpAddr;
+        let egress_ip: IpAddr = [8, 8, 8, 8].into();
+        let wrong_ip: IpAddr = [1, 2, 3, 4].into();
+        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
 
-            let egress_ip: IpAddr = [8, 8, 8, 8].into();
-            let wrong_ip: IpAddr = [1, 2, 3, 4].into();
-            let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        let mut record = Record::known(types::Address::Symmetric(public_socket));
+        record.increment_primary();
+        assert!(record.acceptable(wrong_ip, true));
 
-            let mut record = Record::known(types::Address::Symmetric(public_socket));
-            record.increment_primary();
-            assert!(record.acceptable(wrong_ip, true));
+        let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
+        assert!(!record_not_eligible.acceptable(egress_ip, true));
 
-            let record_not_eligible = Record::known(types::Address::Symmetric(public_socket));
-            assert!(!record_not_eligible.acceptable(egress_ip, true));
+        let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
+        record_reserved.increment_primary();
+        try_reserve(&mut record_reserved);
+        assert!(!record_reserved.acceptable(egress_ip, true));
 
-            let mut record_reserved = Record::known(types::Address::Symmetric(public_socket));
-            record_reserved.increment_primary();
-            record_reserved.reserve(&mut context, Duration::ZERO);
-            assert!(!record_reserved.acceptable(egress_ip, true));
+        let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
+        record_connected.increment_primary();
+        try_reserve(&mut record_connected);
+        record_connected.connect();
+        assert!(!record_connected.acceptable(egress_ip, true));
 
-            let mut record_connected = Record::known(types::Address::Symmetric(public_socket));
-            record_connected.increment_primary();
-            record_connected.reserve(&mut context, Duration::ZERO);
-            record_connected.connect();
-            assert!(!record_connected.acceptable(egress_ip, true));
-
-            assert!(!Record::myself().acceptable(egress_ip, true));
-        });
+        assert!(!Record::myself().acceptable(egress_ip, true));
     }
 
     #[test]
-    fn test_reserve_sets_next_dial() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            record.increment_primary();
-            let now = context.current();
-            assert_eq!(record.dialable(now, true, true), DialStatus::Now);
+    fn test_reservation_and_dial_boundaries() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let next_reservable_at = now + Duration::from_secs(5);
+        let next_dial_at = next_reservable_at + Duration::from_secs(2);
+        let mut record = Record::known(test_address());
+        record.increment_primary();
+        assert_eq!(record.reservation_status(now), ReserveResult::Reserved);
+        record.reserve(next_reservable_at, next_dial_at);
+        record.release();
 
-            let interval = Duration::from_secs(1);
-            assert_eq!(
-                record.reserve(&mut context, interval),
-                ReserveResult::Reserved
-            );
-            record.release();
-
-            // Immediately after release, dialable returns After with jittered time.
-            let status = record.dialable(now, true, true);
-            match status {
-                DialStatus::After(t) => {
-                    assert!(t >= now + interval);
-                    assert!(t <= now + interval * 2);
-                }
-                other => panic!("expected After, got {:?}", other),
-            }
-        });
-    }
-
-    #[test]
-    fn test_reserve_rate_limited() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            let interval = Duration::from_secs(5);
-
-            assert_eq!(
-                record.reserve(&mut context, interval),
-                ReserveResult::Reserved
-            );
-            record.release();
-
-            // Immediate re-reserve is rate-limited.
-            assert_eq!(
-                record.reserve(&mut context, interval),
-                ReserveResult::RateLimited
-            );
-
-            // After interval elapses, reserve succeeds again.
-            context.sleep(interval).await;
-            assert_eq!(
-                record.reserve(&mut context, interval),
-                ReserveResult::Reserved
-            );
-        });
+        for (at, reservation, dial) in [
+            (
+                now,
+                ReserveResult::RateLimited,
+                DialStatus::After(next_dial_at),
+            ),
+            (
+                next_reservable_at - Duration::from_nanos(1),
+                ReserveResult::RateLimited,
+                DialStatus::After(next_dial_at),
+            ),
+            (
+                next_reservable_at,
+                ReserveResult::Reserved,
+                DialStatus::After(next_dial_at),
+            ),
+            (
+                next_dial_at - Duration::from_nanos(1),
+                ReserveResult::Reserved,
+                DialStatus::After(next_dial_at),
+            ),
+            (next_dial_at, ReserveResult::Reserved, DialStatus::Now),
+            (
+                next_dial_at + Duration::from_nanos(1),
+                ReserveResult::Reserved,
+                DialStatus::Now,
+            ),
+        ] {
+            assert_eq!(record.reservation_status(at), reservation, "at {at:?}");
+            assert_eq!(record.dialable(at, true, true), dial, "at {at:?}");
+            assert_eq!(record.status, Status::Inert);
+            assert_eq!(record.next_reservable_at, next_reservable_at);
+            assert_eq!(record.next_dial_at, next_dial_at);
+        }
     }
 
     #[test]
     fn test_dialable_checks_ingress_ip() {
-        use Ingress;
-        use std::net::IpAddr;
-
         let now = SystemTime::UNIX_EPOCH;
 
         // Public ingress, public egress - dialable

@@ -497,8 +497,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Reserve
         let record = self.peers.get_mut(peer).unwrap();
-        match record.reserve(&mut self.context, self.peer_connection_cooldown) {
+        let now = self.context.current();
+        match record.reservation_status(now) {
             ReserveResult::Reserved => {
+                let interval = self.peer_connection_cooldown;
+                let next_reservable_at = now.saturating_add_ext(interval);
+                let next_dial_at = next_reservable_at.add_jittered(&mut self.context, interval / 2);
+                record.reserve(next_reservable_at, next_dial_at);
                 self.metrics.reserved.inc();
                 Some(Reservation::new(metadata, self.releaser.clone()))
             }
@@ -556,6 +561,7 @@ mod tests {
         NZUsize, SystemTimeExt, hostname,
         ordered::{Map, Set},
     };
+    use rand_core::Rng as _;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -2246,6 +2252,82 @@ mod tests {
                 .expect("should succeed after interval");
             assert_eq!(ingress, Ingress::Socket(addr_1));
         });
+    }
+
+    #[test]
+    fn test_reservation_jitter_consumption() {
+        for cooldown in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_secs(1),
+        ] {
+            let run = |reserve| {
+                deterministic::Runner::seeded(42).start(|mut context| async move {
+                    let myself = ed25519::PrivateKey::from_seed(0).public_key();
+                    let peer = ed25519::PrivateKey::from_seed(1).public_key();
+                    let config = super::Config {
+                        allow_private_ips: true,
+                        allow_dns: true,
+                        bypass_ip_check: false,
+                        max_sets: NZUsize!(1),
+                        peer_connection_cooldown: cooldown,
+                        block_duration: Duration::from_secs(100),
+                    };
+                    let mut directory = Directory::init(
+                        context.child("directory"),
+                        myself.clone(),
+                        config,
+                        new_releaser(context.child("releaser")),
+                    );
+                    directory
+                        .track(
+                            0,
+                            primary(
+                                [(peer.clone(), addr(SocketAddr::from(([8, 8, 8, 8], 1235))))]
+                                    .try_into()
+                                    .unwrap(),
+                            ),
+                        )
+                        .unwrap();
+                    let now = context.current();
+                    let deadline = if reserve {
+                        assert!(
+                            directory
+                                .reserve(super::Metadata::Listener(myself))
+                                .is_none()
+                        );
+                        let reservation = directory
+                            .reserve(super::Metadata::Listener(peer.clone()))
+                            .unwrap();
+                        assert!(
+                            directory
+                                .reserve(super::Metadata::Listener(peer.clone()))
+                                .is_none()
+                        );
+                        assert!(directory.connect(&peer));
+                        assert!(
+                            directory
+                                .reserve(super::Metadata::Listener(peer.clone()))
+                                .is_none()
+                        );
+                        drop(reservation);
+                        directory.release(super::Metadata::Listener(peer.clone()));
+                        if !cooldown.is_zero() {
+                            assert!(
+                                directory
+                                    .reserve(super::Metadata::Listener(peer.clone()))
+                                    .is_none()
+                            );
+                        }
+                        directory.dialable().next_query_at.unwrap_or(now)
+                    } else {
+                        (now + cooldown).add_jittered(&mut context, cooldown / 2)
+                    };
+                    (deadline, context.next_u64())
+                })
+            };
+            assert_eq!(run(true), run(false), "cooldown {cooldown:?}");
+        }
     }
 
     #[test]
