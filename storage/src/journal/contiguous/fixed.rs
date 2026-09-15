@@ -563,6 +563,31 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         })
     }
 
+    /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
+    /// without opening any stored blob. A crash at any point leaves a durable intent that the
+    /// next open finishes.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn open_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let checkpoint = checkpoint.stage_clear(size).await?;
+        clear_dependents().await?;
+        Self::open(context, cfg, checkpoint, None).await
+    }
+
     /// Open offsets while completing any previously staged dependent reset.
     pub(super) async fn init_cleared<F, Fut>(
         context: E,
@@ -621,6 +646,23 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     /// Previously acknowledged item end, bounded by the recovery cap.
     pub(super) const fn recovery_watermark(&self) -> u64 {
         self.watermark
+    }
+
+    /// Whether stored blobs hold bytes past the retained end: a blob was discarded unopened, or
+    /// the newest opened blob is longer than the items it retains. A partial trailing item counts
+    /// as excess.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn exceeded(&self) -> bool {
+        if !self.discarded.is_empty() {
+            return true;
+        }
+        let Some((&blob, writer)) = self.pending.last_key_value() else {
+            return false;
+        };
+        let items_per_blob = self.cfg.items_per_blob.get();
+        first_in_blob(self.bounds.start, blob, items_per_blob)
+            .and_then(|first| Inner::<E, A>::items_to_bytes(self.bounds.end.saturating_sub(first)))
+            .is_ok_and(|retained| writer.size() > retained)
     }
 
     /// Read an item for recovery selection or validation.
@@ -1092,18 +1134,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
-        // A journal sized at `u64::MAX` can never accept an append (the successor size
-        // overflows), so reject it before staging any reset intent.
-        if size == u64::MAX {
-            return Err(Error::SizeOverflow);
-        }
-
-        // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
-        // complete the clear before recovering bounds.
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        let checkpoint = checkpoint.stage_clear(size).await?;
-        clear_dependents().await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
+        Recovery::<E, A>::open_cleared(context, cfg, checkpoint, size, clear_dependents)
+            .await?
+            .publish(u64::MAX)
+            .await
     }
 
     /// Begin durably persisting the data blobs.
@@ -1964,6 +1999,26 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
     ) -> Result<Self::Recovery, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         Recovery::open(context, cfg, checkpoint, max_size).await
+    }
+
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+
+        // A staged clear already owns both blob partitions. Otherwise fail before writing intent
+        // if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&context, &cfg.partition).await?;
+        }
+        Recovery::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) }).await
+    }
+
+    async fn covers(context: &E, cfg: &Self::Config, position: u64) -> Result<bool, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        let span = match checkpoint.clear_target() {
+            Some(target) => target..target,
+            None => Recovery::<E, A>::span(context, cfg, &checkpoint).await?,
+        };
+        Ok(span.contains(&position) || (span.is_empty() && span.start == position))
     }
 
     type Config = Config;

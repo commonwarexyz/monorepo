@@ -2530,6 +2530,56 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         Recovery::open(context, cfg, max_size).await
     }
 
+    async fn covers(context: &E, cfg: &Self::Config, position: u64) -> Result<bool, Error> {
+        let span = Recovery::<E, V>::span(context, cfg).await?;
+        Ok(span.contains(&position) || (span.is_empty() && span.start == position))
+    }
+
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let data_partition = cfg.data_partition();
+        let data_context = context.child("data");
+        let offsets_context = context.child("offsets");
+        let offsets_cfg = cfg.offsets_config();
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_cfg.partition).await?;
+
+        // A staged clear already owns the offsets blob partitions. Otherwise fail before writing
+        // intent if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&offsets_context, &offsets_cfg.partition).await?;
+        }
+
+        // The offsets reset is staged durably, the data partition is removed, then the reset
+        // completes. A crash at any point leaves a staged clear that the next open finishes.
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            offsets_cfg,
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&data_context, &data_partition),
+        )
+        .await?;
+        let partition = Partition::new(
+            data_context,
+            data_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        Ok(Recovery {
+            context,
+            cfg,
+            partition,
+            pending: BTreeMap::new(),
+            discarded: Vec::new(),
+            recovered_scans: BTreeMap::new(),
+            offsets: Box::new(offsets),
+            bounds: size..size,
+            bounded: false,
+            #[cfg(test)]
+            halt_after_data_removal: false,
+        })
+    }
+
     type Config = Config<V::Cfg>;
 }
 
@@ -8152,7 +8202,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 26;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8211,7 +8261,7 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 31;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8266,7 +8316,7 @@ mod tests {
 
             #[allow(clippy::reversed_empty_ranges)]
             let _result = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg,
                 10..5, // invalid range: lower > upper
             )
@@ -8307,7 +8357,7 @@ mod tests {
             let lower_bound = 5; // blob 1
             let upper_bound = 20; // blob 3
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8377,7 +8427,7 @@ mod tests {
             let lower_bound = 8; // blob 1
             let upper_bound = 20;
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("sync"),
+                context.child("sync"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8422,7 +8472,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 26;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8476,7 +8526,7 @@ mod tests {
             let lower_bound = 7;
             let upper_bound = 20;
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8525,7 +8575,7 @@ mod tests {
             let lower_bound = 15; // blob 3
             let upper_bound = 26; // last element in blob 5
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8579,7 +8629,7 @@ mod tests {
             let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at blob boundary (24/5 = 4)
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8649,7 +8699,7 @@ mod tests {
             let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (blob 2: 14/5 = 2)
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
