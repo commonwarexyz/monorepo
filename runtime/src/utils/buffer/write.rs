@@ -48,7 +48,8 @@ use std::num::NonZeroUsize;
 ///     blob.write_at(11, b"!").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
-///     // Read back the data to verify
+///     // Drop the writer before reopening the blob, since a blob has one open at a time
+///     drop(blob);
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
 ///     let buf = reader.read(size as usize).await.expect("read failed");
