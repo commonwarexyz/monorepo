@@ -4,10 +4,10 @@
   <rect width="1120" height="1010" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .title { font-size: 28px; font-weight: 700; fill: #111; }
-    .heading { font-size: 23px; font-weight: 700; fill: #111; }
-    .label { font-size: 21px; fill: #333; }
-    .note { font-size: 19px; fill: #666; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
     .center { text-anchor: middle; }
     .blue { fill: #2424d4; }
     .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }

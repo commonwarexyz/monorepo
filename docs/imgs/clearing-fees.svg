@@ -4,12 +4,12 @@
   <rect width="1080" height="870" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .title { font-size: 30px; font-weight: 700; fill: #111; }
-    .subtitle { font-size: 20px; fill: #666; }
-    .eyebrow { font-size: 20px; font-weight: 700; fill: #666; }
-    .heading { font-size: 23px; font-weight: 700; fill: #111; }
-    .label { font-size: 20px; fill: #333; }
-    .note { font-size: 20px; fill: #666; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 14px; fill: #666; }
+    .eyebrow { font-size: 16px; font-weight: 700; fill: #666; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
     .center { text-anchor: middle; }
     .right { text-anchor: end; }
     .blue { fill: #2424d4; }
@@ -20,7 +20,7 @@
     .selected { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
     .accepted { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
     .number { fill: #2424d4; }
-    .number-text { font-size: 20px; font-weight: 700; fill: #fff; text-anchor: middle; }
+    .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
     .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
     .thin-flow { fill: none; stroke: #777; stroke-width: 1.5; marker-end: url(#gray-arrow); }
     .rule { stroke: #d6d6d6; stroke-width: 1.5; }
