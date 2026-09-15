@@ -186,7 +186,6 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 let Some(Some(bits)) = bits.get(section) else {
                     continue;
                 };
-                let mut modified = false;
                 for bit_index in 0..(*size / record_size) {
                     if bit_index >= bits.len() || !bits.get(bit_index) {
                         blob.write_at(
@@ -195,12 +194,9 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                             WriteOptions::default(),
                         )
                         .await?;
-                        modified = true;
                     }
                 }
-                if modified {
-                    blob.sync().await?;
-                }
+                blob.sync().await?;
             }
 
             // Rebuild intervals from the committed records

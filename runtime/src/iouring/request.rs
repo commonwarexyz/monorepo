@@ -14,7 +14,7 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Held};
+use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
@@ -274,22 +274,33 @@ impl Request {
                     },
                 )
             }
-            Self::WriteAt(r) => (
-                RequestOutput::WriteAt(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: Some(r.cache),
-                    _write: Some(r.write),
-                },
-            ),
-            Self::Sync(r) => (
-                RequestOutput::Sync(result),
-                RetiredResources::File {
-                    _file: r.file,
-                    _cache: None,
-                    _write: None,
-                },
-            ),
+            Self::WriteAt(r) => {
+                // Only plain writes stay in `Writing`. Settle here so a caller that stopped
+                // waiting still leaves the open's debt correct.
+                r.file
+                    .wrote(r.state != WriteAtState::Writing, result.is_ok());
+                (
+                    RequestOutput::WriteAt(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _cache: Some(r.cache),
+                        _write: Some(r.write),
+                    },
+                )
+            }
+            Self::Sync(r) => {
+                if result.is_ok() {
+                    r.file.tracker.end_sync(r.seen);
+                }
+                (
+                    RequestOutput::Sync(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _cache: None,
+                        _write: None,
+                    },
+                )
+            }
             Self::Connect(r) => (
                 RequestOutput::Connect(result),
                 RetiredResources::Connect {
@@ -345,10 +356,10 @@ pub enum RetiredResources {
         /// Original byte owners, including consumed chunks.
         _write: WriteBuffers,
     },
-    /// File, directory hold, and any positioned I/O buffer/cache owners.
+    /// Open, directory hold, and any positioned I/O buffer/cache owners.
     File {
-        /// File owner carrying its original storage directory hold.
-        _file: Arc<Held>,
+        /// Open that issued the request, carrying its file, directory hold, and sync obligation.
+        _file: Arc<Shared>,
         /// Shared capability state retained by positioned I/O.
         _cache: Option<Cache>,
         /// Original write owners, absent for reads and standalone sync.
@@ -530,8 +541,8 @@ impl RecvRequest {
 
 /// Logical positioned file read request and its in-loop state.
 pub struct ReadAtRequest {
-    /// File used by the current read SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current read SQE uses.
+    pub file: Arc<Shared>,
     /// Starting file offset for the logical read.
     pub offset: u64,
     /// Bytes already read into `buf`.
@@ -667,8 +678,8 @@ fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
 
 /// Logical positioned file write request and its in-loop state.
 pub struct WriteAtRequest {
-    /// File used by the current write SQE.
-    pub file: Arc<Held>,
+    /// Open whose file the current write SQE uses.
+    pub file: Arc<Shared>,
     /// File offset for the next write SQE.
     pub offset: u64,
     /// Write cursor and buffers that still need to be written.
@@ -758,11 +769,19 @@ impl WriteAtRequest {
 
 /// Logical fsync request and its in-loop state.
 pub struct SyncRequest {
-    /// File descriptor to sync.
-    pub file: Arc<Held>,
+    /// Open whose file the fsync SQE uses.
+    pub file: Arc<Shared>,
+    /// Completed mutations that preceded this barrier's submission.
+    seen: u64,
 }
 
 impl SyncRequest {
+    /// Capture the mutations this sync can cover before submitting it to the ring.
+    pub fn new(file: Arc<Shared>) -> Self {
+        let seen = file.tracker.begin_sync();
+        Self { file, seen }
+    }
+
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         build_datasync_sqe(&self.file)
@@ -865,7 +884,7 @@ mod tests {
     }
 
     /// Retain a descriptor and directory hold for simulated storage requests.
-    fn make_file_fd() -> Arc<Held> {
+    fn make_file_fd() -> Arc<Shared> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         let file = File::from(OwnedFd::from(left));
 
@@ -878,7 +897,7 @@ mod tests {
             )
             .unwrap()
         });
-        Held::new(file, hold.clone())
+        Shared::detached(file, hold.clone())
     }
 
     /// Create a five-byte send with no deadline.
@@ -1221,9 +1240,7 @@ mod tests {
                     true,
                 ),
                 (
-                    Request::Sync(SyncRequest {
-                        file: make_file_fd(),
-                    }),
+                    Request::Sync(SyncRequest::new(make_file_fd())),
                     opcode::Fsync::CODE,
                     None,
                     true,
@@ -1582,16 +1599,12 @@ mod tests {
 
     #[test]
     fn test_active_sync_paths() {
-        let mut request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let mut request = Request::Sync(SyncRequest::new(make_file_fd()));
         assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
         // A sync exposes the kernel error code, including unsolicited ECANCELED.
         for code in [libc::ECANCELED, libc::EIO] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_file_fd()));
             let RequestOutput::Sync(Err(Error::Io(error))) = complete(request, ACTIVE, -code)
             else {
                 panic!("expected sync I/O error");
@@ -1600,13 +1613,31 @@ mod tests {
         }
 
         for result in [0, 1] {
-            let request = Request::Sync(SyncRequest {
-                file: make_file_fd(),
-            });
+            let request = Request::Sync(SyncRequest::new(make_file_fd()));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::Sync(Ok(()))
             ));
+        }
+    }
+
+    #[test]
+    fn test_sync_completion_credits_only_its_successful_barrier() {
+        for success in [false, true] {
+            for later_write in [false, true] {
+                let file = make_file_fd();
+                file.tracker.write();
+                file.tracker.complete();
+                let request = Request::Sync(SyncRequest::new(file.clone()));
+                if later_write {
+                    file.tracker.write();
+                    file.tracker.complete();
+                }
+                let result = if success { Ok(()) } else { Err(Error::Timeout) };
+                let (_, retired) = request.complete(result);
+                drop(retired);
+                assert_eq!(file.tracker.is_dirty(), !success || later_write);
+            }
         }
     }
 
@@ -1646,9 +1677,7 @@ mod tests {
         ));
         drop(retired);
 
-        let request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-        });
+        let request = Request::Sync(SyncRequest::new(make_file_fd()));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Sync(Err(Error::Timeout))));
         drop(retired);

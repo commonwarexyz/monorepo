@@ -339,7 +339,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
                 // The index truncation is already durable. Release its unreferenced values only
                 // after that proof, preserving the index-first crash-recovery order.
                 let values = values.truncate(section, value_size).await?;
-                (index, values.sync(section).await?)
+                (index, values)
             }
         };
         Ok(Self {
@@ -664,7 +664,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 
         // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 
@@ -2778,9 +2777,8 @@ mod tests {
             .await
             .expect("checkpoint restore failed");
 
-            // Restoring an already exact checkpoint syncs its index and values once each. Any
-            // additional durability work came from repairing data that restore discards.
-            assert_eq!(pending.calls(), 2);
+            // The checkpoint is already exact, so neither side needs a truncation sync.
+            assert_eq!(pending.calls(), 0);
             oversized.destroy().await.expect("failed to destroy");
         });
     }
