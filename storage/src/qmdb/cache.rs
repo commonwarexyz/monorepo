@@ -14,7 +14,8 @@ use core::num::NonZeroUsize;
 /// cache lines of locations per lookup.
 const WAYS: usize = 16;
 
-/// Marks an empty slot. No operation has this location.
+/// Marks an empty slot. Operation locations are leaf indices, bounded by the family's maximum
+/// leaf count (`2^62` for MMR and `2^62 + 30` for MMB), so `u64::MAX` is unreachable.
 const EMPTY: u64 = u64::MAX;
 
 /// Maps operation locations to their keys up to a fixed entry capacity.
