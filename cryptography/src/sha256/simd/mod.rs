@@ -1,4 +1,4 @@
-//! Pair-hashing SHA-256 kernels for merkle node messages.
+//! SHA-256 kernels for merkle node pairs and independent message batches.
 //!
 //! Modern SHA extensions (aarch64 SHA2, x86_64 SHA-NI) execute several
 //! rounds per instruction but with multi-cycle latency, so a single message
@@ -15,6 +15,9 @@
 //! those parts into vector registers, with no intermediate buffer. Any other
 //! shape, or the same shape split into a different part decomposition, falls
 //! back to serial hashing.
+//!
+//! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
+//! SIMD lanes, producing the ordinary SHA-256 digest of each message.
 
 use super::{DIGEST_LENGTH, Digest};
 
@@ -23,6 +26,11 @@ mod aarch64;
 #[cfg(all(
     target_arch = "x86_64",
     any(
+        all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vl",
+        ),
         all(
             target_feature = "sha",
             target_feature = "avx2",
@@ -44,6 +52,78 @@ const _: () = assert!(MMR_NODE_LEN == 72);
 /// The BMT node message length: two 32-byte digests (no position).
 const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
 const _: () = assert!(BMT_NODE_LEN == 64);
+
+/// Return whether AVX-512 software SHA-256 is available for 16 messages.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn supports_hash_x16() -> bool {
+    cfg_if::cfg_if! {
+        if #[cfg(all(
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vl",
+        ))] {
+            true
+        } else if #[cfg(feature = "std")] {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+        } else {
+            false
+        }
+    }
+}
+
+/// Minimum active lanes for an available x16 kernel.
+///
+/// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
+/// message on the software fallback. These are initial tuning choices for the
+/// local batch, independent of the number of strategy workers.
+///
+/// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn minimum_x16_batch_len() -> Option<usize> {
+    if !supports_hash_x16() {
+        return None;
+    }
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "std")] {
+            let sha = std::arch::is_x86_feature_detected!("sha");
+        } else {
+            let sha = cfg!(target_feature = "sha");
+        }
+    }
+    Some(if sha { 7 } else { 2 })
+}
+
+/// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn hash_x16(messages: [&[u8]; 16]) -> Option<[Digest; 16]> {
+    let len = messages[0].len();
+    if !supports_hash_x16() || !messages[1..].iter().all(|message| message.len() == len) {
+        return None;
+    }
+
+    cfg_if::cfg_if! {
+        if #[cfg(any(
+            feature = "std",
+            all(
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512vl",
+            ),
+        ))] {
+            // SAFETY: `supports_hash_x16` established every required target
+            // feature and equal lengths were established above.
+            let digests = unsafe { x86_64::hash_x16_equal(messages) };
+            Some(digests.map(Digest))
+        } else {
+            None
+        }
+    }
+}
 
 /// Hash two node-length messages, each given as parts, with the pair-hashing
 /// kernel for the current CPU.
