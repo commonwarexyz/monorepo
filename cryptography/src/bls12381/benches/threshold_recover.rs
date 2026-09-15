@@ -24,7 +24,7 @@ fn bench_threshold_recover(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let players = (0..n)
-                                .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                .map(|i| PrivateKey::from_seed(i).public_key())
                                 .try_collect()
                                 .unwrap();
                             let (public, shares) = deal::<MinSig, _, N3f1>(&mut rng, mode, players)
