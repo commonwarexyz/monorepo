@@ -443,14 +443,19 @@ impl<O: Sink> Sender<O> {
         Ok(chunks)
     }
 
+    /// Builds one contiguous chunk containing a single encrypted frame.
+    fn build_message(&mut self, bufs: impl Into<IoBufs>) -> Result<IoBuf, Error> {
+        let bufs = bufs.into();
+        let frame_len = self.encrypted_frame_len(bufs.len())?;
+        self.build_chunk(std::iter::once(bufs), frame_len)
+    }
+
     /// Encrypts and sends a message to the peer.
     ///
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
     /// and sends the ciphertext.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let frame_len = self.encrypted_frame_len(bufs.len())?;
-        let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
+        let chunk = self.build_message(bufs)?;
         self.sink.send(chunk).await.map_err(Error::SendFailed)
     }
 
@@ -466,20 +471,26 @@ impl<O: Sink> Sender<O> {
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let plans = self.plan_chunks(bufs)?;
-        if plans.is_empty() {
-            return Ok(());
-        }
+        // Drop the input iterator before awaiting the sink.
+        let chunks = {
+            let mut bufs = bufs.into_iter();
+            let Some(first) = bufs.next() else {
+                return Ok(());
+            };
+            match bufs.next() {
+                None => IoBufs::from(self.build_message(first)?),
+                Some(second) => {
+                    let plans = self.plan_chunks([first, second].into_iter().chain(bufs))?;
+                    let mut chunks = Vec::with_capacity(plans.len());
+                    for plan in plans {
+                        chunks.push(self.build_chunk(plan.messages, plan.total_len)?);
+                    }
+                    IoBufs::from(chunks)
+                }
+            }
+        };
 
-        let mut chunks = Vec::with_capacity(plans.len());
-        for plan in plans {
-            chunks.push(self.build_chunk(plan.messages, plan.total_len)?);
-        }
-
-        self.sink
-            .send(IoBufs::from(chunks))
-            .await
-            .map_err(Error::SendFailed)
+        self.sink.send(chunks).await.map_err(Error::SendFailed)
     }
 }
 
@@ -735,6 +746,77 @@ mod test {
     }
 
     #[test]
+    fn test_send_many_empty_and_singleton() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+            let sends = Arc::new(AtomicUsize::new(0));
+            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+
+            let dialer_config = transport_config(dialer_crypto.clone());
+            let listener_config = transport_config(listener_crypto.clone());
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+            )
+            .await?;
+
+            let (_listener_peer, _listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+            sends.store(0, Ordering::Relaxed);
+            chunk_counts.lock().clear();
+
+            // Exhaustion ends the batch even if the iterator is not fused.
+            let mut exhausted = false;
+            dialer_sender
+                .send_many(std::iter::from_fn(|| {
+                    assert!(!exhausted);
+                    exhausted = true;
+                    None::<&[u8]>
+                }))
+                .await?;
+            assert_eq!(sends.load(Ordering::Relaxed), 0);
+            assert!(chunk_counts.lock().is_empty());
+
+            let payload = b"alpha";
+            let mut next = 0;
+            let input = std::iter::from_fn(|| {
+                next += 1;
+                match next {
+                    1 => Some(payload),
+                    2 => None,
+                    _ => panic!("iterator polled after exhaustion"),
+                }
+            });
+            assert_eq!(input.size_hint(), (0, None));
+            dialer_sender.send_many(input).await?;
+            assert_eq!(sends.load(Ordering::Relaxed), 1);
+            assert_eq!(*chunk_counts.lock(), vec![1]);
+            assert_eq!(listener_receiver.recv().await?.coalesce(), payload);
+            Ok(())
+        })
+    }
+
+    #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -776,13 +858,11 @@ mod test {
 
             // Three small messages should fit in one pooled chunk, so `send_many`
             // still reaches the runtime as a single single-chunk send call.
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(b"alpha")),
-                    IoBufs::from(IoBuf::from(b"beta")),
-                    IoBufs::from(IoBuf::from(b"gamma")),
-                ])
-                .await?;
+            let mut messages =
+                [b"alpha".as_slice(), b"beta".as_slice(), b"gamma".as_slice()].into_iter();
+            let input = std::iter::from_fn(|| messages.next());
+            assert_eq!(input.size_hint(), (0, None));
+            dialer_sender.send_many(input).await?;
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
             assert_eq!(*chunk_counts.lock(), vec![1]);
@@ -977,25 +1057,23 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().clear();
 
-            let valid = vec![7u8; 32];
-            let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
-            assert!(matches!(
-                dialer_sender
-                    .send_many(vec![
-                        IoBufs::from(IoBuf::from(valid)),
-                        IoBufs::from(IoBuf::from(oversized)),
-                    ])
-                    .await,
-                Err(Error::SendTooLarge(_))
-            ));
+            let valid = IoBuf::from(vec![7u8; 32]);
+            let oversized = IoBuf::from(vec![9u8; MAX_MESSAGE_SIZE as usize + 1]);
+            for input in [vec![oversized.clone()], vec![valid, oversized]] {
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
+                assert!(matches!(
+                    dialer_sender.send_many(input).await,
+                    Err(Error::SendTooLarge(_))
+                ));
+                assert_eq!(sends.load(Ordering::Relaxed), 0);
+                assert!(chunk_counts.lock().is_empty());
 
-            assert_eq!(sends.load(Ordering::Relaxed), 0);
-            assert!(chunk_counts.lock().is_empty());
-
-            let recovered = b"recovered";
-            dialer_sender.send(&recovered[..]).await?;
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
+                let recovered = b"recovered";
+                dialer_sender.send(&recovered[..]).await?;
+                assert_eq!(sends.load(Ordering::Relaxed), 1);
+                assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
+            }
             Ok(())
         })
     }
