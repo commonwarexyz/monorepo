@@ -1,10 +1,19 @@
 use proc_macro2::Span;
-use syn::{Attribute, Error, Expr, LitInt, Result, Type};
+use syn::{
+    Attribute, Error, Expr, LitInt, Result, Token, Type, WherePredicate, parenthesized,
+    punctuated::Punctuated,
+};
 
 #[derive(Default)]
 pub(super) struct Options {
     pub(super) read_cfg: Option<Type>,
     pub(super) cfg: Option<Expr>,
+    pub(super) read_with: Option<Expr>,
+    pub(super) invalid_tag: Option<Expr>,
+    pub(super) read_bounds: Option<Punctuated<WherePredicate, Token![,]>>,
+    pub(super) write_bounds: Option<Punctuated<WherePredicate, Token![,]>>,
+    pub(super) encode_size_bounds: Option<Punctuated<WherePredicate, Token![,]>>,
+    pub(super) fixed_size_bounds: Option<Punctuated<WherePredicate, Token![,]>>,
     pub(super) encode_with: Option<Expr>,
     pub(super) encode_size: Option<Expr>,
     pub(super) tag: Option<u8>,
@@ -56,7 +65,39 @@ impl Options {
                 attr.parse_nested_meta(|meta| {
                     any = true;
                     let span = meta.path.segments[0].ident.span();
-                    if meta.path.is_ident("read_cfg") && matches!(place, Place::Container) {
+                    if matches!(place, Place::Container)
+                        && (meta.path.is_ident("read_bounds")
+                            || meta.path.is_ident("write_bounds")
+                            || meta.path.is_ident("encode_size_bounds")
+                            || meta.path.is_ident("fixed_size_bounds"))
+                    {
+                        let content;
+                        parenthesized!(content in meta.input);
+                        let bounds = content.parse_terminated(|input| input.parse(), Token![,])?;
+                        let name = meta.path.get_ident().unwrap().to_string();
+                        let slot = match name.as_str() {
+                            "read_bounds" => &mut options.read_bounds,
+                            "write_bounds" => &mut options.write_bounds,
+                            "encode_size_bounds" => &mut options.encode_size_bounds,
+                            _ => &mut options.fixed_size_bounds,
+                        };
+                        set(slot, bounds, span, &name)
+                    } else if meta.path.is_ident("read_with") && matches!(place, Place::Field) {
+                        set(
+                            &mut options.read_with,
+                            meta.value()?.parse()?,
+                            span,
+                            "read_with",
+                        )
+                    } else if meta.path.is_ident("invalid_tag") && matches!(place, Place::Container)
+                    {
+                        set(
+                            &mut options.invalid_tag,
+                            meta.value()?.parse()?,
+                            span,
+                            "invalid_tag",
+                        )
+                    } else if meta.path.is_ident("read_cfg") && matches!(place, Place::Container) {
                         set(
                             &mut options.read_cfg,
                             meta.value()?.parse()?,

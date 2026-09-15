@@ -58,6 +58,19 @@ pub(super) fn rename_consts(input: &mut DeriveInput, kind: Kind, options: &mut O
         }
     }
     names.visit_derive_input_mut(input);
+    for bounds in [
+        &mut options.read_bounds,
+        &mut options.write_bounds,
+        &mut options.encode_size_bounds,
+        &mut options.fixed_size_bounds,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for bound in bounds {
+            names.visit_where_predicate_mut(bound);
+        }
+    }
     if let Some(cfg) = &mut options.read_cfg {
         names.visit_type_mut(cfg);
     }
@@ -196,7 +209,24 @@ pub(super) fn for_impl(
             #cfg_ty: ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static
         ));
     }
+    let bounds = match kind {
+        Kind::Read => &options.read_bounds,
+        Kind::Write => &options.write_bounds,
+        Kind::EncodeSize => &options.encode_size_bounds,
+        Kind::FixedSize => &options.fixed_size_bounds,
+        Kind::Encode => unreachable!(),
+    };
+    if let Some(bounds) = bounds {
+        generics
+            .make_where_clause()
+            .predicates
+            .extend(bounds.iter().cloned());
+        return (generics, cfg_ty);
+    }
     for field in shapes.iter().flat_map(|s| &s.fields) {
+        if kind == Kind::Read && field.options.read_with.is_some() {
+            continue;
+        }
         let leaves = (kind == Kind::Read && field.options.cfg.is_some()).then_some(&input.generics);
         let (recursive, types) = bound_types(field.ty, name, leaves);
         for ty in types {

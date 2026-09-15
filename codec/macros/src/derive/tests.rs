@@ -203,3 +203,137 @@ fn expansions_parse_for_all_shapes_and_generics() {
         }
     }
 }
+
+#[test]
+fn bound_attributes_validate_placement_and_duplicates() {
+    for name in [
+        "read_bounds",
+        "write_bounds",
+        "encode_size_bounds",
+        "fixed_size_bounds",
+    ] {
+        let name = format_ident!("{name}");
+        for bounds in [quote!(), quote!(T: Clone, T: Send,)] {
+            let input: DeriveInput = syn::parse2(quote!(
+                #[codec(#name(#bounds))]
+                struct Item<T>(T);
+            ))
+            .unwrap();
+            for kind in [
+                Kind::Read,
+                Kind::Write,
+                Kind::EncodeSize,
+                Kind::FixedSize,
+                Kind::Encode,
+            ] {
+                let tokens = expand(input.clone(), kind).unwrap();
+                syn::parse2::<syn::File>(tokens).unwrap();
+            }
+        }
+        let input = syn::parse2(quote!(
+            #[codec(#name())]
+            #[codec(#name(T: Clone))]
+            struct Item<T>(T);
+        ))
+        .unwrap();
+        error(input, Kind::Read, &format!("duplicate `{name}`"));
+        for input in [
+            quote!(
+                struct Item<T>(#[codec(#name())] T);
+            ),
+            quote!(
+                enum Item {
+                    #[codec(#name())]
+                    A,
+                }
+            ),
+        ] {
+            error(syn::parse2(input).unwrap(), Kind::Read, "wrong position");
+        }
+    }
+}
+
+#[test]
+fn read_hooks_validate_placement_and_duplicates() {
+    error(
+        parse_quote!(
+            struct Item(#[codec(read_with = f, read_with = g)] u8);
+        ),
+        Kind::Read,
+        "duplicate `read_with`",
+    );
+    error(
+        parse_quote!(
+            #[codec(invalid_tag = f, invalid_tag = g)]
+            enum Item {
+                A,
+            }
+        ),
+        Kind::Read,
+        "duplicate `invalid_tag`",
+    );
+    for input in [
+        quote!(
+            #[codec(read_with = f)]
+            struct Item;
+        ),
+        quote!(
+            enum Item {
+                #[codec(read_with = f)]
+                A,
+            }
+        ),
+        quote!(
+            struct Item(#[codec(invalid_tag = f)] u8);
+        ),
+        quote!(
+            enum Item {
+                #[codec(invalid_tag = f)]
+                A,
+            }
+        ),
+    ] {
+        error(syn::parse2(input).unwrap(), Kind::Read, "wrong position");
+    }
+    for kind in [
+        Kind::Read,
+        Kind::Write,
+        Kind::EncodeSize,
+        Kind::FixedSize,
+        Kind::Encode,
+    ] {
+        error(
+            parse_quote!(
+                #[codec(invalid_tag = f)]
+                struct Item;
+            ),
+            kind,
+            "requires an enum",
+        );
+    }
+    for hook in [
+        quote!(custom),
+        quote!(|buf, cfg| custom(buf, cfg)),
+        quote!({ custom(buf, cfg) }),
+    ] {
+        let input = syn::parse2(quote!(
+            struct Item(#[codec(cfg = &(), read_with = #hook)] u8);
+        ))
+        .unwrap();
+        syn::parse2::<syn::File>(expand(input, Kind::Read).unwrap()).unwrap();
+    }
+    for hook in [
+        quote!(custom),
+        quote!(|tag| custom(tag)),
+        quote!({ custom(tag) }),
+    ] {
+        let input = syn::parse2(quote!(
+            #[codec(invalid_tag = #hook)]
+            enum Item {
+                A,
+            }
+        ))
+        .unwrap();
+        syn::parse2::<syn::File>(expand(input, Kind::Read).unwrap()).unwrap();
+    }
+}

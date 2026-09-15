@@ -81,6 +81,14 @@ pub fn expand(mut input: DeriveInput, kind: Kind) -> Result<TokenStream> {
         return Ok(quote!(#write #size));
     }
     let mut options = Options::parse(&input.attrs, Place::Container)?;
+    if let Some(invalid_tag) = &options.invalid_tag
+        && !matches!(input.data, Data::Enum(_))
+    {
+        return Err(Error::new_spanned(
+            invalid_tag,
+            "invalid_tag requires an enum",
+        ));
+    }
     generics::rename_consts(&mut input, kind, &mut options);
     let shapes = match &input.data {
         Data::Struct(data) => vec![Shape::new(quote!(Self), &data.fields, None)?],
@@ -179,7 +187,20 @@ fn implementation(
                         .cfg
                         .as_ref()
                         .map_or_else(|| quote!(cfg), |expr| quote!(#expr));
-                    quote!(let #binding = <#ty as #codec::Read>::read_cfg(buf, #cfg)?;)
+                    let read = match &field.options.read_with {
+                        Some(Expr::Block(block)) => {
+                            let attrs = &block.attrs;
+                            let label = &block.label;
+                            let statements = &block.block.stmts;
+                            quote!(#(#attrs)* #label { let cfg = #cfg; let buf = &mut *buf; #(#statements)* })
+                        }
+                        Some(expr) => quote!((#expr)(&mut *buf, #cfg)),
+                        None => quote!(<#ty as #codec::Read>::read_cfg(buf, #cfg)),
+                    };
+                    quote! {
+                        let #binding: ::core::result::Result<#ty, #codec::Error> = #read;
+                        let #binding: #ty = #binding?;
+                    }
                 });
                 let constructor = shape.pattern();
                 let body = quote!({ #(#reads)* ::core::result::Result::Ok(#constructor) });
@@ -189,7 +210,12 @@ fn implementation(
                 }
             });
             let body = if shapes[0].tag.is_some() {
-                quote! { match <::core::primitive::u8 as #codec::Read>::read_cfg(buf, &())? { #(#arms,)* tag => ::core::result::Result::Err(#codec::Error::InvalidEnum(tag)) } }
+                let invalid_tag = match &options.invalid_tag {
+                    Some(Expr::Block(block)) => quote!(#block),
+                    Some(expr) => quote!((#expr)(tag)),
+                    None => quote!(#codec::Error::InvalidEnum(tag)),
+                };
+                quote! { match <::core::primitive::u8 as #codec::Read>::read_cfg(buf, &())? { #(#arms,)* tag => { let _ = tag; let tag: #codec::Error = #invalid_tag; ::core::result::Result::Err(tag) } } }
             } else {
                 quote!(#(#arms)*)
             };
