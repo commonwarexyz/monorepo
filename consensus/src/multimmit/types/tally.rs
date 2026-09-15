@@ -13,7 +13,7 @@ use commonware_cryptography::{
     Digest, Hasher, bls12381::primitives::variant::Variant, certificate::Signers,
 };
 use commonware_utils::Participant;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One non-standard position in a compact vote tally.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,16 +66,16 @@ impl EncodeSize for PositionDeviation {
 
 /// One chain's replacement for a tally's reference extension.
 ///
-/// An empty replacement clears the reference extension for this chain.
+/// Index zero clears the reference extension; other indices address the tally's extension paths.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ExtensionDeviation<D: Digest> {
+pub struct ExtensionDeviation {
     chain: ChainId,
-    extension: Extension<D>,
+    extension: usize,
 }
 
-impl<D: Digest> ExtensionDeviation<D> {
+impl ExtensionDeviation {
     /// Creates an extension replacement for `chain`.
-    pub const fn new(chain: ChainId, extension: Extension<D>) -> Self {
+    pub const fn new(chain: ChainId, extension: usize) -> Self {
         Self { chain, extension }
     }
 
@@ -84,31 +84,31 @@ impl<D: Digest> ExtensionDeviation<D> {
         self.chain
     }
 
-    /// Returns the replacement extension.
-    pub const fn extension(&self) -> &Extension<D> {
-        &self.extension
+    /// Returns the replacement path index, or zero to clear this chain.
+    pub const fn extension(&self) -> usize {
+        self.extension
     }
 }
 
-impl<D: Digest> Write for ExtensionDeviation<D> {
+impl Write for ExtensionDeviation {
     fn write(&self, writer: &mut impl BufMut) {
         self.chain.write(writer);
         self.extension.write(writer);
     }
 }
 
-impl<D: Digest> Read for ExtensionDeviation<D> {
+impl Read for ExtensionDeviation {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, bound: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             chain: ReadExt::read(reader)?,
-            extension: Extension::read_cfg(reader, bound)?,
+            extension: usize::read_cfg(reader, &RangeCfg::from(0..=*bound))?,
         })
     }
 }
 
-impl<D: Digest> EncodeSize for ExtensionDeviation<D> {
+impl EncodeSize for ExtensionDeviation {
     fn encode_size(&self) -> usize {
         self.chain.encode_size() + self.extension.encode_size()
     }
@@ -116,18 +116,18 @@ impl<D: Digest> EncodeSize for ExtensionDeviation<D> {
 
 /// The fields by which one vote differs from a tally's standard vote.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Deviation<D: Digest> {
+pub struct Deviation {
     signer: Participant,
     positions: Vec<PositionDeviation>,
-    extensions: Vec<ExtensionDeviation<D>>,
+    extensions: Vec<ExtensionDeviation>,
 }
 
-impl<D: Digest> Deviation<D> {
+impl Deviation {
     /// Creates a deviation record.
     pub(crate) const fn new(
         signer: Participant,
         positions: Vec<PositionDeviation>,
-        extensions: Vec<ExtensionDeviation<D>>,
+        extensions: Vec<ExtensionDeviation>,
     ) -> Self {
         Self {
             signer,
@@ -147,31 +147,32 @@ impl<D: Digest> Deviation<D> {
     }
 
     /// Returns extension replacements in chain order. Omitted chains use the tally reference.
-    pub fn extensions(&self) -> &[ExtensionDeviation<D>] {
+    pub fn extensions(&self) -> &[ExtensionDeviation] {
         &self.extensions
     }
 
-    fn read_cfg(reader: &mut impl Buf, config: CodecConfig) -> Result<Self, CodecError> {
+    fn read_cfg(
+        reader: &mut impl Buf,
+        config: CodecConfig,
+        paths: usize,
+    ) -> Result<Self, CodecError> {
         let signer = ReadExt::read(reader)?;
         let positions =
             Vec::<PositionDeviation>::read_cfg(reader, &(RangeCfg::from(0..=config.chains()), ()))?;
-        let extensions = Vec::<ExtensionDeviation<D>>::read_cfg(
+        let extensions = Vec::<ExtensionDeviation>::read_cfg(
             reader,
-            &(
-                RangeCfg::from(0..=config.chains()),
-                config.extension_bound(),
-            ),
+            &(RangeCfg::from(0..=config.chains()), paths),
         )?;
         Ok(Self::new(signer, positions, extensions))
     }
 }
-impl<D: Digest> Attributable for Deviation<D> {
+impl Attributable for Deviation {
     fn signer(&self) -> Participant {
         self.signer
     }
 }
 
-impl<D: Digest> Write for Deviation<D> {
+impl Write for Deviation {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.positions.write(writer);
@@ -179,7 +180,7 @@ impl<D: Digest> Write for Deviation<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for Deviation<D> {
+impl EncodeSize for Deviation {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.positions.encode_size() + self.extensions.encode_size()
     }
@@ -193,7 +194,8 @@ impl<D: Digest> EncodeSize for Deviation<D> {
 pub struct Tally<D: Digest> {
     reference_extensions: Vec<Extension<D>>,
     signers: Signers,
-    deviations: Vec<Deviation<D>>,
+    deviations: Vec<Deviation>,
+    extension_paths: Vec<Extension<D>>,
 }
 
 impl<D: Digest> Tally<D> {
@@ -240,6 +242,16 @@ impl<D: Digest> Tally<D> {
                 .iter()
                 .map(|(_, body)| (body.positions(), body.extensions())),
         );
+        let extension_paths: Vec<_> = votes
+            .iter()
+            .flat_map(|(_, body)| body.extensions().iter().zip(&reference_extensions))
+            .filter_map(|(extension, reference)| {
+                (!extension.is_empty() && extension != reference).then_some(extension)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
         let mut deviations = Vec::new();
         for (signer, body) in &votes {
             let positions = body
@@ -261,7 +273,17 @@ impl<D: Digest> Tally<D> {
                 .enumerate()
                 .filter(|(_, (extension, reference))| extension != reference)
                 .map(|(chain, (extension, _))| {
-                    ExtensionDeviation::new(ChainId::new(chain as u32), extension.clone())
+                    ExtensionDeviation::new(
+                        ChainId::new(chain as u32),
+                        if extension.is_empty() {
+                            0
+                        } else {
+                            extension_paths
+                                .binary_search(extension)
+                                .expect("collected extension")
+                                + 1
+                        },
+                    )
                 })
                 .collect::<Vec<_>>();
             if positions.is_empty() && extensions.is_empty() {
@@ -282,6 +304,7 @@ impl<D: Digest> Tally<D> {
             reference_extensions,
             signers,
             deviations,
+            extension_paths,
         })
     }
 
@@ -290,13 +313,30 @@ impl<D: Digest> Tally<D> {
         &self.reference_extensions
     }
 
+    /// Returns the distinct nonempty replacement paths in lexical order.
+    ///
+    /// Deviation indices are one-based; zero represents an empty path.
+    pub fn extension_paths(&self) -> &[Extension<D>] {
+        &self.extension_paths
+    }
+
+    fn extension(&self, index: usize) -> Result<&[D], Error> {
+        if index == 0 {
+            return Ok(&[]);
+        }
+        self.extension_paths
+            .get(index - 1)
+            .map(Extension::payloads)
+            .ok_or(Error::Transcript)
+    }
+
     /// Returns the participants whose complete votes are represented.
     pub const fn signers(&self) -> &Signers {
         &self.signers
     }
 
     /// Returns the non-standard vote records in signer order.
-    pub fn deviations(&self) -> &[Deviation<D>] {
+    pub fn deviations(&self) -> &[Deviation] {
         &self.deviations
     }
 
@@ -363,7 +403,10 @@ impl<D: Digest> Tally<D> {
                 let Some(current) = extensions.get_mut(replacement.chain.get() as usize) else {
                     return Err(Error::Transcript);
                 };
-                current.clone_from(&replacement.extension);
+                *current = Extension::new(
+                    self.extension(replacement.extension)?.to_vec(),
+                    config.extension_bound(),
+                )?;
             }
         }
 
@@ -393,6 +436,18 @@ impl<D: Digest> Tally<D> {
             return Err(Error::Transcript);
         }
 
+        if self
+            .extension_paths
+            .iter()
+            .any(|path| path.is_empty() || path.len() > config.extension_bound())
+            || self
+                .extension_paths
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(Error::Transcript);
+        }
+        let mut used = vec![false; self.extension_paths.len()];
         for deviation in &self.deviations {
             if !self.signers.iter().any(|signer| signer == deviation.signer)
                 || deviation.positions.is_empty() && deviation.extensions.is_empty()
@@ -422,12 +477,17 @@ impl<D: Digest> Tally<D> {
                 else {
                     return Err(Error::Transcript);
                 };
-                if replacement.extension == *reference
-                    || replacement.extension.len() > config.extension_bound()
-                {
+                let path = self.extension(replacement.extension)?;
+                if path == reference.payloads() {
                     return Err(Error::Transcript);
                 }
+                if replacement.extension != 0 {
+                    used[replacement.extension - 1] = true;
+                }
             }
+        }
+        if used.iter().any(|used| !used) {
+            return Err(Error::Transcript);
         }
 
         let expanded = self
@@ -449,8 +509,13 @@ impl<D: Digest> Tally<D> {
                         positions[position.chain.get() as usize] = position.position;
                     }
                     for replacement in &deviation.extensions {
-                        extensions[replacement.chain.get() as usize]
-                            .clone_from(&replacement.extension);
+                        extensions[replacement.chain.get() as usize] = Extension::new(
+                            self.extension(replacement.extension)
+                                .expect("validated path index")
+                                .to_vec(),
+                            config.extension_bound(),
+                        )
+                        .expect("validated path length");
                     }
                 }
                 (signer, positions, extensions)
@@ -487,15 +552,24 @@ impl<D: Digest> Tally<D> {
             ),
         )?;
         let signers = Signers::read_cfg(reader, &config.participants())?;
+        let max_paths = config
+            .chains()
+            .checked_mul(config.participants())
+            .ok_or(CodecError::Invalid("Tally", "too many paths"))?;
+        let extension_paths = Vec::<Extension<D>>::read_cfg(
+            reader,
+            &(RangeCfg::from(0..=max_paths), config.extension_bound()),
+        )?;
         let deviation_count = usize::read_cfg(reader, &RangeCfg::from(0..=config.participants()))?;
         let mut deviations = Vec::with_capacity(deviation_count.min(reader.remaining()));
         for _ in 0..deviation_count {
-            deviations.push(Deviation::read_cfg(reader, config)?);
+            deviations.push(Deviation::read_cfg(reader, config, extension_paths.len())?);
         }
         let tally = Self {
             reference_extensions,
             signers,
             deviations,
+            extension_paths,
         };
         tally
             .validate(leader, config)
@@ -507,6 +581,7 @@ impl<D: Digest> Write for Tally<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.reference_extensions.write(writer);
         self.signers.write(writer);
+        self.extension_paths.write(writer);
         self.deviations.write(writer);
     }
 }
@@ -515,6 +590,7 @@ impl<D: Digest> EncodeSize for Tally<D> {
     fn encode_size(&self) -> usize {
         self.reference_extensions.encode_size()
             + self.signers.encode_size()
+            + self.extension_paths.encode_size()
             + self.deviations.encode_size()
     }
 }
@@ -836,6 +912,78 @@ mod tests {
     }
 
     #[test]
+    fn replacement_paths_are_shared_and_canonical() {
+        let config = config();
+        let leader = leader();
+        let path = Extension::new(vec![digest(900)], config.extension_bound()).unwrap();
+        let votes = (0..config.participants())
+            .map(|signer| {
+                let extensions = (0..config.chains())
+                    .map(|chain| {
+                        if (chain + signer) % 3 == 0 {
+                            path.clone()
+                        } else {
+                            Extension::empty()
+                        }
+                    })
+                    .collect();
+                (
+                    Participant::from_usize(signer),
+                    VoteBody::for_leader::<Sha256, MinSig>(
+                        &leader,
+                        vec![Position::new(1); config.chains()],
+                        extensions,
+                        config,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let tally = Tally::from_votes::<MinSig, Sha256, _>(&leader, votes.clone(), config).unwrap();
+        assert_eq!(tally.extension_paths(), std::slice::from_ref(&path));
+        assert!(
+            tally
+                .deviations()
+                .iter()
+                .flat_map(|d| d.extensions())
+                .filter(|d| d.extension() == 1)
+                .count()
+                > 1
+        );
+        let reversed =
+            Tally::from_votes::<MinSig, Sha256, _>(&leader, votes.iter().rev().cloned(), config)
+                .unwrap();
+        assert_eq!(tally.encode(), reversed.encode());
+        let decoded = Tally::read_cfg(&mut tally.encode(), &leader, config).unwrap();
+        for (signer, vote) in votes {
+            assert_eq!(
+                decoded
+                    .vote::<MinSig, Sha256>(&leader, signer, config)
+                    .unwrap()
+                    .encode(),
+                vote.encode()
+            );
+        }
+        let mut duplicate = tally.clone();
+        duplicate.extension_paths.push(path);
+        let mut empty = tally.clone();
+        empty.extension_paths[0] = Extension::empty();
+        let mut unused = tally.clone();
+        unused
+            .extension_paths
+            .push(Extension::new(vec![digest(901)], config.extension_bound()).unwrap());
+        unused.extension_paths.sort();
+        let mut invalid_index = tally.clone();
+        invalid_index.deviations[0].extensions[0].extension = 2;
+        let mut too_long = tally;
+        too_long.extension_paths[0] = Extension::new(vec![digest(900), digest(901)], 2).unwrap();
+        for malformed in [duplicate, empty, unused, invalid_index, too_long] {
+            assert_eq!(malformed.validate(&leader, config), Err(Error::Transcript));
+            assert!(Tally::read_cfg(&mut malformed.encode(), &leader, config).is_err());
+        }
+    }
+
+    #[test]
     fn decoding_rejects_noncanonical_extension_deviations() {
         let config = config();
         let leader = leader();
@@ -843,7 +991,7 @@ mod tests {
         let body = VoteBody::for_leader::<Sha256, MinSig>(
             &leader,
             vec![Position::new(1); config.chains()],
-            vec![extension.clone(); config.chains()],
+            vec![extension; config.chains()],
             config,
         )
         .unwrap();
@@ -853,22 +1001,16 @@ mod tests {
             config,
         )
         .unwrap();
-        let clear = |chain| ExtensionDeviation::new(ChainId::new(chain), Extension::empty());
+        let clear = |chain| ExtensionDeviation::new(ChainId::new(chain), 0);
         for replacements in [
             vec![],
             vec![clear(0), clear(0)],
             vec![clear(1), clear(0)],
             vec![clear(config.chains() as u32)],
             vec![clear(u32::MAX)],
-            vec![ExtensionDeviation::new(ChainId::new(0), extension)],
-            vec![
-                clear(0),
-                ExtensionDeviation::new(ChainId::new(1), tally.reference_extensions[1].clone()),
-            ],
-            vec![ExtensionDeviation::new(
-                ChainId::new(0),
-                Extension::new(vec![digest(400), digest(401)], 2).unwrap(),
-            )],
+            vec![ExtensionDeviation::new(ChainId::new(0), 1)],
+            vec![clear(0), ExtensionDeviation::new(ChainId::new(1), 1)],
+            vec![ExtensionDeviation::new(ChainId::new(0), u32::MAX as usize)],
         ] {
             let mut malformed = tally.clone();
             malformed
@@ -896,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn decoding_bounds_extension_deviation_counts_and_payloads() {
+    fn decoding_bounds_extension_deviation_counts_and_indices() {
         let config = config();
         let prefix = || {
             let mut bytes = BytesMut::new();
@@ -907,7 +1049,7 @@ mod tests {
         let mut bytes = prefix();
         (config.chains() + 1).write(&mut bytes);
         assert!(matches!(
-            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), config),
+            Deviation::read_cfg(&mut bytes.freeze(), config, config.extension_bound()),
             Err(CodecError::InvalidLength(_))
         ));
 
@@ -916,7 +1058,7 @@ mod tests {
         ChainId::new(0).write(&mut bytes);
         (config.extension_bound() + 1).write(&mut bytes);
         assert!(matches!(
-            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), config),
+            Deviation::read_cfg(&mut bytes.freeze(), config, config.extension_bound()),
             Err(CodecError::InvalidLength(_))
         ));
         let disabled = CodecConfig::new(6, 6, Limits::new(2, 0).unwrap()).unwrap();
@@ -925,7 +1067,7 @@ mod tests {
         ChainId::new(0).write(&mut bytes);
         1usize.write(&mut bytes);
         assert!(matches!(
-            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), disabled),
+            Deviation::read_cfg(&mut bytes.freeze(), disabled, 0),
             Err(CodecError::InvalidLength(_))
         ));
     }
@@ -994,9 +1136,21 @@ mod tests {
                     );
                     assert_eq!(decoded.tally().reference_extensions(), reference);
                     if changed > 0 {
-                        let mut tampered = decoded.tally().clone();
-                        tampered.deviations[0].extensions[0].extension =
-                            Extension::new(vec![digest(10_000)], 1).unwrap();
+                        let mut altered = votes
+                            .iter()
+                            .map(|vote| (vote.signer(), vote.body().clone()))
+                            .collect::<Vec<_>>();
+                        let mut extensions = altered[0].1.extensions().to_vec();
+                        extensions[0] = Extension::new(vec![digest(10_000)], 1).unwrap();
+                        altered[0].1 = VoteBody::for_leader::<Sha256, V>(
+                            leader,
+                            altered[0].1.positions().to_vec(),
+                            extensions,
+                            config,
+                        )
+                        .unwrap();
+                        let tampered =
+                            Tally::from_votes::<V, Sha256, _>(leader, altered, config).unwrap();
                         let tampered = Lqc::new(
                             leader.clone(),
                             tampered,
@@ -1095,18 +1249,19 @@ mod tests {
                         )
                         .write(&mut dense);
                     }
-                    let old_size = encoded.len() - tally.encode_size() + dense.len();
-                    let old_vqc_size = vqc.encode_size() - tally.encode_size() + dense.len();
+                    let dense_size = encoded.len() - tally.encode_size() + dense.len();
+                    let dense_vqc_size = vqc.encode_size() - tally.encode_size() + dense.len();
                     eprintln!(
-                        "{} chains={chains} populated={populated} changed={changed} clear={clear}: LQC {old_size}->{} VQC {old_vqc_size}->{}",
+                        "{} chains={chains} populated={populated} changed={changed} clear={clear}: LQC dense={dense_size} compact={} VQC dense={dense_vqc_size} compact={}",
                         core::any::type_name::<V>(),
                         encoded.len(),
                         vqc.encode_size()
                     );
                     match changed {
-                        0 => assert_eq!(encoded.len(), old_size),
-                        1 => assert!(encoded.len() < old_size),
-                        _ => assert_eq!(encoded.len(), old_size + 2 * (chains - 1)),
+                        0 => assert_eq!(encoded.len(), dense_size + 1),
+                        1 => assert!(encoded.len() < dense_size),
+                        _ if clear => assert_eq!(encoded.len(), dense_size + 2 * (chains - 1) + 1),
+                        _ => assert!(encoded.len() < dense_size),
                     }
                     let bounds = config.encoded_bounds::<V, sha256::Digest>().unwrap();
                     assert!(encoded.len() <= bounds.max_artifact_bytes());
@@ -1222,7 +1377,7 @@ mod tests {
         tally.deviations.push(Deviation::new(
             Participant::new(0),
             Vec::new(),
-            vec![ExtensionDeviation::new(ChainId::new(0), Extension::empty())],
+            vec![ExtensionDeviation::new(ChainId::new(0), 0)],
         ));
         assert_eq!(tally.validate(&leader, config), Err(Error::Transcript));
         let mut encoded = tally.encode();
@@ -1261,6 +1416,7 @@ mod tests {
         reference_extensions[0] =
             Extension::new(vec![digest(300)], config.extension_bound()).unwrap();
         let tally = Tally {
+            extension_paths: Vec::new(),
             reference_extensions,
             signers: Signers::new(
                 config.participants().try_into().unwrap(),
@@ -1280,6 +1436,7 @@ mod tests {
         let config = config();
         let leader = leader();
         let mut tally = Tally {
+            extension_paths: Vec::new(),
             reference_extensions: vec![Extension::empty(); config.chains()],
             signers: Signers::new(
                 config.participants().try_into().unwrap(),
@@ -1301,10 +1458,9 @@ mod tests {
             Err(Error::Transcript)
         );
         tally.deviations[0].positions.clear();
-        tally.deviations[0].extensions.push(ExtensionDeviation::new(
-            ChainId::new(u32::MAX),
-            Extension::empty(),
-        ));
+        tally.deviations[0]
+            .extensions
+            .push(ExtensionDeviation::new(ChainId::new(u32::MAX), 0));
         assert_eq!(
             tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
             Err(Error::Transcript)

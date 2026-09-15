@@ -152,27 +152,27 @@ hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
 
 ["commonware_consensus::multimmit::actors::resolver::tests::conformance::CodecConformance<ViewProof<MinPk,Digest>>"]
 n_cases = 128
-hash = "a1208a843d489f16612102858bbb664bcb912ddd3c5810392c77df8c266317b4"
+hash = "78b362f227c4b52904e5a8884983a0905d251fd9eeb8b4fe53d07423ce00eb6c"
 
 ["commonware_consensus::multimmit::actors::resolver::tests::conformance::CodecConformance<ViewProof<MinSig,Digest>>"]
 n_cases = 128
-hash = "8abd54b9deb171bcb75743a9cdbc59f6c16b143e7a734ae6437b11fd8b051f6e"
+hash = "a2190c819ad812616398defc7c297e0a7a4358967a73dfbd47341d613b1e7ae0"
 
 ["commonware_consensus::multimmit::actors::wire::tests::conformance::CodecConformance<Envelope<CertificateMessage<MinPk,Sha256Digest>>>"]
 n_cases = 128
-hash = "db03b44ad1defd698dcc6a48a8e2bb5529c9e774c2ba7da554b80e55a6f3134f"
+hash = "0113a7216cca5e527c7914abb11b0bfa6daae8b83cc830320d8510eef2b03cf6"
 
 ["commonware_consensus::multimmit::actors::wire::tests::conformance::CodecConformance<Envelope<CertificateMessage<MinSig,Sha256Digest>>>"]
 n_cases = 128
-hash = "eed1d16626ee7217c932312ce3c5c68a8fdda972148f428629a5a75681027bd3"
+hash = "d904e3931a383f2df48ac20eab445ccdc87278b9e1fd255de4e8cae720f42dab"
 
 ["commonware_consensus::multimmit::actors::wire::tests::conformance::CodecConformance<Envelope<ConsensusMessage<MinPk,Sha256Digest>>>"]
 n_cases = 128
-hash = "bcfe842010f1caa9a51b6cf2efd6c3f4cd0b76e4951ab2ca70242788e2604459"
+hash = "2977338f3259f7dafe2c4832a0850fbf3f657bc74b1a08be13854a4fcf0b955a"
 
 ["commonware_consensus::multimmit::actors::wire::tests::conformance::CodecConformance<Envelope<ConsensusMessage<MinSig,Sha256Digest>>>"]
 n_cases = 128
-hash = "53e2a09c6aa2a486d6855e57dad9f46f7536bfec789c57467bc1a38ed65b2249"
+hash = "77851fce11902979c26877e86120fc288b7d160c9eec56ba88766dc3ac6b9f1a"
 
 ["commonware_consensus::multimmit::actors::wire::tests::conformance::CodecConformance<Envelope<DataMessage<MinPk,Sha256Digest>>>"]
 n_cases = 128
@@ -184,11 +184,11 @@ hash = "f679e39c49730069667d4cc12144b3bcacdb49aa5aaabb0f1d7eadb459068986"
 
 ["commonware_consensus::multimmit::machine::durability::codec::tests::SnapshotMinPkConformance"]
 n_cases = 128
-hash = "87d206f33987d1cb4b0417296a9eef4079c098635b41657a2c4f0d7c39f6486a"
+hash = "45d4752788f977344087100406169452a134a8d7b98a9767792a8ee2bc4a66f2"
 
 ["commonware_consensus::multimmit::machine::durability::codec::tests::SnapshotMinSigConformance"]
 n_cases = 128
-hash = "048738ec7e2c13af44678ebb46ea30b86df2e23723618ee813d7aec29bc38498"
+hash = "4e242ce6ba7dce3473319bda6be6dae2ccfbc316f4b2cdbe739f98c06e2610d4"
 
 ["commonware_consensus::multimmit::marshal::storage::archive::tests::conformance::CodecConformance<Entry<Key,u64>>"]
 n_cases = 128
@@ -224,11 +224,11 @@ hash = "ebe2e1334ace938c7fbd24c462f3373b8f6adfa7242504cb9e8a1d070422977e"
 
 ["commonware_consensus::multimmit::storage::journal::tests::conformance::JournalRecordMinPkConformance"]
 n_cases = 128
-hash = "7032e11de881d937def11594d98dc9c594fb908827f2376f653c79278c071e06"
+hash = "33d6ea8df50b3bdf2389dab15bbcf713647f8aed7f7a22524ea09db443baad35"
 
 ["commonware_consensus::multimmit::storage::journal::tests::conformance::JournalRecordMinSigConformance"]
 n_cases = 128
-hash = "8f39e0af617177a1f6f6209675929a13891766909d9f8cb87585f29cd7768054"
+hash = "1754cd12d4657a874fb5f32a4204736001450bfa01f3b2c84ad34c1a95a0f3ab"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<Anchor<MinPk,Sha256Digest>>"]
 n_cases = 128
@@ -294,10 +294,6 @@ hash = "899936aed8a5ed78c58af59599af82b50b6bbdb95bffd64665d1412a3bddcc64"
 n_cases = 128
 hash = "6e8ff5d536c086aae0b9dcaf95a1b3eda576a389c3c38ccef028dea6b77254c9"
 
-["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<ExtensionDeviation<Sha256Digest>>"]
-n_cases = 128
-hash = "032df380756415f7528f0ea44bfe8eedcceeeaeec722ced6ba145ff6458e2580"
-
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<LeaderBlock<MinPk,Sha256Digest>>"]
 n_cases = 128
 hash = "745468684940b0b8bd20b18ea4cd8273ba64e275e8ebd09258b2b056a087d37b"
@@ -308,11 +304,11 @@ hash = "5bceb3804c99fe1c890b16a3531d681ac3de3981ff280db18ba662e92e4e46d2"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<Lqc<MinPk,Sha256Digest>>"]
 n_cases = 128
-hash = "8158e154ca2e0ce6145735479c05eb3db13a8ddbd4d7de21b503a2005f37afb4"
+hash = "f8439bc585b9b76eabcad32e70f457dcd9fbccd8e5e2da69f1799632226b2649"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<Lqc<MinSig,Sha256Digest>>"]
 n_cases = 128
-hash = "5410d0d8d7f3b6ee0491b2ca856cb454044b2ff063b46d13e5b028cd6be213ff"
+hash = "a53a0c8679f03b26f765b53fb72442e6b76f43670dff30537deb5384474f7111"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<NoVote<MinPk>>"]
 n_cases = 128
@@ -400,12 +396,16 @@ hash = "bf1f1b604b8a33d75df830248a019237b5320495bea4a419e6b8f04d79e781d9"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<Vqc<MinPk,Sha256Digest>>"]
 n_cases = 128
-hash = "7809dfd4de5d9c713917bbc1d16a16882ecf702b147b422bd6f8d3c66482a4bf"
+hash = "b60158ee06ae56e9a0c5ca708f677358a5fb87c0993c98142ac639cf5246b01c"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<Vqc<MinSig,Sha256Digest>>"]
 n_cases = 128
-hash = "619285da6a725be3336f00811484dfa78226b02af9e807b338e7f7e634800c02"
+hash = "e4b6921fdf21f7d59d4b356c266d0d7610bae7402780566a868e4718b3af0973"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::TipRecordConformance"]
 n_cases = 128
 hash = "6bead31438abe29af9a22ab77c27c25c7aaaa92fd8148ded7f1484e64ba52d16"
+
+["commonware_consensus::multimmit::types::arbitrary::conformance::CodecConformance<ExtensionDeviation>"]
+n_cases = 128
+hash = "83c6ba88b67d74397b68a196f3fcbe14e96d1695f6c23cd4392de1103b707bee"

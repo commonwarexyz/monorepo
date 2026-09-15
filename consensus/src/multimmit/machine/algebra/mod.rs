@@ -101,14 +101,25 @@ impl<D: Digest> ValidatedVqc<D> {
         core::mem::take(&mut self.votes)
     }
 
-    /// Bytes charged against the completion lane. The attested votes are excluded: the finality
-    /// pool allocates them either way, and they are bounded by the certificate's own encoding.
+    /// Bytes charged against the completion lane, including expanded attested votes.
     pub(crate) fn owned_bytes(&self) -> Option<usize> {
-        self.canonical
+        let mut bytes = self
+            .canonical
             .len()
             .checked_add(self.tips.owned_bytes()?)?
             .checked_add(self.commitments.owned_bytes()?)?
-            .checked_add(size_of::<Tips<D>>() + 2 * size_of::<usize>())
+            .checked_add(size_of::<Tips<D>>() + 2 * size_of::<usize>())?
+            .checked_add(size_of_val(self.votes.as_slice()))?;
+        for vote in &self.votes {
+            bytes = bytes
+                .checked_add(size_of_val(vote.body.positions()))?
+                .checked_add(size_of_val(vote.body.extensions()))?
+                .checked_add(4 * size_of::<usize>())?;
+            for extension in vote.body.extensions() {
+                bytes = bytes.checked_add(size_of_val(extension.payloads()))?;
+            }
+        }
+        Some(bytes)
     }
 }
 
@@ -145,6 +156,7 @@ impl<V: Variant, D: Digest> DerivedVqc<V, D> {
             .and_then(|bytes| bytes.checked_add(size_of_val(certificate.leader().proposals())))
             .and_then(|bytes| bytes.checked_add(size_of_val(tally.reference_extensions())))
             .and_then(|bytes| bytes.checked_add(size_of_val(tally.deviations())))
+            .and_then(|bytes| bytes.checked_add(size_of_val(tally.extension_paths())))
             .ok_or(Error::Vote)?;
         for deviation in tally.deviations() {
             bytes = bytes

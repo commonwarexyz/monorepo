@@ -134,7 +134,7 @@ impl CodecConfig {
         NonZeroUsize::new(self.encoded_bounds::<V, D>().ok()?.max_artifact_bytes())
     }
 
-    /// Computes exact encoded maxima for this epoch's bounded protocol objects.
+    /// Computes encoded upper bounds for this epoch's bounded protocol objects.
     pub(crate) fn encoded_bounds<V: Variant, D: Digest>(
         self,
     ) -> Result<EncodedBounds, BoundsError> {
@@ -297,20 +297,22 @@ impl ProtocolSizes {
             encoded_index_sum(k)?,
             checked_product(k, encoded_len(d - 1)?)?,
         ])?;
-        // Every deviation carries a list length. At least one vote uses the reference vector,
-        // so at most votes - 1 replace that empty list with chain-indexed extensions.
-        let replacement_extensions = if e == 0 {
-            0
-        } else {
-            checked_sum(&[extensions, encoded_index_sum(k)?])? - 1
-        };
         let tally_without_signers = |votes: usize| -> Result<usize, BoundsError> {
+            // A reference comes from one vote, leaving at most (votes - 1) replacements per chain.
+            let replaced = if e == 0 { 0 } else { votes.saturating_sub(1) };
+            let paths = checked_product(replaced, k)?;
+            let replacements = checked_sum(&[
+                encoded_len(k)? - 1,
+                encoded_index_sum(k)?,
+                checked_product(k, encoded_len(paths)?)?,
+            ])?;
             checked_sum(&[
                 extensions,
                 bitmap,
+                encoded_vec(paths, extension)?,
                 encoded_len(votes)?,
                 checked_product(votes, checked_sum(&[position_deviation, 1])?)?,
-                checked_product(votes.saturating_sub(1), replacement_extensions)?,
+                checked_product(replaced, replacements)?,
             ])
         };
         let tally = |votes: usize| -> Result<usize, BoundsError> {
@@ -326,7 +328,7 @@ impl ProtocolSizes {
         let lqc = checked_sum(&[leader, tally(quorum)?, signature])?;
         let conflicting_vote = checked_sum(&[digest, positions, extensions])?;
         let mut vqc = 0;
-        for votes in vqc_candidates(designation, vqc_max) {
+        for votes in vqc_candidates(designation, vqc_max, k) {
             let conflicting = vqc_max - votes;
             let candidate = checked_sum(&[
                 leader,
@@ -424,12 +426,15 @@ fn largest_index_width_sum(participants: usize, count: usize) -> Result<usize, B
         .ok_or(BoundsError::Overflow)
 }
 
-fn vqc_candidates(minimum: usize, maximum: usize) -> Vec<usize> {
+fn vqc_candidates(minimum: usize, maximum: usize, chains: usize) -> Vec<usize> {
     const BOUNDARIES: [usize; 4] = [1 << 7, 1 << 14, 1 << 21, 1 << 28];
 
     let mut candidates = vec![minimum, maximum];
     for boundary in BOUNDARIES {
         candidates.extend([boundary.saturating_sub(1), boundary]);
+        // Path table counts and indices widen after (votes - 1) * chains crosses a boundary.
+        let path_boundary = boundary.div_ceil(chains) + 1;
+        candidates.extend([path_boundary - 1, path_boundary]);
         if maximum >= boundary {
             candidates.extend([maximum - boundary, maximum - boundary + 1]);
         }
@@ -817,14 +822,18 @@ mod tests {
             )
             .unwrap();
             let extensions = |signer: usize| {
-                vec![
-                    Extension::new(
-                        vec![Sha256::hash(&[&signer.to_be_bytes()]); bound as usize],
-                        bound as usize
-                    )
-                    .unwrap();
-                    chains
-                ]
+                (0..chains)
+                    .map(|chain| {
+                        Extension::new(
+                            vec![
+                                Sha256::hash(&[&signer.to_be_bytes(), &chain.to_be_bytes()]);
+                                bound as usize
+                            ],
+                            bound as usize,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>()
             };
             let tally = |count: usize| {
                 Tally::from_votes::<V, Sha256, _>(
@@ -853,9 +862,8 @@ mod tests {
             )
             .unwrap();
             let sizes = ProtocolSizes::new::<V, Sha256Digest>(config).unwrap();
-            assert_eq!(
-                lqc.encode().len(),
-                sizes.lqc,
+            assert!(
+                lqc.encode().len() <= sizes.lqc,
                 "participants={participants} chains={chains} depth={depth} bound={bound}"
             );
             let largest_vqc = (config.designation_quorum()..=participants)
@@ -886,15 +894,15 @@ mod tests {
                 })
                 .max()
                 .unwrap();
-            assert_eq!(
-                largest_vqc, sizes.vqc,
+            assert!(
+                largest_vqc <= sizes.vqc,
                 "participants={participants} chains={chains} depth={depth} bound={bound}"
             );
         }
     }
 
     #[test]
-    fn encoded_bounds_match_constructed_dense_certificates() {
+    fn encoded_bounds_cover_constructed_dense_certificates() {
         assert_constructed_certificate_maxima::<MinPk>();
         assert_constructed_certificate_maxima::<MinSig>();
     }
