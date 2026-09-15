@@ -60,7 +60,7 @@ impl crate::Application<Runtime> for PipelineApp {
 }
 
 #[test_traced("WARN")]
-fn test_deferred_pipeline_build_replaced_after_parent_certification() {
+fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
         let Fixture {
             participants,
