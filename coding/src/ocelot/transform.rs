@@ -1,10 +1,12 @@
 //! Additive transforms shared by encoding and decoding.
 
 use super::code::Impl;
-use commonware_math::algebra::Field;
-use std::sync::Arc;
+use commonware_math::algebra::{Field, Ring};
+use std::sync::{Arc, OnceLock};
 
 const WORK_ALIGN: usize = 64;
+const LOCATOR_FWT_MAX_BITS: usize = 16;
+const LOCATOR_FWT_THRESHOLD: usize = 4;
 
 /// A fixed number of equally sized shards, in one aligned allocation.
 ///
@@ -104,6 +106,198 @@ impl Shards {
     }
 }
 
+struct DyadicBlocks<'a> {
+    erased: &'a [usize],
+    next_run: usize,
+    base: usize,
+    limit: usize,
+}
+
+impl<'a> DyadicBlocks<'a> {
+    const fn new(erased: &'a [usize]) -> Self {
+        Self {
+            erased,
+            next_run: 0,
+            base: 0,
+            limit: 0,
+        }
+    }
+}
+
+impl Iterator for DyadicBlocks<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.base == self.limit {
+            if self.next_run == self.erased.len() {
+                return None;
+            }
+
+            self.base = self.erased[self.next_run];
+            self.next_run += 1;
+            while self.next_run < self.erased.len()
+                && self.erased[self.next_run] == self.erased[self.next_run - 1] + 1
+            {
+                self.next_run += 1;
+            }
+            self.limit = self.erased[self.next_run - 1] + 1;
+        }
+
+        let remaining = self.limit - self.base;
+        let by_length = 1usize << remaining.ilog2();
+        let by_alignment = if self.base == 0 {
+            by_length
+        } else {
+            1usize << self.base.trailing_zeros()
+        };
+        let block_len = by_length.min(by_alignment);
+        let block = (self.base, block_len);
+        self.base += block_len;
+        Some(block)
+    }
+}
+
+/// Multiplicative logs and normalized Walsh kernels for locator convolution.
+struct LocatorTables<E> {
+    log: Box<[u32]>,
+    exp: Box<[E]>,
+    kernels: Box<[OnceLock<Box<[u32]>>]>,
+}
+
+impl<E: Field + Copy + 'static> LocatorTables<E> {
+    fn new<I: Impl<Element = E>>(points: &[E]) -> Option<Self> {
+        if !(2..=LOCATOR_FWT_MAX_BITS).contains(&I::BITS)
+            || I::ORDER != 1usize << I::BITS
+            || points.len() != I::ORDER
+            || points[0] != E::zero()
+            || points[1] != E::one()
+        {
+            return None;
+        }
+
+        let modulus = (I::ORDER - 1) as u32;
+        let mut factors = Vec::new();
+        let mut remainder = modulus;
+        let mut factor = 2;
+        while u64::from(factor) * u64::from(factor) <= u64::from(remainder) {
+            if remainder.is_multiple_of(factor) {
+                factors.push(factor);
+                while remainder.is_multiple_of(factor) {
+                    remainder /= factor;
+                }
+            }
+            factor += 1;
+        }
+        if remainder > 1 {
+            factors.push(remainder);
+        }
+
+        // A candidate generates the nonzero field elements exactly when its
+        // order has every prime-power factor present in ORDER - 1.
+        let one = E::one();
+        let generator = points.iter().copied().skip(1).find(|candidate| {
+            candidate.exp(&[u64::from(modulus)]) == one
+                && factors
+                    .iter()
+                    .all(|factor| candidate.exp(&[u64::from(modulus / factor)]) != one)
+        })?;
+
+        // Multiplication by the generator is GF(2)-linear. Locate its action
+        // on each Cantor basis vector to obtain its binary matrix columns.
+        let mut columns = Vec::with_capacity(I::BITS);
+        for bit in 0..I::BITS {
+            let product = generator * &points[1 << bit];
+            columns.push(points.iter().position(|&point| point == product)?);
+        }
+
+        let mut multiply = vec![0; I::ORDER];
+        for coordinate in 1..I::ORDER {
+            let bit = coordinate.trailing_zeros() as usize;
+            multiply[coordinate] = multiply[coordinate ^ (1 << bit)] ^ columns[bit];
+        }
+
+        // Following the linear map from coordinate one must visit every
+        // nonzero coordinate exactly once. log[0] = 0 makes a zero locator
+        // difference contribute the multiplicative identity.
+        let mut log = vec![u32::MAX; I::ORDER];
+        log[0] = 0;
+        let mut exp = Vec::with_capacity(modulus as usize);
+        let mut coordinate = 1;
+        for exponent in 0..modulus {
+            if coordinate == 0 || log[coordinate] != u32::MAX {
+                return None;
+            }
+            log[coordinate] = exponent;
+            exp.push(points[coordinate]);
+            coordinate = multiply[coordinate];
+        }
+        if coordinate != 1 || log[1..].contains(&u32::MAX) {
+            return None;
+        }
+
+        let kernels = (0..=I::BITS)
+            .map(|_| OnceLock::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Some(Self {
+            log: log.into_boxed_slice(),
+            exp: exp.into_boxed_slice(),
+            kernels,
+        })
+    }
+
+    fn kernel(&self, n: usize) -> &[u32] {
+        let layer = n.ilog2() as usize;
+        self.kernels[layer]
+            .get_or_init(|| {
+                let modulus = (self.log.len() - 1) as u32;
+                let mut kernel = self.log[..n].to_vec();
+                fwt(&mut kernel, modulus);
+                // The Walsh matrix squares to n*I. Since n divides ORDER,
+                // ORDER / n is n's inverse modulo ORDER - 1.
+                let inverse = ((self.log.len() / n) % (self.log.len() - 1)) as u32;
+                for value in &mut kernel {
+                    *value = multiply_mod(*value, inverse, modulus);
+                }
+                kernel.into_boxed_slice()
+            })
+            .as_ref()
+    }
+}
+
+#[inline]
+fn multiply_mod(x: u32, y: u32, modulus: u32) -> u32 {
+    (u64::from(x) * u64::from(y) % u64::from(modulus)) as u32
+}
+
+fn fwt(values: &mut [u32], modulus: u32) {
+    // ORDER - 1 is odd, so every power-of-two transform length is invertible
+    // even though this residue ring need not be a field.
+    debug_assert!(values.len().is_power_of_two());
+    debug_assert!(modulus <= u16::MAX as u32);
+    debug_assert!(values.iter().all(|&value| value < modulus));
+    let mut half = 1;
+    while half < values.len() {
+        for chunk in values.chunks_exact_mut(2 * half) {
+            let (lo, hi) = chunk.split_at_mut(half);
+            for (x, y) in lo.iter_mut().zip(hi) {
+                let a = *x;
+                let b = *y;
+                // Reduced values fit in 16 bits. Wrapping operations allow
+                // vectorization without overflow checks on each butterfly.
+                let sum = a.wrapping_add(b);
+                *x = if sum >= modulus { sum - modulus } else { sum };
+                *y = if a >= b {
+                    a - b
+                } else {
+                    a.wrapping_add(modulus).wrapping_sub(b)
+                };
+            }
+        }
+        half *= 2;
+    }
+}
+
 /// Immutable field tables shared by all arithmetic kernels for an implementation.
 pub struct Tables<E> {
     /// Field points in codeword order, expressed in the Cantor basis.
@@ -116,6 +310,7 @@ pub struct Tables<E> {
     /// span of the first `j` basis elements, normalized so `s_j(v_j) = 1`.
     /// Index 0 is unused.
     skews: Box<[E]>,
+    locator: OnceLock<Option<LocatorTables<E>>>,
 }
 
 impl<E: Field + Copy + 'static> Tables<E> {
@@ -157,6 +352,7 @@ impl<E: Field + Copy + 'static> Tables<E> {
         Self {
             points: points.into_boxed_slice(),
             skews: skews.into_boxed_slice(),
+            locator: OnceLock::new(),
         }
     }
 }
@@ -173,6 +369,123 @@ impl<I: Impl> Transform<I> {
             imp,
             tables: I::tables(),
         }
+    }
+
+    /// Evaluate the erasure locator at `queries`, in iterator order.
+    ///
+    /// At an erased point, the point's zero factor is omitted, yielding the
+    /// derivative of the locator there. `erased` must be sorted and unique,
+    /// and `queries` should be cheaply cloneable.
+    ///
+    /// Aligned blocks of 2^j erasures contribute shifted subspace polynomials
+    /// s_j, whose derivatives are one in the Cantor basis. Highly fragmented
+    /// sets use an equivalent log-domain XOR convolution.
+    pub fn locator(
+        &self,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize> + Clone,
+    ) -> Vec<I::Element> {
+        assert!(
+            erased.iter().all(|&i| i < I::ORDER),
+            "erasure position exceeds field order"
+        );
+        assert!(
+            erased.windows(2).all(|pair| pair[0] < pair[1]),
+            "erasure positions are not sorted and unique"
+        );
+        assert!(
+            queries.clone().all(|i| i < I::ORDER),
+            "locator query exceeds field order"
+        );
+
+        let query_count = queries.clone().count();
+        if query_count == 0 {
+            return Vec::new();
+        }
+        let highest = erased
+            .last()
+            .copied()
+            .into_iter()
+            .chain(queries.clone())
+            .max()
+            .expect("at least one query");
+        let n = (highest + 1).next_power_of_two();
+        let block_count = DyadicBlocks::new(erased).count();
+        let fwt_work = n.saturating_mul(2 * n.ilog2() as usize + 1);
+        if query_count.saturating_mul(block_count) > LOCATOR_FWT_THRESHOLD.saturating_mul(fwt_work)
+            && let Some(locator) = self.locator_fwt(erased, queries.clone(), query_count, n)
+        {
+            return locator;
+        }
+        self.locator_dyadic(erased, queries, query_count)
+    }
+
+    fn locator_fwt(
+        &self,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize> + Clone,
+        query_count: usize,
+        n: usize,
+    ) -> Option<Vec<I::Element>> {
+        let tables = self
+            .tables
+            .locator
+            .get_or_init(|| LocatorTables::new::<I>(&self.tables.points))
+            .as_ref()?;
+        let kernel = tables.kernel(n);
+        let modulus = (I::ORDER - 1) as u32;
+        let mut work = vec![0u32; n];
+        let mut output = vec![I::Element::one(); query_count];
+
+        // Walsh convolution computes sum(log(point[x xor e])). The zero
+        // difference at an erased query has log value zero and is thus omitted.
+        for &position in erased {
+            work[position] = 1;
+        }
+        fwt(&mut work, modulus);
+        for (value, &coefficient) in work.iter_mut().zip(kernel) {
+            *value = multiply_mod(*value, coefficient, modulus);
+        }
+        fwt(&mut work, modulus);
+        for (value, position) in output.iter_mut().zip(queries) {
+            *value = tables.exp[work[position] as usize];
+        }
+        Some(output)
+    }
+
+    fn locator_dyadic(
+        &self,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize> + Clone,
+        query_count: usize,
+    ) -> Vec<I::Element> {
+        let one = I::Element::one();
+        let mut locator = vec![one; query_count];
+        for (base, block_len) in DyadicBlocks::new(erased) {
+            // A full-field block contains every queried point. Its
+            // skipped-root product is the derivative s_BITS' = 1.
+            if block_len < I::ORDER {
+                let low_mask = 2 * block_len - 1;
+                for (x, value) in queries.clone().zip(&mut locator) {
+                    let relative = x ^ base;
+                    if relative < block_len {
+                        continue;
+                    }
+
+                    // skews[index] omits bit j from its point. Restore its
+                    // normalized contribution s_j(v_j) = 1 when present.
+                    let index = (relative & !low_mask) | block_len;
+                    let mut factor = self.tables.skews[index];
+                    if relative & block_len != 0 {
+                        factor += &one;
+                    }
+                    *value *= &factor;
+                }
+            } else {
+                debug_assert_eq!(base, 0);
+            }
+        }
+        locator
     }
 
     /// Inverse transform `work` in place at `shift`.
@@ -273,6 +586,9 @@ impl<I: Impl> Transform<I> {
 mod tests {
     use super::{Shards, Transform, WORK_ALIGN};
     use crate::ocelot::{Impl8, code::Impl, impl16::Impl16, kernel::portable::Portable};
+    use commonware_math::algebra::Ring as _;
+    use commonware_utils::test_rng;
+    use rand::RngExt as _;
     use std::ops::Range;
 
     #[derive(Clone, Copy)]
@@ -407,6 +723,80 @@ mod tests {
         }
     }
 
+    fn locator_reference<I: Impl>(
+        transform: &Transform<I>,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize>,
+    ) -> Vec<I::Element> {
+        queries
+            .map(|x| {
+                erased
+                    .iter()
+                    .filter(|&&e| e != x)
+                    .fold(I::Element::one(), |value, &e| {
+                        value * &transform.tables.points[x ^ e]
+                    })
+            })
+            .collect()
+    }
+
+    fn compare_locator<I: Impl>(
+        transform: &Transform<I>,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize> + Clone,
+    ) {
+        assert_eq!(
+            transform.locator(erased, queries.clone()),
+            locator_reference(transform, erased, queries.clone()),
+            "locator differs for {} erasures and {} queries",
+            erased.len(),
+            queries.count(),
+        );
+    }
+
+    fn compare_fwt_locator<I: Impl>(
+        transform: &Transform<I>,
+        erased: &[usize],
+        queries: impl Iterator<Item = usize> + Clone,
+        n: usize,
+    ) {
+        assert!(erased.iter().all(|&position| position < n));
+        assert!(queries.clone().all(|position| position < n));
+        assert_eq!(
+            transform
+                .locator_fwt(erased, queries.clone(), queries.clone().count(), n)
+                .expect("FWT locator tables must build"),
+            locator_reference(transform, erased, queries.clone()),
+            "FWT locator differs for {} erasures, {} queries, and prefix {n}",
+            erased.len(),
+            queries.count(),
+        );
+    }
+
+    fn check_locator_tables<I: Impl>(transform: &Transform<I>) {
+        let tables = transform
+            .tables
+            .locator
+            .get_or_init(|| super::LocatorTables::new::<I>(&transform.tables.points))
+            .as_ref()
+            .expect("locator tables must build");
+        for coordinate in 1..I::ORDER {
+            let exponent = tables.log[coordinate] as usize;
+            assert_eq!(tables.exp[exponent], transform.tables.points[coordinate]);
+        }
+    }
+
+    fn compare_random_locators<I: Impl>(transform: &Transform<I>, cases: usize, max_len: usize) {
+        let mut rng = test_rng();
+        for _ in 0..cases {
+            let count = rng.random_range(0..=64);
+            let mut erased: Vec<_> = (0..count).map(|_| rng.random_range(0..I::ORDER)).collect();
+            erased.sort_unstable();
+            erased.dedup();
+            compare_locator(transform, &erased, 0..rng.random_range(0..=max_len));
+        }
+    }
+
     #[test]
     fn workspace_keeps_alignment_and_shard_count() {
         let mut work = Shards::new(1, 2);
@@ -432,5 +822,117 @@ mod tests {
         compare_schedules(Impl8::new(Portable), &[1, 17, 65]);
         compare_schedules(DefaultImpl(Impl8::new(Portable)), &[3]);
         compare_schedules(Impl16::new(Portable), &[2, 126, 130]);
+    }
+
+    #[test]
+    fn locator_matches_scalar_product() {
+        let gf8 = Transform::new(Impl8::new(Portable));
+
+        // Exhaust every erasure subset of a 4-bit Cantor subspace.
+        const SMALL_ORDER: usize = 16;
+        for mask in 0u32..1 << SMALL_ORDER {
+            let erased: Vec<_> = (0..SMALL_ORDER).filter(|&i| mask & (1 << i) != 0).collect();
+            compare_locator(&gf8, &erased, 0..SMALL_ORDER);
+        }
+
+        // Exercise every dyadic layer, translation, and query point.
+        for layer in 0..=<Impl8<Portable> as Impl>::BITS {
+            let block_len = 1 << layer;
+            for base in (0..<Impl8<Portable> as Impl>::ORDER).step_by(block_len) {
+                compare_locator(&gf8, &(base..base + block_len).collect::<Vec<_>>(), 0..256);
+            }
+        }
+
+        compare_locator(&gf8, &[], 0..<Impl8<Portable> as Impl>::ORDER);
+        compare_locator(
+            &gf8,
+            &[0, 1, 2, 4, 7, 8, 9, 10, 11, 16, 31, 63, 127, 255],
+            0..256,
+        );
+        compare_random_locators(&gf8, 128, 256);
+
+        let gf16 = Transform::new(Impl16::new(Portable));
+        compare_locator(&gf16, &[], 0..<Impl16<Portable> as Impl>::ORDER);
+        compare_locator(
+            &gf16,
+            &[<Impl16<Portable> as Impl>::ORDER - 1],
+            0..<Impl16<Portable> as Impl>::ORDER,
+        );
+        compare_locator(&gf16, &(512..1024).collect::<Vec<_>>(), 0..1537);
+        compare_locator(
+            &gf16,
+            &[
+                0, 1, 2, 4, 7, 8, 9, 10, 11, 16, 31, 255, 256, 511, 1024, 32767, 65535,
+            ],
+            0..2049,
+        );
+        compare_random_locators(&gf16, 64, 1024);
+
+        let erased: Vec<_> = (0..21845).chain(21846..32769).collect();
+        compare_locator(&gf16, &erased, [21845, 32768].into_iter());
+
+        // There is no skew-table entry at 1 << BITS. This full-field block
+        // exercises its derivative-one path directly.
+        let erased: Vec<_> = (0..<Impl16<Portable> as Impl>::ORDER).collect();
+        assert!(
+            gf16.locator(&erased, 0..<Impl16<Portable> as Impl>::ORDER)
+                .iter()
+                .all(|&value| value == <Impl16<Portable> as Impl>::Element::one())
+        );
+    }
+
+    #[test]
+    fn fwt_locator_matches_scalar_product() {
+        let gf8 = Transform::new(Impl8::new(Portable));
+        check_locator_tables(&gf8);
+        for layer in 0..=<Impl8<Portable> as Impl>::BITS {
+            let n = 1usize << layer;
+            let erased: Vec<_> = (0..n)
+                .filter(|position| position.count_ones().is_multiple_of(2))
+                .collect();
+            compare_fwt_locator(&gf8, &erased, (0..n).rev(), n);
+        }
+        let erased: Vec<_> = (0..<Impl8<Portable> as Impl>::ORDER).collect();
+        compare_fwt_locator(
+            &gf8,
+            &erased,
+            0..<Impl8<Portable> as Impl>::ORDER,
+            <Impl8<Portable> as Impl>::ORDER,
+        );
+
+        let gf16 = Transform::new(Impl16::new(Portable));
+        check_locator_tables(&gf16);
+        let mut rng = test_rng();
+        for _ in 0..16 {
+            let layer = rng.random_range(1..=11);
+            let n = 1 << layer;
+            let mut erased: Vec<_> = (0..n).filter(|_| rng.random_bool(0.25)).collect();
+            if erased.is_empty() {
+                erased.push(rng.random_range(0..n));
+            }
+            let queries: Vec<_> = (0..64).map(|_| rng.random_range(0..n)).collect();
+            compare_fwt_locator(&gf16, &erased, queries.iter().copied(), n);
+        }
+
+        let erased: Vec<_> = (0..<Impl16<Portable> as Impl>::ORDER).collect();
+        let queries = [0, 1, 32768, <Impl16<Portable> as Impl>::ORDER - 1];
+        let locator = gf16
+            .locator_fwt(
+                &erased,
+                queries.into_iter(),
+                queries.len(),
+                <Impl16<Portable> as Impl>::ORDER,
+            )
+            .expect("FWT locator tables must build");
+        assert!(
+            locator
+                .iter()
+                .all(|&value| value == <Impl16<Portable> as Impl>::Element::one())
+        );
+
+        // This fragmented layout exceeds the hybrid threshold and exercises
+        // the public dispatch path.
+        let erased: Vec<_> = (512..1536).step_by(2).collect();
+        compare_locator(&gf16, &erased, 0..1537);
     }
 }
