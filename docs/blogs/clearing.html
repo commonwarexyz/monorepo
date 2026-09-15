@@ -173,6 +173,14 @@ O’Grady</a></div>
           .clearing-benchmark-table table {
             min-width: 760px;
           }
+          .clearing-proof-table table {
+            min-width: 540px;
+          }
+          .clearing-proof-table caption {
+            padding: 12px 0;
+            text-align: left;
+            font-weight: bold;
+          }
           .clearing-calculator {
             border: 1px solid #d6d6d6;
             border-radius: 3px;
@@ -260,6 +268,13 @@ O’Grady</a></div>
         settlement uses the same commitments and proofs. The fee
         schedule stays with the operator; changing it requires no
         protocol change.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="In a separate example, payer a batches payments of 20 to b, 7 to c, and a fee of 2 to the operator's designated account. One payer signature covers the whole batch. The operator checks the fee against its quoted policy and countersigns the same endpoint, acknowledging all three payments together. Validators process the fee as an ordinary payment.">
+        <div class="image-caption">
+        <p>Figure 2: The payer includes the operator’s quoted fee in the
+        same signed batch as the recipient payments. One
+        countersignature acknowledges the whole batch; validators
+        process every entry as an ordinary payment.</p>
+        </div>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
@@ -357,7 +372,7 @@ O’Grady</a></div>
         class="math inline">L_{e+1}=L_e=200</span>.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
         <div class="image-caption">
-        <p>Figure 2: A separate epoch with 100 million payments of
+        <p>Figure 3: A separate epoch with 100 million payments of
         $0.000001, one atomic unit each. Every sender uses its own
         opening funds. The arrows group independent payments by sender
         and recipient, with both directions between <span
@@ -393,7 +408,7 @@ O’Grady</a></div>
         <li>The <strong>state root</strong> commits the current positive
         balances.</li>
         <li>The <strong>activity root</strong> commits the cumulative
-        log of sorted account rows.</li>
+        log of account Rows and payment Entries.</li>
         <li>The <strong>payout root</strong> commits the cumulative log
         of external payout outputs.</li>
         </ul>
@@ -404,7 +419,7 @@ O’Grady</a></div>
         Individual Entry records follow the Row prefix in payer-row
         order. A positive-debit Row consumes entries until their
         cumulative values sum to its debit; a zero-debit Row consumes
-        none. Commit(None) ends the epoch. In Figure 3, the blue branch
+        none. Commit(None) ends the epoch. In Figure 4, the blue branch
         expands the BMT for <span class="math inline">c</span>’s
         outgoing payment vector: <span class="math inline">c</span>
         signs that root, and the leaves below are <span
@@ -433,14 +448,14 @@ O’Grady</a></div>
         the new state, so the dealing needs no state-change proof. They
         promote the selected candidate state once the close is
         admitted.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives three shared protocol roots: state, activity, and payout. After prior activity operations, this epoch appends a sorted Row for a, b, c, and d; the certified row count delimits that prefix. Each Row directly records its account, final debit, sequence, and outgoing-payment BMT root. Original Entry records follow in payer-row order, then Commit(None). The shown entries for c pay 4 to b and 7 to d, sum to c's debit of 11, and reconstruct the BMT root that c signs. The cumulative payout log shows prior operations, then this zero-payout epoch's Commit(None). A payout output stores destination and amount and is addressed by its native append location. A separate private QMDB keeps each validator's signing decisions local.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived roots: state, activity, and payout. A separate activity-log strip shows earlier closes followed by this close's four sorted Rows, original Entries grouped by payer, and Commit(None). The highlighted Row for c contains debit 11, sequence 2, and a link to the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. QMDB retains the resulting balances; this close appends no new payout outputs.">
         <div class="image-caption">
-        <p>Figure 3: Validators derive the state, activity, and payout
-        roots. The activity log keeps a certified Row prefix, original
-        Entry records, and Commit(None); <span
-        class="math inline">c</span>’s entries sum to the debit in its
-        Row and reconstruct the BMT root that <span
-        class="math inline">c</span> signs.</p>
+        <p>Figure 4: The close binds three validator-derived roots. The
+        activity log appends this close’s Rows and original Entries
+        after earlier history. Below, <span
+        class="math inline">c</span>’s Row names the BMT root that <span
+        class="math inline">c</span> signs; its two entries sum to the
+        Row’s debit of 11.</p>
         </div>
         <p>The settlement chain holds pooled custody, the certified
         state root, current finalized log heads, bounded pending log
@@ -538,7 +553,7 @@ O’Grady</a></div>
         cumulative logs.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the state root, activity root, and payout root and bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
         <div class="image-caption">
-        <p>Figure 4: Every validator derives the same state, activity,
+        <p>Figure 5: Every validator derives the same state, activity,
         and payout roots before signing one close commitment. Before its
         vote leaves, it durably commits the three public candidates and
         then its private checkpoint and signing decision.</p>
@@ -698,7 +713,7 @@ O’Grady</a></div>
         though the old MMR membership proof is still valid.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-payout-ranges.svg" alt="Four steps show one payout MMR root and output 12 opening remaining unchanged while the end-exclusive unclaimed ranges collapse. The initial range 10 through 15 contains indices 10, 11, 12, 13, and 14. Claiming interior index 12 atomically splits it into 10 through 12 and 13 through 15, reduces the reserve, and pays the destination. Claiming edge indices 10 and 14 shrinks the ranges to singleton intervals 11 through 12 and 13 through 14. Claiming 11 and 13 deletes those last ranges. Replaying output 12 is rejected because its index is in no unclaimed interval, even though its MMR proof remains valid. No claimed set is stored and no MMR leaf is deleted.">
         <div class="image-caption">
-        <p>Figure 5: The payout MMR proves output 12; the
+        <p>Figure 6: The payout MMR proves output 12; the
         unclaimed-range map makes it claimable once. An interior claim
         splits a range, edge claims shrink it, and claiming its last
         item deletes it. Ranges are end-exclusive.</p>
@@ -770,7 +785,7 @@ O’Grady</a></div>
           <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 6: Both calculations include the same predecessor
+        <p>Figure 7: Both calculations include the same predecessor
         credit. Importing it adds to the live balance, preserving
         payments already accepted in the successor epoch.</p>
         </div>
@@ -864,7 +879,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 7: Exact encoded sizes, arithmetic-mean preparation
+        <p>Figure 8: Exact encoded sizes, arithmetic-mean preparation
         times over 20 retained CPU samples, and durable-acknowledgment
         means over three actual runs with no warmup. <span
         class="math inline">A</span> is active payers, <span
@@ -896,7 +911,7 @@ O’Grady</a></div>
         payments.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots show modeled bytes per payment as one million to one billion unit payments pass between fixed pairs. The left shows one validator's keyed update for four account counts, including growing cumulative counters. The right shows the 101-byte commitment and certificate.">
         <div class="image-caption">
-        <p>Figure 8: Operator Dealing model. Every account repeatedly
+        <p>Figure 9: Operator Dealing model. Every account repeatedly
         pays one unit to its next neighbor. Counters grow, while more
         payments share the byte cost of one validator’s update and the
         100-validator committee’s certificate. The validator-derived
@@ -907,36 +922,58 @@ O’Grady</a></div>
         <h3 id="native-proof-sizes-and-verification">Native Proof Sizes
         and Verification</h3>
         <p>Activity challenges open the certified Row prefix in the
-        cumulative native log. The table samples complete encoded
-        account lookups across historical-row (<span
-        class="math inline">H</span>) and current-row (<span
-        class="math inline">R</span>) dimensions with one million live
-        accounts. In these fixtures, <span
-        class="math inline">H&gt;0</span> occupies one prior close and
-        <span class="math inline">H=0</span> has no prior close. Each
-        close also adds Entry records and a Commit, so distributing the
-        same <span class="math inline">H</span> across a different
-        history can change the operation count, floor, topology, and
-        proof size. An empty range needs no MMR opening. Presence
-        includes the full Row; an interior exclusion includes the two
-        adjacent Rows. Signed receipts and payer-vector BMT openings are
-        separate and unchanged.</p>
-        <div class="clearing-benchmark-table">
+        cumulative native log. The first table varies the current
+        close’s Row count <span class="math inline">R</span> with no
+        prior rows (<span class="math inline">H=0</span>). The second
+        fixes <span class="math inline">R=128</span> and varies the rows
+        <span class="math inline">H</span> in one earlier close. Both
+        use one million live accounts. Native operation counts also
+        include any Entry records and each close’s Commit, so
+        distributing the same <span class="math inline">H</span> across
+        a different history can change the operation count, floor,
+        topology, and proof size. An empty range needs no MMR opening.
+        Presence includes the full Row; an interior exclusion includes
+        the two adjacent Rows. Signed receipts and payer-vector BMT
+        openings are separate and unchanged.</p>
+        <div class="clearing-benchmark-table clearing-proof-table">
         <table>
+          <caption>Current close size · no prior rows (<em>H</em> = 0)</caption>
           <thead>
-            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Activity lookup</th><th colspan="4" style="text-align:center;">Historical rows (<em>H</em>)</th></tr>
-            <tr><th style="text-align:right;">0</th><th style="text-align:right;">1,024</th><th style="text-align:right;">65,536</th><th style="text-align:right;">1,000,000</th></tr>
+            <tr>
+              <th style="text-align:left;">Activity lookup</th>
+              <th style="text-align:right;">Current rows (<em>R</em>)</th>
+              <th style="text-align:right;">Size / verification</th>
+            </tr>
           </thead>
           <tbody>
-            <tr><td>Empty absence, <em>R</em> = 0</td><td style="text-align:right;">4 B<br><small>8.03 ns</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Presence, <em>R</em> = 1</td><td style="text-align:right;">124 B<br><small>427 ns</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Adjacent absence, <em>R</em> = 2</td><td style="text-align:right;">239 B<br><small>679 ns</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Presence, <em>R</em> = 128</td><td style="text-align:right;">317 B<br><small>973 ns</small></td><td style="text-align:right;">349 B<br><small>1.11 µs</small></td><td style="text-align:right;">350 B<br><small>1.10 µs</small></td><td style="text-align:right;">510 B<br><small>1.54 µs</small></td></tr>
-            <tr><td>Adjacent absence, <em>R</em> = 128</td><td style="text-align:right;">400 B<br><small>1.14 µs</small></td><td style="text-align:right;">464 B<br><small>1.32 µs</small></td><td style="text-align:right;">465 B<br><small>1.31 µs</small></td><td style="text-align:right;">625 B<br><small>1.76 µs</small></td></tr>
-            <tr><td>Presence, <em>R</em> = 1,024</td><td style="text-align:right;">413 B<br><small>1.27 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Adjacent absence, <em>R</em> = 1,024</td><td style="text-align:right;">496 B<br><small>1.43 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Presence, <em>R</em> = 1,000,000</td><td style="text-align:right;">702 B<br><small>2.11 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Adjacent absence, <em>R</em> = 1,000,000</td><td style="text-align:right;">785 B<br><small>2.25 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
+            <tr><td style="text-align:left;">Empty absence</td><td style="text-align:right;">0</td><td style="text-align:right;">4 B<br><small>8.03 ns</small></td></tr>
+            <tr><td style="text-align:left;">Presence</td><td style="text-align:right;">1</td><td style="text-align:right;">124 B<br><small>427 ns</small></td></tr>
+            <tr><td style="text-align:left;">Adjacent absence</td><td style="text-align:right;">2</td><td style="text-align:right;">239 B<br><small>679 ns</small></td></tr>
+            <tr><td style="text-align:left;">Presence</td><td style="text-align:right;">128</td><td style="text-align:right;">317 B<br><small>973 ns</small></td></tr>
+            <tr><td style="text-align:left;">Adjacent absence</td><td style="text-align:right;">128</td><td style="text-align:right;">400 B<br><small>1.14 µs</small></td></tr>
+            <tr><td style="text-align:left;">Presence</td><td style="text-align:right;">1,024</td><td style="text-align:right;">413 B<br><small>1.27 µs</small></td></tr>
+            <tr><td style="text-align:left;">Adjacent absence</td><td style="text-align:right;">1,024</td><td style="text-align:right;">496 B<br><small>1.43 µs</small></td></tr>
+            <tr><td style="text-align:left;">Presence</td><td style="text-align:right;">1,000,000</td><td style="text-align:right;">702 B<br><small>2.11 µs</small></td></tr>
+            <tr><td style="text-align:left;">Adjacent absence</td><td style="text-align:right;">1,000,000</td><td style="text-align:right;">785 B<br><small>2.25 µs</small></td></tr>
+          </tbody>
+        </table>
+        </div>
+
+        <div class="clearing-benchmark-table clearing-proof-table">
+        <table>
+          <caption>Prior history · 128 current rows (<em>R</em> = 128)</caption>
+          <thead>
+            <tr>
+              <th style="text-align:left;">Prior rows (<em>H</em>)</th>
+              <th style="text-align:right;">Presence</th>
+              <th style="text-align:right;">Adjacent absence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="text-align:left;">0</td><td style="text-align:right;">317 B<br><small>973 ns</small></td><td style="text-align:right;">400 B<br><small>1.14 µs</small></td></tr>
+            <tr><td style="text-align:left;">1,024</td><td style="text-align:right;">349 B<br><small>1.11 µs</small></td><td style="text-align:right;">464 B<br><small>1.32 µs</small></td></tr>
+            <tr><td style="text-align:left;">65,536</td><td style="text-align:right;">350 B<br><small>1.10 µs</small></td><td style="text-align:right;">465 B<br><small>1.31 µs</small></td></tr>
+            <tr><td style="text-align:left;">1,000,000</td><td style="text-align:right;">510 B<br><small>1.54 µs</small></td><td style="text-align:right;">625 B<br><small>1.76 µs</small></td></tr>
           </tbody>
         </table>
         </div>
@@ -954,10 +991,10 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 9: Exact native activity lookup and complete challenge
-        encodings. The smaller values below lookup sizes are arithmetic
-        means of the 20 retained per-sample, per-iteration CPU
-        verification times, starting from decoded inputs. <span
+        <p>Figure 10: Exact native activity lookup and complete
+        challenge encodings. The smaller values below lookup sizes are
+        arithmetic means of the 20 retained per-sample, per-iteration
+        CPU verification times, starting from decoded inputs. <span
         class="math inline">H</span> and <span
         class="math inline">R</span> exclude native Entry and Commit
         operations. Each lookup cell includes its Row or adjacent Rows
@@ -974,33 +1011,49 @@ O’Grady</a></div>
         that root advances. Its MMR path follows cumulative log
         topology, not just the current close’s output count <span
         class="math inline">W</span>, and physical prefix pruning does
-        not shorten it.</p>
-        <div class="clearing-benchmark-table">
+        not shorten it. The first table varies <span
+        class="math inline">W</span> with no prior outputs. The second
+        adds one output after different amounts of history and compares
+        its claim with a refreshed claim for an older output.</p>
+        <div class="clearing-benchmark-table clearing-proof-table">
         <table>
+          <caption>Current close size · no prior outputs (<em>H</em> = 0)</caption>
           <thead>
             <tr>
-              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
-              <th colspan="4" style="text-align:center;">Historical outputs (<em>H</em>)</th>
-            </tr>
-            <tr>
-              <th style="text-align:right;">0</th>
-              <th style="text-align:right;">1,024</th>
-              <th style="text-align:right;">65,536</th>
-              <th style="text-align:right;">1,000,000</th>
+              <th style="text-align:left;">Payout proof</th>
+              <th style="text-align:right;">New outputs (<em>W</em>)</th>
+              <th style="text-align:right;">Size / verification</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>Commit proof, <em>W</em> = 0</td><td style="text-align:right;">46 B<br><small>285 ns</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Current claim, <em>W</em> = 1</td><td style="text-align:right;">105 B<br><small>402 ns</small></td><td style="text-align:right;">138 B<br><small>525 ns</small></td><td style="text-align:right;">139 B<br><small>543 ns</small></td><td style="text-align:right;">331 B<br><small>1.06 µs</small></td></tr>
-            <tr><td>Middle current claim, <em>W</em> = 1,024</td><td style="text-align:right;">394 B<br><small>1.23 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Middle current claim, <em>W</em> = 500,000</td><td style="text-align:right;">651 B<br><small>2.04 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Middle current claim, <em>W</em> = 1,000,000</td><td style="text-align:right;">683 B<br><small>2.15 µs</small></td><td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>
-            <tr><td>Historical claim, refreshed after <em>W</em> = 1</td><td style="text-align:right;">—</td><td style="text-align:right;">394 B<br><small>1.25 µs</small></td><td style="text-align:right;">587 B<br><small>1.82 µs</small></td><td style="text-align:right;">683 B<br><small>2.07 µs</small></td></tr>
+            <tr><td style="text-align:left;">Commit proof</td><td style="text-align:right;">0</td><td style="text-align:right;">46 B<br><small>285 ns</small></td></tr>
+            <tr><td style="text-align:left;">Current claim</td><td style="text-align:right;">1</td><td style="text-align:right;">105 B<br><small>402 ns</small></td></tr>
+            <tr><td style="text-align:left;">Middle current claim</td><td style="text-align:right;">1,024</td><td style="text-align:right;">394 B<br><small>1.23 µs</small></td></tr>
+            <tr><td style="text-align:left;">Middle current claim</td><td style="text-align:right;">500,000</td><td style="text-align:right;">651 B<br><small>2.04 µs</small></td></tr>
+            <tr><td style="text-align:left;">Middle current claim</td><td style="text-align:right;">1,000,000</td><td style="text-align:right;">683 B<br><small>2.15 µs</small></td></tr>
+          </tbody>
+        </table>
+        </div>
+
+        <div class="clearing-benchmark-table clearing-proof-table">
+        <table>
+          <caption>Prior history · one new output (<em>W</em> = 1)</caption>
+          <thead>
+            <tr>
+              <th style="text-align:left;">Prior outputs (<em>H</em>)</th>
+              <th style="text-align:right;">New output claim</th>
+              <th style="text-align:right;">Older output, refreshed</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="text-align:left;">1,024</td><td style="text-align:right;">138 B<br><small>525 ns</small></td><td style="text-align:right;">394 B<br><small>1.25 µs</small></td></tr>
+            <tr><td style="text-align:left;">65,536</td><td style="text-align:right;">139 B<br><small>543 ns</small></td><td style="text-align:right;">587 B<br><small>1.82 µs</small></td></tr>
+            <tr><td style="text-align:left;">1,000,000</td><td style="text-align:right;">331 B<br><small>1.06 µs</small></td><td style="text-align:right;">683 B<br><small>2.07 µs</small></td></tr>
           </tbody>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 10: Exact native payout-log encodings. The smaller
+        <p>Figure 11: Exact native payout-log encodings. The smaller
         values below sizes are arithmetic means of the 20 retained
         per-sample, per-iteration CPU verification times, starting from
         decoded inputs. Nonempty artifacts are complete claims with a
@@ -1008,9 +1061,10 @@ O’Grady</a></div>
         opening plus the Commit operation, not a claim. <span
         class="math inline">H</span> and <span
         class="math inline">W</span> exclude Commit markers, and the
-        48-byte current finalized head is separate. Current rows use a
-        middle output except where labeled. Position, floor, and MMR
-        topology affect size; these samples are not upper bounds.</p>
+        48-byte current finalized head is separate. Current-output
+        claims use a middle output except where labeled. Position,
+        floor, and MMR topology affect size; these samples are not upper
+        bounds.</p>
         </div>
         <p>QMDB proofs authenticate balances for forced withdrawal
         intake and recovery. A recovery claim opens the account’s
@@ -1032,7 +1086,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 11: Exact Current Ordered proof encodings for a middle
+        <p>Figure 12: Exact Current Ordered proof encodings for a middle
         account and a missing key. The sparse successor changes 1,024
         accounts; the dense successor changes all one million.
         SHA-256/MMB uses 32-byte bitmap chunks and 8-byte balances.
@@ -1047,7 +1101,7 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 12: Modeled operator Dealing per validator, with total
+        <p>Figure 13: Modeled operator Dealing per validator, with total
         direct operator egress in parentheses. Dotted: all live account
         records (40 bytes each), before database overhead and retained
         evidence. Both axes are logarithmic. Encoder fixtures match the

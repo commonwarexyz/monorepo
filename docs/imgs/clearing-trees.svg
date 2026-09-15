@@ -1,122 +1,87 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 844" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1010" role="img" aria-labelledby="title description">
   <title id="title">The Commitments Behind a Close</title>
-  <desc id="description">Each validator derives three shared protocol roots: state, activity, and payout. After prior activity operations, this epoch appends a sorted Row for accounts a, b, c, and d. Each Row directly holds the account, final debit, sequence, and outgoing-payment BMT root; the certified row count delimits that prefix. Original Entry records follow in payer-row order, and Commit(None) ends the epoch. The entries for c pay 4 to b and 7 to d; their positive values sum to c's debit of 11 and reconstruct the BMT root that c signs. QMDB carries positive balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. After prior payout operations, this epoch appends no payout outputs and adds Commit(None). A payout output stores destination and amount and is addressed by its native append location. A separate private QMDB keeps each validator's signing decisions local.</desc>
-  <rect width="1320" height="844" fill="#fff"/>
+  <desc id="description">Each validator derives the state, activity, and payout roots, which the close commitment binds with the close context. QMDB retains balances a: 85, b: 58, c: 26, and d: 31. The activity MMR appends this close's four sorted Rows, then original Entries grouped by payer, then Commit(None), after earlier closes. The highlighted Row for c contains debit 11, sequence 2, and c's signed outgoing-payment BMT root. Original Entries reconstruct that BMT: 4 to b and 7 to d, one payment each. The payout MMR appends withdrawal outputs; this example has no new payouts and appends only Commit(None).</desc>
+  <rect width="1120" height="1010" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .title { font-size: 26px; font-weight: 700; fill: #111; }
-    .heading { font-size: 22px; font-weight: 700; fill: #111; }
-    .label { font-size: 19px; fill: #333; }
-    .note { font-size: 17px; fill: #666; }
-    .mono { font-size: 21px; fill: #111; }
+    .title { font-size: 28px; font-weight: 700; fill: #111; }
+    .heading { font-size: 23px; font-weight: 700; fill: #111; }
+    .label { font-size: 21px; fill: #333; }
+    .note { font-size: 19px; fill: #666; }
     .center { text-anchor: middle; }
-    .right { text-anchor: end; }
     .blue { fill: #2424d4; }
     .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
     .record { fill: #fff; stroke: #bcbcbc; stroke-width: 1.5; }
     .selected { fill: #f4f4ff; stroke: #2424d4; stroke-width: 1.5; }
     .link { fill: none; stroke: #999; stroke-width: 1.5; }
     .focus { fill: none; stroke: #2424d4; stroke-width: 2; }
-    .rule { stroke: #dedede; stroke-width: 1; }
   </style>
 
-  <text class="title" x="30" y="40">The Commitments Behind a Close</text>
-  <text class="note" x="30" y="69">Three shared roots derived by each validator</text>
+  <text class="title" x="32" y="40">The Commitments Behind a Close</text>
+  <text class="note" x="32" y="74">Three shared roots, all derived by validators</text>
 
-  <rect class="selected" x="405" y="98" width="510" height="90" rx="5"/>
-  <text class="heading center blue" x="660" y="133">32-byte close commitment</text>
-  <text class="note center" x="660" y="165">binds all three roots</text>
-  <path class="focus" d="M660 188 V219 M214 244 V219 H1106 V244 M660 219 V244"/>
+  <rect class="selected" x="344" y="108" width="432" height="76" rx="5"/>
+  <text class="heading center blue" x="560" y="140">32-byte close commitment</text>
+  <text class="note center" x="560" y="167">roots + close context</text>
+  <path class="focus" d="M560 184 V214 M196 246 V214 H924 V246 M560 214 V246"/>
 
-  <rect class="panel" x="30" y="244" width="368" height="568" rx="5"/>
-  <text class="heading center" x="214" y="284">Account Balances</text>
-  <text class="note center" x="214" y="313">QMDB · positive balances</text>
-  <rect class="record" x="122" y="346" width="184" height="42" rx="3"/>
-  <text class="label center" x="214" y="373">State root</text>
-  <path class="link" d="M214 388 V422"/>
-  <rect class="record" x="66" y="422" width="296" height="242" rx="3"/>
-  <text class="note" x="89" y="453">account</text>
-  <text class="note right" x="339" y="453">balance</text>
-  <path class="rule" d="M66 468 H362"/>
-  <text class="mono" x="94" y="505">a</text>
-  <text class="mono right" x="335" y="505">85</text>
-  <text class="mono" x="94" y="550">b</text>
-  <text class="mono right" x="335" y="550">58</text>
-  <rect x="67" y="564" width="294" height="44" fill="#f4f4ff"/>
-  <text class="mono blue" x="94" y="595">c</text>
-  <text class="mono right blue" x="335" y="595">26</text>
-  <text class="mono" x="94" y="640">d</text>
-  <text class="mono right" x="335" y="640">31</text>
-  <text class="label center" x="214" y="710">Kept across closes</text>
-  <text class="note center" x="214" y="749">Prove a balance</text>
-  <text class="note center" x="214" y="775">for withdrawal or recovery</text>
+  <rect class="panel" x="32" y="246" width="328" height="176" rx="5"/>
+  <text class="heading center" x="196" y="282">State root</text>
+  <text class="note center" x="196" y="315">QMDB · current balances</text>
+  <text class="label" x="90" y="361">a: 85</text>
+  <text class="label" x="230" y="361">b: 58</text>
+  <text class="label blue" x="90" y="395">c: 26</text>
+  <text class="label" x="230" y="395">d: 31</text>
 
-  <rect class="panel" x="430" y="244" width="460" height="568" rx="5"/>
-  <text class="heading center" x="660" y="284">Account Activity</text>
-  <text class="note center" x="660" y="313">MMR · cumulative operation log</text>
-  <rect class="record" x="568" y="346" width="184" height="42" rx="3"/>
-  <text class="label center" x="660" y="373">Activity root</text>
-  <path class="link" d="M660 388 V405 H492 V418 M536 439 H552 M588 439 H594 M630 439 H636 M672 439 H678 M714 439 H735 V503 H466 V514"/>
-  <rect class="record" x="448" y="418" width="88" height="42" rx="3"/>
-  <rect class="record" x="552" y="418" width="36" height="42" rx="3"/>
-  <rect class="record" x="594" y="418" width="36" height="42" rx="3"/>
-  <rect class="selected" x="636" y="418" width="36" height="42" rx="3"/>
-  <rect class="record" x="678" y="418" width="36" height="42" rx="3"/>
-  <text class="note center" x="492" y="445">prior ops</text>
-  <text class="mono center" x="570" y="446">a</text>
-  <text class="mono center" x="612" y="446">b</text>
-  <text class="mono center blue" x="654" y="446">c</text>
-  <text class="mono center" x="696" y="446">d</text>
-  <path class="focus" d="M552 468 V476 H714 V468"/>
-  <text class="note center blue" x="633" y="497" style="font-size:15px;">row_count = 4 · [A0, A0+G)</text>
+  <rect class="selected" x="396" y="246" width="328" height="176" rx="5"/>
+  <text class="heading center blue" x="560" y="282">Activity root</text>
+  <text class="note center" x="560" y="315">MMR · cumulative activity</text>
+  <text class="label center" x="560" y="361">Rows, then Entries,</text>
+  <text class="label center" x="560" y="395">then Commit(None)</text>
 
-  <rect class="record" x="448" y="514" width="36" height="42" rx="3"/>
-  <rect class="record" x="494" y="514" width="104" height="42" rx="3"/>
-  <rect class="record" x="608" y="514" width="104" height="42" rx="3"/>
-  <rect class="record" x="722" y="514" width="36" height="42" rx="3"/>
-  <rect class="record" x="768" y="514" width="108" height="42" rx="3"/>
-  <text class="note center" x="466" y="541">…</text>
-  <text class="note center" x="546" y="532" style="font-size:14px;">Entry</text>
-  <text class="note center" x="546" y="549" style="font-size:14px;">b · 4 · 1</text>
-  <text class="note center" x="660" y="532" style="font-size:14px;">Entry</text>
-  <text class="note center" x="660" y="549" style="font-size:14px;">d · 7 · 1</text>
-  <text class="note center" x="740" y="541">…</text>
-  <text class="note center" x="822" y="541" style="font-size:14px;">Commit(None)</text>
-  <path class="focus" d="M494 564 V572 H712 V564"/>
-  <text class="note center blue" x="603" y="591" style="font-size:15px;">c entries · 4 + 7 = debit 11</text>
+  <rect class="panel" x="760" y="246" width="328" height="176" rx="5"/>
+  <text class="heading center" x="924" y="282">Payout root</text>
+  <text class="note center" x="924" y="315">MMR · withdrawal outputs</text>
+  <text class="note center" x="924" y="361">No new payouts here;</text>
+  <text class="note center" x="924" y="395">append Commit(None).</text>
 
-  <path class="focus" d="M654 460 V478 H882 V642 H852"/>
-  <rect class="selected" x="468" y="604" width="384" height="84" rx="3"/>
-  <text class="label blue" x="490" y="630">c's activity Row</text>
-  <text class="label" x="490" y="656">debit 11 · sequence 2</text>
-  <text class="note center blue" x="660" y="681" style="font-size:16px;">c-signed outgoing-payment BMT root</text>
-  <path class="focus" d="M660 688 V712 M660 712 L565 724 M660 712 L755 724"/>
-  <rect class="record" x="478" y="724" width="174" height="64" rx="3"/>
-  <rect class="record" x="668" y="724" width="174" height="64" rx="3"/>
-  <text class="label center" x="565" y="749">to b: 4</text>
-  <text class="note center" x="565" y="775">1 payment</text>
-  <text class="label center" x="755" y="749">to d: 7</text>
-  <text class="note center" x="755" y="775">1 payment</text>
+  <text class="heading" x="32" y="477">Inside the activity log</text>
+  <text class="note center blue" x="337" y="516">4 sorted Rows</text>
+  <path class="link" d="M182 569 H216 M462 569 H510 M816 569 H852"/>
+  <rect class="panel" x="32" y="534" width="150" height="70" rx="4"/>
+  <text class="note center" x="107" y="563">Earlier</text>
+  <text class="note center" x="107" y="588">closes</text>
+  <rect class="record" x="216" y="534" width="51" height="70" rx="4"/>
+  <rect class="record" x="281" y="534" width="51" height="70" rx="4"/>
+  <rect class="selected" x="346" y="534" width="51" height="70" rx="4"/>
+  <rect class="record" x="411" y="534" width="51" height="70" rx="4"/>
+  <text class="label center" x="241.5" y="577">a</text>
+  <text class="label center" x="306.5" y="577">b</text>
+  <text class="label center blue" x="371.5" y="577">c</text>
+  <text class="label center" x="436.5" y="577">d</text>
+  <rect class="record" x="510" y="534" width="306" height="70" rx="4"/>
+  <text class="label center" x="663" y="563">Original Entries</text>
+  <text class="note center" x="663" y="589">grouped by payer</text>
+  <rect class="record" x="852" y="534" width="236" height="70" rx="4"/>
+  <text class="label center" x="970" y="577">Commit(None)</text>
+  <path class="focus" d="M216 616 V626 H1088 V616"/>
+  <text class="note center blue" x="652" y="654">This close appends left to right</text>
 
-  <rect class="panel" x="922" y="244" width="368" height="568" rx="5"/>
-  <text class="heading center" x="1106" y="284">Payouts</text>
-  <text class="note center" x="1106" y="313">MMR · cumulative payout log</text>
-  <rect class="record" x="965" y="346" width="282" height="42" rx="3"/>
-  <text class="label center" x="1106" y="373">Payout root</text>
-  <path class="link" d="M1106 388 V401 M1009 401 H1187 M1009 401 V412 M1094 401 V412 M1187 401 V412"/>
-  <rect class="record" x="957" y="412" width="104" height="42" rx="3"/>
-  <rect class="record" x="1073" y="412" width="42" height="42" rx="3"/>
-  <rect class="record" x="1127" y="412" width="120" height="42" rx="3"/>
-  <text class="note center" x="1009" y="439">prior ops</text>
-  <text class="note center" x="1094" y="439">…</text>
-  <text class="note center" x="1187" y="439" style="font-size:16px;">Commit(None)</text>
-  <text class="note center blue" x="1106" y="482">no new payouts this close</text>
-  <path class="rule" d="M946 501 H1266"/>
-  <text class="note center" x="1106" y="532">Addressed by append location</text>
-  <rect class="record" x="999" y="550" width="214" height="74" rx="3"/>
-  <text class="label center" x="1106" y="580">destination</text>
-  <text class="label center" x="1106" y="608">amount</text>
-  <text class="label center" x="1106" y="710">Appended by validators</text>
-  <text class="note center" x="1106" y="749">Open against the current</text>
-  <text class="note center" x="1106" y="775">finalized payout root</text>
+  <text class="heading blue" x="32" y="707">The highlighted Row belongs to payer c</text>
+  <rect class="selected" x="32" y="740" width="370" height="130" rx="5"/>
+  <text class="heading blue" x="56" y="775">c's Row</text>
+  <text class="label" x="56" y="813">debit 11 · sequence 2</text>
+  <text class="note" x="56" y="847">outgoing-payment root</text>
+  <path class="focus" d="M402 840 H550"/>
+  <rect class="selected" x="550" y="807" width="538" height="66" rx="4"/>
+  <text class="label center blue" x="819" y="847">BMT root signed by c</text>
+  <path class="focus" d="M819 873 V895 M680 917 V895 H958 V917"/>
+  <rect class="record" x="550" y="917" width="260" height="62" rx="4"/>
+  <rect class="record" x="828" y="917" width="260" height="62" rx="4"/>
+  <text class="label center" x="680" y="943">to b: 4</text>
+  <text class="note center" x="680" y="969">1 payment</text>
+  <text class="label center" x="958" y="943">to d: 7</text>
+  <text class="note center" x="958" y="969">1 payment</text>
+  <text class="note" x="32" y="917">Original Entries supply the leaves.</text>
+  <text class="label blue" x="32" y="950">4 + 7 = c's debit 11</text>
 </svg>
