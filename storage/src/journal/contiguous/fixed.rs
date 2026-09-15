@@ -446,15 +446,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             cfg.page_cache.clone(),
             cfg.write_buffer,
         );
-        let mut indices = Vec::with_capacity(names.len());
-        for name in names {
-            let bytes: [u8; 8] = name
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidBlobName(commonware_formatting::hex(&name)))?;
-            indices.push(u64::from_be_bytes(bytes));
-        }
-        indices.sort_unstable();
+        let indices = Partition::<E>::indices(names)?;
         let pruning_boundary = Inner::<E, A>::recover_pruning_boundary(
             checkpoint.boundary_hint(),
             indices.first().copied(),
@@ -587,6 +579,33 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             clear_dependents().await?;
         }
         Self::open(context, cfg, checkpoint, max_size).await
+    }
+
+    /// Positions the stored blobs may hold, judged from blob names and `checkpoint` without
+    /// opening any blob: the recovered pruning boundary up to the newest blob's capacity, an
+    /// upper bound on the stored end. Without blobs the range is empty at the boundary. A clear
+    /// staged in `checkpoint` is not applied.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn span(
+        context: &E,
+        cfg: &Config,
+        checkpoint: &Checkpoint<E>,
+    ) -> Result<Range<u64>, Error> {
+        let items_per_blob = cfg.items_per_blob.get();
+        let (_, names) = Partition::select(context, &cfg.partition).await?;
+        let indices = Partition::<E>::indices(names)?;
+        let boundary = Inner::<E, A>::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            indices.first().copied(),
+            items_per_blob,
+        )?;
+        let end = match indices.last() {
+            Some(&newest) => {
+                super::blob_first_position(newest, items_per_blob)?.saturating_add(items_per_blob)
+            }
+            None => boundary,
+        };
+        Ok(boundary..end)
     }
 
     /// Exclusive recovered item end.
