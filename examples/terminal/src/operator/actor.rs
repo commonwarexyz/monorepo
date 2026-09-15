@@ -39,7 +39,9 @@ use commonware_clearing::bajillion::{
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
     settlement::Genesis,
-    transition::{BatchId, ChallengeIndex, Close, EpochContext, Terminal, WithdrawalClaim},
+    transition::{
+        BatchId, ChallengeIndex, Close, EpochContext, RootBundle, Terminal, WithdrawalClaim,
+    },
     vector::{OutEntry, OutVector},
 };
 #[cfg(test)]
@@ -139,6 +141,12 @@ pub(crate) enum CloseEvent {
     Failed { epoch: u64, error: String },
 }
 
+struct AdmittedClose {
+    epoch: u64,
+    batch_id: BatchId<Digest>,
+    roots: RootBundle<Digest>,
+}
+
 struct ActiveClose {
     epoch: u64,
     receiver: Receiver<Result<SettlementResult>>,
@@ -175,8 +183,8 @@ pub(crate) struct Operator {
     #[cfg(test)]
     initial_accounts: Vec<Account>,
     active_close: Option<ActiveClose>,
-    // Results are durable in the close jobs; this FIFO tracks certified finality.
-    admitted: VecDeque<SettlementResult>,
+    // The FIFO retains admission identities; close jobs own the complete durable results.
+    admitted: VecDeque<AdmittedClose>,
     recovering: bool,
     store_fault: Option<String>,
     close_fault: Option<String>,
@@ -470,7 +478,7 @@ impl Operator {
         self.store.incoming_payments(receiver, after, limit)
     }
 
-    /// Opens a finalized epoch's retained activity evidence for a payer-recipient edge.
+    /// Opens retained, locally certified activity evidence for a payer-recipient edge.
     /// Close evidence is stored independently of the operational account history.
     pub(crate) fn committed_entry(
         &self,
@@ -1001,6 +1009,7 @@ impl Operator {
     }
 
     pub(crate) fn advance_close(&mut self) -> Result<()> {
+        self.ensure_store_usable()?;
         let Some(active) = self.active_close.as_ref() else {
             return Ok(());
         };
@@ -1028,7 +1037,7 @@ impl Operator {
                     anyhow::bail!("epoch {epoch} close is durably fenced: {error}");
                 }
                 let persisted = if self.pipeline.is_some() {
-                    self.record_admission(result)
+                    self.record_admission(&result)
                 } else {
                     self.store.finish_close(&result, self.genesis_root)
                 };
@@ -1042,7 +1051,9 @@ impl Operator {
                     }
                     return Err(error.context(format!("operator fenced: {message}")));
                 }
-                self.balances.notify();
+                if self.pipeline.is_none() {
+                    self.balances.notify();
+                }
                 if let Err(error) = self.start_next_persisted_close() {
                     let message = format!("next close could not be scheduled: {error:#}");
                     self.close_fault = Some(message.clone());
@@ -1494,28 +1505,21 @@ impl Operator {
     fn certified_tip(&self) -> Result<Option<(u64, StateRoot<Digest>)>> {
         self.admitted.back().map_or_else(
             || self.store.latest_finalized_root(),
-            |result| {
-                Ok(Some((
-                    result.context.payment().epoch(),
-                    result.roots.successor,
-                )))
-            },
+            |admitted| Ok(Some((admitted.epoch, admitted.roots.successor))),
         )
     }
 
     fn next_construction_epoch(&self) -> Result<Option<u64>> {
-        let first = self.admitted.back().map_or(Ok(0), |result| {
-            result
-                .context
-                .payment()
-                .epoch()
+        let first = self.admitted.back().map_or(Ok(0), |admitted| {
+            admitted
+                .epoch
                 .checked_add(1)
                 .context("admitted epoch overflow")
         })?;
         self.store.closing_epoch_from(first)
     }
 
-    fn record_admission(&mut self, result: SettlementResult) -> Result<()> {
+    fn record_admission(&mut self, result: &SettlementResult) -> Result<()> {
         let predecessor = self
             .certified_tip()?
             .map_or(self.genesis_root, |(_, root)| root);
@@ -1529,7 +1533,11 @@ impl Operator {
             result.context.payment().epoch(),
             result.context.challenge_deadline(),
         );
-        self.admitted.push_back(result);
+        self.admitted.push_back(AdmittedClose {
+            epoch: result.context.payment().epoch(),
+            batch_id: result.header.batch_id::<Sha256>(),
+            roots: result.roots,
+        });
         Ok(())
     }
 
@@ -1545,18 +1553,28 @@ impl Operator {
         record: &AdmittedRootsResponse,
     ) -> Result<()> {
         self.ensure_store_usable()?;
-        let Some(result) = self.admitted.front() else {
+        let Some(admitted) = self.admitted.front() else {
             return Ok(());
         };
-        if result.context.payment().epoch() != epoch {
+        if admitted.epoch != epoch {
             return Ok(());
         }
         ensure!(
-            record.batch_id == result.header.batch_id::<Sha256>() && record.roots == result.roots,
+            record.batch_id == admitted.batch_id && record.roots == admitted.roots,
             "certified admission differs from the durable operator close"
         );
         if record.finalized {
-            let finalized = self.store.finish_close(result, self.genesis_root);
+            let result = self
+                .store
+                .stored_result(epoch)?
+                .context("admitted close has no retained result")?;
+            ensure!(
+                result.context.payment().epoch() == epoch
+                    && result.header.batch_id::<Sha256>() == admitted.batch_id
+                    && result.roots == admitted.roots,
+                "retained close differs from its admitted identity"
+            );
+            let finalized = self.store.finish_close(&result, self.genesis_root);
             self.guard_store(finalized)?;
             self.admitted.pop_front();
             self.balances.notify();
@@ -1577,8 +1595,7 @@ impl Operator {
         if let Some(pipeline) = &self.pipeline {
             pipeline.fence(first);
         }
-        self.admitted
-            .retain(|result| result.context.payment().epoch() < first);
+        self.admitted.retain(|admitted| admitted.epoch < first);
         Ok(())
     }
 
@@ -1642,6 +1659,7 @@ impl Operator {
                 if error.downcast_ref::<CommitUnknown>().is_some()
                     || error.downcast_ref::<MutationFailed>().is_some() =>
             {
+                self.store.epoch_reader().fence_storage_failure(&error);
                 let message = format!("{error:#}; restart the operator before continuing");
                 self.store_fault = Some(message.clone());
                 Err(error.context(format!("operator fenced: {message}")))

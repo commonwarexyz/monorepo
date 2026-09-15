@@ -567,7 +567,7 @@ impl Read for IncomingPaymentsResponse {
     }
 }
 
-/// Requests the committed public terminal entry for one (payer, recipient) edge of a
+/// Requests retained activity evidence for one (payer, recipient) edge of a
 /// retained epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommittedEntryRequest {
@@ -602,7 +602,10 @@ impl Read for CommittedEntryRequest {
     }
 }
 
-/// The committed close's identity, its change root, and the composed terminal-entry lookup.
+/// A locally certified close's identity, change root, and terminal-entry lookup.
+///
+/// Callers must bind `batch_id` and `change_root` to an authenticated admission before
+/// relying on `lookup`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommittedEntryResponse {
     pub(crate) batch_id: BatchId<Digest>,
@@ -1222,11 +1225,10 @@ pub(crate) async fn incoming_payments<E: Network + Clock>(
     .context("decode incoming payments")
 }
 
-/// Fetches the committed public terminal entry for one (payer, recipient) edge of a
-/// retained epoch.
+/// Fetches retained activity evidence for one payer-recipient edge.
 ///
-/// This is the availability dependence of reconciliation: the operator can refuse to serve the
-/// lookup but cannot forge one, since it opens against the committed close's own change root.
+/// The caller authenticates the admission identity and verifies the returned lookup against
+/// its change root. The operator only supplies the evidence.
 pub(crate) async fn committed_entry<E: Network + Clock>(
     network: &E,
     address: SocketAddr,

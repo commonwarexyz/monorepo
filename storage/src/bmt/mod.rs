@@ -298,6 +298,21 @@ impl<D: Digest> Tree<D> {
         self.root
     }
 
+    /// Iterates the nodes that can appear as proof siblings, keyed by `(level, index)`.
+    ///
+    /// Nodes are ordered by increasing level, then increasing index. Level zero contains
+    /// leaves. Coordinates match [`range_proof_positions`]. The root and unpaired last
+    /// nodes are omitted because proof reconstruction derives them.
+    pub fn proof_nodes(&self) -> impl Iterator<Item = ((usize, usize), D)> + '_ {
+        self.levels.iter().enumerate().flat_map(|(level, nodes)| {
+            nodes
+                .iter()
+                .enumerate()
+                .take(nodes.len().get() / 2 * 2)
+                .map(move |(index, digest)| ((level, index), *digest))
+        })
+    }
+
     /// Generates a Merkle proof for the leaf at `position`.
     ///
     /// This is a single-element multi-proof, which includes the minimal siblings
@@ -321,20 +336,10 @@ impl<D: Digest> Tree<D> {
             return Err(Error::InvalidPosition(start));
         }
 
-        // Validate range bounds
-        if start > end {
-            return Err(Error::InvalidPosition(start));
-        }
         let leaf_count = self.levels.first().len().get() as u32;
-        if start >= leaf_count {
-            return Err(Error::InvalidPosition(start));
-        }
-        if end >= leaf_count {
-            return Err(Error::InvalidPosition(end));
-        }
 
         // Compute required siblings without enumerating every leaf in the range.
-        let sibling_positions = siblings_required_for_range_proof(leaf_count, start, end)?;
+        let sibling_positions = range_proof_positions(leaf_count, start, end)?;
         let siblings: Vec<D> = sibling_positions
             .iter()
             .map(|&(level, index)| self.levels[level][index])
@@ -548,7 +553,10 @@ fn siblings_required_for_multi_proof(
 
 /// Returns the sorted, deduplicated positions of siblings required to prove
 /// inclusion of a contiguous range of leaves from `start` to `end` (inclusive).
-fn siblings_required_for_range_proof(
+///
+/// Each coordinate is `(level, index)`, with leaves at level zero, matching
+/// [`Tree::proof_nodes`]. The tree must be nonempty and both endpoints must be in bounds.
+pub fn range_proof_positions(
     leaf_count: u32,
     start: u32,
     end: u32,
@@ -934,11 +942,72 @@ impl<D: Digest> Proof<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeMap;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_parallel::{Rayon, Sequential};
     use core::num::NonZeroUsize;
     use rstest::rstest;
+
+    #[test]
+    fn exported_nodes_reproduce_range_and_single_proofs() {
+        for count in 0..=33_u32 {
+            let digests: Vec<Digest> = (0..count)
+                .map(|position| Sha256::hash(&[&position.to_be_bytes()]))
+                .collect();
+            let mut builder = Builder::<Sha256>::new(digests.len());
+            for digest in &digests {
+                builder.add(digest);
+            }
+            let tree = builder.build(&Sequential);
+            let nodes: BTreeMap<_, _> = tree.proof_nodes().collect();
+            let mut used = BTreeSet::new();
+            for start in 0..count {
+                for end in start..count {
+                    let positions = range_proof_positions(count, start, end).unwrap();
+                    let proof = Proof {
+                        leaf_count: count,
+                        siblings: positions.iter().map(|position| nodes[position]).collect(),
+                    };
+                    used.extend(positions);
+                    assert_eq!(proof, tree.multi_proof(start..=end).unwrap());
+                    assert_eq!(proof, tree.range_proof(start, end).unwrap());
+                    proof
+                        .verify_range_inclusion::<Sha256>(
+                            start,
+                            &digests[start as usize..=end as usize],
+                            &tree.root(),
+                        )
+                        .unwrap();
+                }
+            }
+            assert_eq!(used, nodes.keys().copied().collect());
+            if count == 0 {
+                assert_eq!(tree.range_proof(0, 0).unwrap(), Proof::default());
+            }
+        }
+        assert!(matches!(
+            range_proof_positions(0, 0, 0),
+            Err(Error::NoLeaves)
+        ));
+        for (count, start, end, invalid) in [(2, 1, 0, 1), (3, 3, 3, 3), (3, 0, 3, 3)] {
+            assert!(matches!(
+                range_proof_positions(count, start, end),
+                Err(Error::InvalidPosition(position)) if position == invalid
+            ));
+        }
+        assert!(
+            range_proof_positions(u32::MAX, 0, u32::MAX - 1)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            range_proof_positions(u32::MAX, u32::MAX - 1, u32::MAX - 1)
+                .unwrap()
+                .len()
+                <= 32
+        );
+    }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2837
     ///

@@ -160,7 +160,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 49 {
+    match selector % 44 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -178,15 +178,16 @@ fuzz_target!(|data: &[u8]| {
         5 => roundtrip::<Certificate>(bytes, &item_limit),
         6 => roundtrip::<Vote>(bytes, &()),
         7 => roundtrip::<WithdrawalAction>(bytes, &()),
-        8 | 43 => roundtrip::<StateRoot<Digest>>(bytes, &()),
-        9 | 44 => roundtrip::<StateValueOpening<Digest>>(bytes, &item_limit),
+        8 => roundtrip::<StateRoot<Digest>>(bytes, &()),
+        9 => roundtrip::<StateValueOpening<Digest>>(bytes, &item_limit),
         10 => roundtrip::<core::num::NonZeroU64>(bytes, &()),
         11 => roundtrip::<SettlementOutput>(bytes, &()),
         12 => roundtrip::<AccountChange<VerifyingKey, Digest>>(bytes, &()),
         13 => roundtrip::<ChangeValue<Digest>>(bytes, &()),
         14 => roundtrip::<ChangeValueCore>(bytes, &()),
         15 => roundtrip::<ChangeGuard<VerifyingKey, Digest>>(bytes, &()),
-        16 | 17 => roundtrip::<Opening<Digest>>(bytes, &()),
+        16 => roundtrip::<Opening<Digest>>(bytes, &()),
+        17 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
         18 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
         19 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
         20 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
@@ -197,9 +198,10 @@ fuzz_target!(|data: &[u8]| {
         25 => roundtrip::<OutEntry<VerifyingKey>>(bytes, &()),
         26 => roundtrip::<OutVector<VerifyingKey>>(bytes, &()),
         27 => roundtrip::<OutTipLookup<VerifyingKey, Digest>>(bytes, &()),
-        28 | 31 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
+        28 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
         29 => roundtrip::<CloseContext<VerifyingKey, Digest>>(bytes, &()),
-        30 | 45 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
+        30 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
+        31 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         32 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
         33 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
         34 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
@@ -215,9 +217,7 @@ fuzz_target!(|data: &[u8]| {
         40 => roundtrip::<RootBundle<Digest>>(bytes, &()),
         41 => roundtrip::<BatchId<Digest>>(bytes, &()),
         42 => roundtrip::<CloseLimits>(bytes, &()),
-        46 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
-        47 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
-        48 => deterministic::Runner::seeded(u64::from(limit_selector))
+        43 => deterministic::Runner::seeded(u64::from(limit_selector))
             .start(|runtime| async move { dealing_roundtrip(bytes, close_limits, runtime).await }),
         _ => unreachable!(),
     }

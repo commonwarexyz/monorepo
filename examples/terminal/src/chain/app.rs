@@ -4,7 +4,7 @@ use crate::{
     chain::{
         ingress::Provider,
         native::NativeGenesis,
-        state::execute,
+        state::{Record, execute, status_key},
         types::{
             Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, Qmdb, SyncTarget, now,
         },
@@ -30,9 +30,8 @@ use tracing::info;
 /// Maximum milliseconds a block's timestamp may lead the verifier's clock at
 /// vote time.
 ///
-/// Demo-grade bound: generous against honest clock skew and scheduling delay,
-/// while capping both how far ahead a proposer can date a block over honest
-/// clocks and, therefore, how long verifiers wait out a future-dated block.
+/// Allows honest clock skew and scheduling delay. A block with a later timestamp
+/// remains pending until the local clock enters this window or verification is cancelled.
 pub(crate) const MAX_TIMESTAMP_DRIFT: u64 = 2_000;
 
 /// One finalized tip entry: the block's height, digest, canonical root, and
@@ -207,12 +206,9 @@ where
             return None;
         }
 
-        // Timestamp check two, vote-time drift: a block dated beyond the
-        // local clock plus the drift bound is not voted on yet. It is not
-        // permanently invalid (the clock catches up), so wait it out instead
-        // of returning `None`. The wait is bounded by the drift an honest or
-        // dishonest proposer could have claimed over honest clocks, and the
-        // loop mutates nothing, so cancelling and re-running it is safe.
+        // Vote eligibility follows the local clock. A future timestamp can keep
+        // verification pending until it enters the drift window. The loop mutates
+        // no state, so verification can be cancelled and retried.
         loop {
             let bound = now(&context.0).saturating_add(MAX_TIMESTAMP_DRIFT);
             if block.timestamp <= bound {
@@ -253,21 +249,45 @@ where
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        // Replay of a certified block: only the deterministic timestamp
-        // monotonicity is re-checked (inside execution), never the vote-time
-        // drift bound.
-        Some(
-            execute(
-                batches,
-                block.height(),
-                block.timestamp,
-                &self.timing,
-                &self.native,
-                &block.transactions,
-            )
-            .await
-            .expect("replay execution must read settlement state"),
+        // Original deployments remain registered, and each block records their timestamp.
+        // The supplied parent batch carries the clock of this speculative ancestry.
+        let parent_timestamp = if block.height().get() == 1 {
+            self.genesis.timestamp
+        } else {
+            let deployment = self
+                .native
+                .deployments
+                .first()
+                .expect("native genesis contains a deployment")
+                .deployment
+                .digest();
+            match batches
+                .get(&status_key(deployment))
+                .await
+                .expect("replay must read parent settlement status")
+            {
+                Some(Record::Status(status)) => status.timestamp,
+                _ => unreachable!("every executed block records the genesis deployment status"),
+            }
+        };
+        if block.timestamp <= parent_timestamp {
+            return None;
+        }
+
+        let merkleized = execute(
+            batches,
+            block.height(),
+            block.timestamp,
+            &self.timing,
+            &self.native,
+            &block.transactions,
         )
+        .await
+        .expect("replay execution must read settlement state");
+        if merkleized.root() != block.state_root {
+            return None;
+        }
+        Some(merkleized)
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

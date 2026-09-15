@@ -5,6 +5,7 @@ use commonware_p2p::Receiver;
 use commonware_runtime::IoBuf;
 use commonware_utils::{Acknowledgement as _, acknowledgement::Exact, channel::mpsc};
 use futures::FutureExt as _;
+use std::convert::Infallible;
 
 #[derive(Debug)]
 struct NetworkInput(mpsc::Receiver<(ed25519::PublicKey, IoBuf)>);

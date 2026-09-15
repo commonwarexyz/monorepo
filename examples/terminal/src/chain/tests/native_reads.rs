@@ -699,6 +699,94 @@ fn registration_completion_survives_its_fee_debit() {
 }
 
 #[test]
+fn registration_completion_rotates_past_certified_absence_replay() {
+    deterministic::Runner::timed(Duration::from_secs(90)).start(|context| async move {
+        let upstream = SocketAddr::from(([127, 0, 0, 1], 19_876));
+        let stale = SocketAddr::from(([127, 0, 0, 1], 19_877));
+        let control = harness::start(&context, upstream, "registration-replay").await;
+        control.advance(1).await;
+        let native = control.identity().native.clone();
+        let owner = operator_signer(0);
+        let request = RegisterDeploymentRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"registration-absence-replay"]),
+            operator_ack_key(0),
+            native.deployments[0].network_key.clone(),
+            1024,
+            native.registration_fee,
+            &owner,
+        );
+        let expected = request.entry(&native).unwrap();
+        let deployment = request.deployment_id();
+        let lookup = ReadRequest::new(
+            deployment,
+            Lookup::RegistryEntry {
+                chain_id: native.chain_id(),
+                deployment,
+            },
+        );
+        let replay = rpc::invoke(
+            &context,
+            upstream,
+            "query",
+            query::METHOD_READ,
+            lookup.encode(),
+        )
+        .await
+        .unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed_reads = reads.clone();
+        let mut listener = context.bind(stale).await.unwrap();
+        context
+            .child("stale_registration")
+            .spawn(move |context| async move {
+                loop {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let body = if request.method == query::METHOD_READ {
+                        observed_reads.fetch_add(1, Ordering::Relaxed);
+                        replay.clone()
+                    } else {
+                        assert_eq!(request.method, query::METHOD_SUBMIT_TX);
+                        rpc::invoke(&context, upstream, "query", request.method, request.body)
+                            .await
+                            .unwrap()
+                    };
+                    rpc::send_response(&mut sink, &rpc::Response::Success { body })
+                        .await
+                        .unwrap();
+                }
+            });
+        let mut client = Client::new(
+            control.identity(),
+            deployment,
+            vec![stale, upstream],
+            context.child("registration_client"),
+        )
+        .unwrap();
+        let before = client.read(&context, &lookup).await.unwrap();
+        assert!(before.record.is_none());
+        let result =
+            crate::chain::setup::complete_registration(&context, &mut client, &native, request)
+                .await;
+
+        let mut current = Client::new(
+            control.identity(),
+            deployment,
+            vec![upstream],
+            context.child("current_client"),
+        )
+        .unwrap();
+        let applied = current.recent(&context, &lookup).await.unwrap();
+        assert!(applied.height > before.height);
+        assert_eq!(applied.record, Some(Record::RegistryEntry(expected)));
+        assert!(reads.load(Ordering::Relaxed) > 1);
+        assert!(now(&context).saturating_sub(before.timestamp) > RECENCY_THRESHOLD);
+        result.expect("an already-certified registration must survive a stale query endpoint");
+    });
+}
+
+#[test]
 fn certified_registry_fits_busy_block() {
     deterministic::Runner::timed(Duration::from_secs(120)).start(|context| async move {
         let mut fixture = ReadFixture::new(&context).await;

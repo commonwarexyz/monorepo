@@ -756,7 +756,7 @@ fn admit_pending(operator: &mut Operator) -> AdmittedRootsResponse {
         roots: result.roots,
         finalized: false,
     };
-    operator.record_admission(result).unwrap();
+    operator.record_admission(&result).unwrap();
     record
 }
 
@@ -2186,7 +2186,7 @@ fn poisoned_evidence_metadata_cannot_poison_replica_recovery() {
             roots: record.roots,
             finalized: record.finalized,
         };
-        operator.record_admission(result.clone()).unwrap();
+        operator.record_admission(&result).unwrap();
         assert!(operator.store.latest_finalized_root().unwrap().is_none());
         let saved = result.encode();
         drop(operator);
@@ -3231,6 +3231,196 @@ fn invalid_requests_are_rejected_before_epoch_registration() {
             .is_err()
     );
     assert!(operator.validate_close_start(0).is_err());
+}
+
+async fn prepare_registered_send(
+    context: &deterministic::Context,
+    chain: &mut client::Client,
+    operator: &Mutex<Operator>,
+) -> operator_rpc::OperatorRequest {
+    let sign = || {
+        let operator = operator.lock();
+        let (authorization, entries) = operator
+            .sign_send(0, &[(operator.wallets[1].public_key(), 1)])
+            .unwrap();
+        operator_rpc::OperatorRequest::AcceptSend(operator_rpc::AcceptSendRequest {
+            authorization,
+            entries,
+        })
+    };
+    let request = sign();
+    assert!(
+        service::prepare_request(context, chain, operator, &request, Timing::DEFAULT)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Registration adopts the certified anchor before the payer signs its accepted send.
+    let request = sign();
+    assert!(
+        service::prepare_request(context, chain, operator, &request, Timing::DEFAULT)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    request
+}
+
+async fn fail_payment_with_buffered_admission(
+    context: &deterministic::Context,
+    fail_payment: fn(&mut Store),
+) -> (Mutex<Operator>, client::Client, SyncSender<()>) {
+    let chain = Chain::new(context).await;
+    let client = |label| {
+        client::Client::new(
+            chain.control.identity(),
+            deployment(),
+            vec![SocketAddr::from(([127, 0, 0, 1], 9_800))],
+            context.child(label),
+        )
+        .unwrap()
+    };
+    let mut serving = client("serving");
+    let operator = Mutex::new(operator());
+    let request = prepare_registered_send(context, &mut serving, &operator).await;
+    let rpc::Response::Success { body } =
+        operator_rpc::handle_decoded(&mut operator.lock(), request)
+    else {
+        panic!("registered epoch-0 payment failed");
+    };
+    assert!(matches!(
+        operator_rpc::AcceptSendResponse::decode(body).unwrap(),
+        operator_rpc::AcceptSendResponse::Accepted(_)
+    ));
+
+    // A retained certificate is replayed through the production admission worker.
+    // Its successful result stays buffered until the normal service driver collects it.
+    let expected = {
+        let mut operator = operator.lock();
+        let prepared = operator
+            .prepare_epoch(
+                operator.store.load_current().unwrap(),
+                operator.registration.clone(),
+            )
+            .unwrap();
+        rotate_epoch(&mut operator, 0);
+        operator.complete_prepared(prepared, 0).unwrap()
+    };
+
+    // The close thread replays an admitted result, so its scheduling cannot expire registration.
+    client::admit(context, &mut serving, AdmitRequest::from(&expected))
+        .await
+        .unwrap();
+    let (started, release) = operator.lock().balances.pause_next_catch_up().unwrap();
+    let (certifier, mailbox) = node::Certifier::new(
+        context.child("admission"),
+        node::Config {
+            verifier: operator.lock().protocol.verifier(),
+            chain: client("admission_client"),
+            mailbox_size: NonZeroUsize::new(10).unwrap(),
+        },
+    );
+    let peers = (0..crate::protocol::committee().unwrap().members().len())
+        .map(|index| ed25519::PrivateKey::from_seed(index as u64).public_key())
+        .collect::<Vec<_>>();
+    certifier.start(inert_channel(peers.clone()));
+    {
+        let mut operator = operator.lock();
+        operator.pipeline = Some(node::Pipeline::new(mailbox, &peers, deployment()).unwrap());
+        operator.start_next_persisted_close().unwrap();
+    }
+    for _ in 0..40_000 {
+        if operator
+            .lock()
+            .active_close
+            .as_ref()
+            .unwrap()
+            .thread
+            .is_finished()
+        {
+            break;
+        }
+        std::thread::yield_now();
+        context.sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        operator
+            .lock()
+            .active_close
+            .as_ref()
+            .unwrap()
+            .thread
+            .is_finished()
+    );
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let admitted = serving.admitted(context, 0).await.unwrap().unwrap();
+    assert_eq!(admitted.batch_id, expected.header.batch_id::<Sha256>());
+    assert_eq!(admitted.roots, expected.roots);
+    assert!(operator.lock().admitted.is_empty());
+
+    // Successor registration requires this actual predecessor admission. The proof
+    // worker is held after reading its result and before its next source connection.
+    let request = prepare_registered_send(context, &mut serving, &operator).await;
+    assert_eq!(operator.lock().registration.context.payment().epoch(), 1);
+    let response = {
+        let mut operator = operator.lock();
+        fail_payment(&mut operator.store);
+        operator_rpc::handle_decoded(&mut operator, request)
+    };
+    let rpc::Response::Error { error } = response else {
+        panic!("failed successor payment was acknowledged");
+    };
+    let error = std::str::from_utf8(&error).unwrap();
+    assert!(
+        error.contains("payment storage mutation failed")
+            || error.contains("payment commit outcome is unknown"),
+        "{error}"
+    );
+    assert!(operator.lock().ensure_store_usable().is_err());
+    (operator, serving, release)
+}
+
+#[test]
+fn foreground_payment_failure_preserves_buffered_close() {
+    for fail_payment in [
+        Store::fail_next_payment_write as fn(&mut Store),
+        Store::fail_next_payment_commit,
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let (operator, mut chain, release) =
+                fail_payment_with_buffered_admission(&context, fail_payment).await;
+            let error = service::observe_closes(&context, &mut chain, &operator)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("SQLite connection is unusable"));
+
+            // Taking ActiveClose precedes the driver's first foreground SQL query.
+            // Its presence proves the failed owner was rejected before that query.
+            assert!(operator.lock().active_close.is_some());
+            assert!(operator.lock().admitted.is_empty());
+            release.send(()).unwrap();
+            let _ = operator.lock().balances.catch_up();
+        });
+    }
+}
+
+#[test]
+fn foreground_payment_failure_fences_deferred_proof_reads() {
+    for fail_payment in [
+        Store::fail_next_payment_write as fn(&mut Store),
+        Store::fail_next_payment_commit,
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let (operator, _, release) =
+                fail_payment_with_buffered_admission(&context, fail_payment).await;
+            assert!(operator.lock().store.storage_fault().is_some());
+            release.send(()).unwrap();
+            assert!(operator.lock().balances.catch_up().is_err());
+            assert!(operator.lock().active_close.is_some());
+            assert!(operator.lock().admitted.is_empty());
+        });
+    }
 }
 
 #[test]
@@ -4970,7 +5160,7 @@ fn virtual_first_credit_waits_for_admission_across_multiple_cutovers() {
         first.acceptance
     );
 
-    operator.record_admission(result).unwrap();
+    operator.record_admission(&result).unwrap();
     operator.accept_send(spend, spend_entries).unwrap();
     assert_eq!(
         operator

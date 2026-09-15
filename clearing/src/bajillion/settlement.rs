@@ -1126,12 +1126,14 @@ where
             }
         }
         let mut openings = extra_openings.iter();
+        let mut latest_challenge_deadline = None;
         for request in withdrawals.requests() {
             if self.pending_withdrawals.contains_key(request.account()) {
                 continue;
             }
             self.ensure_withdrawal_epoch_available(request.body().action())?;
             self.ensure_withdrawal_intake(now, request, &destination_is_eligible)?;
+
             // Finalize is legal only at now > challenge_deadline and runs the
             // inclusive expiry sweep first. FIFO also holds this close behind
             // every pending close, and challenge durations vary within the
@@ -1139,11 +1141,13 @@ where
             // one's. The earliest finalizing tick is therefore one past the
             // latest of those deadlines, and a deadline at that tick would
             // fault before the pop, so the close needs a strictly later one.
-            let earliest_finalize = self
-                .pipeline
-                .iter()
-                .map(|entry| entry.admitted.context.challenge_deadline())
-                .fold(context.challenge_deadline(), u64::max)
+            let earliest_finalize = latest_challenge_deadline
+                .get_or_insert_with(|| {
+                    self.pipeline
+                        .iter()
+                        .map(|entry| entry.admitted.context.challenge_deadline())
+                        .fold(context.challenge_deadline(), u64::max)
+                })
                 .checked_add(1)
                 .ok_or(SettlementError::EpochOverflow)?;
             if request.body().deadline() <= earliest_finalize {
@@ -1351,14 +1355,14 @@ where
         if self.fault_settled {
             return Err(SettlementError::HardFaultAlreadySettled);
         }
-        let next_epoch = self
-            .expected_epoch
-            .checked_add(1)
-            .ok_or(SettlementError::EpochOverflow)?;
         let entry = self
             .pipeline
             .front()
             .ok_or(SettlementError::NoPendingBatch)?;
+        let next_epoch = self
+            .expected_epoch
+            .checked_add(1)
+            .ok_or(SettlementError::EpochOverflow)?;
         match &entry.batch.status {
             BatchStatus::Pending => {}
             BatchStatus::Challenged(_) | BatchStatus::Invalidated(_) => {
@@ -9930,7 +9934,15 @@ mod tests {
     #[test]
     fn partial_withdrawal_can_finish_with_the_last_finalizable_close() {
         let mut fixture = harness(&[2]);
-        fixture.chain.expected_epoch = u64::MAX - 2;
+        fixture.chain = TestChain::new(
+            fixture.deployment,
+            fixture.operator.public_key(),
+            committee(101),
+            &fixture.cache.head().into(),
+            u64::MAX - 2,
+            config(2),
+        )
+        .unwrap();
         let account = &fixture.accounts[0];
         let public_key = account.public_key();
         let partial = withdrawal(
@@ -10028,6 +10040,14 @@ mod tests {
         assert_eq!(fixture.chain.current_state_root(), successor.root());
         assert_eq!(fixture.chain.custody_balance(), 0);
         assert!(fixture.chain.hard_fault().is_none());
+        assert_eq!(fixture.chain.expected_epoch, u64::MAX);
+        assert!(fixture.chain.pending().is_none());
+        let before = fixture.chain.encode();
+        assert!(matches!(
+            fixture.chain.finalize(7),
+            Err(SettlementError::NoPendingBatch)
+        ));
+        assert_eq!(fixture.chain.encode(), before);
     }
 
     #[test]

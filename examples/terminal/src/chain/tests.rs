@@ -1,9 +1,11 @@
+mod app_contract;
 mod checkpoint_proofs;
 mod core_registry;
 mod fixture;
 mod ingress_qualification;
 mod native_reads;
 mod preflight;
+mod proof_restart;
 mod scripted;
 mod startup;
 mod virtual_balances;
@@ -31,9 +33,10 @@ use super::{
         NativeTransferRequest, QueueWithdrawalRequest, RegisterDeploymentRequest,
         RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
     },
-    types::{Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, Qmdb, StateKey, now},
+    types::{Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, StateKey, now},
     validator::{
-        MAX_MESSAGE_SIZE, NAMESPACE as CHAIN_NAMESPACE, SHARING_MODE, Scheme as Threshold,
+        MAX_MESSAGE_SIZE, NAMESPACE as CHAIN_NAMESPACE, NoopResolver, SHARING_MODE,
+        Scheme as Threshold, sync_config,
     },
 };
 use crate::{
@@ -105,7 +108,7 @@ use commonware_glue::{
     },
     stateful::{
         Application as _, Config as StatefulConfig, Input, Stateful as StatefulActor, SyncPlan,
-        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
+        db::{DatabaseSet, Merkleized as _},
     },
 };
 use commonware_parallel::{Sequential, Strategy};
@@ -114,23 +117,14 @@ use commonware_runtime::{
     Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    archive::prunable,
-    journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::full::Config as MerkleConfig,
-    mmr,
-    qmdb::{
-        any::ordered::variable::Operation,
-        current::VariableConfig,
-        sync::{FeedbackTx, Request, Response, Source as QmdbSource},
-    },
-    translator::TwoCap,
+    archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
+    merkle::full::Config as MerkleConfig, qmdb::current::VariableConfig, translator::TwoCap,
 };
 use commonware_utils::{
     N3f1, NZU16, NZU32, NZU64, NZUsize, Participant, TestRng, iter::NonEmpty, non_empty_range,
     ordered::Set, sync::Mutex, test_rng,
 };
 use std::{
-    convert::Infallible,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
@@ -3589,29 +3583,8 @@ const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1024));
 
 type Scheme = MockScheme<ed25519::PublicKey>;
 
-/// State-sync source that never answers: no validator syncs in this test.
-#[derive(Clone)]
-struct NoopResolver;
-
-impl QmdbSource for NoopResolver {
-    type Family = mmr::Family;
-    type Digest = Digest;
-    type Op = Operation<mmr::Family, StateKey, Record>;
-    type Error = Infallible;
-
-    fn serve<'a>(
-        &'a self,
-        _request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
-    > + Send
-    + 'a {
-        std::future::pending()
-    }
-}
-
-impl AttachableResolver<Qmdb<deterministic::Context>> for NoopResolver {
-    async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
+fn query_address(index: usize) -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 6_000 + index as u16))
 }
 
 /// Type-erased state reader so validator state does not name actor types.
@@ -3642,361 +3615,6 @@ impl<S: CertScheme<Digest>> ProcessedHeight for State<S> {
             .get_processed_height()
             .await
             .map_or(0, |height| height.get())
-    }
-}
-
-/// Four validators finalizing the deposit -> register -> admit -> finalize
-/// sequence submitted through validator 0's query server and gossiped by the
-/// ingress actors.
-#[derive(Clone)]
-struct Engine {
-    participants: Vec<ed25519::PublicKey>,
-    schemes: Vec<Scheme>,
-    finalized: Vec<Finalized>,
-    client: ClientResult,
-    expected_root: StateRoot<Digest>,
-    deposit_id: Digest,
-}
-
-impl Engine {
-    fn new(n: u32) -> Self {
-        let mut rng = test_rng();
-        let SchemeFixture {
-            participants,
-            schemes,
-            ..
-        } = scheme_mocks::fixture(&mut rng, NAMESPACE, n);
-
-        // The client rebuilds the fixture with the deadlines the chain
-        // assigns at inclusion. The settled root and deposit id are
-        // deadline-independent, so a throwaway fixture pins the expectations.
-        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
-        let state = genesis_cache();
-        let epoch = close_fixture(
-            native().chain_id(),
-            &protocol,
-            0,
-            state,
-            b"chain-e2e-deposit",
-            2,
-            3,
-        );
-        let finalized = (0..n as usize).map(|_| Finalized::default()).collect();
-        Self {
-            participants,
-            schemes,
-            finalized,
-            client: ClientResult::default(),
-            expected_root: epoch.result.roots.successor,
-            deposit_id: epoch.deposit.id,
-        }
-    }
-
-    /// Query server address for one validator.
-    fn query_address(index: usize) -> std::net::SocketAddr {
-        std::net::SocketAddr::from(([127, 0, 0, 1], 6_000 + index as u16))
-    }
-}
-
-impl EngineDefinition for Engine {
-    type PublicKey = ed25519::PublicKey;
-    type Engine = Handle<()>;
-    type State = State;
-
-    fn participants(&self) -> Vec<Self::PublicKey> {
-        self.participants.clone()
-    }
-
-    fn channels(&self) -> Vec<(u64, Quota)> {
-        vec![
-            (0, TEST_QUOTA), // votes
-            (1, TEST_QUOTA), // certificates
-            (2, TEST_QUOTA), // resolver
-            (3, TEST_QUOTA), // backfill
-            (4, TEST_QUOTA), // broadcast
-            (5, TEST_QUOTA), // settlement transactions
-        ]
-    }
-
-    async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
-        let InitContext {
-            context,
-            index,
-            delayed: _,
-            public_key,
-            oracle,
-            channels,
-            participants: _,
-            monitor,
-        } = ctx;
-
-        let scheme = self.schemes[index].clone();
-        let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let db_config = config(&partition_prefix, &context);
-
-        let mut channels = channels.into_iter();
-        let vote_network = channels.next().unwrap();
-        let certificate_network = channels.next().unwrap();
-        let resolver_network = channels.next().unwrap();
-        let backfill_network = channels.next().unwrap();
-        let broadcast_network = channels.next().unwrap();
-        let settlement_tx_network = channels.next().unwrap();
-
-        // Marshal resolver.
-        let resolver = marshal_resolver::init(
-            context.child("marshal_resolver"),
-            marshal_resolver::Config {
-                public_key: public_key.clone(),
-                peer_provider: oracle.manager(),
-                blocker: oracle.control(public_key.clone()),
-                mailbox_size: NZUsize!(100),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
-            },
-            backfill_network,
-        );
-
-        // Buffered broadcast engine.
-        let (broadcast_engine, buffer) = buffered::Engine::new(
-            context.child("broadcast"),
-            buffered::Config {
-                public_key: public_key.clone(),
-                mailbox_size: NZUsize!(100),
-                deque_size: 10,
-                priority: false,
-                codec_config: (),
-                peer_provider: oracle.manager(),
-            },
-        );
-        broadcast_engine.start(broadcast_network);
-
-        // Prunable archives backing marshal.
-        let archive_config = |name: &str| prunable::Config {
-            translator: TwoCap,
-            metadata_partition: format!("{partition_prefix}-{name}-metadata"),
-            key_partition: format!("{partition_prefix}-{name}-key"),
-            key_page_cache: page_cache.clone(),
-            value_partition: format!("{partition_prefix}-{name}-value"),
-            compression: None,
-            codec_config: (),
-            items_per_section: NZU64!(10),
-            key_write_buffer: IO_BUFFER_SIZE,
-            value_write_buffer: IO_BUFFER_SIZE,
-            replay_buffer: IO_BUFFER_SIZE,
-        };
-        let finalizations_by_height = prunable::Archive::init(
-            context.child("finalizations_by_height"),
-            archive_config("finalizations"),
-        )
-        .await
-        .expect("failed to initialize finalizations archive");
-        let finalized_blocks =
-            prunable::Archive::init(context.child("finalized_blocks"), archive_config("blocks"))
-                .await
-                .expect("failed to initialize blocks archive");
-
-        // Genesis block shared by every validator, dated at the simulated
-        // deployment start.
-        let genesis_block = Block::genesis(
-            self.participants[0].clone(),
-            native().chain_id(),
-            0,
-            initial_sync_target::<deterministic::Context>(),
-        );
-
-        let startup = context.child("stateful_startup");
-        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
-        let _ = plan.should_state_sync(false);
-        let provider = ConstantProvider::new(scheme.clone());
-
-        // Marshal actor.
-        let (marshal_actor, marshal_mailbox, floor) =
-            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
-                context.child("marshal"),
-                finalizations_by_height,
-                finalized_blocks,
-                marshal::Config {
-                    provider: provider.clone(),
-                    epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: plan.marshal_start(Arc::new(genesis_block.clone())),
-                    partition_prefix: partition_prefix.clone(),
-                    mailbox_size: NZUsize!(100),
-                    view_retention: ViewDelta::new(10),
-                    prunable_items_per_section: NZU64!(10),
-                    page_cache: page_cache.clone(),
-                    replay_buffer: IO_BUFFER_SIZE,
-                    key_write_buffer: IO_BUFFER_SIZE,
-                    value_write_buffer: IO_BUFFER_SIZE,
-                    block_codec_config: (),
-                    max_repair: NZUsize!(10),
-                    max_pending_acks: NZUsize!(1),
-                    strategy: Sequential,
-                },
-            )
-            .await;
-
-        // Transaction ingress: peers gossip settlement transactions and
-        // proposals borrow from the queue.
-        let (ingress_actor, ingress_mailbox) = ingress::Actor::new(
-            context.child("ingress"),
-            ingress::Config {
-                mailbox_size: NZUsize!(100),
-                capacity: NZUsize!(1_024),
-                bytes: NZUsize!(64 * 1024 * 1024),
-                lease: 5,
-                retention: 20,
-            },
-            RegistryView::new(native().deployments),
-        );
-
-        // Stateful actor wrapping the settlement application. No validator
-        // state-syncs in this test, so the resolver is a no-op.
-        let finalized = self.finalized[index].clone();
-        let application: App<Scheme, ingress::Mailbox> = App::new(
-            genesis_block.clone(),
-            Timing::DEFAULT,
-            native(),
-            finalized.clone(),
-        );
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
-            context.child("stateful"),
-            StatefulConfig {
-                application,
-                db_config,
-                provider: ingress_mailbox.clone(),
-                marshal: (marshal_mailbox.clone(), floor),
-                mailbox_size: NZUsize!(100),
-                plan,
-                resolvers: NoopResolver,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
-                    apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
-                },
-                prune_config: None,
-            },
-        );
-
-        // Type-erased state reader for the end-of-run property.
-        let reader_mailbox = stateful_mailbox.clone();
-        let reader: StateReader = Arc::new(move |key: StateKey| {
-            let mailbox = reader_mailbox.clone();
-            Box::pin(async move {
-                let databases = mailbox.subscribe_databases().await;
-                let guard = databases.read().await;
-                guard.get(&key).await.expect("state read must succeed")
-            })
-        });
-
-        // Deferred wrapper and marshal startup. The ingress mailbox rides the
-        // reporter stream so the queue retires included transactions.
-        let deferred = Deferred::new(
-            context.child("deferred"),
-            stateful_mailbox.clone(),
-            marshal_mailbox.clone(),
-            FixedEpocher::new(EPOCH_LENGTH),
-        );
-        let marshal_reporters = MonitorReporter::new(
-            public_key.clone(),
-            monitor,
-            Reporters::from((stateful_mailbox.clone(), ingress_mailbox.clone())),
-        );
-        marshal_actor.start(marshal_reporters, buffer, resolver);
-        stateful_actor.start();
-
-        // Certified query server over the applied database.
-        let db = stateful_mailbox.subscribe_databases().await;
-        ingress_actor.start(
-            settlement_tx_network,
-            db.clone(),
-            finalized.clone(),
-            native(),
-            Timing::DEFAULT,
-            Set::from_iter_dedup(self.participants[..4].iter().cloned()),
-        );
-        query::start(
-            context.child("query"),
-            query::Config {
-                address: Self::query_address(index),
-                db,
-                finalized: finalized.clone(),
-                marshal: marshal_mailbox.clone(),
-                ingress: ingress_mailbox,
-                sealer: None,
-            },
-        );
-
-        // Validator 0 drives the RPC round trip: submit over the query
-        // server, wait for certified finalization, and verify every read
-        // through the light client.
-        if index == 0 {
-            let verdict = self.client.clone();
-            let scheme_for_client = scheme.clone();
-            let expected_root = self.expected_root;
-            context.child("client").spawn(move |context| async move {
-                let result = Box::pin(client(
-                    context,
-                    scheme_for_client,
-                    Self::query_address(0),
-                    expected_root,
-                ))
-                .await
-                .map_err(|error| format!("{error:#}"));
-                *verdict.lock() = Some(result);
-            });
-        }
-
-        // Simplex engine.
-        let engine = simplex::Engine::new(
-            context,
-            simplex::Config {
-                scheme,
-                elector: RoundRobin::<Sha256>::default(),
-                blocker: oracle.control(public_key.clone()),
-                automaton: deferred.clone(),
-                relay: deferred,
-                reporter: marshal_mailbox.clone(),
-                strategy: Sequential,
-                partition: format!("{partition_prefix}-simplex"),
-                mailbox_size: NZUsize!(3),
-                epoch: Epoch::zero(),
-                floor: simplex::config::Floor::Genesis(genesis_block.digest()),
-                replay_buffer: IO_BUFFER_SIZE,
-                write_buffer: IO_BUFFER_SIZE,
-                page_cache,
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_millis(500),
-                view_retention: ViewDelta::new(10),
-                skip: SkipPolicy::Enabled {
-                    timeout: Duration::from_secs(5),
-                    budget: simplex::SkipBudget::Participants,
-                },
-                fetch_timeout: Duration::from_secs(2),
-                forward: ForwardPolicy::Disabled,
-                track_historical_votes: false,
-            },
-        );
-        let handle = engine.start(vote_network, certificate_network, resolver_network);
-
-        (
-            handle,
-            State {
-                marshal: marshal_mailbox,
-                reader,
-                finalized,
-                client: self.client.clone(),
-            },
-        )
-    }
-
-    fn start(engine: Self::Engine) -> Handle<()> {
-        engine
     }
 }
 
@@ -4069,184 +3687,6 @@ async fn submit(
         context.sleep(POLL).await;
     }
     anyhow::bail!("submission remained unavailable")
-}
-
-/// Submits one transaction and waits for a certified read proving its
-/// `effect` record present, returning the height it was proven at.
-async fn submit_effective(
-    context: &mut deterministic::Context,
-    scheme: &Scheme,
-    address: std::net::SocketAddr,
-    tx: &SettlementTx,
-    effect: &ReadRequest,
-    latest: &mut light::Latest,
-) -> anyhow::Result<u64> {
-    let submitted = submit(context, address, tx).await?;
-    anyhow::ensure!(
-        matches!(
-            submitted,
-            ingress::Submission::Accepted | ingress::Submission::Duplicate
-        ),
-        "submission was not admitted for {:?}: {submitted:?}",
-        effect.lookup
-    );
-    loop {
-        let (verified, _) = verified_read(context, scheme, address, effect).await?;
-        latest
-            .observe(verified.height)
-            .map_err(|error| anyhow::anyhow!("effect read regressed: {error}"))?;
-        if verified.record.is_some() {
-            return Ok(verified.height);
-        }
-        context.sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// The RPC round trip driven against validator 0's query server.
-async fn client(
-    mut context: deterministic::Context,
-    scheme: Scheme,
-    address: std::net::SocketAddr,
-    expected_root: StateRoot<Digest>,
-) -> anyhow::Result<()> {
-    // The deposit carries no deadline, so it is submitted first: the
-    // boundary-only registration commits its root. Registration and
-    // admission depend on their predecessors, so each waits for the prior
-    // certified effect record (gossip does not preserve order).
-    let protocol = Protocol::new(NonZeroUsize::MIN)?;
-    let state = genesis_cache();
-    let (deposit, deposit_tx, register_tx) = fixture_boundary(
-        native().chain_id(),
-        &protocol,
-        0,
-        &state,
-        b"chain-e2e-deposit",
-    );
-    let mut latest = light::Latest::default();
-    submit_effective(
-        &mut context,
-        &scheme,
-        address,
-        &deposit_tx,
-        &req(Lookup::Deposit { id: deposit.id }),
-        &mut latest,
-    )
-    .await?;
-    submit_effective(
-        &mut context,
-        &scheme,
-        address,
-        &register_tx,
-        &req(Lookup::Registration),
-        &mut latest,
-    )
-    .await?;
-
-    // Execution assigned the deadlines at the registration's inclusion
-    // height, so the close is built only after the certified registration
-    // read reveals them: the operator's read-back flow.
-    let (verified, _) =
-        verified_read(&mut context, &scheme, address, &req(Lookup::Registration)).await?;
-    let Some(Record::Registration(record)) = verified.record else {
-        anyhow::bail!("the registered epoch left no certified record");
-    };
-    anyhow::ensure!(record.epoch == 0, "the certified record is not epoch 0");
-    let epoch = close_fixture(
-        native().chain_id(),
-        &protocol,
-        0,
-        state.clone(),
-        b"chain-e2e-deposit",
-        record.admission_deadline,
-        record.challenge_deadline,
-    );
-    anyhow::ensure!(
-        epoch.deposit_tx == deposit_tx && epoch.register_tx == register_tx,
-        "the fixture boundary diverged from the submitted transactions"
-    );
-    anyhow::ensure!(
-        epoch.result.roots.successor == expected_root,
-        "the fixture root diverged from the expectation"
-    );
-    submit_effective(
-        &mut context,
-        &scheme,
-        address,
-        &epoch.admit_tx,
-        &req(Lookup::Admitted { epoch: 0 }),
-        &mut latest,
-    )
-    .await?;
-
-    // Wait for a certified status read proving epoch zero finalized with the
-    // expected root.
-    let (settled_height, first) = loop {
-        let (verified, response) =
-            verified_read(&mut context, &scheme, address, &req(Lookup::Status)).await?;
-        latest
-            .observe(verified.height)
-            .map_err(|error| anyhow::anyhow!("status read regressed: {error}"))?;
-        let Some(Record::Status(status)) = verified.record else {
-            anyhow::bail!("status read returned no record");
-        };
-        if status.hard_faulted {
-            anyhow::bail!("the deployment hard-faulted");
-        }
-        if status.last_finalized == Some(0) {
-            anyhow::ensure!(
-                status.state_root == expected_root,
-                "finalized state root diverged from the close"
-            );
-            break (verified.height, response);
-        }
-        context.sleep(Duration::from_millis(200)).await;
-    };
-
-    // The included deposit's record is certified present, and an
-    // unregistered epoch's anchor is certified absent.
-    let deposit_request = req(Lookup::Deposit {
-        id: Sha256::hash(&[b"chain-e2e-deposit"]),
-    });
-    let (verified, _) = verified_read(&mut context, &scheme, address, &deposit_request).await?;
-    anyhow::ensure!(
-        matches!(verified.record, Some(Record::Deposit(_))),
-        "deposit record was not certified"
-    );
-    let absent_request = req(Lookup::Anchor { epoch: 7 });
-    let (verified, _) = verified_read(&mut context, &scheme, address, &absent_request).await?;
-    anyhow::ensure!(
-        verified.record.is_none(),
-        "unregistered epoch anchor was certified present"
-    );
-
-    // A stale-certificate replay verifies (it is authentic for its height)
-    // but the monotonic gate rejects it once a later read was accepted.
-    let fresh_height = loop {
-        let (verified, _) =
-            verified_read(&mut context, &scheme, address, &req(Lookup::Status)).await?;
-        if verified.height > settled_height {
-            break verified.height;
-        }
-        context.sleep(Duration::from_millis(200)).await;
-    };
-    latest
-        .observe(fresh_height)
-        .map_err(|error| anyhow::anyhow!("fresh read regressed: {error}"))?;
-    let replayed = light::verify_read::<deterministic::Context, Scheme>(
-        &mut context,
-        &scheme,
-        &req(Lookup::Status),
-        &first,
-    )
-    .map_err(|error| anyhow::anyhow!("stale replay failed verification: {error}"))?;
-    anyhow::ensure!(
-        matches!(
-            latest.observe(replayed.height),
-            Err(light::Error::Stale { .. })
-        ),
-        "stale replay was not detected"
-    );
-    Ok(())
 }
 
 /// Every validator settled epoch zero: the deposit is recorded, the close
@@ -4413,24 +3853,6 @@ impl<S: CertScheme<Digest>> Property<ed25519::PublicKey, State<S>> for ClientSuc
     }
 }
 
-#[test]
-fn chain_finalizes_settlement_epoch() {
-    let engine = Engine::new(4);
-    let expected_root = engine.expected_root;
-    let deposit_id = engine.deposit_id;
-    PlanBuilder::new(engine)
-        .seed(0)
-        .exit_condition(ClientDoneAt { height: 35 })
-        .property(ClientSucceeded)
-        .property(Settled {
-            expected_root,
-            deposit_id,
-        })
-        .property(Monotonic)
-        .run()
-        .unwrap();
-}
-
 // --- distributed certification end-to-end tests ---------------------------
 
 /// The deposit label shared by the distributed fixture and its driver.
@@ -4504,7 +3926,7 @@ fn validator_entries() -> Vec<ValidatorEntry> {
     (0..4)
         .map(|index| ValidatorEntry {
             clearing: committee.members()[usize::from(dealt_participant(index).unwrap())],
-            query: Engine::query_address(index),
+            query: query_address(index),
         })
         .collect()
 }
@@ -4771,7 +4193,6 @@ impl EngineDefinition for Distributed {
 
         let startup = context.child("stateful_startup");
         let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
-        let _ = plan.should_state_sync(false);
         let scheme = self.schemes[index.min(self.schemes.len() - 1)].clone();
         let provider = ConstantProvider::new(scheme.clone());
 
@@ -4821,13 +4242,7 @@ impl EngineDefinition for Distributed {
                     mailbox_size: NZUsize!(100),
                     plan,
                     resolvers: NoopResolver,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(16),
-                        apply_batch_size: NZU64!(64),
-                        max_outstanding_requests: 8,
-                        update_channel_size: NZUsize!(256),
-                        max_retained_roots: 8,
-                    },
+                    sync_config: sync_config(),
                     prune_config: None,
                 },
             );
@@ -4861,7 +4276,7 @@ impl EngineDefinition for Distributed {
                 db,
                 finalized.clone(),
                 settlement_tx_network.0,
-                (0..validators.len()).map(Engine::query_address).collect(),
+                (0..validators.len()).map(query_address).collect(),
             );
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let (certifier, pipeline) = node::Certifier::new(
@@ -4878,6 +4293,7 @@ impl EngineDefinition for Distributed {
             let verdict = self.driver.clone();
             let plan = Drive {
                 expect_fault: self.expect_fault,
+                silent: self.silent.clone(),
                 epochs: self.epochs,
                 undealt: self.undealt.clone(),
                 fetcher: self.fetcher,
@@ -4885,15 +4301,15 @@ impl EngineDefinition for Distributed {
             };
             let scheme_for_reads = scheme.clone();
             context.child("driver").spawn(move |context| async move {
-                let result = drive(
+                let result = Box::pin(drive(
                     context,
                     backend,
                     pipeline,
                     validators,
                     scheme_for_reads,
-                    Engine::query_address(0),
+                    query_address(0),
                     plan,
-                )
+                ))
                 .await
                 .map_err(|error| format!("{error:#}"));
                 *verdict.lock() = Some(result);
@@ -4941,13 +4357,7 @@ impl EngineDefinition for Distributed {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: NoopResolver,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
-                    apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
-                },
+                sync_config: sync_config(),
                 prune_config: None,
             },
         );
@@ -5025,7 +4435,7 @@ impl EngineDefinition for Distributed {
             Some((impaired, impairment)) if impaired == index => {
                 impaired_query(
                     context.child("query"),
-                    Engine::query_address(index),
+                    query_address(index),
                     impairment,
                     sealer,
                     self.impaired_accepts.clone(),
@@ -5035,7 +4445,7 @@ impl EngineDefinition for Distributed {
                 query::start(
                     context.child("query"),
                     query::Config {
-                        address: Engine::query_address(index),
+                        address: query_address(index),
                         db,
                         finalized: finalized.clone(),
                         marshal: marshal_mailbox.clone(),
@@ -5100,6 +4510,8 @@ struct Drive {
     /// Whether epoch 0's registration is expected to expire into the
     /// deadline fault instead of certifying.
     expect_fault: bool,
+    /// Validator indices that run no sealer.
+    silent: std::collections::BTreeSet<usize>,
     /// Epochs closed back to back.
     epochs: u64,
     /// Per epoch, the validator left out of the operator's deals.
@@ -5141,7 +4553,14 @@ async fn drive(
         // certified before the registration is submitted.
         let (deposit, deposit_tx, register_tx) =
             fixture_boundary(native().chain_id(), &protocol, epoch, &predecessor, label);
-        chain.deliver(&context, &deposit_tx).await?;
+        let submitted = submit(&context, query, &deposit_tx).await?;
+        anyhow::ensure!(
+            matches!(
+                submitted,
+                ingress::Submission::Accepted | ingress::Submission::Duplicate
+            ),
+            "the epoch {epoch} deposit was not admitted: {submitted:?}"
+        );
         let mut deposited = false;
         for _ in 0..600 {
             if chain.deposit(&context, deposit.id).await.ok().flatten() == Some(deposit.clone()) {
@@ -5202,20 +4621,61 @@ async fn drive(
         }
 
         if plan.expect_fault {
-            // Quorum is unreachable: the certificate must never assemble,
-            // and the registration expires into the deadline fault at its
-            // exact absolute height.
-            let certified: Arc<Mutex<Option<()>>> = Arc::default();
+            // The expiry scenario requires each active sealer to retain the
+            // exact dealing while certification remains pending.
+            let expected_context = prepared.context().clone();
+            let expected_dealing = prepared.encoded().clone();
+            let certification: Arc<Mutex<Option<Result<(), String>>>> = Arc::default();
             {
-                let certified = certified.clone();
+                let certification = certification.clone();
                 context.child("certify").spawn(move |_| async move {
-                    if pipeline.certify(prepared, deals).await.is_ok() {
-                        *certified.lock() = Some(());
-                    }
+                    let result = pipeline
+                        .certify(prepared, deals)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}"));
+                    *certification.lock() = Some(result);
                 });
             }
+            let request = rpc::Request {
+                method: query::METHOD_EVIDENCE,
+                body: EvidenceRequest::new(deployment(), EvidenceLookup::Dealing { epoch })
+                    .encode(),
+            };
+            let expected_retained = validators
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !plan.silent.contains(index))
+                .count();
+            let mut retained = std::collections::BTreeSet::new();
             for _ in 0..600 {
-                if let Some(FaultRecord::Faulted(reason)) = chain.fault(&context).await? {
+                for index in 0..validators.len() {
+                    if plan.silent.contains(&index) || retained.contains(&index) {
+                        continue;
+                    }
+                    if let Ok(rpc::Response::Success { body }) =
+                        rpc::call(&context, query_address(index), &request).await
+                        && let Ok(EvidenceResponse::Served(Evidence::Dealing(saved))) =
+                            EvidenceResponse::decode(body)
+                    {
+                        anyhow::ensure!(
+                            saved.context.epoch_context() == &expected_context
+                                && saved.dealing == expected_dealing,
+                            "validator {index} retained a foreign dealing"
+                        );
+                        retained.insert(index);
+                    }
+                }
+                let fault = chain.fault(&context).await?;
+                if let Some(result) = certification.lock().as_ref() {
+                    match result {
+                        Ok(()) => anyhow::bail!("two silent validators assembled a certificate"),
+                        Err(error) => {
+                            anyhow::bail!("certification failed before expiry: {error}")
+                        }
+                    }
+                }
+                if let Some(FaultRecord::Faulted(reason)) = fault {
                     match reason {
                         HardFaultReasonResponse::ExpiredRegistration {
                             epoch: 0,
@@ -5227,8 +4687,8 @@ async fn drive(
                                 "the registration expired at {expired_at}, not its deadline"
                             );
                             anyhow::ensure!(
-                                certified.lock().is_none(),
-                                "two silent validators still assembled a certificate"
+                                retained.len() == expected_retained,
+                                "registration expired before every healthy validator retained the exact dealing"
                             );
                             return Ok(());
                         }
@@ -5292,6 +4752,12 @@ async fn drive(
         matches!(verified.record, Some(Record::Deposit(_))),
         "deposit record was not certified"
     );
+    let absent_request = req(Lookup::Anchor { epoch: plan.epochs });
+    let (verified, _) = verified_read(&mut context, &scheme, query, &absent_request).await?;
+    anyhow::ensure!(
+        verified.record.is_none(),
+        "unregistered epoch anchor was certified present"
+    );
 
     if let Some(fetcher) = plan.fetcher {
         let root = *settled
@@ -5302,7 +4768,7 @@ async fn drive(
             body: EvidenceRequest::new(deployment(), EvidenceLookup::Dealing { epoch: 0 }).encode(),
         };
         let rpc::Response::Success { body } =
-            rpc::call(&context, Engine::query_address(fetcher), &request).await?
+            rpc::call(&context, query_address(fetcher), &request).await?
         else {
             anyhow::bail!("catchup history unavailable")
         };
@@ -5320,7 +4786,7 @@ async fn drive(
                 continue;
             }
             let rpc::Response::Success { body } =
-                rpc::call(&context, Engine::query_address(index), &request).await?
+                rpc::call(&context, query_address(index), &request).await?
             else {
                 continue;
             };
@@ -6272,41 +5738,6 @@ fn admit_requires_a_valid_committee_certificate() {
 }
 
 #[test]
-fn admit_from_any_submitter_lands() {
-    deterministic::Runner::default().start(|context| async move {
-        let fixture = epoch_fixture();
-
-        // The transaction carries no submitter identity: its wire bytes are
-        // exactly the certified close material, so a third-party relay
-        // reconstructs the identical transaction from gossip alone.
-        let relayed = SettlementTx::decode(fixture.admit_tx.encode()).unwrap();
-        assert_eq!(relayed, fixture.admit_tx);
-
-        // Land the operator-built transaction on one chain and the relayed
-        // bytes on another: execution has no source concept, so both chains
-        // admit the same close and commit identical roots.
-        let operator_db = open(context.child("submitter_a"), "submitter-a").await;
-        let relay_db = open(context.child("submitter_b"), "submitter-b").await;
-        let setup = [fixture.deposit_tx.clone(), fixture.register_tx.clone()];
-        assert_eq!(
-            seal(&operator_db, 1, &setup).await,
-            seal(&relay_db, 1, &setup).await
-        );
-        assert_eq!(
-            seal(&operator_db, 2, std::slice::from_ref(&fixture.admit_tx)).await,
-            seal(&relay_db, 2, std::slice::from_ref(&relayed)).await
-        );
-        for db in [&operator_db, &relay_db] {
-            assert!(matches!(
-                read(db, &admitted_key(&deployment(), 0)).await,
-                Some(Record::Admitted(admitted))
-                    if admitted.batch_id == fixture.result.header.batch_id::<Sha256>()
-            ));
-        }
-    });
-}
-
-#[test]
 fn begin_hard_fault_is_not_a_griefing_lever() {
     deterministic::Runner::default().start(|context| async move {
         let fixture = epoch_fixture();
@@ -6676,7 +6107,6 @@ impl EngineDefinition for Walkthrough {
 
         let startup = context.child("stateful_startup");
         let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
-        let _ = plan.should_state_sync(false);
 
         // Marshal actor.
         let (marshal_actor, marshal_mailbox, floor) =
@@ -6726,13 +6156,7 @@ impl EngineDefinition for Walkthrough {
                     mailbox_size: NZUsize!(100),
                     plan,
                     resolvers: NoopResolver,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(16),
-                        apply_batch_size: NZU64!(64),
-                        max_outstanding_requests: 8,
-                        update_channel_size: NZUsize!(256),
-                        max_retained_roots: 8,
-                    },
+                    sync_config: sync_config(),
                     prune_config: None,
                 },
             );
@@ -6911,13 +6335,7 @@ impl EngineDefinition for Walkthrough {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: NoopResolver,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
-                    apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
-                },
+                sync_config: sync_config(),
                 prune_config: None,
             },
         );
@@ -7270,6 +6688,7 @@ async fn walkthrough(
     anyhow::ensure!(
         summary.reconciled == vec![0]
             && summary.convicted.is_empty()
+            && summary.protected.is_empty()
             && summary.unenforceable.is_empty()
             && summary.withheld.is_empty(),
         "epoch 0 did not reconcile cleanly: {summary:?}"
@@ -7471,7 +6890,9 @@ async fn tenant(
     anyhow::ensure!(finished.epoch == 0, "the close finished a foreign epoch");
     let summary = bob.reconcile(&context, &mut bob_chain, operator).await?;
     anyhow::ensure!(
-        summary.reconciled == vec![0] && summary.convicted.is_empty(),
+        summary.reconciled == vec![0]
+            && summary.convicted.is_empty()
+            && summary.protected.is_empty(),
         "epoch 0 did not reconcile cleanly: {summary:?}"
     );
 

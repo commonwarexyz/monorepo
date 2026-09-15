@@ -231,8 +231,10 @@ pub struct Validator {
 pub async fn run(context: tokio::Context, args: Validator) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
-    network.validate().expect("invalid network config");
     let genesis_output = read_genesis(&args.node_dir).expect("genesis is required");
+    network
+        .validate(&genesis_output)
+        .expect("invalid network config");
     let local = node.public_key();
     let partition_prefix = "validator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -359,7 +361,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let startup = context.child("stateful_startup");
     let plan = SyncPlan::init(&startup, partition_prefix).await;
-    let _ = plan.should_state_sync(false);
 
     // Marshal actor.
     let (marshal_actor, marshal, floor) = MarshalActor::init(

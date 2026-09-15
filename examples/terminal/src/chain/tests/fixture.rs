@@ -138,7 +138,6 @@ impl ReadFixture {
         );
         let startup = context.child("startup");
         let plan = SyncPlan::init(&startup, prefix).await;
-        let _ = plan.should_state_sync(false);
         let (actor, marshal, floor) = MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
             context.child("marshal"),
             finalizations,
@@ -186,13 +185,7 @@ impl ReadFixture {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: NoopResolver,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
-                    apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
-                },
+                sync_config: sync_config(),
                 prune_config: None,
             },
         );

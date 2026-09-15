@@ -380,6 +380,12 @@ impl<D: Digest> Tree<D> {
         self.root
     }
 
+    /// Iterates BMT proof siblings at the coordinates from [`bmt::range_proof_positions`].
+    /// Nodes are ordered by increasing level, then increasing index.
+    pub fn proof_nodes(&self) -> impl Iterator<Item = ((usize, usize), D)> + '_ {
+        self.inner.proof_nodes()
+    }
+
     /// Opens one vector position.
     pub fn opening(&self, position: u32) -> Result<Opening<D>, Error> {
         if position >= self.len {

@@ -8,7 +8,7 @@ use super::{
     Agent,
     evidence::{check_opening, unusable_head},
     store::{ContextCache, PendingPayment},
-    wallet::settlement_status,
+    wallet::{ReceiptEpoch, receipt_epoch, settlement_status},
 };
 use crate::{
     chain::{
@@ -25,15 +25,7 @@ use commonware_clearing::bajillion::{
     vector::{OutEntry, OutVector},
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
-use std::{net::SocketAddr, time::Duration};
-
-/// Certified anchor polls before an acceptance is reported unconfirmed. The
-/// operator registers on the chain before it releases a receipt, so absence
-/// here is read lag.
-const CONFIRM_ATTEMPTS: usize = 50;
-
-/// Pause between certified anchor polls.
-const CONFIRM_POLL: Duration = Duration::from_millis(200);
+use std::net::SocketAddr;
 
 /// One send resolved and ready for the shared accept, verify, and commit tail.
 struct StagedSend {
@@ -56,11 +48,11 @@ pub(crate) enum PaymentOutcome {
     },
 }
 
-/// How the wallet resolved an already-staged pending send before submission.
+/// How verified receipts and settlement resolve one staged send.
 enum PendingOutcome {
     /// No admitted outcome resolves the intent, so resubmit the exact bytes.
     Live(Box<StagedSend>),
-    /// The send's commitment was concluded from a finalized settlement root.
+    /// A verified receipt or finalized inclusion concluded the send.
     Resolved(PaymentOutcome),
     /// The send provably never committed and was abandoned, so a fresh one must be staged.
     Abandoned,
@@ -78,17 +70,6 @@ impl Agent {
         let (requested, total) = self.payment_entries(entries)?;
         self.pay_requested(ctx, chain, operator, requested, total)
             .await
-    }
-
-    /// Whether a draft entry belongs to the exact unresolved payment.
-    pub(crate) fn pending_payment_contains(&self, receiver: usize, amount: u64) -> bool {
-        let recipient = &self.receivers[receiver % self.receivers.len()].key;
-        self.pending_payment.as_ref().is_some_and(|pending| {
-            pending
-                .entries
-                .iter()
-                .any(|entry| &entry.recipient == recipient && entry.amount == amount)
-        })
     }
 
     /// Resumes the durably staged pending send, when one exists.
@@ -154,7 +135,10 @@ impl Agent {
             {
                 Ok(response) => response,
                 Err(error) => {
-                    return match self.resolve_pending(ctx, chain, operator, staged).await {
+                    return match self
+                        .resolve_pending(ctx, chain, operator, staged, None)
+                        .await
+                    {
                         Ok(PendingOutcome::Resolved(outcome)) => Ok(outcome),
                         Ok(PendingOutcome::Live(_) | PendingOutcome::Abandoned) => {
                             Err(error).context("submit payment")
@@ -165,34 +149,41 @@ impl Agent {
                     };
                 }
             };
-            let context = match response {
+            let resolution = match response {
                 operator_rpc::AcceptSendResponse::Accepted(accepted) => {
                     Self::verify_accepted(&accepted, &staged, total)?;
-                    let accepted = self
-                        .confirm_and_record(ctx, chain, &staged, accepted)
+                    let resolution = self
+                        .resolve_pending(ctx, chain, operator, staged, Some(accepted))
                         .await?;
-                    return Ok(PaymentOutcome::Accepted(Box::new(accepted)));
+                    ensure!(
+                        !matches!(resolution, PendingOutcome::Abandoned),
+                        "accepted payment was permanently excluded by settlement"
+                    );
+                    resolution
                 }
-                operator_rpc::AcceptSendResponse::Stale { context, .. } => context,
+                operator_rpc::AcceptSendResponse::Stale { context, .. } => {
+                    ensure!(
+                        context.operator() == &self.operator,
+                        "corrective context has an unexpected operator"
+                    );
+                    self.resolve_pending(ctx, chain, operator, staged, None)
+                        .await?
+                }
             };
             ensure!(
-                context.operator() == &self.operator,
-                "corrective context has an unexpected operator"
-            );
-            ensure!(
-                attempts < SUBMIT_ATTEMPTS,
+                matches!(&resolution, PendingOutcome::Resolved(_)) || attempts < SUBMIT_ATTEMPTS,
                 "the operator repeatedly rejected the unresolved payment"
             );
             attempts += 1;
-            staged = match self.resolve_pending(ctx, chain, operator, staged).await? {
+            staged = match resolution {
                 PendingOutcome::Live(staged) => {
                     ctx.sleep(POLL).await;
                     *staged
                 }
-                PendingOutcome::Resolved(outcome) => return Ok(outcome),
                 PendingOutcome::Abandoned => {
                     self.stage(ctx, chain, operator, &requested, total).await?
                 }
+                PendingOutcome::Resolved(outcome) => return Ok(outcome),
             };
         }
     }
@@ -328,40 +319,31 @@ impl Agent {
 
     /// Resolves the staged authorization against its registration and admitted activity.
     /// Admission fixes the close, so exclusion is permanent. Inclusion without a receipt
-    /// requires finality before the wallet records a completed payment.
+    /// requires finality before the wallet records a completed payment. Any supplied acceptance
+    /// has already passed exact-body and receipt verification.
     async fn resolve_pending<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
         staged: StagedSend,
+        accepted: Option<operator_rpc::AcceptedBatchResponse>,
     ) -> Result<PendingOutcome> {
         let context = &staged.context;
-        let status = settlement_status(ctx, chain, self.deployment).await?;
-        let anchor = chain
-            .anchor(ctx, context.epoch())
-            .await
-            .context("read staged epoch registration")?;
-        let invalidated = match anchor {
-            Some(anchor) => anchor != *context.anchor(),
-            None => {
-                status
-                    .last_finalized
-                    .is_some_and(|last| last >= context.epoch())
-                    || chain
-                        .registration(ctx)
-                        .await?
-                        .is_some_and(|registered| registered.epoch > context.epoch())
+        let admitted = match receipt_epoch(ctx, chain, self.deployment, context).await? {
+            ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
+            ReceiptEpoch::Unresolved => return Ok(PendingOutcome::Live(Box::new(staged))),
+            ReceiptEpoch::Live(None) => {
+                return match accepted {
+                    Some(accepted) => Ok(PendingOutcome::Resolved(PaymentOutcome::Accepted(
+                        Box::new(self.record_payment(accepted, &staged, false)?),
+                    ))),
+                    None => Ok(PendingOutcome::Live(Box::new(staged))),
+                };
             }
-        };
-        if invalidated {
-            return self.abandon_staged(&staged);
-        }
-        if anchor.is_none() {
-            return Ok(PendingOutcome::Live(Box::new(staged)));
-        }
-        let Some(admitted) = chain.admitted(ctx, context.epoch()).await? else {
-            return Ok(PendingOutcome::Live(Box::new(staged)));
+            ReceiptEpoch::Live(Some(admitted))
+            | ReceiptEpoch::Finalized(admitted)
+            | ReceiptEpoch::Faulted(admitted) => admitted,
         };
         let account = self.account();
         let lookup = self
@@ -394,10 +376,20 @@ impl Agent {
             return self.abandon_staged(&staged);
         }
 
-        ensure!(
-            admitted.finalized,
-            "the staged epoch has not finalized, so its commitment is not yet decidable"
-        );
+        // Activity is immutable, but evidence retrieval can cross finalization or a fault.
+        // Only a fresh live verdict can authorize a newly acquired preconfirmation.
+        let finalized = if admitted.finalized {
+            true
+        } else {
+            match receipt_epoch(ctx, chain, self.deployment, context).await? {
+                ReceiptEpoch::Finalized(_) => true,
+                ReceiptEpoch::Live(_) if accepted.is_some() => false,
+                ReceiptEpoch::Invalidated => return self.abandon_staged(&staged),
+                _ => anyhow::bail!(
+                    "the staged epoch has not finalized, so its commitment is not yet decidable"
+                ),
+            }
+        };
 
         let total = entry_total(&staged.entries)?;
         let previous_debit = staged
@@ -406,22 +398,25 @@ impl Agent {
             .cumulative_debit()
             .checked_sub(total)
             .context("staged payment total exceeds its epoch debit")?;
-        let fetched = operator_rpc::accepted_batch(
-            ctx,
-            operator,
-            operator_rpc::AcceptSendRequest {
-                authorization: staged.authorization.clone(),
-                entries: staged.entries.clone(),
-            },
-        )
-        .await
-        .ok()
-        .flatten()
-        .filter(|accepted| Self::verify_accepted(accepted, &staged, total).is_ok());
+        let fetched = match accepted {
+            Some(accepted) => Some(accepted),
+            None => operator_rpc::accepted_batch(
+                ctx,
+                operator,
+                operator_rpc::AcceptSendRequest {
+                    authorization: staged.authorization.clone(),
+                    entries: staged.entries.clone(),
+                },
+            )
+            .await
+            .ok()
+            .flatten()
+            .filter(|accepted| Self::verify_accepted(accepted, &staged, total).is_ok()),
+        };
         let outcome = match fetched {
-            Some(accepted) => {
-                PaymentOutcome::Accepted(Box::new(self.record_payment(accepted, &staged, true)?))
-            }
+            Some(accepted) => PaymentOutcome::Accepted(Box::new(
+                self.record_payment(accepted, &staged, finalized)?,
+            )),
             None => {
                 self.store
                     .finalize_payment_unheld(&staged.authorization, &staged.entries, previous_debit)
@@ -433,16 +428,16 @@ impl Agent {
                 }
             }
         };
-        self.store
-            .clear_context()
-            .context("invalidate finalized signing context")?;
-        self.cache = None;
-        if let Ok(opening) = self
-            .holders
-            .validator_opening(ctx, chain, &self.account(), &status)
-            .await
-        {
-            self.retain_head(&status.state_root, &opening)?;
+        if finalized {
+            self.cache = None;
+            if let Ok(status) = settlement_status(ctx, chain, self.deployment).await
+                && let Ok(opening) = self
+                    .holders
+                    .validator_opening(ctx, chain, &self.account(), &status)
+                    .await
+            {
+                self.retain_head(&status.state_root, &opening)?;
+            }
         }
         Ok(PendingOutcome::Resolved(outcome))
     }
@@ -453,9 +448,6 @@ impl Agent {
             .abandon_payment(&staged.authorization)
             .context("record excluded payment")?;
         self.pending_payment = None;
-        self.store
-            .clear_context()
-            .context("invalidate excluded signing context")?;
         self.cache = None;
         Ok(PendingOutcome::Abandoned)
     }
@@ -528,7 +520,7 @@ impl Agent {
         epoch: u64,
     ) -> Result<()> {
         if self.pending_withdrawal.is_some() || self.pending_withdrawal_claim.is_some() {
-            return Ok(());
+            return self.store.check_signing_context(context);
         }
         self.store
             .cache_context(context, root, epoch)
@@ -688,50 +680,6 @@ impl Agent {
         Ok((context, root))
     }
 
-    /// Confirms the send's context is a settlement registration through a certified
-    /// anchor read, and only then durably commits its verified receipts.
-    ///
-    /// The anchor commits the entire epoch context (deployment, boundary, liability,
-    /// and the chain-assigned absolute deadlines) and anchor records persist for the
-    /// life of the deployment, so a certified anchor equal to the send's context proves
-    /// settlement registered exactly this payment context. The operator registers on
-    /// the chain before it releases a receipt, so an absent anchor is read lag and is
-    /// polled through briefly rather than failing the payment.
-    ///
-    /// Every live-path acceptance commits through here, so the registration gate is
-    /// structural. The only other endpoint-advancing paths are in [`Self::resolve_pending`],
-    /// where a Merkle-verified finalized root itself is the proof of registration.
-    async fn confirm_and_record<E: Env>(
-        &mut self,
-        ctx: &E,
-        chain: &mut Client,
-        staged: &StagedSend,
-        accepted: operator_rpc::AcceptedBatchResponse,
-    ) -> Result<operator_rpc::AcceptedBatchResponse> {
-        let context = &staged.context;
-        for attempt in 0..CONFIRM_ATTEMPTS {
-            match chain.anchor(ctx, context.epoch()).await {
-                Ok(Some(anchor)) => {
-                    ensure!(
-                        anchor == *context.anchor(),
-                        "confirm payment registration: another anchor is registered for the epoch"
-                    );
-                    return self.record_payment(accepted, staged, false);
-                }
-                Ok(None) if attempt + 1 < CONFIRM_ATTEMPTS => {}
-                Ok(None) => anyhow::bail!(
-                    "confirm payment registration: the payment context is not registered"
-                ),
-                Err(error) if attempt + 1 == CONFIRM_ATTEMPTS => {
-                    return Err(error.context("confirm payment registration"));
-                }
-                Err(_) => {}
-            }
-            ctx.sleep(CONFIRM_POLL).await;
-        }
-        unreachable!("the confirmation loop returns on its final attempt")
-    }
-
     /// Confirms an operator acceptance is the exact staged send with valid receipts:
     /// the acknowledged body must be the staged body byte for byte, and the opened
     /// entries must credit the staged recipients positionally.
@@ -880,7 +828,10 @@ fn entry_total(entries: &[Entry]) -> Result<u64> {
 }
 
 /// Merges positive deltas into a strictly recipient-sorted cumulative vector.
-fn merge_entries(mut merged: Vec<OutEntry<Key>>, deltas: &[Entry]) -> Result<Vec<OutEntry<Key>>> {
+pub(super) fn merge_entries(
+    mut merged: Vec<OutEntry<Key>>,
+    deltas: &[Entry],
+) -> Result<Vec<OutEntry<Key>>> {
     for delta in deltas {
         match merged.binary_search_by(|edge| edge.recipient.cmp(&delta.recipient)) {
             Ok(position) => {

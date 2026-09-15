@@ -1,6 +1,10 @@
 //! The receive lane: verified incoming intake and anchored reconciliation.
 
-use super::{Agent, store::IncomingRecord};
+use super::{
+    Agent,
+    store::IncomingRecord,
+    wallet::{ReceiptEpoch, invalidated_epoch, receipt_epoch},
+};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -8,11 +12,11 @@ use crate::{
         tx::{ChallengeRequest, SettlementTx},
     },
     operator::rpc as operator_rpc,
-    protocol::Key,
+    protocol::{Key, Receipt},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness},
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness, HigherEntryLookup},
     payment::PaymentContext,
 };
 use commonware_codec::Encode as _;
@@ -29,8 +33,10 @@ pub(crate) struct ReconcileSummary {
     pub(crate) reconciled: Vec<u64>,
     /// Epochs whose omitted credit was convicted with a proven `HigherAckEntry` challenge.
     pub(crate) convicted: Vec<u64>,
+    /// Epochs whose admitted close was invalidated before finalization.
+    pub(crate) protected: Vec<u64>,
     /// Epochs whose held credit can no longer be enforced: a finalized close understated it
-    /// past the window, or settlement permanently prevents its close from finalizing.
+    /// past the window, or its close never admitted before settlement faulted.
     pub(crate) unenforceable: Vec<u64>,
     /// Epochs that finalized while the operator still withholds the committed-side evidence
     /// needed to verify or convict, reported once per stretch of withholding. The epoch keeps
@@ -43,6 +49,7 @@ impl ReconcileSummary {
     pub(crate) const fn is_empty(&self) -> bool {
         self.reconciled.is_empty()
             && self.convicted.is_empty()
+            && self.protected.is_empty()
             && self.unenforceable.is_empty()
             && self.withheld.is_empty()
     }
@@ -52,8 +59,10 @@ impl ReconcileSummary {
 enum EntryVerdict {
     /// The committed terminal entry covered the held receipt.
     Covered,
-    /// Served evidence was unavailable, unanchored, or unprovable: retry the epoch.
+    /// Served evidence was unavailable, unanchored, or unprovable before publication.
     Refused,
+    /// Challenge delivery began but its certified outcome is unknown.
+    Unconfirmed,
     /// The omission was convicted with a proven challenge.
     Convicted,
     /// A finalized close understated the held receipt past the challenge window.
@@ -61,25 +70,15 @@ enum EntryVerdict {
 }
 
 impl Agent {
-    /// Pulls, verifies, settlement-anchors, and durably persists the receipts newly crediting
-    /// this wallet.
+    /// Acquires incoming receipts as live conditional preconfirmations or verified finalized credits.
     ///
-    /// This is the receiver's intake, folded into the balance heartbeat. A receiver may rely on
-    /// a payment exactly when its verified receipt is durably held: a balance read from the
-    /// operator's head is an observation, not reliance-grade. Every fetched receipt is fully
-    /// verified: both signatures over the acknowledged endpoint, the entry's membership under
-    /// the acknowledged root, and its recipient. It is then anchored: the receipt's
-    /// `(epoch, anchor)` must be the anchor the chain certifiably registered for that epoch,
-    /// read with the recency bound so a proven absence holds at a certified tip no older than
-    /// the recency threshold. A receipt over an operator-chosen anchor with no settlement
-    /// obligation has no close to adjudicate against and can never be enforced, so it is not
-    /// reliance-grade. A receipt's cumulative is per-edge cumulative, so intake credits the
-    /// DELTA versus the previously held entry for that (payer, epoch) edge, and a
-    /// non-advancing or duplicate receipt is skipped idempotently. Unverifiable and unanchored
-    /// receipts are ignored and never stored, yet the durable cursor still advances past them
-    /// so a poisoned entry cannot wedge intake. The receipts and the advanced cursor commit
-    /// together, so reliance never outruns durability, and a lost response refetches the exact
-    /// page and reinserts it idempotently.
+    /// Signatures, entry membership, recipient, and the registered anchor authenticate each
+    /// receipt. First-time historical credit also requires finalized coverage of both its
+    /// cumulative amount and count. Previously held evidence remains available for reconciliation.
+    /// Each credited row commits with its cursor before another remote read. Skipped rows
+    /// share the next cursor write, including when later evidence is unavailable. Unresolved
+    /// evidence retries its row while preceding credits remain durable. Per-edge deltas make
+    /// retries idempotent.
     pub(crate) async fn intake_incoming<E: Env>(
         &mut self,
         ctx: &E,
@@ -100,86 +99,96 @@ impl Agent {
             return Ok(());
         }
 
-        let account = self.account();
-        let operator_key = self.operator.clone();
-        let mut anchors = std::collections::BTreeMap::<u64, Option<Digest>>::new();
-        let mut held = std::collections::BTreeMap::<(Key, u64), (u64, u64)>::new();
-        let mut records = Vec::with_capacity(page.pairs.len());
-        for incoming in page.pairs {
-            let receipt = incoming.receipt;
-            let body = receipt.ack.body();
-            let context = PaymentContext::new(*body.anchor(), body.epoch(), operator_key.clone());
-
-            // Verify both signatures, the entry opening, and the credited recipient.
-            if receipt.verify::<Sha256>(&context).is_err() || receipt.recipient != account {
-                continue;
-            }
-
-            // An immutable registered anchor can confirm or reject a receipt. Absence may
-            // reflect a lagging snapshot, so retry the page before advancing its cursor.
-            let epoch = body.epoch();
-            let anchor = *body.anchor();
-            let registered_anchor = match anchors.get(&epoch) {
-                Some(cached) => *cached,
-                None => {
-                    let fetched = chain
-                        .anchor(ctx, epoch)
-                        .await
-                        .context("read settlement registration anchor")?;
-                    anchors.insert(epoch, fetched);
-                    fetched
-                }
-            };
-            let registered_anchor =
-                registered_anchor.context("settlement registration is not visible yet")?;
-            if registered_anchor != anchor {
-                continue;
-            }
-
-            // The per-edge delta versus the previously held entry keeps the ledger's
-            // amount-sum semantics: skip a receipt that does not strictly advance the
-            // edge on both dimensions.
-            let payer = body.payer().clone();
-            let edge = (payer.clone(), epoch);
-            let prior = match held.get(&edge) {
-                Some(prior) => *prior,
-                None => {
-                    let stored = self
-                        .store
-                        .held_edge(&payer, epoch)
-                        .context("read held edge endpoint")?
-                        .unwrap_or((0, 0));
-                    held.insert(edge.clone(), stored);
-                    stored
-                }
-            };
-            if receipt.cumulative <= prior.0 || receipt.count <= prior.1 {
-                continue;
-            }
-            let amount = receipt
-                .cumulative
-                .checked_sub(prior.0)
-                .context("held edge delta is checked")?;
-            held.insert(edge, (receipt.cumulative, receipt.count));
-            records.push(IncomingRecord {
-                id: Sha256::hash(&[body.encode().as_ref()]),
-                payer,
-                epoch,
-                anchor,
-                seq: body.seq(),
-                cumulative: receipt.cumulative,
-                count: receipt.count,
-                amount,
-                cursor: incoming.sequence,
-                receipt,
-            });
+        let mut sequence = self.incoming.cursor;
+        for incoming in &page.pairs {
+            ensure!(
+                incoming.sequence > sequence,
+                "incoming page sequences are not strictly increasing after the requested cursor"
+            );
+            sequence = incoming.sequence;
         }
-        self.incoming = self
-            .store
-            .record_incoming(&records, page.next_cursor)
-            .context("persist verified incoming receipts")?;
-        self.last_reconciled_epoch = self.store.last_reconciled_epoch()?;
-        Ok(())
+        ensure!(
+            page.next_cursor == sequence,
+            "incoming page cursor does not match its last sequence"
+        );
+
+        let mut cursor = self.incoming.cursor;
+        let mut result = Ok(());
+        for incoming in page.pairs {
+            let record = match self
+                .incoming_record(ctx, chain, operator, incoming.receipt)
+                .await
+            {
+                Ok(record) => record,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            };
+            cursor = incoming.sequence;
+            if let Some(record) = record {
+                self.incoming = self
+                    .store
+                    .record_incoming(&[record], cursor)
+                    .context("persist verified incoming receipt")?;
+                self.last_reconciled_epoch = self.store.last_reconciled_epoch()?;
+            }
+        }
+        if cursor > self.incoming.cursor {
+            self.incoming = self
+                .store
+                .record_incoming(&[], cursor)
+                .context("persist processed incoming cursor")?;
+        }
+        result
+    }
+
+    /// Verifies one receipt's credit before its cursor can advance.
+    async fn incoming_record<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+        receipt: Receipt,
+    ) -> Result<Option<IncomingRecord>> {
+        let account = self.account();
+        let body = receipt.ack.body();
+        let epoch = body.epoch();
+        let context = PaymentContext::new(*body.anchor(), epoch, self.operator.clone());
+        if receipt.verify::<Sha256>(&context).is_err() || receipt.recipient != account {
+            return Ok(None);
+        }
+        let payer = body.payer().clone();
+        let prior = self.store.held_edge(&payer, epoch)?.unwrap_or((0, 0));
+        if receipt.cumulative <= prior.0 || receipt.count <= prior.1 {
+            return Ok(None);
+        }
+        match receipt_epoch(ctx, chain, self.deployment, &context).await? {
+            ReceiptEpoch::Live(_) => {}
+            ReceiptEpoch::Finalized(admitted) => {
+                let lookup = self
+                    .incoming_lookup(ctx, chain, operator, epoch, &admitted, &payer)
+                    .await?;
+                let (cumulative, count) =
+                    lookup.resolve::<Sha256>(&admitted.roots.change, &payer, &account)?;
+                if cumulative < receipt.cumulative || count < receipt.count {
+                    return Ok(None);
+                }
+            }
+            ReceiptEpoch::Invalidated => return Ok(None),
+            ReceiptEpoch::Unresolved | ReceiptEpoch::Faulted(_) => {
+                anyhow::bail!("incoming receipt settlement is not yet decidable");
+            }
+        }
+        Ok(Some(IncomingRecord {
+            id: Sha256::hash(&[body.encode().as_ref()]),
+            payer,
+            epoch,
+            cumulative: receipt.cumulative,
+            count: receipt.count,
+            amount: receipt.cumulative - prior.0,
+            receipt,
+        }))
     }
 
     /// Reconciles held incoming credits against the committed close, convicting understatement.
@@ -199,8 +208,9 @@ impl Agent {
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
     /// the close with one [`Challenge::HigherAckEntry`] transaction whose proven outcome is
-    /// read back certified, records the conviction durably, and stops, because one proven
-    /// challenge invalidates the whole close. When the anchored entry covers every held receipt
+    /// read back certified, records protection durably, and stops, because one proven
+    /// challenge invalidates the whole close. A certified invalidation boundary also establishes
+    /// protection without attributing the challenge. When the anchored entry covers every held receipt
     /// and the epoch has finalized, the wallet marks the epoch reconciled. The two enforcement
     /// dead ends, a finalized close that understated a held receipt past the window and a
     /// registered epoch whose close never admitted before settlement faulted, are recorded
@@ -298,40 +308,18 @@ impl Agent {
             return Ok(());
         };
 
-        if !admitted.finalized {
-            let invalidated = match fault {
-                Some(FaultRecord::Settling(_)) => true,
-                Some(FaultRecord::Faulted(HardFaultReasonResponse::ProvenChallenge {
-                    batch_id,
-                    ..
-                })) => {
-                    let first = status
-                        .last_finalized
-                        .map_or(Some(0), |last| last.checked_add(1))
-                        .context("receipt epoch overflow")?;
-                    let mut found = false;
-                    for candidate in first..=epoch {
-                        let Some(record) = chain.admitted(ctx, candidate).await? else {
-                            break;
-                        };
-                        if record.batch_id == batch_id {
-                            found = true;
-                            break;
-                        }
-                    }
-                    found
-                }
-                _ => false,
-            };
-            if invalidated {
-                self.store.record_unenforceable(epoch)?;
-                self.withheld.remove(&epoch);
-                summary.unenforceable.push(epoch);
-                return Ok(());
-            }
+        if !admitted.finalized
+            && let Some(fault) = fault
+            && invalidated_epoch(ctx, chain, epoch, status, &fault).await?
+        {
+            self.store.record_protected(epoch)?;
+            self.withheld.remove(&epoch);
+            summary.protected.push(epoch);
+            return Ok(());
         }
 
         let mut uncovered = false;
+        let mut refused = false;
         for entry in &held {
             match self
                 .assess_entry(ctx, chain, operator, epoch, &admitted, &account, entry)
@@ -342,20 +330,17 @@ impl Agent {
                 // the chain's evidence-replay guard, aborting before the conviction is recorded.
                 EntryVerdict::Convicted => {
                     self.store
-                        .record_challenge(epoch)
-                        .context("record challenge outcome")?;
+                        .record_protected(epoch)
+                        .context("record protected outcome")?;
                     self.withheld.remove(&epoch);
                     summary.convicted.push(epoch);
                     return Ok(());
                 }
-                // Finalized close evidence remains accountable at every age. A refusal
-                // leaves the receipt unresolved and alarms once until evidence is served.
-                EntryVerdict::Refused => {
-                    if admitted.finalized && self.withheld.insert(epoch) {
-                        summary.withheld.push(epoch);
-                    }
-                    return Ok(());
-                }
+                // An attempted challenge may already have taken effect. Wait for its certified
+                // outcome before submitting distinct evidence under the same batch.
+                EntryVerdict::Unconfirmed => return Ok(()),
+                // Unavailable evidence for one payer does not shadow independent payer edges.
+                EntryVerdict::Refused => refused = true,
                 EntryVerdict::Uncovered => uncovered = true,
                 EntryVerdict::Covered => {}
             }
@@ -367,6 +352,12 @@ impl Agent {
                 .context("record unenforceable epoch")?;
             self.withheld.remove(&epoch);
             summary.unenforceable.push(epoch);
+        } else if refused {
+            // Finalized close evidence remains accountable at every age. An unavailable
+            // edge stays unresolved and alarms once until evidence is served.
+            if admitted.finalized && self.withheld.insert(epoch) {
+                summary.withheld.push(epoch);
+            }
         } else if admitted.finalized {
             self.store
                 .mark_reconciled(epoch)
@@ -381,10 +372,46 @@ impl Agent {
         Ok(())
     }
 
-    /// Assesses one held receipt against the anchored committed close without mutating state.
+    /// Fetches committed entry evidence from validators, with an authenticated operator fallback.
+    async fn incoming_lookup<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &Client,
+        operator: SocketAddr,
+        epoch: u64,
+        admitted: &AdmittedRootsResponse,
+        payer: &Key,
+    ) -> Result<HigherEntryLookup<Key, Digest>> {
+        let account = self.account();
+        if let Ok(lookup) = self
+            .holders
+            .committed_entry(ctx, chain, admitted, payer, &account)
+            .await
+        {
+            return Ok(lookup);
+        }
+        let evidence = operator_rpc::committed_entry(
+            ctx,
+            operator,
+            operator_rpc::CommittedEntryRequest {
+                epoch,
+                payer: payer.clone(),
+                recipient: account,
+            },
+        )
+        .await?;
+        ensure!(
+            evidence.batch_id == admitted.batch_id && evidence.change_root == admitted.roots.change,
+            "committed entry differs from the certified close"
+        );
+        Ok(evidence.lookup)
+    }
+
+    /// Assesses one held receipt and publishes its challenge when undercoverage is provable.
     ///
-    /// Every served-evidence failure, an unavailable, unanchored, or unprovable lookup and a
-    /// non-proven verdict, is demoted to a soft refusal so it retries rather than aborting.
+    /// Served evidence that is unavailable, unanchored, or unprovable before a challenge is
+    /// attempted is retryable independently. Once delivery begins, an unconfirmed outcome
+    /// stops this epoch so the caller never submits distinct evidence under the same batch.
     #[allow(clippy::too_many_arguments, reason = "one assessment, one call site")]
     async fn assess_entry<E: Env>(
         &mut self,
@@ -396,45 +423,15 @@ impl Agent {
         account: &Key,
         held: &super::store::HeldEntry,
     ) -> EntryVerdict {
-        // The committed entry comes from the validators, verified against the
-        // anchored change root. The operator is the accused party, so its reconstruction is
-        // the fallback only when every holder declines.
-        let lookup = match self
-            .holders
-            .committed_entry(ctx, chain, admitted, &held.payer, account)
+        let Ok(lookup) = self
+            .incoming_lookup(ctx, chain, operator, epoch, admitted, &held.payer)
             .await
-        {
-            Ok(lookup) => lookup,
-            Err(_) => {
-                let Ok(evidence) = operator_rpc::committed_entry(
-                    ctx,
-                    operator,
-                    operator_rpc::CommittedEntryRequest {
-                        epoch,
-                        payer: held.payer.clone(),
-                        recipient: account.clone(),
-                    },
-                )
-                .await
-                else {
-                    return EntryVerdict::Refused;
-                };
-
-                // Served evidence must be the anchored close before any coverage verdict: a
-                // fabricated batch or root could otherwise fake coverage through the window,
-                // or point a challenge at another close and burn the window on a worthless
-                // verdict.
-                if evidence.batch_id != admitted.batch_id
-                    || evidence.change_root != admitted.roots.change
-                {
-                    return EntryVerdict::Refused;
-                }
-                evidence.lookup
-            }
+        else {
+            return EntryVerdict::Refused;
         };
 
         // Resolving served evidence is a cryptographic check on an untrusted party, so a
-        // failure is refusal, not a fatal error that would shadow the higher epochs.
+        // failure is a retryable refusal rather than a fatal error.
         let Ok((cumulative, count)) =
             lookup.resolve::<Sha256>(&admitted.roots.change, &held.payer, account)
         else {
@@ -447,12 +444,9 @@ impl Agent {
             return EntryVerdict::Uncovered;
         }
 
-        // The coverage check above dry-ran the exact HigherAckEntry condition,
-        // so an honest wallet never submits a no-contradiction challenge.
-        // Submit and complete on the transaction's effect: the certified fault
-        // record naming the proven challenge over exactly this batch.
-        // Rejections are effect-free, so a challenge that never earns the
-        // fault record is a soft refusal that retries.
+        // The lookup proves the HigherAckEntry condition. The immutable first fault
+        // permits exact attribution; an earlier fault leaves this attempt unresolved
+        // until a certified invalidation boundary is available.
         let challenge = Challenge::HigherAckEntry {
             entry: Box::new(EntryWitness {
                 ack: AckWitness::from_ack(&held.receipt.ack),
@@ -469,11 +463,11 @@ impl Agent {
             evidence: challenge.encode(),
         });
         if chain.deliver(ctx, &tx).await.is_err() {
-            return EntryVerdict::Refused;
+            return EntryVerdict::Unconfirmed;
         }
         for _ in 0..EFFECT_ATTEMPTS {
             let Ok(fault) = chain.fault(ctx).await else {
-                return EntryVerdict::Refused;
+                return EntryVerdict::Unconfirmed;
             };
             if let Some(fault) = fault {
                 let reason = match fault {
@@ -487,11 +481,11 @@ impl Agent {
                 ) {
                     EntryVerdict::Convicted
                 } else {
-                    EntryVerdict::Refused
+                    EntryVerdict::Unconfirmed
                 };
             }
             ctx.sleep(POLL).await;
         }
-        EntryVerdict::Refused
+        EntryVerdict::Unconfirmed
     }
 }

@@ -9,13 +9,15 @@ use super::{
 use crate::{
     chain::{
         client::{Chain, Client, Env},
-        state::StatusRecord,
+        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
     },
     operator::rpc as operator_rpc,
     protocol::{AccountIdentity, Key, Wallet, eve_identity, eve_wallet, identities, wallets},
 };
 use anyhow::{Context, Result, ensure};
-use commonware_clearing::bajillion::{boundary::SignedWithdrawal, qmdb::StateOpening};
+use commonware_clearing::bajillion::{
+    boundary::SignedWithdrawal, payment::PaymentContext, qmdb::StateOpening,
+};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Clock, Network};
 use std::{collections::BTreeSet, net::SocketAddr, path::Path};
@@ -45,10 +47,10 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// committed entries, and claims come from authenticated epoch activity. The signing
 /// context comes from the chain's own registration. Every proof binds its certified root.
 ///
-/// As a receiver, this wallet may rely on a payment exactly when its verified receipt is
-/// durably held. A balance that moved in the operator's head is an observation, not
-/// reliance-grade: the enforceable preconfirmation is the held operator receipt, and
-/// reconciliation later proves every finalized credit was backed by one.
+/// Incoming credit requires a durably held receipt acquired while its preconfirmation
+/// remains live, or verified coverage in its finalized close. Live preconfirmations depend
+/// on the holder obtaining evidence and including a challenge within the native window.
+/// Reconciliation retains that obligation for previously held receipts.
 pub(crate) struct Agent {
     pub(super) wallet: Wallet,
     /// The clearing key authenticated by this deployment's registry entry.
@@ -384,4 +386,140 @@ pub(super) async fn settlement_status<E: Env>(
         "settlement status has an unexpected deployment"
     );
     Ok(status)
+}
+
+/// Certified settlement permissions for acquiring a receipt under one payment context.
+pub(super) enum ReceiptEpoch {
+    /// Registration or admission is not visible enough to decide; retain the exact intent.
+    Unresolved,
+    /// The native challenge window remains live, with an optional immutable admitted close.
+    Live(Option<AdmittedRootsResponse>),
+    /// Coverage must be verified under this immutable finalized close.
+    Finalized(AdmittedRootsResponse),
+    /// The published fault does not establish whether this nonfinal admitted close survives.
+    Faulted(AdmittedRootsResponse),
+    /// The context can never settle: its anchor conflicts, it never admitted, or it was invalidated.
+    Invalidated,
+}
+
+/// Classifies new receipt reliance using monotonic certified reads of native settlement.
+pub(super) async fn receipt_epoch<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    deployment: Digest,
+    context: &PaymentContext<Key, Digest>,
+) -> Result<ReceiptEpoch> {
+    ensure!(
+        chain.deployment() == deployment,
+        "settlement client has an unexpected deployment"
+    );
+    let epoch = context.epoch();
+    match chain.anchor(ctx, epoch).await? {
+        Some(anchor) if anchor != *context.anchor() => return Ok(ReceiptEpoch::Invalidated),
+        None => {
+            let status = chain.recent_status(ctx).await?;
+            let registration = chain.registration(ctx).await?;
+            if status.hard_faulted
+                || status.last_finalized.is_some_and(|last| last >= epoch)
+                || registration.is_some_and(|registered| registered.epoch > epoch)
+            {
+                // The absence must follow the permanent boundary, since a registration
+                // can become visible between the initial anchor and boundary reads.
+                return Ok(match chain.anchor(ctx, epoch).await? {
+                    Some(anchor) if anchor == *context.anchor() => ReceiptEpoch::Unresolved,
+                    _ => ReceiptEpoch::Invalidated,
+                });
+            }
+            return Ok(ReceiptEpoch::Unresolved);
+        }
+        Some(_) => {}
+    }
+
+    let admitted = chain.admitted(ctx, epoch).await?;
+    if let Some(record) = admitted
+        && record.finalized
+    {
+        return Ok(ReceiptEpoch::Finalized(record));
+    }
+    let registration = if admitted.is_none() {
+        chain.registration(ctx).await?
+    } else {
+        None
+    };
+    let status = chain.recent_status(ctx).await?;
+    if status.hard_faulted {
+        let fault = chain
+            .fault(ctx)
+            .await?
+            .context("settlement fault is not visible yet")?;
+
+        // Admission absence after the permanent fault proves the context never can admit.
+        // An earlier absence could have preceded a successful admission and must be retried.
+        let Some(record) = chain.admitted(ctx, epoch).await? else {
+            return Ok(ReceiptEpoch::Invalidated);
+        };
+        if record.finalized {
+            return Ok(ReceiptEpoch::Finalized(record));
+        }
+        if invalidated_epoch(ctx, chain, epoch, &status, &fault).await? {
+            return Ok(ReceiptEpoch::Invalidated);
+        }
+        return Ok(ReceiptEpoch::Faulted(record));
+    }
+    if status.last_finalized.is_some_and(|last| last >= epoch) {
+        let record = chain
+            .admitted(ctx, epoch)
+            .await?
+            .context("finalized close is not visible yet")?;
+        ensure!(record.finalized, "finalized close is not visible yet");
+        return Ok(ReceiptEpoch::Finalized(record));
+    }
+
+    // Native admission deadlines strictly increase, challenge duration is fixed, and each
+    // sequential block finalizes the ready front. A healthy nonfinal admitted close
+    // therefore still has a live challenge window, even after its successor registers.
+    if admitted.is_some() {
+        return Ok(ReceiptEpoch::Live(admitted));
+    }
+    if registration.is_some_and(|registered| {
+        registered.epoch == epoch
+            && registered.anchor == *context.anchor()
+            && registered.admitted.is_none()
+            && status.height <= registered.admission_deadline
+    }) {
+        return Ok(ReceiptEpoch::Live(None));
+    }
+    Ok(ReceiptEpoch::Unresolved)
+}
+
+/// Whether the published fault boundary permanently invalidates this nonfinal admitted epoch.
+pub(super) async fn invalidated_epoch<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    epoch: u64,
+    status: &StatusRecord,
+    fault: &FaultRecord,
+) -> Result<bool> {
+    let batch_id = match fault {
+        // Terminal settlement starts only after every surviving prefix close finalizes.
+        FaultRecord::Settling(_) => return Ok(true),
+        FaultRecord::Faulted(HardFaultReasonResponse::ProvenChallenge { batch_id, .. }) => {
+            *batch_id
+        }
+        FaultRecord::Faulted(_) => return Ok(false),
+    };
+    let first = status
+        .last_finalized
+        .map_or(Some(0), |last| last.checked_add(1))
+        .context("receipt epoch overflow")?;
+    for candidate in first..=epoch {
+        let record = chain
+            .admitted(ctx, candidate)
+            .await?
+            .context("fault ancestry is not visible yet")?;
+        if record.batch_id == batch_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

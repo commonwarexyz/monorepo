@@ -222,6 +222,11 @@ pub(crate) async fn run_with_io<E: Env>(
                     "epoch {epoch} omission convicted via HigherAckEntry; the close is invalidated"
                 ));
             }
+            for epoch in summary.protected {
+                state.log(format!(
+                    "epoch {epoch} protected: its admitted close was invalidated before finalization"
+                ));
+            }
             for epoch in summary.reconciled {
                 state.log(format!(
                     "epoch {epoch} reconciled: every held credit is evidence-backed"
@@ -259,6 +264,9 @@ pub(crate) async fn run_with_io<E: Env>(
             }
             KeyCode::PageDown => state.amount = state.amount.saturating_sub(10).max(1),
             KeyCode::PageUp => state.amount = state.amount.saturating_add(10),
+            KeyCode::Char('p' | 'b') if agent.has_pending_payment() => {
+                state.log("A saved payment is awaiting confirmation; press R to retry it.");
+            }
             KeyCode::Char('p') => {
                 let receiver = agent.receiver_name(state.receiver);
                 match agent
@@ -288,11 +296,7 @@ pub(crate) async fn run_with_io<E: Env>(
                 }
             }
             KeyCode::Char('R') => {
-                let resolving: Vec<_> = state.staged.iter().copied().filter(|(receiver, amount)| agent.pending_payment_contains(*receiver, *amount)).collect();
                 let outcome = agent.resume_pending_payment(network, chain, operator).await;
-                if matches!(outcome, Ok(Some(_))) {
-                    state.staged.retain(|entry| !resolving.contains(entry));
-                }
                 match outcome {
                     Ok(Some(PaymentOutcome::Accepted(payment))) => state.log(format!(
                         "epoch {} payment #{} confirmed for {}", payment.epoch, payment.sequence, payment.total
@@ -348,11 +352,15 @@ pub(crate) async fn run_with_io<E: Env>(
                             state.staged.clear();
                         }
                         Err(error) => {
-                            let action = if agent.has_pending_payment() {
+                            let pending = agent.has_pending_payment();
+                            let action = if pending {
                                 "saved payment unconfirmed; press R to retry it"
                             } else {
                                 "batch not sent"
                             };
+                            if pending {
+                                state.staged.clear();
+                            }
                             state.log(format!("{action}: {error:#}"));
                         }
                     }
@@ -1273,9 +1281,30 @@ mod tests {
         assert!(!rendered.contains("e payout"), "{rendered}");
     }
 
+    #[derive(Clone, Copy)]
+    enum RetryDraftCase {
+        BatchThenUnrelated,
+        DirectThenSame,
+        SameThenDirect,
+    }
+
     #[test]
     fn retry_retires_only_the_paid_draft_entries() {
-        deterministic::Runner::default().start(|context| async move {
+        retry_draft_case(RetryDraftCase::BatchThenUnrelated);
+    }
+
+    #[test]
+    fn retry_preserves_same_tuple_staged_after_direct_payment() {
+        retry_draft_case(RetryDraftCase::DirectThenSame);
+    }
+
+    #[test]
+    fn retry_preserves_same_tuple_staged_before_direct_payment() {
+        retry_draft_case(RetryDraftCase::SameThenDirect);
+    }
+
+    fn retry_draft_case(case: RetryDraftCase) {
+        deterministic::Runner::default().start(move |context| async move {
             let chain_address = SocketAddr::from(([127, 0, 0, 1], 2));
             let control = harness::start(&context, chain_address, "retry-ui").await;
             let mut chain = Client::new(
@@ -1346,18 +1375,39 @@ mod tests {
                             < std::time::Duration::from_secs(30)
                     );
                     let shown = displayed.borrow();
-                    let key = match phase.get() {
-                        0 => Some(KeyCode::Char('a')),
-                        1 if shown.1.len() == 1 => Some(KeyCode::Char('b')),
-                        2 if shown.2 => Some(KeyCode::Right),
-                        3 if shown.0 == 2 => Some(KeyCode::Char('a')),
-                        4 if shown.1.len() == 2 => Some(KeyCode::Char('b')),
-                        5 => {
+                    let key = match (case, phase.get()) {
+                        (RetryDraftCase::BatchThenUnrelated, 0) => Some(KeyCode::Char('a')),
+                        (RetryDraftCase::BatchThenUnrelated, 1) if shown.1.len() == 1 => {
+                            Some(KeyCode::Char('b'))
+                        }
+                        (RetryDraftCase::BatchThenUnrelated, 2) if shown.2 => Some(KeyCode::Right),
+                        (RetryDraftCase::BatchThenUnrelated, 3) if shown.0 == 2 => {
+                            Some(KeyCode::Char('a'))
+                        }
+                        (RetryDraftCase::BatchThenUnrelated, 4)
+                            if shown.1.iter().any(|(receiver, _)| *receiver == 2) =>
+                        {
+                            Some(KeyCode::Char('b'))
+                        }
+                        (RetryDraftCase::BatchThenUnrelated, 5) => {
                             assert!(shown.2);
                             assert!(shown.3.contains("press R"), "{}", shown.3);
                             Some(KeyCode::Char('R'))
                         }
-                        6 if !shown.2 => Some(KeyCode::Char('q')),
+                        (RetryDraftCase::BatchThenUnrelated, 6) if !shown.2 => {
+                            Some(KeyCode::Char('q'))
+                        }
+                        (RetryDraftCase::DirectThenSame, 0) => Some(KeyCode::Char('p')),
+                        (RetryDraftCase::DirectThenSame, 1) if shown.2 => Some(KeyCode::Char('a')),
+                        (RetryDraftCase::DirectThenSame, 2) if shown.1.len() == 1 => {
+                            Some(KeyCode::Char('R'))
+                        }
+                        (RetryDraftCase::SameThenDirect, 0) => Some(KeyCode::Char('a')),
+                        (RetryDraftCase::SameThenDirect, 1) if shown.1.len() == 1 => {
+                            Some(KeyCode::Char('p'))
+                        }
+                        (RetryDraftCase::SameThenDirect, 2) if shown.2 => Some(KeyCode::Char('R')),
+                        (_, 3) if !shown.2 => Some(KeyCode::Char('q')),
                         _ => None,
                     };
                     if key.is_some() {
@@ -1371,7 +1421,14 @@ mod tests {
             server.abort();
             assert!(!agent.has_pending_payment());
             assert_eq!(agent.receipt_count(), 1);
-            assert_eq!(displayed.borrow().1, vec![(2, super::DEFAULT_AMOUNT)]);
+            let expected = match case {
+                RetryDraftCase::BatchThenUnrelated => 2,
+                RetryDraftCase::DirectThenSame | RetryDraftCase::SameThenDirect => 1,
+            };
+            assert_eq!(
+                displayed.borrow().1,
+                vec![(expected, super::DEFAULT_AMOUNT)]
+            );
         });
     }
 

@@ -1,6 +1,6 @@
 //! Native asset ownership and the bounded operator registry.
 
-use crate::protocol::{Account, Deployment, Key, MAX_GENESIS_ACCOUNTS, chain_id};
+use crate::protocol::{Account, Deployment, Key, MAX_GENESIS_ACCOUNTS, SQLITE_U64_MAX, chain_id};
 use bytes::BufMut;
 use commonware_clearing::bajillion::qmdb::StateRoot;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt as _, Write};
@@ -98,15 +98,23 @@ impl NativeGenesis {
                 return false;
             }
             let mut accounts = BTreeSet::new();
+            let mut liability = 0u64;
             for account in &entry.deployment.accounts {
                 if !accounts.insert(&account.key) {
                     return false;
                 }
-                let Some(total) = supply.checked_add(account.balance) else {
+                let Some(total) = liability
+                    .checked_add(account.balance)
+                    .filter(|total| *total <= SQLITE_U64_MAX)
+                else {
                     return false;
                 };
-                supply = total;
+                liability = total;
             }
+            let Some(total) = supply.checked_add(liability) else {
+                return false;
+            };
+            supply = total;
         }
         true
     }
@@ -114,5 +122,49 @@ impl NativeGenesis {
     /// The immutable chain domain; runtime registry growth never changes it.
     pub(crate) fn chain_id(&self) -> Digest {
         chain_id(self.deployments.iter().map(|entry| &entry.deployment))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{chain::harness, protocol};
+
+    #[test]
+    fn genesis_custody_respects_operator_monetary_domain() {
+        let mut native = harness::native(protocol::deployments());
+        native.balances.clear();
+        native.deployments.truncate(1);
+        native.deployments[0].deployment.accounts.truncate(2);
+        assert_eq!(native.deployments[0].deployment.accounts.len(), 2);
+
+        let maximum = protocol::SQLITE_U64_MAX;
+        for (balances, valid) in [
+            ([0, 0], true),
+            ([maximum, 0], true),
+            ([maximum + 1, 0], false),
+            ([maximum / 2 + 1, maximum / 2 + 1], false),
+        ] {
+            for (account, balance) in native.deployments[0]
+                .deployment
+                .accounts
+                .iter_mut()
+                .zip(balances)
+            {
+                account.balance = balance;
+            }
+            assert_eq!(native.validate(), valid, "allocations: {balances:?}");
+        }
+
+        for account in &mut native.deployments[0].deployment.accounts {
+            account.balance = 0;
+        }
+        native.balances.push(Account {
+            key: native.fee_recipient.clone(),
+            balance: u64::MAX,
+        });
+        assert!(native.validate());
+        native.deployments[0].deployment.accounts[0].balance = 1;
+        assert!(!native.validate());
     }
 }

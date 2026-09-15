@@ -6,7 +6,7 @@ pub(super) struct Schedule {
     withdrawals: usize,
     withdrawal_after_finality: bool,
     payment_head_before_finality: bool,
-    payment_epochs: Vec<u64>,
+    payments: Vec<operator_rpc::AcceptedBatchResponse>,
     closes: Vec<u64>,
     withdrawal: Vec<operator_rpc::AcknowledgeWithdrawalRequest>,
 }
@@ -49,7 +49,7 @@ pub(super) async fn serve<L: Listener>(
             operator_rpc::OperatorRequest::PaymentHead(_) => {
                 let finalized = verifier.status(&context).await.unwrap().last_finalized;
                 let epoch = operator.lock().status().unwrap().epoch;
-                if !schedule.lock().payment_epochs.is_empty()
+                if !schedule.lock().payments.is_empty()
                     && epoch > finalized.map_or(0, |epoch| epoch + 1)
                 {
                     schedule.lock().payment_head_before_finality = true;
@@ -100,7 +100,11 @@ pub(super) async fn serve<L: Listener>(
                 }
             }
             operator_rpc::OperatorRequest::StartClose(request) => {
-                let expected = schedule.lock().payment_epochs.last().copied().unwrap_or(0);
+                let expected = schedule
+                    .lock()
+                    .payments
+                    .last()
+                    .map_or(0, |payment| payment.epoch);
                 assert_eq!(
                     request.expected_epoch, expected,
                     "close must name accepted work"
@@ -136,7 +140,21 @@ pub(super) async fn serve<L: Listener>(
                 operator_rpc::AcceptSendResponse::decode(body.clone()).unwrap()
         {
             let epoch = accepted.epoch;
-            schedule.lock().payment_epochs.push(epoch);
+            {
+                let mut schedule = schedule.lock();
+                if let Some(prior) = schedule
+                    .payments
+                    .iter()
+                    .find(|prior| prior.acceptance.ack.body() == accepted.acceptance.ack.body())
+                {
+                    assert_eq!(
+                        prior, &accepted,
+                        "exact retries must return the same acceptance"
+                    );
+                } else {
+                    schedule.payments.push(accepted);
+                }
+            }
 
             // Withhold the accepted response until the independent production
             // driver cuts its epoch. The next payment races its finalization.
@@ -205,7 +223,11 @@ pub(super) async fn run(
             "withdrawal preceded finalized balance 120 and local Finished"
         );
         (
-            schedule.payment_epochs.clone(),
+            schedule
+                .payments
+                .iter()
+                .map(|payment| payment.epoch)
+                .collect::<Vec<_>>(),
             schedule.closes.clone(),
             schedule.withdrawal.clone(),
         )
@@ -216,7 +238,7 @@ pub(super) async fn run(
     );
     anyhow::ensure!(
         epochs.len() == 4,
-        "script must accept exactly four payments"
+        "script must accept exactly four distinct payments: {epochs:?}"
     );
     anyhow::ensure!(
         epochs.windows(2).all(|pair| pair[0] < pair[1]),

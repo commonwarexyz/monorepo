@@ -1,6 +1,7 @@
+use super::admission_fixtures::{QUORUM, VALIDATORS, Validators};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, bls12381},
+    admission::bls12381,
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     posted,
     qmdb::{self, State, StateHead, StateOpening, account_key},
@@ -28,7 +29,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
     qmdb::current::FixedConfig, translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, time::SYSTEM_TIME_PRECISION};
+use commonware_utils::{NZU16, NZU64, NZUsize, Participant, TestRng, time::SYSTEM_TIME_PRECISION};
 use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -47,9 +48,6 @@ const FAULT_DEADLINE: u64 = 2;
 const OPERATOR_SEED: u64 = 1;
 const OPERATOR_BLS_SEED: u64 = 777;
 const ACCOUNT_SEED_START: u64 = 10_000;
-const VALIDATOR_SEED_START: u64 = 1_000_000;
-const ADMISSION_VALIDATORS: usize = 100;
-const ADMISSION_QUORUM: usize = 67;
 
 const QUEUE_DEPTHS: &[usize] = &[0, 1, 4, 16];
 const FINALIZE_WITHDRAWALS: &[usize] = &[0, 1, 16, 256];
@@ -74,46 +72,6 @@ type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 struct Account {
     private: SigningKey,
     public: VerifyingKey,
-}
-
-struct Validators {
-    committee: Committee,
-    signers: Vec<bls12381::Scheme>,
-}
-
-impl Validators {
-    fn new(count: usize) -> Self {
-        let mut keys = (0..count)
-            .map(|index| {
-                let index = u64::try_from(index).expect("validator index fits in u64");
-                let signing = Private::new(Scalar::from(VALIDATOR_SEED_START + index + 1));
-                (compute_public::<MinSig>(&signing), signing)
-            })
-            .collect::<Vec<_>>();
-        keys.sort_unstable_by_key(|validator| validator.0);
-        let committee = Committee::new(keys.iter().map(|(public, _)| *public).collect::<Vec<_>>())
-            .expect("benchmark committee is canonical");
-        let signers = keys
-            .into_iter()
-            .take(committee.quorum())
-            .map(|(_, signing)| {
-                bls12381::Scheme::signer(committee.clone(), signing)
-                    .expect("benchmark validator belongs to the committee")
-            })
-            .collect();
-        Self { committee, signers }
-    }
-
-    fn certificate(&self, header: &TestHeader) -> bls12381::Certificate {
-        let attestations = self
-            .signers
-            .iter()
-            .map(|signer| signer.sign(header).expect("benchmark validator can sign"))
-            .collect::<Vec<_>>();
-        self.signers[0]
-            .assemble_exact(attestations)
-            .expect("benchmark certificate has an exact quorum")
-    }
 }
 
 #[derive(Clone)]
@@ -283,7 +241,7 @@ impl ChainSource {
         SettlementChain::new(
             deployment(),
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
-            self.validators.committee.clone(),
+            self.validators.committee().clone(),
             &(&self.head).into(),
             0,
             settlement_config(
@@ -316,7 +274,7 @@ async fn admission_fixture(
         admission_deadline,
         admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE),
         CloseLimits::protocol_maximum(),
-        validators.committee.commitment::<Sha256>(),
+        validators.committee().commitment::<Sha256>(),
     )
     .expect("benchmark epoch is valid")
     .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
@@ -352,7 +310,10 @@ async fn admission_fixture(
         .await
         .expect("benchmark close applies");
     assert_eq!(state.root(), close.roots.successor);
-    let certificate = validators.certificate(&close.header);
+    let certificate = validators
+        .signer(Participant::new(0))
+        .assemble_exact(validators.attestations(&close.header))
+        .expect("benchmark certificate has an exact quorum");
     (
         state,
         AdmissionFixture {
@@ -593,20 +554,30 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
 fn bench_admit(c: &mut Criterion) {
     c.bench_function(
         &format!(
-            "{}/op=admit live_accounts={LIVE_ACCOUNTS} n={ADMISSION_VALIDATORS} q={ADMISSION_QUORUM} withdrawals=1",
+            "{}/op=admit live_accounts={LIVE_ACCOUNTS} n={VALIDATORS} q={QUORUM} withdrawals=1",
             module_path!()
         ),
         |b| {
             b.iter_custom(|iterations| {
-                deterministic::Runner::new(deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION)).start(|runtime| async move {
-                    let source = close_source(runtime, 1, ADMISSION_VALIDATORS).await;
+                deterministic::Runner::new(
+                    deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION),
+                )
+                .start(|runtime| async move {
+                    let source = close_source(runtime, 1, VALIDATORS).await;
                     let mut elapsed = Duration::ZERO;
                     for _ in 0..iterations {
                         let mut input = admit_input(&source);
                         let start = Instant::now();
-                        let batch = input.chain.admit(
-                            black_box(0), input.header, input.roots, input.withdrawal_total, input.certificate,
-                        ).expect("benchmark close can be admitted");
+                        let batch = input
+                            .chain
+                            .admit(
+                                black_box(0),
+                                input.header,
+                                input.roots,
+                                input.withdrawal_total,
+                                input.certificate,
+                            )
+                            .expect("benchmark close can be admitted");
                         elapsed += start.elapsed();
                         black_box(batch);
                         black_box(input.chain);

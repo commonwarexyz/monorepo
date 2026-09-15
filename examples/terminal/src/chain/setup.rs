@@ -246,12 +246,18 @@ impl NetworkConfig {
         read_json(&node_dir.join("network.json"))
     }
 
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        if self.participants.is_empty() {
-            anyhow::bail!("participants must not be empty");
+    pub(crate) fn validate(&self, genesis: &Genesis) -> anyhow::Result<()> {
+        if self.participants.is_empty()
+            || self.participants.len() != genesis.players().len()
+            || Set::from_iter_dedup(self.participants.iter().cloned()) != *genesis.players()
+        {
+            anyhow::bail!("network participants differ from the genesis committee");
         }
-        if self.participants.len() != self.peers.len() {
-            anyhow::bail!("every participant needs a dial address");
+        if self.peers.len() != self.participants.len()
+            || Set::from_iter_dedup(self.peers.iter().map(|peer| peer.public_key.clone()))
+                != *genesis.players()
+        {
+            anyhow::bail!("every genesis participant needs exactly one dial entry");
         }
         if self.operators.is_empty() {
             anyhow::bail!("at least one operator is required");
@@ -692,7 +698,7 @@ pub struct OperatorSetup {
 pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
     let genesis = read_genesis_file(&args.genesis)?;
     let network: NetworkConfig = read_json(&args.network)?;
-    network.validate()?;
+    network.validate(&genesis)?;
     anyhow::ensure!(
         args.max_dealing_bytes >= MIN_DEALING_BYTES,
         "the stock operator requires a dealing reservation of at least {MIN_DEALING_BYTES} bytes"
@@ -813,7 +819,7 @@ pub(crate) async fn complete_registration<E: Env, C: Chain>(
     let tx = SettlementTx::RegisterDeployment(request);
     for _ in 0..100 {
         let read = client
-            .read(
+            .recent(
                 context,
                 &ReadRequest::new(
                     deployment,
@@ -1576,7 +1582,7 @@ mod tests {
         let first = node_dir.join("validator-0");
         let node = NodeConfig::load(&first).unwrap();
         let network = NetworkConfig::load(&first).unwrap();
-        network.validate().unwrap();
+        network.validate(&read_genesis(&first).unwrap()).unwrap();
         assert_eq!(network.participants.len(), 4);
         assert_eq!(node.listen.port(), 4300);
         assert_eq!(node.query.port(), 4400);
@@ -1739,11 +1745,54 @@ mod tests {
         );
         assert!(!undersized.exists());
 
+        let mut foreign_peer = network.clone();
+        foreign_peer.peers[0].public_key = PrivateKey::from_seed(91_000).public_key();
+        let mut foreign_committee = network.clone();
+        for (index, participant) in foreign_committee.participants.iter_mut().enumerate() {
+            *participant = PrivateKey::from_seed(92_000 + index as u64).public_key();
+        }
+        for (peer, participant) in foreign_committee
+            .peers
+            .iter_mut()
+            .zip(&foreign_committee.participants)
+        {
+            peer.public_key = participant.clone();
+        }
+        for (name, imported) in [
+            ("foreign-peer", foreign_peer),
+            ("foreign-committee", foreign_committee),
+        ] {
+            let imported_path = node_dir.join(format!("{name}.json"));
+            write_json(&imported_path, &imported).unwrap();
+            let target = node_dir.join(name);
+            assert!(
+                prepare_operator(OperatorSetup {
+                    node_dir: target.clone(),
+                    genesis: first.join("genesis.json"),
+                    network: imported_path,
+                    listen: SocketAddr::from(([127, 0, 0, 1], 4_902)),
+                    max_dealing_bytes: MIN_DEALING_BYTES,
+                })
+                .is_err(),
+                "{name} must be rejected before preparing an operator",
+            );
+            assert!(!target.exists());
+        }
+
+        let mut relocated = network;
+        relocated.participants.reverse();
+        relocated.peers.rotate_left(1);
+        for (index, peer) in relocated.peers.iter_mut().enumerate() {
+            peer.dial.set_port(4_600 + index as u16);
+        }
+        let relocated_path = node_dir.join("relocated-network.json");
+        write_json(&relocated_path, &relocated).unwrap();
+
         let joining = node_dir.join("joining");
         prepare_operator(OperatorSetup {
             node_dir: joining.clone(),
             genesis: first.join("genesis.json"),
-            network: first.join("network.json"),
+            network: relocated_path,
             listen: SocketAddr::from(([127, 0, 0, 1], 4_900)),
             max_dealing_bytes: MIN_DEALING_BYTES,
         })
@@ -1752,6 +1801,12 @@ mod tests {
         let bytes = from_hex(&encoded).unwrap();
         let registration = RegisterDeploymentRequest::decode_cfg(bytes, &()).unwrap();
         let operator = OperatorConfig::load(&joining).unwrap();
+        let imported = NetworkConfig::load(&joining).unwrap();
+        assert_eq!(imported.participants, relocated.participants);
+        for (actual, expected) in imported.peers.iter().zip(&relocated.peers) {
+            assert_eq!(actual.public_key, expected.public_key);
+            assert_eq!(actual.dial, expected.dial);
+        }
         assert!(registration.verify(&genesis.native.chain_id()));
         assert_eq!(registration.deployment_id(), operator.deployment);
         assert_eq!(registration.operator, operator.clearing.public_key());

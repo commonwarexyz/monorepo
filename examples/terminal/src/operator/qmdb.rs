@@ -413,10 +413,8 @@ async fn recover<E: Context + Spawner>(
         )
         .await;
     }
-    // Recovery may find a complete apply that survived without its caller's commit.
-    // Sync that exact prefix before its SQL reconstruction inputs can be retired.
     sequence(connection, &state)?;
-    Ok(state.commit().await?)
+    Ok(state)
 }
 
 async fn catch_up<E: Context + Spawner>(

@@ -380,9 +380,10 @@ pub(crate) async fn active_close_fixture(
     runtime: deterministic::Context,
     profile: ActiveProfile,
 ) -> CloseFixture {
-    let committee = super::admission_fixtures::Validators::new()
-        .committee()
-        .commitment::<Sha256>();
+    let committee =
+        super::admission_fixtures::Validators::new(super::admission_fixtures::VALIDATORS)
+            .committee()
+            .commitment::<Sha256>();
     active_close_fixture_with_committee(runtime, profile, committee).await
 }
 

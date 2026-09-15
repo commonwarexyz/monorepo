@@ -901,8 +901,10 @@ pub(crate) async fn start(
 )> {
     let operator = OperatorConfig::load(node_dir).context("load operator node config")?;
     let network = NetworkConfig::load(node_dir).context("load network config")?;
-    network.validate().context("invalid network config")?;
     let genesis = read_genesis(node_dir).context("genesis is required")?;
+    network
+        .validate(&genesis)
+        .context("invalid network config")?;
     let local = operator.public_key();
 
     let deployment = operator.deployment;
@@ -1015,7 +1017,6 @@ pub(crate) async fn start(
     );
     let startup = context.child("stateful_startup");
     let plan = SyncPlan::init(&startup, partition_prefix).await;
-    let _ = plan.should_state_sync(false);
 
     // Marshal actor.
     let (marshal_actor, marshal, floor) = MarshalActor::init(

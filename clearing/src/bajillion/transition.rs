@@ -795,10 +795,10 @@ pub struct WithdrawalClaim<D: Digest> {
 }
 
 impl<D: Digest> WithdrawalClaim<D> {
-    pub(crate) const fn new(
-        output: WithdrawalOutput,
-        output_opening: commitment::Opening<D>,
-    ) -> Self {
+    /// Constructs an unverified claim from an output and its opening.
+    ///
+    /// Call [`Self::verify`] against the finalized withdrawal-output root before use.
+    pub const fn new(output: WithdrawalOutput, output_opening: commitment::Opening<D>) -> Self {
         Self {
             output,
             output_opening,
@@ -902,7 +902,7 @@ pub struct Close<P: PublicKey, D: Digest> {
     /// Terminal vectors aligned with activity rows.
     pub out_vectors: Vec<OutVector<P>>,
     encoded: Bytes,
-    pub(crate) changes: Arc<ChallengeIndex<P, D>>,
+    pub(crate) changes: ChallengeIndex<P, D>,
     withdrawals: Vec<WithdrawalOutput>,
     withdrawal_rows: Vec<usize>,
     withdrawal_tree: Tree<D>,
@@ -1014,11 +1014,13 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
             .collect::<Vec<_>>();
         let mut builder = commitment::Builder::<H>::new(VectorKind::Change, leaves.len() as u32)?;
         builder.add_values(&guards, &Sequential)?;
-        let changes = Arc::new(ChallengeIndex {
-            leaves: Arc::new(leaves),
-            guards: Arc::new(guards),
-            tree: Arc::new(builder.build(&Sequential)?),
-        });
+        let changes = ChallengeIndex {
+            material: Arc::new(ChallengeMaterial {
+                leaves,
+                guards,
+                tree: builder.build(&Sequential)?,
+            }),
+        };
         let mut builder =
             commitment::Builder::<H>::new(VectorKind::WithdrawalOutput, count as u32)?;
         builder.add_values(&outputs, &Sequential)?;
@@ -1043,9 +1045,11 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
     pub const fn encoded(&self) -> &Bytes {
         &self.encoded
     }
-    /// Returns retained activity values and their guard tree.
-    pub fn change_evidence(&self) -> (&[AccountChange<P, D>], &Tree<D>) {
-        (&self.changes.leaves, &self.changes.tree)
+    /// Returns aligned activity values, cached guards, and their commitment tree.
+    #[allow(clippy::type_complexity)]
+    pub fn change_evidence(&self) -> (&[AccountChange<P, D>], &[ChangeGuard<P, D>], &Tree<D>) {
+        let material = &self.changes.material;
+        (&material.leaves, &material.guards, &material.tree)
     }
     /// Returns the registered withdrawal outputs and their tree.
     pub fn withdrawal_evidence(&self) -> (&[WithdrawalOutput], &Tree<D>) {
@@ -1055,6 +1059,7 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
     pub fn withdrawal_claim(&self, account: &P) -> Result<WithdrawalClaim<D>, TransitionError> {
         let row = self
             .changes
+            .material
             .leaves
             .binary_search_by(|leaf| leaf.account().as_ref().cmp(account.as_ref()))
             .map_err(|_| TransitionError::WithdrawalClaim)?;
@@ -1111,9 +1116,14 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
 /// Whole activity-tree lookup material, shared by prepared and validated closes.
 #[derive(Clone, Debug)]
 pub struct ChallengeIndex<P: PublicKey, D: Digest> {
-    leaves: Arc<Vec<AccountChange<P, D>>>,
-    guards: Arc<Vec<ChangeGuard<P, D>>>,
-    tree: Arc<Tree<D>>,
+    material: Arc<ChallengeMaterial<P, D>>,
+}
+
+#[derive(Debug)]
+struct ChallengeMaterial<P: PublicKey, D: Digest> {
+    leaves: Vec<AccountChange<P, D>>,
+    guards: Vec<ChangeGuard<P, D>>,
+    tree: Tree<D>,
 }
 impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
     /// Authenticates and shares the close's retained activity tree.
@@ -1122,29 +1132,30 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
         close: &Close<P, D>,
     ) -> Result<Self, TransitionError> {
         validate_header::<H, P, D>(context, &close.header, &close.roots, close.withdrawal_total)?;
-        if close.changes.tree.root() != close.roots.change {
+        if close.changes.root() != close.roots.change {
             return Err(TransitionError::ChangeRoot);
         }
-        Ok((*close.changes).clone())
+        Ok(close.changes.clone())
     }
     /// Returns the activity root.
     pub fn root(&self) -> VectorRoot<D> {
-        self.tree.root()
+        self.material.tree.root()
     }
     /// Opens membership or the exact adjacent-key absence bracket.
     pub fn change_parts(&self, account: &P) -> Result<ChangeParts<P, D>, TransitionError> {
-        match self
+        let material = &self.material;
+        match material
             .leaves
             .binary_search_by(|leaf| leaf.account().as_ref().cmp(account.as_ref()))
         {
             Ok(position) => Ok(ChangeParts::Present {
-                leaf: self.leaves[position].clone(),
-                proof: self.tree.opening(position as u32)?,
+                leaf: material.leaves[position].clone(),
+                proof: material.tree.opening(position as u32)?,
             }),
             Err(position) => {
-                let (predecessor, successor, opening) = self
+                let (predecessor, successor, opening) = material
                     .tree
-                    .bracket(&self.guards, position as u32..position as u32)?;
+                    .bracket(&material.guards, position as u32..position as u32)?;
                 Ok(ChangeParts::Absent {
                     predecessor,
                     successor,
@@ -1513,11 +1524,13 @@ where
     let guards = strategy.map_collect_vec(leaves.iter(), |leaf| leaf.guard::<H>());
     let mut builder = commitment::Builder::<H>::new(VectorKind::Change, leaves.len() as u32)?;
     builder.add_values(&guards, strategy)?;
-    let changes = Arc::new(ChallengeIndex {
-        leaves: Arc::new(leaves),
-        guards: Arc::new(guards),
-        tree: Arc::new(builder.build(strategy)?),
-    });
+    let changes = ChallengeIndex {
+        material: Arc::new(ChallengeMaterial {
+            leaves,
+            guards,
+            tree: builder.build(strategy)?,
+        }),
+    };
     let mut outputs = Vec::with_capacity(withdrawals.len());
     let mut withdrawal_rows = Vec::with_capacity(withdrawals.len());
     for request in withdrawals.requests() {

@@ -25,8 +25,8 @@ pub(crate) struct Validators {
 }
 
 impl Validators {
-    pub(crate) fn new() -> Self {
-        let mut validators = (0..VALIDATORS)
+    pub(crate) fn new(count: usize) -> Self {
+        let mut validators = (0..count)
             .map(|index| {
                 let index = u64::try_from(index).expect("validator index fits in u64");
                 let signing = Private::new(Scalar::from(VALIDATOR_SEED_START + index + 1));
@@ -36,8 +36,6 @@ impl Validators {
         validators.sort_unstable_by_key(|validator| validator.0);
         let committee = Committee::new(validators.iter().map(|(public, _)| *public).collect())
             .expect("benchmark committee is canonical");
-        assert_eq!(committee.faults(), FAULTS);
-        assert_eq!(committee.quorum(), QUORUM);
         Self {
             committee,
             keys: validators.into_iter().map(|(_, private)| private).collect(),
@@ -57,7 +55,7 @@ impl Validators {
     }
 
     pub(crate) fn attestations(&self, header: &Header<Digest>) -> Vec<Vote> {
-        (0..QUORUM)
+        (0..self.committee.quorum())
             .map(|index| {
                 self.signer(Participant::from_usize(index))
                     .sign(header)
@@ -76,7 +74,9 @@ pub(crate) struct CertificateFixture {
 
 pub(crate) fn certificate_fixture() -> CertificateFixture {
     super::fixtures::runner().start(|runtime| async move {
-        let validators = Validators::new();
+        let validators = Validators::new(VALIDATORS);
+        assert_eq!(validators.committee().faults(), FAULTS);
+        assert_eq!(validators.committee().quorum(), QUORUM);
         let profile = super::fixtures::selected_active_profiles()[0].1;
         let fixture = super::fixtures::active_close_fixture_with_committee(
             runtime,

@@ -392,7 +392,7 @@ pub(crate) fn benches(challenges_only: bool) {
     for (_, profile) in selected_active_profiles() {
         runner().start(|runtime| async move {
             let fixture = active_close_fixture(runtime, profile).await;
-            let validators = Validators::new();
+            let validators = Validators::new(VALIDATORS);
             let close = fixture.prepared.close();
             let parts = dealing_bytes(close);
             let decoded = posted::decode::<VerifyingKey, Digest>(close.encoded().clone(), &fixture.context)

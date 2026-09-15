@@ -636,7 +636,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             .unwrap(),
             Verdict::NoContradiction
         );
-        let (leaves, tree) = retained.change_evidence();
+        let (leaves, _, tree) = retained.change_evidence();
         let false_absence = Challenge::HigherAckDebit {
             ack: Box::new(ack),
             payer: Box::new(AccountLookup::Absent(ChangeAbsence {

@@ -1,5 +1,5 @@
 use super::{
-    admission_fixtures::Validators,
+    admission_fixtures::{VALIDATORS, Validators},
     fixtures::{WORKERS, active_close_fixture, profile_key, selected_active_profiles, strategy},
 };
 use commonware_clearing::bajillion::admission::seal;
@@ -26,7 +26,7 @@ fn bench_seal(c: &mut Criterion) {
                 b.iter_custom(|iterations| {
                     super::fixtures::runner().start(|runtime| async move {
                         let fixture = active_close_fixture(runtime, profile).await;
-                        let signer = Validators::new().signer(Participant::new(0));
+                        let signer = Validators::new(VALIDATORS).signer(Participant::new(0));
                         let mut rng = TestRng::new(0);
                         let mut elapsed = Duration::ZERO;
                         for _ in 0..iterations {

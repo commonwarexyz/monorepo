@@ -4,6 +4,9 @@
 //! chain's registered context. Candidate mutations and evidence become durable before voting.
 //! Consensus selects the canonical history; its records precede state application and commit.
 //! Restart applies only accepted closes beyond the recovered native head.
+//! The demo retains all canonical closes, signed votes, and individually indexed proof records.
+
+mod proofs;
 
 use crate::{
     chain::{
@@ -341,23 +344,6 @@ impl Sealed {
             vote,
         }
     }
-
-    fn close(&self) -> Result<Close<Key, Digest>> {
-        ensure!(
-            self.header
-                .verify::<Sha256, Key>(&self.context, &self.roots, self.withdrawal_total),
-            "retained header mismatch"
-        );
-        let close =
-            Close::decode_evidence::<Sha256>(self.evidence.clone(), &self.context, &self.header)?;
-        ensure!(
-            close.header == self.header
-                && close.roots == self.roots
-                && close.withdrawal_total == self.withdrawal_total,
-            "retained evidence mismatch"
-        );
-        Ok(close)
-    }
 }
 pub(crate) type Store<E> = prunable::Archive<TwoCap, E, Digest, Sealed>;
 pub(crate) async fn store<E: StorageContext>(
@@ -439,6 +425,7 @@ async fn recover<E: StorageContext + Spawner>(
     mut state: State<E, Sha256>,
     deployment: &Deployment,
     archive: &Store<E>,
+    proofs: &proofs::Store<E>,
 ) -> Result<(State<E, Sha256>, u64)> {
     let genesis = deployment.genesis();
     if state.is_bootstrap() {
@@ -481,13 +468,16 @@ async fn recover<E: StorageContext + Spawner>(
             && first.context.predecessor_liability() == genesis.liability(),
         "canonical genesis mismatch"
     );
+    proofs.check(&first).await?;
     let tail = if last == 0 {
         first
     } else {
-        archive
+        let tail = archive
             .get(Identifier::Index(last))
             .await?
-            .context("missing canonical tail")?
+            .context("missing canonical tail")?;
+        proofs.check(&tail).await?;
+        tail
     };
     ensure!(
         tail.context.deployment() == deployment.digest() && tail.context.payment().epoch() == last,
@@ -530,6 +520,7 @@ struct Lane<E: StorageContext + Spawner> {
     pending: Option<Dealing>,
     store: Option<Store<E>>,
     votes: Option<Store<E>>,
+    proofs: Option<proofs::Store<E>>,
     state: Option<State<E, Sha256>>,
     next: u64,
 }
@@ -818,10 +809,6 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let batch = record.header.batch_id::<Sha256>().into_digest();
         let archive = lane.votes.take().expect("vote archive owner");
         let archive = archive.put_sync(dealing.epoch, batch, &record).await?;
-        ensure!(
-            archive.has(Identifier::Key(&batch)).await?,
-            "vote evidence was not retained"
-        );
         lane.votes = Some(archive);
         Self::vote(sender, &peer, ballot);
         Ok(())
@@ -852,7 +839,13 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             Sequential,
         );
         let state = State::<_, Sha256>::open(self.context.child("balances"), config).await?;
-        let (state, next) = recover(state, deployment, &archive).await?;
+        let proofs = proofs::Store::open(
+            self.context.child("proofs"),
+            &self.partition,
+            *deployment.digest(),
+        )
+        .await?;
+        let (state, next) = recover(state, deployment, &archive, &proofs).await?;
         let position = lanes.len();
         lanes.push(Lane {
             deployment: deployment.clone(),
@@ -860,6 +853,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             pending: None,
             store: Some(archive),
             votes: Some(votes),
+            proofs: Some(proofs),
             state: Some(state),
             next,
         });
@@ -1027,11 +1021,9 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 archive.get(Identifier::Index(epoch)).await?.is_none(),
                 "conflicting canonical epoch"
             );
+            let proofs = lane.proofs.take().expect("proof archive owner");
+            lane.proofs = Some(proofs.retain(&record, prepared.close()).await?);
             let archive = archive.put_sync(epoch, batch, &record).await?;
-            ensure!(
-                archive.has(Identifier::Key(&batch)).await?,
-                "canonical evidence was not retained"
-            );
             lane.store = Some(archive);
             let state = lane.state.take().expect("balance owner");
             lane.state = Some(state.apply(prepared.into_parts().1).await?.commit().await?);
@@ -1072,21 +1064,24 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             );
         }
         if let EvidenceLookup::Dealing { epoch } = &request.lookup {
-            return Ok(lane
+            let record = lane
                 .store
                 .as_ref()
                 .unwrap()
                 .get(Identifier::Index(*epoch))
-                .await?
-                .or(lane
-                    .votes
+                .await?;
+            let record = if record.is_some() {
+                record
+            } else {
+                lane.votes
                     .as_ref()
                     .unwrap()
                     .get(Identifier::Index(*epoch))
-                    .await?)
-                .map_or(EvidenceResponse::Unsealed, |record| {
-                    EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into())))
-                }));
+                    .await?
+            };
+            return Ok(record.map_or(EvidenceResponse::Unsealed, |record| {
+                EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into())))
+            }));
         }
         if let EvidenceLookup::CloseEvidence { batch_id } = &request.lookup {
             let record = lane
@@ -1116,15 +1111,20 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             }));
         }
         let batch = request.lookup.batch().expect("close lookup");
-        let Some(record) = lane
+        if !lane
             .store
             .as_ref()
             .unwrap()
-            .get(Identifier::Key(batch))
+            .has(Identifier::Key(batch))
             .await?
-        else {
+        {
             return Ok(EvidenceResponse::Unsealed);
-        };
+        }
+        let proofs = lane.proofs.as_ref().unwrap();
+        let record = proofs
+            .descriptor(batch)
+            .await?
+            .context("canonical close is missing its proof descriptor")?;
         let target = match &request.lookup {
             EvidenceLookup::PredecessorState { .. } => Some((
                 *record.context.predecessor_root(),
@@ -1157,12 +1157,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 body,
             }));
         }
-        answer(
-            &record.context,
-            &record.withdrawals,
-            &record.close()?,
-            &request.lookup,
-        )
+        proofs.answer(&record, &request.lookup).await
     }
     fn vote<Se: Sender<PublicKey = ed25519::PublicKey>>(
         sender: &mut Se,
@@ -1182,7 +1177,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         chain::{
@@ -1344,7 +1339,7 @@ mod tests {
 
     /// One two-peer simulated network: the operator's DA channel endpoints
     /// and the validator's, with links per `to_validator`/`to_operator`.
-    async fn network(
+    pub(crate) async fn network(
         context: &deterministic::Context,
         operator: &ed25519::PublicKey,
         validator: &ed25519::PublicKey,
@@ -1943,6 +1938,7 @@ mod tests {
                 deployment: deployment.clone(),
                 votes: Some(votes),
                 store: Some(canonical),
+                proofs: Some(proofs::Store::open(context.child("proofs"), "branch", *deployment.digest()).await.unwrap()),
                 state: Some(state),
                 next: 0,
             }];
@@ -2082,7 +2078,7 @@ mod tests {
                     .encode()
                     .contains("archive_ahead_replay_balances_apply_batch_calls_total 0")
             );
-            let (recovered, recovered_next) = recover(recovered, &deployment, &reopened_archive)
+            let (recovered, recovered_next) = recover(recovered, &deployment, &reopened_archive, lanes[0].proofs.as_ref().unwrap())
                 .await
                 .unwrap();
             assert_eq!(recovered_next, 1);
@@ -2125,7 +2121,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let (resumed, resumed_next) = recover(state, &deployment, &applied_archive).await.unwrap();
+            let (resumed, resumed_next) = recover(state, &deployment, &applied_archive, lanes[0].proofs.as_ref().unwrap()).await.unwrap();
             state = resumed;
             assert_eq!(resumed_next, 1);
             assert!(
@@ -2135,6 +2131,8 @@ mod tests {
             );
             let mut wrong_size = record_b.clone();
             wrong_size.operations += 1;
+            let wrong_size_proofs = proofs::Store::open(context.child("wrong_size_proofs"), "wrong-size", *deployment.digest())
+                .await.unwrap().retain(&wrong_size, b.close()).await.unwrap();
             let wrong_size_archive = store(
                 context.child("wrong_size_archive"),
                 "wrong-size",
@@ -2149,7 +2147,7 @@ mod tests {
             .await
             .unwrap();
             assert!(
-                recover(state, &deployment, &wrong_size_archive)
+                recover(state, &deployment, &wrong_size_archive, &wrong_size_proofs)
                     .await
                     .is_err()
             );
@@ -2166,7 +2164,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                recover(state, &wrong_genesis_operations, &reopened_archive)
+                recover(state, &wrong_genesis_operations, &reopened_archive, lanes[0].proofs.as_ref().unwrap())
                     .await
                     .is_err()
             );
@@ -2186,7 +2184,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                recover(state, &wrong_genesis, &reopened_archive)
+                recover(state, &wrong_genesis, &reopened_archive, lanes[0].proofs.as_ref().unwrap())
                     .await
                     .is_err()
             );
@@ -2206,7 +2204,7 @@ mod tests {
             )
             .await;
             assert!(
-                recover(fresh, &wrong_genesis, &empty_archive)
+                recover(fresh, &wrong_genesis, &empty_archive, lanes[0].proofs.as_ref().unwrap())
                     .await
                     .is_err()
             );

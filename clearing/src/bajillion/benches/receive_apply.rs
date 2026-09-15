@@ -1,5 +1,5 @@
 use super::{
-    admission_fixtures::Validators,
+    admission_fixtures::{VALIDATORS, Validators},
     fixtures::{
         CloseFixture, EPOCH, WORKERS, active_close_fixture, epoch_context, profile_key,
         selected_active_profiles, strategy, terminal_material,
@@ -43,7 +43,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                             ..
                         } = active_close_fixture(runtime, profile).await;
                         drop(prepared);
-                        let validators = Validators::new();
+                        let validators = Validators::new(VALIDATORS);
                         let committee = validators.committee().commitment::<Sha256>();
                         let signer = validators.signer(Participant::new(0));
                         let mut rng = TestRng::new(0);

@@ -167,8 +167,9 @@ closes must finalize first.
 
 Every validator checks the same dealing against its stored balances and saves
 the evidence before voting. Balance replicas follow admitted closes and serve
-historical proofs from the same QMDB. The operator's proof replica advances
-independently of preparing the next dealing.
+historical proofs from the same QMDB. Activity and withdrawal proofs use
+individually stored leaves and shared Merkle nodes. The operator's proof replica
+advances independently of preparing the next dealing.
 
 Wallets authenticate chain reads using `genesis.json` and keep unresolved signed
 requests for retry. After a deployment fault, they can claim finalized withdrawals,

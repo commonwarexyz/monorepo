@@ -23,12 +23,13 @@ fn bench_prepare(c: &mut Criterion) {
                         let fixture = active_close_fixture(runtime, profile).await;
                         let mut elapsed = Duration::ZERO;
                         for _ in 0..iterations {
+                            let terminals = fixture.terminals.clone();
                             let start = Instant::now();
                             let prepared = prepare_dealing::<Sha256, _, _>(
                                 fixture.context.epoch_context(),
                                 &fixture.deposits,
                                 &fixture.withdrawals,
-                                fixture.terminals.clone(),
+                                terminals,
                             )
                             .expect("prepare dealing");
                             elapsed += start.elapsed();

@@ -9,6 +9,7 @@
 //! preconfirmation. They are irreplaceable once the operator is gone, so like the recovery
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
+use super::pay::merge_entries;
 use crate::{
     chain::{
         state as chain_state,
@@ -35,7 +36,7 @@ use commonware_cryptography_curve25519::signing::Signature;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
 const MAX_STATE_OPENING_BYTES: usize = 16 * 1024;
@@ -101,18 +102,15 @@ pub(crate) struct IncomingSummary {
 }
 
 /// One verified incoming receipt ready to persist: the payer-signed body digest keying it,
-/// the credited edge endpoint, the delta amount versus the previously held entry, its
-/// acceptance cursor, and the canonical [`Receipt`] bytes.
+/// the credited edge endpoint, the delta amount versus the previously held entry, and the
+/// canonical [`Receipt`] bytes.
 pub(crate) struct IncomingRecord {
     pub(crate) id: Digest,
     pub(crate) payer: Key,
     pub(crate) epoch: u64,
-    pub(crate) anchor: Digest,
-    pub(crate) seq: u64,
     pub(crate) cumulative: u64,
     pub(crate) count: u64,
     pub(crate) amount: u64,
-    pub(crate) cursor: u64,
     pub(crate) receipt: Receipt,
 }
 
@@ -139,8 +137,8 @@ pub(crate) struct VectorState {
 pub(crate) enum ReconcileOutcome {
     /// The committed close's terminal entries covered every held receipt.
     Reconciled = 1,
-    /// A held entry exceeded the committed terminal entry and a proven challenge was submitted.
-    Challenged = 2,
+    /// The admitted close was invalidated before finalization.
+    Protected = 2,
     /// An enforcement dead end: a finalized close understated a held receipt past the
     /// challenge window, or a registered epoch's close never admitted and settlement faulted.
     Unenforceable = 3,
@@ -279,6 +277,11 @@ impl Store {
         self.finish_mutation(result)
     }
 
+    #[cfg(test)]
+    pub(crate) fn total_changes(&self) -> u64 {
+        self.connection.total_changes()
+    }
+
     pub(crate) fn recovery_opening(
         &self,
         root: &StateRoot<Digest>,
@@ -287,20 +290,50 @@ impl Store {
         read_recovery_opening(&self.connection, root, &self.account)
     }
 
-    /// Durably caches the wallet's optimistic signing state from one verified head read:
-    /// the operator-served payment context to sign under, and the retained opening at
-    /// `root` as the affordability floor that context was served against.
+    /// Rejects a signing context retired by the wallet's permanent settlement history.
+    /// This applies even when a pending withdrawal suppresses cache refresh.
+    pub(crate) fn check_signing_context(
+        &self,
+        context: &PaymentContext<Key, Digest>,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            context.operator() == &self.operator,
+            "payment context has an unexpected operator"
+        );
+
+        // A certified view can predate durable local conclusions after a client restart.
+        // Epochs outside SQLite's integer range have no archived conclusions.
+        let mut statement = self.connection.prepare_cached(
+            "SELECT length(authorization), authorization FROM agent_payments
+             WHERE state IN (?1, ?2) AND epoch = ?3",
+        )?;
+        let conclusions = statement.query_map(
+            params![
+                PaymentState::Finalized as i64,
+                PaymentState::Abandoned as i64,
+                i64::try_from(context.epoch()).ok(),
+            ],
+            |row| read_fixed_blob(row, 0, 1, AUTHORIZATION_BYTES, "concluded authorization"),
+        )?;
+        for encoded in conclusions {
+            let authorization = SendAuthorization::<Key, Digest>::decode(encoded?)?;
+            ensure!(
+                authorization.body().anchor() != context.anchor(),
+                "signing context has a permanent settlement outcome"
+            );
+        }
+        Ok(())
+    }
+
+    /// Durably caches a signing context and its verified affordability floor at `root`.
     pub(crate) fn cache_context(
         &mut self,
         context: &PaymentContext<Key, Digest>,
         root: &StateRoot<Digest>,
         floor_epoch: u64,
     ) -> Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            context.operator() == &self.operator,
-            "cached payment context has an unexpected operator"
-        );
+        self.check_signing_context(context)?;
         let epoch = sql_u64(floor_epoch, "cached floor epoch")?;
         let encoded_context = context.encode();
         let encoded_root = root.encode();
@@ -312,18 +345,6 @@ impl Store {
             encoded_root.as_ref(),
             epoch,
         );
-        self.finish_mutation(result)
-    }
-
-    /// Invalidates the cached signing state.
-    ///
-    /// A withdrawal reduces the live balance ahead of any predecessor root a floor could
-    /// be read from, so the wallet clears the cache before its request can reach the
-    /// operator and re-caches only from a verified head read once no withdrawal is in
-    /// flight.
-    pub(crate) fn clear_context(&mut self) -> Result<()> {
-        self.ensure_usable()?;
-        let result = clear_context_transaction(&mut self.connection);
         self.finish_mutation(result)
     }
 
@@ -585,7 +606,7 @@ impl Store {
         previous_debit: u64,
     ) -> Result<Vec<OutEntry<Key>>> {
         let prior = read_vector_state(&self.connection, body.epoch(), body.anchor())?;
-        let (prior_seq, mut merged) = match prior {
+        let (prior_seq, prior_entries) = match prior {
             Some(state) => {
                 ensure!(
                     state.cumulative_debit == previous_debit,
@@ -602,28 +623,7 @@ impl Store {
             prior_seq.map_or(Some(1), |seq| seq.checked_add(1)) == Some(body.seq()),
             "the committed batch does not extend the durable vector sequence"
         );
-        for entry in entries {
-            match merged.binary_search_by(|edge| edge.recipient.cmp(&entry.recipient)) {
-                Ok(position) => {
-                    merged[position].cumulative = merged[position]
-                        .cumulative
-                        .checked_add(entry.amount)
-                        .context("edge cumulative overflow")?;
-                    merged[position].count = merged[position]
-                        .count
-                        .checked_add(1)
-                        .context("edge count overflow")?;
-                }
-                Err(position) => merged.insert(
-                    position,
-                    OutEntry {
-                        recipient: entry.recipient.clone(),
-                        cumulative: entry.amount,
-                        count: 1,
-                    },
-                ),
-            }
-        }
+        let merged = merge_entries(prior_entries, entries)?;
         let vector = OutVector::new(body.epoch(), self.account.clone(), merged)
             .context("assemble committed out vector")?;
         ensure!(
@@ -800,29 +800,24 @@ impl Store {
         self.finish_mutation(result)
     }
 
-    /// Durably records one verified intake page: the accepted receipts and the advanced
-    /// cursor.
+    /// Atomically persists verified credits and the cursor of the processed incoming prefix.
     ///
-    /// The receipts and the cursor commit together, so a receiver that observes the cursor
-    /// advance is guaranteed to hold every credit up to it. Insertion is idempotent per
-    /// payer-signed body digest, so a crash before this commit leaves the cursor unchanged
-    /// and the exact page refetches and reinserts without duplication. Only self-verified
-    /// receipts reach here: an invalid receipt is never stored, yet the cursor still
-    /// advances past it.
+    /// Insertion is idempotent per payer-signed body digest. The caller validates the page
+    /// and authenticates receipt reliance before entering this transaction. The unsigned
+    /// cursor identifies processed rows; it does not authenticate enumeration completeness.
     pub(crate) fn record_incoming(
         &mut self,
         records: &[IncomingRecord],
         next_cursor: u64,
     ) -> Result<IncomingSummary> {
         self.ensure_usable()?;
+        sql_u64(next_cursor, "incoming cursor")?;
         for record in records {
             let body = record.receipt.ack.body();
             ensure!(
                 record.id == body_id(body)
                     && &record.payer == body.payer()
                     && record.epoch == body.epoch()
-                    && record.anchor == *body.anchor()
-                    && record.seq == body.seq()
                     && record.cumulative == record.receipt.cumulative
                     && record.count == record.receipt.count,
                 "incoming record does not project its receipt"
@@ -833,7 +828,10 @@ impl Store {
                 !encoded.is_empty() && encoded.len() <= MAX_RECEIPT_BYTES,
                 "incoming receipt encoding exceeds its bound"
             );
-            sql_u64(record.cursor, "incoming cursor")?;
+            sql_u64(record.epoch, "incoming epoch")?;
+            sql_u64(record.cumulative, "incoming cumulative")?;
+            sql_u64(record.count, "incoming count")?;
+            sql_u64(record.amount, "incoming amount")?;
         }
         let result = record_incoming_transaction(&mut self.connection, records, next_cursor);
         self.finish_mutation(result)?;
@@ -963,9 +961,9 @@ impl Store {
         read_last_reconciled(&self.connection)
     }
 
-    /// Durably records that a proven challenge was submitted for an understated epoch.
-    pub(crate) fn record_challenge(&mut self, epoch: u64) -> Result<()> {
-        self.record_outcome(epoch, ReconcileOutcome::Challenged)
+    /// Durably records that the epoch's admitted close was invalidated before finalization.
+    pub(crate) fn record_protected(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::Protected)
     }
 
     /// Durably records an epoch whose held credit can no longer be enforced: a finalized close
@@ -1032,7 +1030,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT LIKE 'sqlite_autoindex_%'
                     AND name NOT IN (
                         'agent_payments_settled',
-                        'agent_incoming_payer_id', 'agent_incoming_epoch_payer'
+                        'agent_incoming_epoch_payer'
                     ))
              LIMIT 1
          )",
@@ -1207,7 +1205,6 @@ fn initialize_schema(
              id BLOB PRIMARY KEY CHECK (length(id) = {digest_size}),
              cumulative_debit INTEGER NOT NULL CHECK (cumulative_debit > 0),
              epoch INTEGER NOT NULL CHECK (epoch >= 0),
-             anchor BLOB NOT NULL CHECK (length(anchor) = {digest_size}),
              total INTEGER NOT NULL CHECK (total > 0),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
              authorization BLOB NOT NULL CHECK (length(authorization) = {authorization_size}),
@@ -1237,15 +1234,11 @@ fn initialize_schema(
              id BLOB PRIMARY KEY CHECK (length(id) = {digest_size}),
              payer BLOB NOT NULL CHECK (length(payer) = {key_size}),
              epoch INTEGER NOT NULL CHECK (epoch >= 0),
-             anchor BLOB NOT NULL CHECK (length(anchor) = {digest_size}),
-             seq INTEGER NOT NULL CHECK (seq >= 0),
              cumulative INTEGER NOT NULL CHECK (cumulative > 0),
              count INTEGER NOT NULL CHECK (count > 0 AND count <= cumulative),
              amount INTEGER NOT NULL CHECK (amount > 0),
-             cursor INTEGER NOT NULL CHECK (cursor > 0),
              receipt BLOB NOT NULL CHECK (length(receipt) BETWEEN 1 AND {max_receipt_size})
          );
-         CREATE INDEX agent_incoming_payer_id ON agent_incoming (payer, id);
          CREATE INDEX agent_incoming_epoch_payer ON agent_incoming (epoch, payer);
 
          CREATE TABLE agent_reconciled (
@@ -2043,18 +2036,6 @@ fn cache_context_transaction(
     Ok(())
 }
 
-fn clear_context_transaction(connection: &mut Connection) -> Result<()> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .context("begin signing context invalidation")?;
-    transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
-
-    transaction
-        .commit()
-        .map_err(|source| CommitUnknown::new("signing context invalidation", source))?;
-    Ok(())
-}
-
 fn stage_payment_transaction(
     connection: &mut Connection,
     account: &Key,
@@ -2128,9 +2109,9 @@ fn conclude_payment_transaction(
         transaction.execute(
             "INSERT INTO agent_payments (
                  id, cumulative_debit, recovery_root, authorization, entries,
-                 state, receipts, acceptance, epoch, anchor, total
+                 state, receipts, acceptance, epoch, total
              )
-             SELECT ?1, ?2, recovery_root, authorization, entries, ?3, ?4, ?5, ?7, ?8, ?9
+             SELECT ?1, ?2, recovery_root, authorization, entries, ?3, ?4, ?5, ?7, ?8
              FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?6",
             params![
                 id,
@@ -2140,7 +2121,6 @@ fn conclude_payment_transaction(
                 encoded_acceptance,
                 encoded_authorization,
                 sql_u64(body.epoch(), "payment epoch")?,
-                body.anchor().as_ref(),
                 sql_u64(total, "payment total")?,
             ],
         )? == 1,
@@ -2153,6 +2133,9 @@ fn conclude_payment_transaction(
         )? == 1,
         "pending payment changed before {operation}"
     );
+    if !matches!(state, PaymentState::Accepted) {
+        transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
+    }
     if let Some(vector) = vector {
         replace_vector_rows(
             &transaction,
@@ -2314,8 +2297,8 @@ fn record_incoming_transaction(
     {
         let mut insert = transaction.prepare_cached(
             "INSERT INTO agent_incoming (
-                 id, payer, epoch, anchor, seq, cumulative, count, amount, cursor, receipt
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 id, payer, epoch, cumulative, count, amount, receipt
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO NOTHING",
         )?;
         for record in records {
@@ -2324,12 +2307,9 @@ fn record_incoming_transaction(
                 record.id.as_ref(),
                 record.payer.as_ref(),
                 sql_u64(record.epoch, "incoming epoch")?,
-                record.anchor.as_ref(),
-                sql_u64(record.seq, "incoming sequence")?,
                 sql_u64(record.cumulative, "incoming cumulative")?,
                 sql_u64(record.count, "incoming count")?,
                 sql_u64(record.amount, "incoming amount")?,
-                sql_u64(record.cursor, "incoming cursor")?,
                 encoded.as_ref(),
             ])?;
             if inserted > 0 {
@@ -2555,44 +2535,14 @@ fn to_sqlite_error(error: anyhow::Error) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::fixtures::StateFixture, *};
-    use crate::protocol::{Wallet, deployment, identities, operator_key, wallets};
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
+    use super::{
+        super::{
+            fixtures::{StateFixture, TempDatabase},
+            tests::issued_receipt,
+        },
+        *,
     };
-
-    static TEMP_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDatabase {
-        directory: PathBuf,
-        path: PathBuf,
-    }
-
-    impl TempDatabase {
-        fn new() -> Self {
-            let id = TEMP_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!(
-                "commonware-terminal-agent-store-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir(&directory).unwrap();
-            let path = directory.join("agent.sqlite");
-            Self { directory, path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDatabase {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.directory);
-        }
-    }
-
+    use crate::protocol::{Wallet, deployment, identities, operator_key, wallets};
     fn open_error(path: &Path, account: &Key, deployment: &Digest, operator: &Key) -> String {
         match Store::open(path, account, deployment, operator) {
             Ok(_) => panic!("incompatible agent database was accepted"),
@@ -2663,15 +2613,11 @@ mod tests {
         store.retain_recovery_opening(&root, &opening).unwrap();
         store.cache_context(&context, &root, 0).unwrap();
         drop(store);
-        let (mut store, state) = open_store(database.path(), &account);
+        let (_store, state) = open_store(database.path(), &account);
         let cache = state.cache.unwrap();
         assert_eq!(cache.context, context);
         assert_eq!(cache.root, root);
         assert_eq!(cache.epoch, 0);
-        store.clear_context().unwrap();
-        drop(store);
-        let (_, state) = open_store(database.path(), &account);
-        assert!(state.cache.is_none());
     }
 
     #[test]
@@ -2709,13 +2655,13 @@ mod tests {
         let (authorization, entries) = sign_delta(&context, &wallet, 7);
         let (mut store, _) = open_store(database.path(), &account);
         store.retain_recovery_opening(&root, &opening).unwrap();
+        store.cache_context(&context, &root, 0).unwrap();
         store
             .stage_payment(&authorization, &entries, &root, 0)
             .unwrap();
         store
             .finalize_payment_unheld(&authorization, &entries, 0)
             .unwrap();
-        store.clear_context().unwrap();
         drop(store);
         let (store, state) = open_store(database.path(), &account);
         assert!(state.cache.is_none());
@@ -2782,15 +2728,13 @@ mod tests {
                 .connection
                 .execute(
                     "INSERT INTO agent_incoming (
-                         id, payer, epoch, anchor, seq, cumulative, count, amount, cursor, receipt
-                     ) VALUES (?1, ?2, ?3, ?4, 1, ?5, 1, ?5, ?6, x'01')",
+                         id, payer, epoch, cumulative, count, amount, receipt
+                     ) VALUES (?1, ?2, ?3, ?4, 1, ?4, x'01')",
                     params![
                         Sha256::hash(&[b"credit-id", &[tag]]).as_ref(),
                         payer.as_ref(),
                         epoch,
-                        Sha256::hash(&[b"credit-anchor"]).as_ref(),
                         amount,
-                        epoch + 1,
                     ],
                 )
                 .unwrap();
@@ -3130,5 +3074,42 @@ mod tests {
             i64::MAX as u64
         );
         assert!(from_sql_u64(-1, "test value").is_err());
+    }
+
+    #[test]
+    fn incoming_cursor_domain_rejection_precedes_mutation() {
+        let database = TempDatabase::new();
+        let account = wallets().remove(1).public_key();
+        let (mut store, _) = open_store(database.path(), &account);
+        let payer = wallets().remove(0);
+        let context = PaymentContext::new(Sha256::hash(&[b"incoming-record"]), 0, operator_key());
+        let receipt = issued_receipt(&context, &payer, &account, 5);
+        let records = [IncomingRecord {
+            id: body_id(receipt.ack.body()),
+            payer: payer.public_key(),
+            epoch: 0,
+            cumulative: 5,
+            count: 1,
+            amount: 5,
+            receipt,
+        }];
+
+        let error = store.record_incoming(&records, u64::MAX).unwrap_err();
+        assert!(format!("{error:#}").contains("incoming cursor exceeds SQLite INTEGER range"));
+        assert!(!store.poisoned);
+        assert_eq!(
+            read_incoming_summary(&store.connection).unwrap(),
+            IncomingSummary::default()
+        );
+
+        let summary = store.record_incoming(&records, 1).unwrap();
+        assert_eq!(
+            summary,
+            IncomingSummary {
+                total: 5,
+                count: 1,
+                cursor: 1
+            }
+        );
     }
 }

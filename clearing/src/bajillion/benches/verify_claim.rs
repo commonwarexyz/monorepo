@@ -17,16 +17,14 @@ fn bench_verify_claim(c: &mut Criterion) {
                 1,
                 u32::try_from(profile.live_accounts).expect("output count fits"),
             ] {
-                for (label, action) in [
-                    ("amount", WithdrawalAction::Amount(NonZeroU64::MIN)),
-                    ("close", WithdrawalAction::Close),
-                ] {
-                    claims.push((
-                        label,
+                claims.push((
+                    total,
+                    withdrawal_claim_fixture(
+                        &fixture,
                         total,
-                        withdrawal_claim_fixture(&fixture, total, action),
-                    ));
-                }
+                        WithdrawalAction::Amount(NonZeroU64::MIN),
+                    ),
+                ));
             }
             let account = fixture.accounts[profile.live_accounts / 2].0.clone();
             let (state, _) = fixture
@@ -43,10 +41,10 @@ fn bench_verify_claim(c: &mut Criterion) {
             );
             (claims, state.root(), opening)
         });
-        for (action, total, fixture) in claims {
+        for (total, fixture) in claims {
             c.bench_function(
                 &format!(
-                    "{}::withdrawal/{} W={total} action={action}",
+                    "{}::withdrawal/{} W={total} action=amount",
                     module_path!(),
                     profile_key(profile)
                 ),

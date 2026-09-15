@@ -192,12 +192,10 @@ where
         return Some(Vec::new());
     }
 
+    let strategy = strategy.manual();
     const PARTITIONS_PER_WORKER: usize = 4;
     const MIN_UNITS_PER_PARTITION: usize = 8;
-    let target_partitions = strategy
-        .manual()
-        .parallelism()
-        .saturating_mul(PARTITIONS_PER_WORKER);
+    let target_partitions = strategy.parallelism().saturating_mul(PARTITIONS_PER_WORKER);
     let max_partitions = (units / MIN_UNITS_PER_PARTITION).max(1);
     let partition_count = target_partitions.min(max_partitions).min(units);
     let partition_len = units / partition_count;
