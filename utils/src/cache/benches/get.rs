@@ -6,26 +6,22 @@ use std::{hint::black_box, num::NonZeroUsize};
 /// Benchmarks the cache-hit read path: a full cache, all lookups present.
 fn bench_get(c: &mut Criterion) {
     for capacity in [1usize << 10, 1 << 14, 1 << 18] {
-        let capacity = NonZeroUsize::new(capacity).unwrap();
-        let mut cache = Cache::new(capacity);
-        for i in 0..capacity.get() as u64 {
+        let mut cache = Cache::new(NonZeroUsize::new(capacity).unwrap());
+        for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut rng = TestRng::new(capacity.get() as u64);
+        let mut rng = TestRng::new(capacity as u64);
         let keys: Vec<u64> = (0..1024)
-            .map(|_| rng.random_range(0..capacity.get() as u64))
+            .map(|_| rng.random_range(0..capacity as u64))
             .collect();
 
-        c.bench_function(
-            &format!("{}/capacity={}", module_path!(), capacity.get()),
-            |b| {
-                b.iter(|| {
-                    for k in &keys {
-                        black_box(cache.get(black_box(k)));
-                    }
-                });
-            },
-        );
+        c.bench_function(&format!("{}/capacity={capacity}", module_path!()), |b| {
+            b.iter(|| {
+                for k in &keys {
+                    black_box(cache.get(black_box(k)));
+                }
+            });
+        });
     }
 }
 

@@ -64,10 +64,11 @@ use core::{
 };
 use hashbrown::HashTable;
 
+/// Shared hashing state for resident and Ghost indexes.
 type Hasher = ahash::RandomState;
 
 /// Stable identifier for cache storage.
-pub type Slot = usize;
+type Slot = usize;
 
 /// A single cache slot.
 ///
@@ -187,7 +188,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// live, and an out-of-range slot does not exist. External indexes
     /// therefore need no maintenance beyond tolerating misses.
     #[inline]
-    pub fn get_at(&self, slot: Slot, key: &K) -> Option<&V> {
+    pub fn get_at(&self, slot: usize, key: &K) -> Option<&V> {
         let resident = self.slots.get(slot)?;
         if !resident.live || resident.key != *key {
             return None;
@@ -275,13 +276,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// The slot index identifies the entry until it is evicted or removed, so
     /// callers can record it in an external index and resolve later reads with
     /// [Self::get_at] instead of a hash lookup.
-    ///
-    /// # Panics
-    ///
-    /// If `make` panics while producing a value for a new slot, replacement metadata
-    /// may already have been updated. If the panic is caught, this cache must
-    /// not be used again.
-    pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (Slot, &mut V) {
+    pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (usize, &mut V) {
         let hash = self.hasher.hash_one(&key);
         let slot = match self.find_slot_hashed(&key, hash) {
             Some(slot) => {
@@ -315,43 +310,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 false
             }
         }
-    }
-
-    /// Conditionally removes a resident `key`.
-    ///
-    /// Returns `None` when `key` is not resident. The predicate is not called
-    /// and nonresident history is preserved. For a resident, the
-    /// predicate is called exactly once with its value. A rejected resident
-    /// records use and returns `Some(false)`, while an accepted resident is
-    /// removed without first recording use and returns `Some(true)`.
-    ///
-    /// The removed slot and its allocation are retained for reuse, so the
-    /// value is not returned.
-    ///
-    /// # Panics
-    ///
-    /// If `predicate` panics, this operation makes no structural or replacement
-    /// mutation before unwinding.
-    #[inline]
-    pub fn remove_if<F: FnOnce(&V) -> bool>(&mut self, key: &K, predicate: F) -> Option<bool> {
-        let hash = self.hasher.hash_one(key);
-        let Ok(entry) = self
-            .index
-            .find_entry(hash, |&slot| self.slots[slot].key == *key)
-        else {
-            return None;
-        };
-        let slot = *entry.get();
-        if !predicate(&self.slots[slot].value) {
-            self.slots[slot].state.record_hit_mut();
-            return Some(false);
-        }
-
-        entry.remove();
-        self.unlink_resident(slot);
-        self.slots[slot].live = false;
-        self.free.push(slot);
-        Some(true)
     }
 
     /// Retains only the entries for which `keep` returns `true`.
@@ -1282,67 +1240,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_if_outcomes_panic_and_reuse() {
-        let mut cache = Cache::<u64, u64>::new(NZUsize!(1));
-        let (slot, value) = cache.get_or_insert_mut(1, || 10);
-        assert_eq!(*value, 10);
-
-        let calls = Cell::new(0);
-        assert_eq!(
-            cache.remove_if(&2, |_| {
-                calls.set(calls.get() + 1);
-                true
-            }),
-            None
-        );
-        assert_eq!(calls.get(), 0);
-        assert_eq!(cache.bits(slot), 0);
-
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = cache.remove_if(&1, |value| {
-                calls.set(calls.get() + 1);
-                assert_eq!(*value, 10);
-                panic!("predicate panic");
-            });
-        }));
-        assert!(panic.is_err());
-        assert_eq!(calls.get(), 1);
-        assert_eq!(cache.peek(&1), Some(&10));
-        assert_eq!(cache.bits(slot), 0);
-        assert!(cache.free.is_empty());
-        cache.check_invariants();
-
-        assert_eq!(
-            cache.remove_if(&1, |value| {
-                calls.set(calls.get() + 1);
-                *value == 11
-            }),
-            Some(false)
-        );
-        assert_eq!(calls.get(), 2);
-        assert_eq!(cache.peek(&1), Some(&10));
-        assert_eq!(cache.bits(slot), REFERENCED);
-
-        cache.slots[slot].state.reset();
-        assert_eq!(
-            cache.remove_if(&1, |value| {
-                calls.set(calls.get() + 1);
-                *value == 10
-            }),
-            Some(true)
-        );
-        assert_eq!(calls.get(), 3);
-        assert!(!cache.contains(&1));
-        assert_eq!(cache.bits(slot), 0);
-        assert_eq!(cache.free, vec![slot]);
-
-        let (reused, value) = cache.get_or_insert_mut(2, || unreachable!());
-        assert_eq!(reused, slot);
-        assert_eq!(*value, 10);
-        cache.check_invariants();
-    }
-
-    #[test]
     fn test_retain_frees_slots_for_reuse() {
         let mut cache = Cache::new(NZUsize!(4));
         for key in 0..4u64 {
@@ -1411,6 +1308,69 @@ mod tests {
         assert_eq!(cache.slots.len(), 3);
         assert_eq!(cache.len(), 3);
         cache.check_invariants();
+    }
+
+    #[test]
+    fn test_prefill_and_detached_slots_preserve_reuse_order() {
+        for interrupted in [false, true] {
+            let mut cache = Cache::<u64, u64>::new(NZUsize!(6));
+            for key in 0..3 {
+                assert_eq!(cache.get_or_insert_mut(key, || key + 10).0, key as usize);
+            }
+            assert!(cache.remove(&1));
+            assert!(cache.remove(&2));
+
+            let mut next = 3;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cache.prefill(|| {
+                    assert!(!interrupted || next != 5, "prefill factory panic");
+                    let value = next + 10;
+                    next += 1;
+                    value
+                });
+            }));
+            assert_eq!(result.is_err(), interrupted);
+            assert_eq!(cache.get_at(0, &0), Some(&10));
+            cache.check_invariants();
+
+            // Successful prefill yields new slots in creation order. An interrupted
+            // prefill leaves completed slots on top of the existing free stack.
+            let expected: &[usize] = if interrupted {
+                &[4, 3, 2, 1]
+            } else {
+                &[3, 4, 5, 2, 1]
+            };
+            for &expected_slot in expected {
+                let (slot, value) =
+                    cache.get_or_insert_mut(expected_slot as u64, || unreachable!());
+                assert_eq!(slot, expected_slot);
+                assert_eq!(*value, expected_slot as u64 + 10);
+                cache.check_invariants();
+            }
+            if interrupted {
+                assert_eq!(cache.get_or_insert_mut(5, || 15).0, 5);
+            }
+
+            assert!(cache.remove(&1));
+            assert!(cache.remove(&2));
+            let mut detached = vec![1, 2];
+            cache.retain(|key, _| {
+                if *key == 0 || *key == 3 {
+                    detached.push(*key as usize);
+                    false
+                } else {
+                    true
+                }
+            });
+            cache.check_invariants();
+            for expected_slot in detached.into_iter().rev() {
+                let (slot, value) =
+                    cache.get_or_insert_mut(expected_slot as u64 + 20, || unreachable!());
+                assert_eq!(slot, expected_slot);
+                assert_eq!(*value, expected_slot as u64 + 10);
+                cache.check_invariants();
+            }
+        }
     }
 
     #[test]
@@ -2020,33 +1980,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_if_miss_preserves_ghost_history() {
-        let mut cache = Cache::new(NZUsize!(2));
-        for key in 1..=3u64 {
-            cache.put(key, key);
-        }
-        assert_eq!(cache.ghost_keys(), vec![1]);
-
-        assert_eq!(cache.remove_if(&1, |_| unreachable!()), None);
-        assert_eq!(cache.ghost_keys(), vec![1]);
-        cache.put(1, 10);
-        assert!(cache.main_keys().contains(&1));
-        assert!(!cache.ghost_keys().contains(&1));
-        cache.check_invariants();
-
-        let mut cache = Cache::new(NZUsize!(2));
-        for key in 1..=3u64 {
-            cache.put(key, key);
-        }
-        assert!(!cache.remove(&1));
-        assert!(cache.ghost_keys().is_empty());
-        cache.put(1, 10);
-        assert!(cache.small_keys().contains(&1));
-        assert!(!cache.main_keys().contains(&1));
-        cache.check_invariants();
-    }
-
-    #[test]
     fn test_correlation_window_ignores_only_young_hits() {
         // Key 4 is at the Small head, inside the two-entry correlation window.
         // Its hit must not set the bit, so a scan ages and evicts it to Ghost.
@@ -2183,7 +2116,6 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.main_keys(), vec![1]);
         assert!(!cache.contains(&2));
-        assert_eq!(cache.free.len(), 1);
         cache.check_invariants();
     }
 
@@ -2639,7 +2571,6 @@ mod tests {
     struct CountingKey {
         id: usize,
         hashes: Rc<Cell<usize>>,
-        comparisons: Rc<Cell<usize>>,
     }
 
     impl CountingKey {
@@ -2647,27 +2578,16 @@ mod tests {
             Self {
                 id,
                 hashes: Rc::new(Cell::new(0)),
-                comparisons: Rc::new(Cell::new(0)),
             }
         }
 
         fn hashes(&self) -> usize {
             self.hashes.get()
         }
-
-        fn comparisons(&self) -> usize {
-            self.comparisons.get()
-        }
-
-        fn reset_counts(&self) {
-            self.hashes.set(0);
-            self.comparisons.set(0);
-        }
     }
 
     impl PartialEq for CountingKey {
         fn eq(&self, other: &Self) -> bool {
-            self.comparisons.set(self.comparisons.get() + 1);
             self.id == other.id
         }
     }
@@ -2713,28 +2633,6 @@ mod tests {
         cache.clear();
         assert_eq!(two.hashes(), 1);
         assert_eq!(three.hashes(), 1);
-    }
-
-    #[test]
-    fn remove_if_reuses_the_resident_probe() {
-        let key = CountingKey::new(7);
-        let mut cache = Cache::<CountingKey, usize>::new(NonZeroUsize::new(1).unwrap());
-        cache.put(key.clone(), 70);
-
-        key.reset_counts();
-        assert_eq!(cache.remove_if(&key, |value| *value == 71), Some(false));
-        assert_eq!(key.hashes(), 1);
-        assert_eq!(key.comparisons(), 1);
-
-        key.reset_counts();
-        assert_eq!(cache.remove_if(&key, |value| *value == 70), Some(true));
-        assert_eq!(key.hashes(), 1);
-        assert_eq!(key.comparisons(), 1);
-
-        key.reset_counts();
-        assert_eq!(cache.remove_if(&key, |_| unreachable!()), None);
-        assert_eq!(key.hashes(), 1);
-        assert_eq!(key.comparisons(), 0);
     }
 
     #[derive(Clone, Default, Eq, PartialEq)]
@@ -2826,33 +2724,6 @@ mod tests {
     #[test]
     fn collisions_rehash_and_stable_values() {
         exercise_rehash::<true>();
-    }
-
-    #[test]
-    fn remove_if_validates_full_keys_under_collisions() {
-        let first = ProbeKey::<true>("first".into());
-        let second = ProbeKey::<true>("second".into());
-        let absent = ProbeKey::<true>("absent".into());
-        let mut cache = Cache::<_, usize>::new(NonZeroUsize::new(2).unwrap());
-        cache.put(first.clone(), 1);
-        cache.put(second.clone(), 2);
-
-        let calls = Cell::new(0);
-        assert_eq!(
-            cache.remove_if(&absent, |_| {
-                calls.set(calls.get() + 1);
-                true
-            }),
-            None
-        );
-        assert_eq!(calls.get(), 0);
-        assert_eq!(cache.peek(&first), Some(&1));
-        assert_eq!(cache.peek(&second), Some(&2));
-
-        assert_eq!(cache.remove_if(&second, |value| *value == 2), Some(true));
-        assert_eq!(cache.peek(&first), Some(&1));
-        assert!(!cache.contains(&second));
-        cache.check_invariants();
     }
 
     #[derive(Default)]

@@ -8,33 +8,29 @@ const INSERTS_PER_ITERATION: usize = 1024;
 /// each insertion into the full cache invokes the eviction path.
 fn bench_insert(c: &mut Criterion) {
     for capacity in [1usize << 10, 1 << 14, 1 << 18] {
-        let capacity = NonZeroUsize::new(capacity).unwrap();
-        let mut cache = Cache::new(capacity);
-        for i in 0..capacity.get() as u64 {
+        let mut cache = Cache::new(NonZeroUsize::new(capacity).unwrap());
+        for i in 0..capacity as u64 {
             cache.put(i, i);
         }
-        let mut next = capacity.get() as u64;
+        let mut next = capacity as u64;
 
-        c.bench_function(
-            &format!("{}/capacity={}", module_path!(), capacity.get()),
-            |b| {
-                b.iter_batched(
-                    || {
-                        let start = next;
-                        next = next
-                            .checked_add(INSERTS_PER_ITERATION as u64)
-                            .expect("benchmark keys must not overflow");
-                        start..next
-                    },
-                    |keys| {
-                        for key in keys {
-                            cache.put(black_box(key), black_box(key));
-                        }
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        c.bench_function(&format!("{}/capacity={capacity}", module_path!()), |b| {
+            b.iter_batched(
+                || {
+                    let start = next;
+                    next = next
+                        .checked_add(INSERTS_PER_ITERATION as u64)
+                        .expect("benchmark keys must not overflow");
+                    start..next
+                },
+                |keys| {
+                    for key in keys {
+                        cache.put(black_box(key), black_box(key));
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
     }
 }
 
