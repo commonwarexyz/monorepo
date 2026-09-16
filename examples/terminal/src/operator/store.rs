@@ -14,14 +14,16 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction},
-    commitment::Opening,
+    commitment::{Opening, Tree},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE},
     qmdb::StateRoot,
     transition::{EpochContext, Header, RootBundle},
-    vector::{OutEntry, OutTipLookup, OutVector},
+    vector::{OutEntry, OutVector},
 };
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, FixedSize, RangeCfg};
-use commonware_cryptography::{Sha256, sha256::Digest};
+#[cfg(not(test))]
+use commonware_cryptography::Sha256;
+use commonware_cryptography::sha256::Digest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{
     ffi::OsString,
@@ -34,6 +36,8 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+#[cfg(test)]
+use tests::CountingSha256 as Sha256;
 use thiserror::Error;
 
 const SCHEMA_VERSION: i64 = 19;
@@ -273,6 +277,7 @@ struct Plan {
     payer: StoredAccount,
     /// The payer's merged cumulative out vector after this batch.
     vector: OutVector<Key>,
+    tree: Tree<Digest>,
     credits: Vec<Credit>,
 }
 
@@ -1448,18 +1453,19 @@ impl Store {
             let mut accepted = Vec::with_capacity(plan.credits.len());
             for credit in &plan.credits {
                 upsert_account_state(transaction, epoch, &credit.receiver)?;
-                let lookup = plan
+                let position = plan
                     .vector
-                    .lookup::<Sha256, Digest>(&credit.receiver.key)
+                    .entries()
+                    .binary_search_by(|entry| {
+                        entry.recipient.as_ref().cmp(credit.receiver.key.as_ref())
+                    })
+                    .expect("every credited recipient is in the merged vector");
+                let entry = &plan.vector.entries()[position];
+                let (cumulative, count) = (entry.cumulative, entry.count);
+                let opening = plan
+                    .tree
+                    .opening(u32::try_from(position)?)
                     .context("open accepted entry")?;
-                let OutTipLookup::Present {
-                    cumulative,
-                    count,
-                    opening,
-                } = lookup
-                else {
-                    unreachable!("every credited recipient is in the merged vector");
-                };
                 advance_edge.execute(params![
                     epoch_sql,
                     plan.payer.key.as_ref(),
@@ -2406,10 +2412,10 @@ fn validate_new_batch(
         "payer vector capacity is exhausted"
     );
     let vector = OutVector::new(epoch, payer_key, merged).context("assemble merged out vector")?;
-    let send_root = vector
-        .root::<Sha256, Digest>()
+    let tree = vector
+        .commitment::<Sha256, Digest>()
         .context("commit merged out vector")?;
-    if send_root != body.send_root() {
+    if tree.root() != body.send_root() {
         return Ok(Admission::Stale(Endpoint {
             cumulative_debit: prior_debit,
             seq: prior_seq,
@@ -2441,6 +2447,7 @@ fn validate_new_batch(
         total,
         payer,
         vector,
+        tree,
         credits,
     })))
 }
@@ -3093,10 +3100,46 @@ mod tests {
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
         payment::VectorSendBody,
+        vector::OutTipLookup,
     };
-    use commonware_cryptography::{Hasher as _, Signer as _};
+    use commonware_cryptography::{Hasher, Sha256 as NativeSha256, Signer as _};
     use commonware_cryptography_curve25519::signing::SigningKey;
-    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::{
+        cell::Cell,
+        num::{NonZeroU64, NonZeroUsize},
+    };
+
+    thread_local! {
+        static PAYER_TREE_BUILDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Default)]
+    pub(super) struct CountingSha256(NativeSha256);
+
+    impl Hasher for CountingSha256 {
+        type Digest = Digest;
+
+        fn hash(parts: &[&[u8]]) -> Digest {
+            if parts.first() == Some(&b"_COMMONWARE_CLEARING_OUT_ENTRY_ROOT".as_slice()) {
+                PAYER_TREE_BUILDS.set(PAYER_TREE_BUILDS.get() + 1);
+            }
+            NativeSha256::hash(parts)
+        }
+
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Digest, Digest) {
+            (Self::hash(left), Self::hash(right))
+        }
+
+        fn update(&mut self, bytes: &[u8]) -> &mut Self {
+            self.0.update(bytes);
+            self
+        }
+
+        fn finalize(self) -> (Self, Digest) {
+            let (hasher, digest) = self.0.finalize();
+            (Self(hasher), digest)
+        }
+    }
 
     #[test]
     fn non_wal_sqlite_sources_are_rejected() {
@@ -3605,63 +3648,117 @@ mod tests {
     }
 
     #[test]
-    fn stored_rows_reassemble_the_served_receipts() {
+    fn batch_receipts_share_one_tree() {
         let mut fixture = PaymentFixture::new();
-        let third = SigningKey::from_seed(103).public_key();
-        let mut edges = vec![
-            OutEntry {
-                recipient: fixture.receiver.public_key(),
-                cumulative: 1,
-                count: 1,
-            },
-            OutEntry {
-                recipient: third,
-                cumulative: 2,
-                count: 1,
-            },
-        ];
-        edges.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
-        let mut entries = edges
-            .iter()
-            .map(|edge| Entry {
-                recipient: edge.recipient.clone(),
-                amount: edge.cumulative,
+        let mut edges = (102..=104)
+            .map(|seed| OutEntry {
+                recipient: SigningKey::from_seed(seed).public_key(),
+                cumulative: 0,
+                count: 0,
             })
             .collect::<Vec<_>>();
-        entries.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
-        let vector =
-            OutVector::new(fixture.context.epoch(), fixture.payer.public_key(), edges).unwrap();
-        let body = VectorSendBody::new(
-            &fixture.context,
-            fixture.payer.public_key(),
-            1,
-            3,
-            vector.root::<Sha256, Digest>().unwrap(),
-        );
-        let send = SendAuthorization::sign(body, &fixture.payer);
-        let batch = accepted(fixture.store.accept_send(
-            &fixture.context,
-            &fixture.protocol,
-            send,
-            &entries,
-        ));
-        assert_eq!(batch.acceptance.entries.len(), 2);
-        batch.acceptance.verify(&fixture.context).unwrap();
+        edges.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+        let mut debit = 0;
+        for (round, indices) in [vec![0, 2], vec![1], vec![0, 2]].into_iter().enumerate() {
+            let entries = indices
+                .into_iter()
+                .map(|index| {
+                    let edge = &mut edges[index];
+                    let amount = index as u64 + 1;
+                    edge.cumulative += amount;
+                    edge.count += 1;
+                    debit += amount;
+                    Entry {
+                        recipient: edge.recipient.clone(),
+                        amount,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let vector = OutVector::new(
+                fixture.context.epoch(),
+                fixture.payer.public_key(),
+                edges
+                    .iter()
+                    .filter(|edge| edge.count > 0)
+                    .cloned()
+                    .collect(),
+            )
+            .unwrap();
+            let sign = |root| {
+                SendAuthorization::sign(
+                    VectorSendBody::new(
+                        &fixture.context,
+                        fixture.payer.public_key(),
+                        round as u64 + 1,
+                        debit,
+                        root,
+                    ),
+                    &fixture.payer,
+                )
+            };
+            let send = sign(vector.root::<Sha256, Digest>().unwrap());
+            let stale = sign(
+                OutVector::empty(fixture.context.epoch(), fixture.payer.public_key())
+                    .root::<Sha256, Digest>()
+                    .unwrap(),
+            );
 
-        // Each served incoming row must reassemble the exact receipt the acceptance
-        // issued, because receivers persist and rely on the served evidence.
-        let expected = batch.acceptance.receipts().collect::<Vec<_>>();
-        for receipt in &expected {
-            let served = fixture
-                .store
-                .incoming_payments(&receipt.recipient, 0, 10)
-                .unwrap();
-            assert_eq!(served.len(), 1);
-            assert_eq!(&served[0].receipt, receipt);
-            served[0]
-                .receipt
-                .verify::<Sha256>(&fixture.context)
-                .unwrap();
+            let changes = fixture.store.total_changes();
+            PAYER_TREE_BUILDS.set(0);
+            assert!(matches!(
+                fixture
+                    .store
+                    .accept_send(&fixture.context, &fixture.protocol, stale, &entries)
+                    .unwrap(),
+                SendVerdict::Stale(_)
+            ));
+            assert_eq!(PAYER_TREE_BUILDS.get(), 1);
+            assert_eq!(fixture.store.total_changes(), changes);
+
+            PAYER_TREE_BUILDS.set(0);
+            let batch = accepted(fixture.store.accept_send(
+                &fixture.context,
+                &fixture.protocol,
+                send.clone(),
+                &entries,
+            ));
+            assert_eq!(PAYER_TREE_BUILDS.get(), 1);
+            assert_eq!(batch.acceptance.entries.len(), entries.len());
+            batch.acceptance.verify(&fixture.context).unwrap();
+            for entry in &batch.acceptance.entries {
+                let OutTipLookup::Present {
+                    cumulative,
+                    count,
+                    opening,
+                } = vector.lookup::<Sha256, Digest>(&entry.recipient).unwrap()
+                else {
+                    panic!("accepted recipient is missing from the signed vector");
+                };
+                assert_eq!((entry.cumulative, entry.count), (cumulative, count));
+                assert_eq!(entry.opening.encode(), opening.encode());
+            }
+
+            fixture = fixture.reopen();
+            let changes = fixture.store.total_changes();
+            PAYER_TREE_BUILDS.set(0);
+            let replay = accepted(fixture.store.accept_send(
+                &fixture.context,
+                &fixture.protocol,
+                send,
+                &entries,
+            ));
+            assert_eq!(PAYER_TREE_BUILDS.get(), 0);
+            assert_eq!(replay.acceptance, batch.acceptance);
+            assert_eq!(fixture.store.total_changes(), changes);
+
+            for receipt in batch.acceptance.receipts() {
+                let served = fixture
+                    .store
+                    .incoming_payments(&receipt.recipient, 0, 10)
+                    .unwrap();
+                assert_eq!(served.last().unwrap().receipt, receipt);
+                receipt.verify::<Sha256>(&fixture.context).unwrap();
+            }
         }
     }
 
