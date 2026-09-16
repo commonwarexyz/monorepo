@@ -177,7 +177,7 @@ fn state_config(context: &deterministic::Context) -> qmdb::Config<Sequential> {
         },
         grafted_metadata_partition: "settlement-grafts".into(),
         translator: EightCap,
-        init_cache_size: Some(NZUsize!(64)),
+        init_cache: Some(NZUsize!(64)),
         init_buffer: NZUsize!(4096),
         init_concurrency: (),
     }

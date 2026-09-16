@@ -234,7 +234,7 @@ pub(crate) fn state_config(context: &impl BufferPooler, prefix: &str) -> qmdb::C
         },
         grafted_metadata_partition: format!("{prefix}-grafted"),
         translator: EightCap,
-        init_cache_size: Some(NZUsize!(65536)),
+        init_cache: Some(NZUsize!(65536)),
         init_buffer: NZUsize!(65536),
         init_concurrency: (),
     }

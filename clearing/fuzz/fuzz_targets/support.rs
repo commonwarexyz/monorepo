@@ -39,7 +39,7 @@ pub fn config(context: &impl BufferPooler, prefix: &str) -> qmdb::Config<Sequent
         },
         grafted_metadata_partition: format!("{prefix}-grafted"),
         translator: EightCap,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(4096),
         init_concurrency: (),
     }
