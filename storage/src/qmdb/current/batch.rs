@@ -641,7 +641,7 @@ where
     }
 }
 
-// Ordered merkleize.
+// Ordered-specific methods.
 impl<F, K, V, H, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>
 where
     F: Graftable,
@@ -650,6 +650,23 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
+    /// Read the greatest live key at or below `key` and the least live key above it,
+    /// with their values. Reads pending mutations, live ancestors, and committed state.
+    /// Returns `None` on either side when no such key exists, without wrapping.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_neighbors<E, C, I>(
+        &self,
+        key: &K,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<(Option<(K, V::Value)>, Option<(K, V::Value)>), Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+    {
+        self.inner.get_neighbors(key, &db.any).await
+    }
+
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(

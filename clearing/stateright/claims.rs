@@ -1,15 +1,17 @@
 use stateright::{Checker, Model, Property};
 use std::collections::BTreeMap;
 
-// Bootstrap and each epoch's Commit occupy native locations but never enter the ledger.
+// Position zero is the bootstrap Commit. The middle close is empty.
 const OUTPUTS: [(u8, u16, usize); 6] = [
     (1, 2, 0),
     (2, 0, 1),
     (3, 3, 1),
-    (5, 5, 2),
-    (6, 0, 0),
-    (7, 7, 0),
+    (6, 5, 2),
+    (7, 0, 0),
+    (8, 7, 0),
 ];
+const FINALIZED_OPERATIONS: [u8; 4] = [1, 5, 6, 10];
+const COMMIT_POSITIONS: [u8; 3] = [4, 5, 9];
 const INITIAL_CUSTODY: u16 = 17;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -18,18 +20,20 @@ struct Claim {
     amount: u16,
     destination: usize,
     root_operations: u8,
-    containing_start: u8,
+    neighbors: [Option<(u8, u8)>; 2],
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ClaimState {
+    admitted: u8,
     finalized: u8,
     fault: bool,
+    // Consumed native locations include finalized Commit positions.
     intervals: BTreeMap<u8, u8>,
     reserve: u16,
     custody: u16,
     released_to: [u16; 3],
-    // Ghost issuance and payment identities check the production interval representation.
+    // Ghost issuance and payment identities check the production claimed-range representation.
     issued: u8,
     paid: u8,
     last: Option<u8>,
@@ -38,6 +42,7 @@ struct ClaimState {
 impl Default for ClaimState {
     fn default() -> Self {
         Self {
+            admitted: 0,
             finalized: 0,
             fault: false,
             intervals: BTreeMap::new(),
@@ -53,29 +58,42 @@ impl Default for ClaimState {
 
 impl ClaimState {
     const fn operations(&self) -> u8 {
-        1 + self.finalized * 4
+        FINALIZED_OPERATIONS[self.finalized as usize]
+    }
+
+    fn neighbors(&self, position: u8) -> [Option<(u8, u8)>; 2] {
+        let before = self
+            .intervals
+            .range(..=position)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        let after_start = before.map_or(position, |(start, _)| start);
+        let after = self
+            .intervals
+            .range((
+                std::ops::Bound::Excluded(after_start),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(&start, &end)| (start, end));
+        [before, after]
     }
 
     fn witness(&self, index: usize) -> Claim {
         let (position, amount, destination) = OUTPUTS[index];
-        let containing_start = self
-            .intervals
-            .range(..=position)
-            .next_back()
-            .filter(|(_, end)| position < **end)
-            .map_or(position, |(start, _)| *start);
         Claim {
             position,
             amount,
             destination,
             root_operations: self.operations(),
-            containing_start,
+            neighbors: self.neighbors(position),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaimAction {
+    Admit,
     Finalize,
     Fault,
     Claim(Claim),
@@ -85,6 +103,34 @@ enum ClaimAction {
 struct ClaimModel;
 
 impl ClaimModel {
+    fn insert_claimed(
+        state: &mut ClaimState,
+        position: u8,
+        neighbors: [Option<(u8, u8)>; 2],
+    ) -> bool {
+        if neighbors != state.neighbors(position)
+            || neighbors[0].is_some_and(|(start, end)| start <= position && position < end)
+        {
+            return false;
+        }
+        let mut start = position;
+        let mut end = position + 1;
+        if let Some((before_start, before_end)) = neighbors[0]
+            && before_end == position
+        {
+            assert_eq!(state.intervals.remove(&before_start), Some(before_end));
+            start = before_start;
+        }
+        if let Some((after_start, after_end)) = neighbors[1]
+            && after_start == end
+        {
+            assert_eq!(state.intervals.remove(&after_start), Some(after_end));
+            end = after_end;
+        }
+        assert!(state.intervals.insert(start, end).is_none());
+        true
+    }
+
     fn apply(state: &mut ClaimState, claim: Claim) -> bool {
         let Some(index) = OUTPUTS
             .iter()
@@ -95,10 +141,10 @@ impl ClaimModel {
         if claim.root_operations != state.operations() || state.issued & (1 << index) == 0 {
             return false;
         }
-        let Some(&end) = state.intervals.get(&claim.containing_start) else {
-            return false;
-        };
-        if claim.position < claim.containing_start || claim.position >= end {
+        if claim.neighbors != state.neighbors(claim.position)
+            || claim.neighbors[0]
+                .is_some_and(|(start, end)| start <= claim.position && claim.position < end)
+        {
             return false;
         }
         let Some(reserve) = state.reserve.checked_sub(claim.amount) else {
@@ -107,14 +153,8 @@ impl ClaimModel {
         let Some(custody) = state.custody.checked_sub(claim.amount) else {
             return false;
         };
-        state.intervals.remove(&claim.containing_start);
-        if claim.containing_start < claim.position {
-            state
-                .intervals
-                .insert(claim.containing_start, claim.position);
-        }
-        if claim.position + 1 < end {
-            state.intervals.insert(claim.position + 1, end);
+        if !Self::insert_claimed(state, claim.position, claim.neighbors) {
+            return false;
         }
         state.reserve = reserve;
         state.custody = custody;
@@ -125,13 +165,24 @@ impl ClaimModel {
     }
 
     fn finalize(state: &mut ClaimState) -> bool {
-        if state.fault || state.finalized == 2 {
+        if state.fault || state.finalized == state.admitted {
             return false;
         }
-        let start = state.operations();
-        assert!(state.intervals.insert(start, start + 3).is_none());
-        let offset = usize::from(state.finalized) * 3;
-        for (index, (_, amount, _)) in OUTPUTS.iter().enumerate().skip(offset).take(3) {
+        let batch = usize::from(state.finalized);
+        let commit = COMMIT_POSITIONS[batch];
+        assert!(Self::insert_claimed(state, commit, state.neighbors(commit)));
+        let issued = match batch {
+            0 => 0..3,
+            1 => 3..3,
+            2 => 3..6,
+            _ => unreachable!(),
+        };
+        for (index, (_, amount, _)) in OUTPUTS
+            .iter()
+            .enumerate()
+            .take(issued.end)
+            .skip(issued.start)
+        {
             state.reserve += amount;
             state.issued |= 1 << index;
         }
@@ -146,19 +197,29 @@ fn custody_is_conserved(_: &ClaimModel, state: &ClaimState) -> bool {
 
 fn ledger_is_exact(_: &ClaimModel, state: &ClaimState) -> bool {
     let mut actual = Vec::new();
+    let mut previous_end = None;
     for (&start, &end) in &state.intervals {
-        if start >= end {
+        if start >= end || previous_end.is_some_and(|previous| previous >= start) {
             return false;
         }
         actual.extend(start..end);
+        previous_end = Some(end);
     }
-    let expected = OUTPUTS
+    let mut expected = COMMIT_POSITIONS
         .iter()
-        .enumerate()
-        .filter(|(index, _)| state.issued & (1 << index) != 0 && state.paid & (1 << index) == 0)
-        .map(|(_, (position, _, _))| *position)
+        .take(usize::from(state.finalized))
+        .copied()
+        .chain(
+            OUTPUTS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| state.paid & (1 << index) != 0)
+                .map(|(_, (position, _, _))| *position),
+        )
         .collect::<Vec<_>>();
-    actual == expected && state.intervals.len() <= expected.len() && state.paid & !state.issued == 0
+    expected.sort_unstable();
+    let unclaimed = (state.issued & !state.paid).count_ones() as usize;
+    actual == expected && state.intervals.len() <= unclaimed + 1 && state.paid & !state.issued == 0
 }
 
 fn reserves_are_exact(_: &ClaimModel, state: &ClaimState) -> bool {
@@ -192,7 +253,10 @@ impl Model for ClaimModel {
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         if !state.fault {
             actions.push(ClaimAction::Fault);
-            if state.finalized < 2 {
+            if state.admitted < 3 {
+                actions.push(ClaimAction::Admit);
+            }
+            if state.finalized < state.admitted {
                 actions.push(ClaimAction::Finalize);
             }
         }
@@ -206,6 +270,12 @@ impl Model for ClaimModel {
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut next = last.clone();
         match action {
+            ClaimAction::Admit => {
+                if next.fault || next.admitted == 3 {
+                    return None;
+                }
+                next.admitted += 1;
+            }
             ClaimAction::Finalize => {
                 if !Self::finalize(&mut next) {
                     return None;
@@ -230,7 +300,7 @@ impl Model for ClaimModel {
         vec![
             Property::always("claim custody is conserved", custody_is_conserved),
             Property::always(
-                "interval union is issued minus paid native positions",
+                "claimed ranges equal finalized commits plus paid native positions",
                 ledger_is_exact,
             ),
             Property::always(
@@ -244,7 +314,10 @@ impl Model for ClaimModel {
             Property::sometimes(
                 "all withdrawal claims fully drain",
                 |_: &Self, s: &ClaimState| {
-                    s.finalized == 2 && s.paid == 63 && s.intervals.is_empty() && s.reserve == 0
+                    s.finalized == 3
+                        && s.paid == 63
+                        && s.intervals == BTreeMap::from([(1, 10)])
+                        && s.reserve == 0
                 },
             ),
             Property::sometimes(
@@ -252,10 +325,8 @@ impl Model for ClaimModel {
                 |_: &Self, s: &ClaimState| s.fault && s.finalized == 1 && s.paid == 7,
             ),
             Property::sometimes(
-                "zero value outputs remain after reserve drains",
-                |_: &Self, s: &ClaimState| {
-                    s.finalized == 2 && s.reserve == 0 && !s.intervals.is_empty()
-                },
+                "zero value outputs remain eligible after reserve drains",
+                |_: &Self, s: &ClaimState| s.finalized == 3 && s.reserve == 0 && s.paid != 63,
             ),
             Property::sometimes(
                 "positions may claim in reverse order",
@@ -276,6 +347,11 @@ fn assert_rejected_without_mutation(state: &ClaimState, claim: Claim) {
     assert_eq!(attempted, *state);
 }
 
+fn admit_and_finalize(state: &mut ClaimState) {
+    state.admitted += 1;
+    assert!(ClaimModel::finalize(state));
+}
+
 #[test]
 fn claim_checker_exhausts_every_claim_ordering() {
     let checker = ClaimModel.checker().threads(1).spawn_bfs().join();
@@ -286,7 +362,7 @@ fn claim_checker_exhausts_every_claim_ordering() {
 #[test]
 fn claims_reject_inexact_identity_and_replay_without_mutation() {
     let mut state = ClaimState::default();
-    ClaimModel::finalize(&mut state);
+    admit_and_finalize(&mut state);
     let canonical = state.witness(0);
     for claim in [
         Claim {
@@ -306,7 +382,7 @@ fn claims_reject_inexact_identity_and_replay_without_mutation() {
             ..canonical
         },
         Claim {
-            containing_start: 2,
+            neighbors: [None, None],
             ..canonical
         },
         state.witness(3),
@@ -321,7 +397,7 @@ fn claims_reject_inexact_identity_and_replay_without_mutation() {
 fn first_middle_last_and_zero_claims_split_exactly() {
     for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
         let mut state = ClaimState::default();
-        ClaimModel::finalize(&mut state);
+        admit_and_finalize(&mut state);
         for index in order {
             let claim = state.witness(index);
             let before = state.reserve;
@@ -331,17 +407,17 @@ fn first_middle_last_and_zero_claims_split_exactly() {
             }
             assert!(ledger_is_exact(&ClaimModel, &state));
         }
-        assert!(state.intervals.is_empty());
+        assert_eq!(state.intervals, BTreeMap::from([(1, 5)]));
         assert_eq!(state.reserve, 0);
     }
 }
 
 #[test]
-fn latest_root_refresh_and_stale_interval_hints_are_independent() {
+fn latest_root_refresh_and_stale_neighbor_hints_are_independent() {
     let mut state = ClaimState::default();
-    ClaimModel::finalize(&mut state);
+    admit_and_finalize(&mut state);
     let stale = state.witness(2);
-    ClaimModel::finalize(&mut state);
+    admit_and_finalize(&mut state);
     assert_rejected_without_mutation(&state, stale);
     let refreshed = state.witness(2);
     let middle = state.witness(1);
@@ -357,8 +433,9 @@ fn latest_root_refresh_and_stale_interval_hints_are_independent() {
 #[test]
 fn withdrawal_claims_update_custody_independently_and_atomically() {
     let mut state = ClaimState::default();
-    ClaimModel::finalize(&mut state);
-    ClaimModel::finalize(&mut state);
+    admit_and_finalize(&mut state);
+    admit_and_finalize(&mut state);
+    admit_and_finalize(&mut state);
     for (index, reserve, custody) in [(0, 15, 15), (3, 10, 10)] {
         let claim = state.witness(index);
         assert!(ClaimModel::apply(&mut state, claim));
@@ -374,7 +451,7 @@ fn withdrawal_claims_update_custody_independently_and_atomically() {
 #[test]
 fn claim_always_properties_have_direct_negative_controls() {
     let mut state = ClaimState::default();
-    ClaimModel::finalize(&mut state);
+    admit_and_finalize(&mut state);
     let mut wrong = state.clone();
     wrong.custody -= 1;
     assert!(!custody_is_conserved(&ClaimModel, &wrong));
@@ -382,9 +459,34 @@ fn claim_always_properties_have_direct_negative_controls() {
     wrong.reserve -= 1;
     assert!(!reserves_are_exact(&ClaimModel, &wrong));
     let mut wrong = state.clone();
-    wrong.intervals.insert(4, 5);
+    wrong.intervals.insert(6, 7);
     assert!(!ledger_is_exact(&ClaimModel, &wrong));
+    let mut adjacent = state.clone();
+    for index in 0..3 {
+        let claim = adjacent.witness(index);
+        assert!(ClaimModel::apply(&mut adjacent, claim));
+    }
+    adjacent.intervals = BTreeMap::from([(1, 3), (3, 5)]);
+    assert!(!ledger_is_exact(&ClaimModel, &adjacent));
     let mut wrong = state;
     wrong.released_to[0] = 1;
     assert!(!releases_are_exact(&ClaimModel, &wrong));
+}
+
+#[test]
+fn pending_and_empty_closes_only_claim_their_finalized_commit() {
+    let mut state = ClaimState {
+        admitted: 3,
+        ..ClaimState::default()
+    };
+    assert!(state.intervals.is_empty());
+    assert_eq!(state.issued, 0);
+
+    assert!(ClaimModel::finalize(&mut state));
+    assert_eq!(state.intervals, BTreeMap::from([(4, 5)]));
+    assert_eq!(state.issued, 0b000111);
+    assert!(ClaimModel::finalize(&mut state));
+    assert_eq!(state.intervals, BTreeMap::from([(4, 6)]));
+    assert_eq!(state.issued, 0b000111);
+    assert!(ledger_is_exact(&ClaimModel, &state));
 }

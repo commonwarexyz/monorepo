@@ -24,9 +24,9 @@ use super::{
     registry::RegistryView,
     setup::{Genesis, ValidatorEntry},
     state::{
-        FaultRecord, HardFaultReasonResponse, Record, admitted_key, anchor_key, deposit_key,
-        execute, fault_key, hard_fault_key, native_balance, payout_head_key, refund_key,
-        registration_key, registry, registry_entry, registry_entry_key, status_key, unclaimed_key,
+        FaultRecord, HardFaultReasonResponse, Record, admitted_key, anchor_key, claimed_key,
+        deposit_key, execute, fault_key, hard_fault_key, native_balance, payout_head_key,
+        refund_key, registration_key, registry, registry_entry, registry_entry_key, status_key,
         withdrawal_key,
     },
     tx::{
@@ -35,7 +35,10 @@ use super::{
         NativeTransferRequest, QueueWithdrawalRequest, RegisterDeploymentRequest,
         RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
     },
-    types::{Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, StateKey, now},
+    types::{
+        Block, Database, MAX_BLOCK_BYTES, MAX_BLOCK_TXS, MAX_TX_BYTES, StateKey, StateTranslator,
+        now,
+    },
     validator::{
         MAX_MESSAGE_SIZE, NAMESPACE as CHAIN_NAMESPACE, NoopResolver, SHARING_MODE,
         Scheme as Threshold, sync_config,
@@ -147,7 +150,7 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 fn config(
     prefix: &str,
     pooler: &impl BufferPooler,
-) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+) -> VariableConfig<StateTranslator, ((), ()), Sequential> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     VariableConfig {
         merkle_config: MerkleConfig {
@@ -169,7 +172,7 @@ fn config(
             replay_buffer: IO_BUFFER_SIZE,
         },
         grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
-        translator: TwoCap,
+        translator: StateTranslator,
         init_cache_size: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
@@ -301,6 +304,24 @@ fn two_deployments() -> Vec<Deployment> {
 /// Reads one record from applied state.
 async fn read(db: &Database<deterministic::Context>, key: &StateKey) -> Option<Record> {
     db.read().await.get(key).await.expect("state read succeeds")
+}
+
+async fn claimed(
+    db: &Database<deterministic::Context>,
+    index: u64,
+) -> Option<commonware_clearing::bajillion::settlement::ClaimedRange> {
+    let request = req(Lookup::Claimed { index });
+    let guard = db.read().await;
+    let proof = match guard.get(&request.key()).await.unwrap() {
+        Some(record) => query::ReadProof::Present {
+            record,
+            proof: guard.key_value_proof(request.key()).await.unwrap(),
+        },
+        None => query::ReadProof::Absent {
+            proof: guard.exclusion_proof(&request.key()).await.unwrap(),
+        },
+    };
+    proof.claimed(&request)
 }
 
 /// One certified-read request against the compiled default deployment.
@@ -1370,7 +1391,6 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
     });
     let claim = WithdrawalClaimRequest {
         deployment: deployment(),
-        start: result.0.context.predecessor_logs().payouts.operations,
         claim: result.1,
     };
     (
@@ -1410,9 +1430,9 @@ fn cross_deployment_claim_deposit_is_atomic_and_replay_safe() {
             claim: claim.clone(),
             deposit,
         };
-        let claims_key = unclaimed_key(&deployment(), claim.start);
+        let claims_key = claimed_key(&deployment(), claim.claim.position());
         let original_claims = read(&db, &claims_key).await;
-        assert!(matches!(original_claims, Some(Record::Unclaimed(_))));
+        assert_eq!(original_claims, None);
         let mut wrong_signature = compound.clone();
         wrong_signature.deposit.event.amount = 8;
         let mut insufficient = compound.clone();
@@ -1472,7 +1492,7 @@ fn cross_deployment_claim_deposit_is_atomic_and_replay_safe() {
         assert_eq!(read(&db, &claims_key).await, original_claims);
         assert_eq!(status(&db).await.claimable, 7);
         seal_native(&db, 15, &native, &[compound.clone(), compound.clone()]).await;
-        assert_eq!(read(&db, &claims_key).await, None);
+        assert!(claimed(&db, claim.claim.position()).await.is_some());
         assert_eq!(
             read(&db, &deposit_key(&target, &event.id)).await,
             Some(Record::Deposit(event))
@@ -1592,8 +1612,8 @@ fn unavailable_destination_preserves_the_source_claim() {
                 &[compound, SettlementTx::ClaimWithdrawal(misdirected)],
             )
             .await;
-            assert!(matches!(read(&db, &unclaimed_key(&deployment(), claim.start)).await, Some(Record::Unclaimed(_))));
-            assert_eq!(read(&db, &unclaimed_key(&target, claim.start)).await, None);
+            assert_eq!(claimed(&db, claim.claim.position()).await, None);
+            assert_eq!(read(&db, &claimed_key(&target, claim.claim.position())).await, None);
             assert_eq!(read(&db, &deposit_key(&target, &event.id)).await, None);
             assert_eq!(status(&db).await.claimable, 7);
             assert_eq!(
@@ -2676,9 +2696,8 @@ fn rejections_are_effect_free() {
         register.predecessor_liability = 399;
         let register = SettlementTx::RegisterEpoch(register);
 
-        let (_, _, mut claim) = withdrawal_fixture();
+        let (_, _, claim) = withdrawal_fixture();
         let position = claim.claim.position();
-        claim.start = u64::MAX;
         let claim = SettlementTx::ClaimWithdrawal(claim);
         let batch_id = BatchId::new(Sha256::hash(&[b"chain-unknown-batch"]));
 
@@ -2696,10 +2715,7 @@ fn rejections_are_effect_free() {
         // execution tracing, never in state.
         assert_eq!(read(&db, &registration_key(&deployment())).await, None);
         assert_eq!(read(&db, &anchor_key(&deployment(), 0)).await, None);
-        assert_eq!(
-            read(&db, &unclaimed_key(&deployment(), position)).await,
-            None
-        );
+        assert_eq!(read(&db, &claimed_key(&deployment(), position)).await, None);
         assert_eq!(read(&db, &fault_key(&deployment())).await, None);
         assert_eq!(status(&db).await.custody, 400);
     });
@@ -3682,7 +3698,7 @@ fn light_client_verifies_certified_reads() {
 #[test]
 fn recency_passes_exactly_at_the_threshold() {
     let verified = light::Verified {
-        unclaimed: None,
+        claimed: None,
         payout_tip: None,
         height: 3,
         timestamp: 1_000,

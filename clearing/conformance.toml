@@ -50,6 +50,10 @@ n_cases = 1024
 hash = "c7ef3c15f7c3397eeb1b8f438d237b1b488a2c50a46e8a7b453c21cfa0540631"
 n_cases = 1024
 
+["conformance::CodecConformance<ClaimedRange>"]
+hash = "bf76fcad4bac6125de03674156bcb4b9a6a6c636d3a318bb4d6d11ce542e2bab"
+n_cases = 256
+
 ["conformance::CodecConformance<CloseContext<VerifyingKey,Sha256Digest>>"]
 hash = "47167e3699fe547f7bd5c7f7abc2b7cc54937842ffed9d88f4ffdc16a7833243"
 n_cases = 65536
@@ -181,10 +185,6 @@ n_cases = 65536
 ["conformance::CodecConformance<StateValueOpening<Sha256Digest>>"]
 hash = "d096c9389e321c5f3909a456d92fe63883b43a1d057a87a568202e1d4b1881a2"
 n_cases = 1024
-
-["conformance::CodecConformance<UnclaimedInterval>"]
-hash = "4a5aa50783c71ecf5fcf3649e7c63929cef688ddf721074e1636c7e7f565c6a5"
-n_cases = 256
 
 ["conformance::CodecConformance<VectorAck<VerifyingKey,Sha256Digest>>"]
 hash = "af4b8079abc613a42263c1c0d7f77d4e860bd90fe795075389376def39bb10f6"

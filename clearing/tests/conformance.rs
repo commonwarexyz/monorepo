@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     qmdb::{StateHead, StateLookup, StateOpening, StateRoot, StateTarget, StateValueOpening},
     replica::ReplicaHead,
-    settlement::{SettlementChain, UnclaimedInterval},
+    settlement::{ClaimedRange, SettlementChain},
     state::{AccountChange, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
         ActivityRange, BatchId, CloseContext, CloseLimits, EpochContext, Header, ProposalId,
@@ -77,7 +77,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<WithdrawalOutput> => 1024,
     CodecConformance<WithdrawalClaim<Sha256Digest>> => 256,
     CodecConformance<SettlementChain<Sha256, VerifyingKey>> => 256,
-    CodecConformance<UnclaimedInterval> => 256,
+    CodecConformance<ClaimedRange> => 256,
     CodecConformance<StateHead<Sha256Digest>>,
     CodecConformance<StateTarget<Sha256Digest>>,
     CodecConformance<ReplicaHead<Sha256Digest>>,

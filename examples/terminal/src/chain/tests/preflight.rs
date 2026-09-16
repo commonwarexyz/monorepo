@@ -397,10 +397,7 @@ fn preflight_compound_claim_uses_the_source_identity_without_consuming_it() {
             .await,
             Preflight::Unavailable
         );
-        assert!(matches!(
-            read(&db, &unclaimed_key(&deployment(), claim.start)).await,
-            Some(Record::Unclaimed(_))
-        ));
+        assert!(claimed(&db, claim.claim.position()).await.is_none());
         assert_eq!(status(&db).await.claimable, 7);
         apply(
             &db,
@@ -516,10 +513,8 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
             assert_eq!(status(&db).await.claimable, if blocked { 7 } else { 0 });
             assert_eq!(status(&db).await.custody, if blocked { 393 } else { 400 });
             assert_eq!(
-                read(&db, &unclaimed_key(&deployment(), claim.start))
-                    .await
-                    .is_some(),
-                blocked
+                claimed(&db, claim.claim.position()).await.is_some(),
+                !blocked
             );
             apply(&db, &finalized, &native, height + 1, &[direct, compound]).await;
             assert_eq!(
@@ -729,7 +724,6 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
         let initial = native_balance(&db, &native, &account).await.unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: payout_position,
             claim: WithdrawalClaim::new(output, opening),
         });
         apply(&db, &finalized, &native, 18, &[claim.clone(), claim]).await;
@@ -941,7 +935,6 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
             let initial = native_balance(&db, &native, &account).await.unwrap();
             let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: deployment(),
-                start: payout_position,
                 claim: WithdrawalClaim::new(output, opening),
             });
             apply(&db, &finalized, &native, 16, &[claim.clone(), claim]).await;
@@ -949,16 +942,10 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 native_balance(&db, &native, &account).await.unwrap(),
                 initial
             );
-            assert_eq!(
-                read(
-                    &db,
-                    &unclaimed_key(
-                        &deployment(),
-                        carried.context.predecessor_logs().payouts.operations
-                    )
-                )
-                .await,
-                None
+            assert!(
+                claimed(&db, carried.context.predecessor_logs().payouts.operations)
+                    .await
+                    .is_some()
             );
             assert_eq!(status(&db).await.claimable, 0);
             assert_supply(&db, &native, &[]).await;

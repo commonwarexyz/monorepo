@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
     posted,
     qmdb::{StateHead, StateLookup, StateOpening, StateRoot, StateTarget, StateValueOpening},
     replica::ReplicaHead,
-    settlement::UnclaimedInterval,
+    settlement::ClaimedRange,
     state::{AccountChange, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
         ActivityRange, BatchId, CloseContext, CloseLimits, Header, ProposalId, RootBundle,
@@ -248,7 +248,7 @@ fuzz_target!(|data: &[u8]| {
         44 => roundtrip::<Heads<Digest>>(bytes, &()),
         45 => roundtrip::<Floors>(bytes, &()),
         46 => roundtrip::<LogOpening<Digest>>(bytes, &()),
-        47 => roundtrip::<UnclaimedInterval>(bytes, &()),
+        47 => roundtrip::<ClaimedRange>(bytes, &()),
         48 => roundtrip::<ProposalId<Digest>>(bytes, &()),
         49 => roundtrip::<StateHead<Digest>>(bytes, &()),
         50 => roundtrip::<ReplicaHead<Digest>>(bytes, &()),

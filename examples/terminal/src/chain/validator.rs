@@ -15,7 +15,7 @@ use crate::{
         da, ingress, query,
         registry::{self, RegistryView},
         setup::{NetworkConfig, NodeConfig, read_genesis},
-        types::{Block, Database},
+        types::{Block, Database, StateTranslator},
     },
     protocol::committee,
 };
@@ -148,7 +148,7 @@ pub(crate) const INGRESS_LEASE: u64 = 10;
 pub(crate) fn db_config(
     prefix: &str,
     page_cache: CacheRef,
-) -> commonware_storage::qmdb::current::VariableConfig<TwoCap, ((), ()), Sequential> {
+) -> commonware_storage::qmdb::current::VariableConfig<StateTranslator, ((), ()), Sequential> {
     commonware_storage::qmdb::current::VariableConfig {
         merkle_config: MerkleConfig {
             journal_partition: format!("{prefix}-chain-mmr-journal"),
@@ -169,7 +169,7 @@ pub(crate) fn db_config(
             replay_buffer: IO_BUFFER_SIZE,
         },
         grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
-        translator: TwoCap,
+        translator: StateTranslator,
         init_cache_size: Some(NZUsize!(1_024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),

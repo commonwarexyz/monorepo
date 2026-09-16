@@ -31,9 +31,9 @@ use crate::{
         da::Mailbox as SealerMailbox,
         ingress::Mailbox as IngressMailbox,
         state::{
-            Record, admitted_key, anchor_key, deposit_key, fault_key, hard_fault_key,
+            Record, admitted_key, anchor_key, claimed_key, deposit_key, fault_key, hard_fault_key,
             native_balance_key, native_transfer_key, payout_head_key, refund_key, registration_key,
-            registry_entry_key, registry_key, status_key, unclaimed_key, withdrawal_key,
+            registry_entry_key, registry_key, status_key, withdrawal_key,
         },
         types::{Block, Database, Exclusion, Proof, StateKey},
     },
@@ -114,8 +114,8 @@ pub(crate) enum Lookup {
     Registration,
     /// The latest accepted withdrawal receipt, retained after carriage.
     Withdrawal { account: Key },
-    /// The interval containing this native payout index, if still unclaimed.
-    Unclaimed { index: u64 },
+    /// The claimed range containing this native payout index, if already consumed.
+    Claimed { index: u64 },
     /// One hard-fault release by account.
     HardFault { account: Key },
     /// One deposit refund by account and settlement phase.
@@ -129,7 +129,7 @@ impl Lookup {
     pub(crate) const fn requires_payout_tip(&self) -> bool {
         matches!(
             self,
-            Self::Unclaimed { .. } | Self::Anchor { .. } | Self::Admitted { .. } | Self::Fault
+            Self::Claimed { .. } | Self::Anchor { .. } | Self::Admitted { .. } | Self::Fault
         )
     }
 }
@@ -167,7 +167,7 @@ impl ReadRequest {
             Lookup::Deposit { id } => deposit_key(deployment, id),
             Lookup::Registration => registration_key(deployment),
             Lookup::Withdrawal { account } => withdrawal_key(deployment, account),
-            Lookup::Unclaimed { index } => unclaimed_key(deployment, *index),
+            Lookup::Claimed { index } => claimed_key(deployment, *index),
             Lookup::HardFault { account } => hard_fault_key(deployment, account),
             Lookup::Refund { account, terminal } => refund_key(deployment, account, *terminal),
             Lookup::Fault => fault_key(deployment),
@@ -221,7 +221,7 @@ impl Write for Lookup {
                 6_u8.write(buf);
                 account.write(buf);
             }
-            Self::Unclaimed { index } => {
+            Self::Claimed { index } => {
                 7_u8.write(buf);
                 index.write(buf);
             }
@@ -279,7 +279,7 @@ impl EncodeSize for Lookup {
             Self::Status | Self::Registration | Self::Fault | Self::PayoutHead => 0,
             Self::Anchor { epoch } | Self::Admitted { epoch } => epoch.encode_size(),
             Self::Deposit { id } => id.encode_size(),
-            Self::Unclaimed { index } => index.encode_size(),
+            Self::Claimed { index } => index.encode_size(),
             Self::Withdrawal { account } | Self::HardFault { account } => account.encode_size(),
             Self::Refund { account, terminal } => account.encode_size() + terminal.encode_size(),
         }
@@ -306,7 +306,7 @@ impl Read for Lookup {
             6 => Ok(Self::Withdrawal {
                 account: Key::read(buf)?,
             }),
-            7 => Ok(Self::Unclaimed {
+            7 => Ok(Self::Claimed {
                 index: u64::read(buf)?,
             }),
             9 => Ok(Self::HardFault {
@@ -348,33 +348,50 @@ pub(crate) enum ReadProof {
 }
 
 impl ReadProof {
-    /// Interprets a verified ordered proof at a payout index as interval coverage.
-    pub(crate) fn unclaimed(
+    /// Interprets a verified ordered proof at a payout index as claimed coverage.
+    pub(crate) fn claimed(
         &self,
         request: &ReadRequest,
-    ) -> Option<commonware_clearing::bajillion::settlement::UnclaimedInterval> {
-        let Lookup::Unclaimed { index } = request.lookup else {
+    ) -> Option<commonware_clearing::bajillion::settlement::ClaimedRange> {
+        let Lookup::Claimed { index } = request.lookup else {
             return None;
         };
         let (start, end) = match self {
             Self::Present {
-                record: Record::Unclaimed(end),
+                record: Record::Claimed(end),
                 ..
             } => (index, *end),
             Self::Absent {
                 proof: Exclusion::KeyValue(_, update),
             } => {
-                let start = crate::chain::state::unclaimed_start(&request.deployment, &update.key)?;
-                let Record::Unclaimed(end) = update.value else {
-                    return None;
-                };
-                (start, end)
+                return claimed_predecessor(&request.deployment, index, &update.key, &update.value);
             }
             _ => return None,
         };
-        (start <= index && index < end)
-            .then_some(commonware_clearing::bajillion::settlement::UnclaimedInterval { start, end })
+        claimed_range(index, start, end)
     }
+}
+
+fn claimed_predecessor(
+    deployment: &Digest,
+    index: u64,
+    key: &StateKey,
+    record: &Record,
+) -> Option<commonware_clearing::bajillion::settlement::ClaimedRange> {
+    let start = crate::chain::state::claimed_start(deployment, key)?;
+    let Record::Claimed(end) = record else {
+        return None;
+    };
+    claimed_range(index, start, *end)
+}
+
+fn claimed_range(
+    index: u64,
+    start: u64,
+    end: u64,
+) -> Option<commonware_clearing::bajillion::settlement::ClaimedRange> {
+    let claimed = commonware_clearing::bajillion::settlement::ClaimedRange { start, end };
+    (claimed.is_valid() && start <= index && index < end).then_some(claimed)
 }
 
 impl Write for ReadProof {
@@ -1089,6 +1106,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
+    use commonware_storage::merkle::{Family as _, mmr};
 
     #[test]
     fn native_read_keys_bind_chain_and_transfer_owner() {
@@ -1136,6 +1154,41 @@ mod tests {
         assert_ne!(
             request(chain_id, accounts[0].key.clone()).key(),
             request(Sha256::hash(&[b"other chain"]), accounts[0].key.clone()).key()
+        );
+    }
+
+    #[test]
+    fn claimed_coverage_rejects_foreign_namespaces_and_out_of_domain_bounds() {
+        let deployment = Sha256::hash(&[b"claimed deployment"]);
+        let other = Sha256::hash(&[b"other claimed deployment"]);
+        let maximum = *mmr::Family::MAX_LEAVES;
+
+        assert_eq!(
+            claimed_predecessor(
+                &deployment,
+                maximum - 1,
+                &claimed_key(&deployment, 1),
+                &Record::Claimed(maximum),
+            ),
+            Some(commonware_clearing::bajillion::settlement::ClaimedRange {
+                start: 1,
+                end: maximum,
+            })
+        );
+        assert_eq!(
+            claimed_predecessor(&deployment, 1, &claimed_key(&other, 1), &Record::Claimed(2),),
+            None
+        );
+        assert_eq!(claimed_range(0, 0, 1), None);
+        assert_eq!(claimed_range(1, 1, 1), None);
+        assert_eq!(claimed_range(maximum, 1, maximum), None);
+        assert_eq!(claimed_range(1, 1, maximum + 1), None);
+        assert_eq!(claimed_range(u64::MAX, 1, u64::MAX), None);
+
+        let maximum_request = ReadRequest::new(deployment, Lookup::Claimed { index: u64::MAX });
+        assert_eq!(
+            ReadRequest::decode(maximum_request.encode()).unwrap(),
+            maximum_request
         );
     }
 

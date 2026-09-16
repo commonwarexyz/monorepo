@@ -229,6 +229,8 @@ fn first_credit(invalidated: bool) {
             ]);
             seal_native(&db, height, &native, &transactions).await;
             assert_eq!(read(&db, &queue_key).await, None);
+            let commit = result.roots.withdrawal_outputs.operations - 1;
+            assert!(claimed(&db, commit).await.is_none());
             if invalidated {
                 seal_native(
                     &db,
@@ -258,17 +260,7 @@ fn first_credit(invalidated: bool) {
                 assert_eq!(status(&db).await.state_root, genesis.root());
                 assert_eq!(status(&db).await.custody, 400);
                 assert_eq!(status(&db).await.claimable, 0);
-                assert_eq!(
-                    read(
-                        &db,
-                        &unclaimed_key(
-                            &deployment(),
-                            result.context.predecessor_logs().payouts.operations
-                        )
-                    )
-                    .await,
-                    None
-                );
+                assert!(claimed(&db, commit).await.is_none());
                 assert_eq!(
                     read(&db, &hard_fault_key(&deployment(), &recipient.public_key())).await,
                     None
@@ -291,6 +283,7 @@ fn first_credit(invalidated: bool) {
             }
             seal_native(&db, height + 12, &native, &[]).await;
             assert!(!status(&db).await.hard_faulted);
+            assert!(claimed(&db, commit).await.is_some());
             assert_eq!(status(&db).await.last_finalized, Some(epoch));
             assert_eq!(status(&db).await.custody, 400);
             assert_eq!(status(&db).await.claimable, 0);
@@ -352,7 +345,6 @@ fn first_credit(invalidated: bool) {
             .unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: payout_position,
             claim: WithdrawalClaim::new(output, payout_opening),
         });
         seal_native(
@@ -369,11 +361,7 @@ fn first_credit(invalidated: bool) {
         assert_eq!(read(&db, &native_key).await, None);
         seal_native(&db, height + 12, &native, &[]).await;
         assert_eq!(status(&db).await.claimable, total);
-        let claims_key = unclaimed_key(
-            &deployment(),
-            result.context.predecessor_logs().payouts.operations,
-        );
-        let finalized_claims = read(&db, &claims_key).await;
+        let finalized_claims = claimed(&db, payout_position).await;
         height += 13;
         let mut transactions = queues(result.roots.successor, opening, height);
         transactions.push(register(
@@ -386,7 +374,7 @@ fn first_credit(invalidated: bool) {
         assert_eq!(read(&db, &queue_key).await, None);
         seal_native(&db, height + 11, &native, &[]).await;
         assert!(status(&db).await.hard_faulted);
-        assert_eq!(read(&db, &claims_key).await, finalized_claims);
+        assert_eq!(claimed(&db, payout_position).await, finalized_claims);
         assert_eq!(status(&db).await.claimable, total);
         seal_native(&db, height + 12, &native, &[claim.clone(), claim.clone()]).await;
         assert_eq!(
@@ -398,13 +386,13 @@ fn first_credit(invalidated: bool) {
         assert_eq!(status(&db).await.custody, 400 - total);
         assert_eq!(status(&db).await.claimable, 0);
         assert_supply(&db, &native, &[recipient.public_key()]).await;
-        let consumed = read(&db, &claims_key).await;
+        let consumed = claimed(&db, payout_position).await;
         assert_ne!(consumed, finalized_claims);
         assert!(db.finalize().await.durable().await);
         drop(db);
         let db = open(context.child("reopened"), "virtual-credit").await;
         seal_native(&db, height + 13, &native, &[claim]).await;
-        assert_eq!(read(&db, &claims_key).await, consumed);
+        assert_eq!(claimed(&db, payout_position).await, consumed);
         assert_eq!(
             native_balance(&db, &native, &recipient.public_key())
                 .await

@@ -25,7 +25,8 @@
 //! Mutations are submit-then-prove-by-effect: a flow submits a
 //! [`SettlementTx`] through [`Chain::deliver`] and completes only on a
 //! certified read of the effect: deposit custody, registration or admission,
-//! payout inclusion plus interval coverage, or fault recovery. The advisory [`Submission`] answer is used only
+//! payout inclusion plus claimed-range coverage, or fault recovery. The advisory
+//! [`Submission`] answer is used only
 //! to reject oversized submissions and pace a full queue. An effect-free
 //! rejection is indistinguishable from not-yet-included: flows
 //! retry until the effect appears or a bounded budget ends, and only a
@@ -580,21 +581,21 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// The finalized payout head and interval coverage at one certified chain snapshot.
+    /// The finalized payout head and claimed coverage at one certified chain snapshot.
     fn payout_status<E: Env>(
         &mut self,
         ctx: &E,
         index: u64,
     ) -> impl Future<Output = Result<PayoutStatus>> + Send {
         async move {
-            let request = self.request(Lookup::Unclaimed { index });
+            let request = self.request(Lookup::Claimed { index });
             let verified = self.recent(ctx, &request).await?;
             Ok(PayoutStatus {
                 head: verified
                     .payout_tip
                     .context("payout lookup omitted its certified head")?
                     .payouts,
-                interval: verified.unclaimed,
+                claimed: verified.claimed,
             })
         }
     }
@@ -704,11 +705,11 @@ pub(crate) trait Chain: Send + 'static {
     }
 }
 
-/// A coherent certificate-backed payout state. A verified Append inclusion at `head`
-/// proves consumption when `interval` is absent.
+/// A coherent certificate-backed payout state. Claimed coverage proves consumption;
+/// its absence requires a separate Append opening against this exact `head` before submission.
 pub(crate) struct PayoutStatus {
     pub(crate) head: commonware_clearing::bajillion::logs::LogHead<Digest>,
-    pub(crate) interval: Option<commonware_clearing::bajillion::settlement::UnclaimedInterval>,
+    pub(crate) claimed: Option<commonware_clearing::bajillion::settlement::ClaimedRange>,
 }
 
 /// The remote settlement-chain backend: an RPC client of the validators'

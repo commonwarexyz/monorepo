@@ -30,6 +30,9 @@ cargo run --release -p commonware-terminal --bin terminal-chain -- setup --opera
 mprocs --config ./data/mprocs-wallets.yaml
 ```
 
+This alpha demo does not migrate existing data across protocol state or wire
+format changes. Create a fresh network when upgrading those formats.
+
 To resume an existing network, run only the `mprocs` command. The four validators
 and one operator start automatically. Wallets wait for you:
 
@@ -173,13 +176,15 @@ survives rollback of the protocol databases and is never part of their certified
 roots or imported from another validator.
 
 Each payout has a sparse native log position; commit markers are never payouts.
-The chain retains the current finalized activity and payout heads and ordered unclaimed ranges
-whose values are only their end positions. A claim splits its range and transfers
-its amount atomically. A zero-valued output still consumes its position.
+The chain retains the current finalized activity and payout heads and ordered claimed ranges
+whose values are only their end positions. Finalization inserts each trailing commit marker as
+claimed, and a successful payout inserts its position while merging adjacent ranges. A
+zero-valued output still consumes its position.
 
-Wallets authenticate the current payout head and range coverage under the same
-certified block, then refresh the output proof through the operator or configured
-holders. Proposers refresh proofs again when finalization advances before execution.
+Wallets authenticate the current payout head and claimed-range result under the same
+certified block. Range absence is not issuance: the wallet also verifies the exact payout
+opening against that head through the operator or configured holders. Proposers verify the
+opening against the latest finalized head again when finalization advances before execution.
 The exact active authorization remains independent of the cached payout claim.
 The claim retains its native position across proof replacement and restart. After a deployment fault, finalized payouts remain claimable without a
 new vote, alongside deposit refunds and recovery from the frozen balance root.
@@ -189,7 +194,8 @@ Run a validator with `--retain-native-history` to keep older native operations f
 proof serving through its ordinary query endpoint. Longer retention is a local
 choice; an offline replica does not delay other validators' pruning. Keep wallet
 databases and a replica with the required history available for old claims.
-The outstanding-range ledger shrinks as payouts are consumed. Each finalization
+Adjacent claimed positions coalesce, so fully settled history and intervening commit markers
+collapse into one range; fragmented claims still require proportional range state. Each finalization
 retires the previous finalized admission and anchor. The chain keeps the latest
 finalized descriptor and the live pending suffix; the fixed admission and challenge
 windows bound that suffix. Proof servers walk retained native rows and payment

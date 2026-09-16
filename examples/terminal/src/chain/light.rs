@@ -60,8 +60,8 @@ pub(crate) struct Verified {
     pub(crate) timestamp: u64,
     /// The verified value, or `None` for a verified absence.
     pub(crate) record: Option<Record>,
-    /// Authenticated coverage of a queried native payout index by an unclaimed interval.
-    pub(crate) unclaimed: Option<commonware_clearing::bajillion::settlement::UnclaimedInterval>,
+    /// Authenticated coverage of a queried native payout index by a claimed range.
+    pub(crate) claimed: Option<commonware_clearing::bajillion::settlement::ClaimedRange>,
     pub(crate) payout_tip: Option<crate::protocol::PayoutTip>,
 }
 
@@ -131,7 +131,7 @@ where
     Ok(Verified {
         height: block.height.get(),
         timestamp: block.timestamp,
-        unclaimed: response.proof.unclaimed(request),
+        claimed: response.proof.claimed(request),
         payout_tip,
         record,
     })

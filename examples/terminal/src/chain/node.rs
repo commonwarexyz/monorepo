@@ -201,10 +201,7 @@ where
             .get(&request.key())
             .await
             .context("read applied settlement state")?;
-        let unclaimed = if matches!(
-            request.lookup,
-            crate::chain::query::Lookup::Unclaimed { .. }
-        ) {
+        let claimed = if matches!(request.lookup, crate::chain::query::Lookup::Claimed { .. }) {
             let proof = match &record {
                 Some(record) => crate::chain::query::ReadProof::Present {
                     record: record.clone(),
@@ -214,7 +211,7 @@ where
                     proof: guard.exclusion_proof(&request.key()).await?,
                 },
             };
-            proof.unclaimed(request)
+            proof.claimed(request)
         } else {
             None
         };
@@ -233,7 +230,7 @@ where
             height: tip.height,
             timestamp: tip.timestamp,
             record,
-            unclaimed,
+            claimed,
             payout_tip,
         }))
     }

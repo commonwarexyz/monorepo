@@ -172,7 +172,6 @@ struct PublishedPacket {
 #[derive(Clone)]
 struct CachedClaim {
     head: LogHead<Digest>,
-    start: Option<u64>,
     claim: WithdrawalClaim<Digest>,
 }
 
@@ -553,9 +552,10 @@ impl Native {
         &self,
         context: &deterministic::Context,
         head: LogHead<Digest>,
-    ) -> Result<BTreeMap<OutputId, WithdrawalOutput>> {
+    ) -> Result<(BTreeMap<OutputId, WithdrawalOutput>, Vec<OutputId>)> {
         let chain = self.client(context);
         let mut outputs = BTreeMap::new();
+        let mut commits = Vec::new();
         let mut cursor = 0;
         while cursor < head.operations {
             let (start, operations) = chain.payout_operations(context, head, cursor).await?;
@@ -582,7 +582,11 @@ impl Native {
                             "payout operation page repeated a position"
                         );
                     }
-                    PayoutOperation::Commit(None, _) => {}
+                    PayoutOperation::Commit(None, _) => {
+                        if position != 0 {
+                            commits.push(position);
+                        }
+                    }
                     PayoutOperation::Commit(Some(_), _) => {
                         bail!("payout operation page contains application commit metadata")
                     }
@@ -590,7 +594,7 @@ impl Native {
             }
             cursor = end;
         }
-        Ok(outputs)
+        Ok((outputs, commits))
     }
 
     async fn execute(
@@ -867,7 +871,6 @@ impl Native {
                     output,
                     CachedClaim {
                         head: status.head,
-                        start: status.interval.map(|interval| interval.start),
                         claim,
                     },
                 );
@@ -878,12 +881,10 @@ impl Native {
                     return Ok(Outcome::Rejected);
                 };
                 let before = self.client(context).payout_status(context, output).await?;
-                if before.head != cached.head
-                    || before.interval.map(|interval| interval.start) != cached.start
-                {
+                if before.head != cached.head {
                     return Ok(Outcome::Rejected);
                 }
-                if before.interval.is_none() {
+                if before.claimed.is_some() {
                     return Ok(Outcome::Unchanged);
                 }
                 let expected = cached.claim.output().clone();
@@ -891,7 +892,6 @@ impl Native {
                     .submit(SettlementTx::ClaimWithdrawal(
                         crate::chain::tx::WithdrawalClaimRequest {
                             deployment: deployment(),
-                            start: cached.start.expect("unclaimed output has a range start"),
                             claim: cached.claim,
                         },
                     ))
@@ -902,7 +902,7 @@ impl Native {
                     current.output() == &expected,
                     "current payout head changed an existing output"
                 );
-                if after.interval.is_none() {
+                if after.claimed.is_some() {
                     Outcome::Accepted
                 } else {
                     Outcome::Rejected
@@ -1025,9 +1025,27 @@ impl Native {
         }
         let mut outputs = [[None; model::ACCOUNTS]; model::EPOCHS];
         let mut released = [[None; model::ACCOUNTS]; model::EPOCHS];
-        let mut unclaimed = BTreeMap::new();
+        let mut claimed = BTreeMap::new();
         let mut claim_head = [None; model::ACCOUNTS];
-        let finalized_outputs = self.payout_outputs(context, payout_tip.payouts).await?;
+        let (finalized_outputs, finalized_commits) =
+            self.payout_outputs(context, payout_tip.payouts).await?;
+        for position in finalized_commits {
+            let payout = chain.payout_status(context, position).await?;
+            ensure!(
+                payout.head == payout_tip.payouts,
+                "commit status differs from the current finalized head"
+            );
+            let range = payout
+                .claimed
+                .context("a finalized payout commit is not structurally claimed")?;
+            ensure!(
+                range.start <= position && position < range.end,
+                "claimed range does not contain its finalized commit"
+            );
+            if let Some(prior) = claimed.insert(range.start, range.end) {
+                ensure!(prior == range.end, "claimed range views disagree");
+            }
+        }
         for close in &self.closes {
             let epoch: usize = close.context.payment().epoch().try_into()?;
             let finalized = status
@@ -1074,18 +1092,20 @@ impl Native {
                         claim.output() == &output,
                         "payout page and point opening disagree"
                     );
-                    match payout.interval {
-                        Some(interval) => {
-                            claim_head[account].get_or_insert(position);
+                    match payout.claimed {
+                        Some(range) => {
+                            released[epoch][account] = Some(output.amount());
                             ensure!(
-                                interval.start <= position && position < interval.end,
-                                "payout status interval does not contain its output"
+                                range.start <= position && position < range.end,
+                                "claimed range does not contain its payout output"
                             );
-                            if let Some(prior) = unclaimed.insert(interval.start, interval.end) {
-                                ensure!(prior == interval.end, "payout interval views disagree");
+                            if let Some(prior) = claimed.insert(range.start, range.end) {
+                                ensure!(prior == range.end, "claimed range views disagree");
                             }
                         }
-                        None => released[epoch][account] = Some(output.amount()),
+                        None => {
+                            claim_head[account].get_or_insert(position);
+                        }
                     }
                 }
             }
@@ -1158,7 +1178,7 @@ impl Native {
                 .map_or(0, |epoch| u8::try_from(epoch + 1).unwrap()),
             finalized_balances,
             payout_head: payout_tip.payouts.operations,
-            unclaimed,
+            claimed,
             outputs,
             released,
             claim_head,

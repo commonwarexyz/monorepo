@@ -14,8 +14,8 @@ use commonware_clearing::bajillion::logs::PayoutOperation;
 use std::net::SocketAddr;
 
 impl Agent {
-    /// Retains an authenticated payout identity and retries refreshable proof bytes until the
-    /// append-only certified payout log proves that globally positioned output spent.
+    /// Retains an authenticated payout identity and retries refreshable proof bytes until a
+    /// certified claimed range proves that the globally positioned output is spent.
     pub(crate) async fn claim_withdrawal<E: Env>(
         &mut self,
         ctx: &E,
@@ -42,9 +42,6 @@ impl Agent {
         let mut last_submission = None;
 
         for _ in 0..EFFECT_ATTEMPTS {
-            // The cached candidate was authenticated at a finalized payout head. Payout positions
-            // are append-only, so a newer certified count beyond this index proves that the same
-            // identity was issued even when its current interval is absent.
             let status = chain
                 .payout_status(ctx, index)
                 .await
@@ -53,7 +50,11 @@ impl Agent {
                 index < status.head.operations,
                 "current payout head predates the cached candidate"
             );
-            let Some(interval) = status.interval else {
+            if let Some(claimed) = status.claimed {
+                ensure!(
+                    claimed.start <= index && index < claimed.end,
+                    "certified claimed range does not contain the payout index"
+                );
                 self.store
                     .complete_withdrawal_claim(index)
                     .context("record delivered payout candidate")?;
@@ -62,7 +63,7 @@ impl Agent {
                     destination: output.destination().clone(),
                     amount: output.amount(),
                 });
-            };
+            }
             let claim = match &candidate {
                 cached if cached.head == status.head => cached.claim.clone(),
                 _ => match operator_rpc::payout_proof(
@@ -84,10 +85,6 @@ impl Agent {
                         .context("refresh payout proof from configured custodians")?,
                 },
             };
-            ensure!(
-                interval.start <= index && index < interval.end,
-                "certified interval does not contain the payout index"
-            );
             if candidate.head != status.head {
                 candidate = PendingWithdrawalClaim {
                     head: status.head,
@@ -101,7 +98,6 @@ impl Agent {
 
             let tx = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: self.deployment,
-                start: interval.start,
                 claim,
             });
             if let Err(error) = chain.deliver(ctx, &tx).await {
@@ -111,7 +107,7 @@ impl Agent {
         }
 
         let error = anyhow::anyhow!(
-            "the withdrawal remains unclaimed; payout identity and current proof are retained"
+            "the withdrawal remains unpaid; payout identity and current proof are retained"
         );
         match last_submission {
             Some(source) => Err(error.context(source)),
@@ -121,8 +117,9 @@ impl Agent {
 
     /// Discovers one unspent wallet-owned output in the finalized native payout log.
     ///
-    /// The destination match is advisory discovery. The point opening and coherent current
-    /// unclaimed interval authenticate the candidate before it becomes durable.
+    /// The destination match is advisory discovery. A point opening against the coherent current
+    /// head authenticates the candidate before it becomes durable; claimed-range absence alone
+    /// never establishes issuance.
     async fn withdrawal_source<E: Env>(
         &mut self,
         ctx: &E,
@@ -160,22 +157,19 @@ impl Agent {
                 if position >= status.head.operations {
                     continue;
                 }
-                if let Some(interval) = status.interval {
-                    if !(interval.start <= position && position < interval.end) {
-                        continue;
-                    }
-                    let Ok(claim) = chain.payout_proof(ctx, status.head, position).await else {
-                        continue;
-                    };
-                    let Ok(claim) = verify_payout_proof(&status.head, position, output, claim)
-                    else {
-                        continue;
-                    };
-                    return Ok(PendingWithdrawalClaim {
-                        head: status.head,
-                        claim,
-                    });
+                if status.claimed.is_some() {
+                    continue;
                 }
+                let Ok(claim) = chain.payout_proof(ctx, status.head, position).await else {
+                    continue;
+                };
+                let Ok(claim) = verify_payout_proof(&status.head, position, output, claim) else {
+                    continue;
+                };
+                return Ok(PendingWithdrawalClaim {
+                    head: status.head,
+                    claim,
+                });
             }
             cursor = start
                 .checked_add(

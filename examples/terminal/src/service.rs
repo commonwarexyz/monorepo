@@ -1629,12 +1629,11 @@ mod tests {
                                 .payout_status(&context, claim.position())
                                 .await
                                 .unwrap();
-                            assert!(before.interval.is_some());
+                            assert!(before.claimed.is_none());
                             assert!(claim.verify::<Sha256>(&before.head).is_ok());
                             let claim_tx = SettlementTx::ClaimWithdrawal(
                                 crate::chain::tx::WithdrawalClaimRequest {
                                     deployment: deployment(),
-                                    start: before.interval.unwrap().start,
                                     claim: claim.clone(),
                                 },
                             );
@@ -1644,8 +1643,8 @@ mod tests {
                                     .payout_status(&context, claim.position())
                                     .await
                                     .unwrap()
-                                    .interval
-                                    .is_none()
+                                    .claimed
+                                    .is_some()
                             );
                             control.submit(claim_tx).await;
                             assert!(
@@ -1653,8 +1652,8 @@ mod tests {
                                     .payout_status(&context, claim.position())
                                     .await
                                     .unwrap()
-                                    .interval
-                                    .is_none()
+                                    .claimed
+                                    .is_some()
                             );
                             assert_eq!(status(&control).await.claimable, 0);
                             assert!(!status(&control).await.hard_faulted);
@@ -2059,7 +2058,7 @@ mod tests {
                 _ => bail!("unexpected historical follower read"),
             };
             Ok(Verified {
-                unclaimed: None,
+                claimed: None,
                 payout_tip: request.lookup.requires_payout_tip().then(|| {
                     crate::protocol::PayoutTip {
                         payouts: commonware_clearing::bajillion::logs::Heads::empty::<

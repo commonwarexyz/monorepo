@@ -61,8 +61,8 @@ use commonware_clearing::bajillion::{
     commitment::VectorRoot,
     qmdb::StateRoot,
     settlement::{
-        Bounds, ClaimError, DepositRefund, HardFaultReason, HardFaultRelease, HardFaultSettlement,
-        Registered, SettlementChain, SettlementError, UnclaimedInterval,
+        Bounds, ClaimError, ClaimedRange, DepositRefund, HardFaultReason, HardFaultRelease,
+        HardFaultSettlement, Registered, SettlementChain, SettlementError,
     },
     transition::{BatchId, RootBundle, WithdrawalOutput},
 };
@@ -95,7 +95,7 @@ enum Domain {
     Deposit = 4,
     Withdrawal = 5,
     Registration = 6,
-    Unclaimed = 7,
+    Claimed = 7,
     HardFault = 9,
     Refund = 10,
     Fault = 11,
@@ -155,19 +155,19 @@ pub(crate) fn registration_key(deployment: &Digest) -> StateKey {
     derive(deployment, Domain::Registration, &[])
 }
 
-/// Ordered key of an unclaimed range's inclusive start.
-pub(crate) fn unclaimed_key(deployment: &Digest, start: u64) -> StateKey {
+/// Ordered key of a claimed range's inclusive start.
+pub(crate) fn claimed_key(deployment: &Digest, start: u64) -> StateKey {
     let mut bytes = [0; KEY_BYTES];
-    bytes.copy_from_slice(derive(deployment, Domain::Unclaimed, &[]).as_ref());
+    bytes.copy_from_slice(derive(deployment, Domain::Claimed, &[]).as_ref());
     bytes[32..40].copy_from_slice(&start.to_be_bytes());
     StateKey::new(bytes)
 }
 
 /// Decodes a range start only inside this deployment's ordered key namespace.
-pub(crate) fn unclaimed_start(deployment: &Digest, key: &StateKey) -> Option<u64> {
-    let prefix = unclaimed_key(deployment, 0);
+pub(crate) fn claimed_start(deployment: &Digest, key: &StateKey) -> Option<u64> {
+    let prefix = claimed_key(deployment, 0);
     let bytes = key.as_ref();
-    (bytes[..32] == prefix.as_ref()[..32] && bytes[40] == Domain::Unclaimed as u8)
+    (bytes[..32] == prefix.as_ref()[..32] && bytes[40] == Domain::Claimed as u8)
         .then(|| u64::from_be_bytes(bytes[32..40].try_into().expect("fixed key width")))
 }
 
@@ -992,7 +992,7 @@ pub(crate) enum Record {
     Deposit(DepositEvent),
     Withdrawal(SignedWithdrawal<Key, Digest>),
     Registration(RegistrationRecord),
-    Unclaimed(u64),
+    Claimed(u64),
     HardFault(HardFaultReleaseRecord),
     Refund(ClaimPendingDepositResponse),
     Fault(FaultRecord),
@@ -1050,7 +1050,7 @@ impl Write for Record {
                 6_u8.write(buf);
                 record.write(buf);
             }
-            Self::Unclaimed(record) => {
+            Self::Claimed(record) => {
                 7_u8.write(buf);
                 record.write(buf);
             }
@@ -1089,7 +1089,7 @@ impl EncodeSize for Record {
             Self::Deposit(record) => record.encode_size(),
             Self::Withdrawal(record) => record.encode_size(),
             Self::Registration(record) => record.encode_size(),
-            Self::Unclaimed(record) => record.encode_size(),
+            Self::Claimed(record) => record.encode_size(),
             Self::HardFault(record) => record.encode_size(),
             Self::Refund(record) => record.encode_size(),
             Self::Fault(record) => record.encode_size(),
@@ -1124,7 +1124,7 @@ impl Read for Record {
                 &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
             )?)),
             6 => Ok(Self::Registration(RegistrationRecord::read(buf)?)),
-            7 => Ok(Self::Unclaimed(u64::read(buf)?)),
+            7 => Ok(Self::Claimed(u64::read(buf)?)),
             9 => Ok(Self::HardFault(HardFaultReleaseRecord::read(buf)?)),
             10 => Ok(Self::Refund(ClaimPendingDepositResponse::read(buf)?)),
             11 => Ok(Self::Fault(FaultRecord::read(buf)?)),
@@ -1245,15 +1245,12 @@ impl Step {
 /// One deadline observation that changed machine state.
 enum Fired {
     /// The admitted close finalized.
-    Finalized {
-        epoch: u64,
-        claims: Option<UnclaimedInterval>,
-    },
+    Finalized { epoch: u64, commit: u64 },
     /// The deployment hard-faulted.
     Faulted { reason: HardFaultReasonResponse },
 }
 
-/// Invalid paths and stale range hints are refreshable against current finality.
+/// Payout paths can be refreshed against current finality.
 const fn claim_rejection(error: &ClaimError) -> TxOutcome {
     match error {
         ClaimError::Unavailable | ClaimError::Proof(_) => TxOutcome::Unavailable,
@@ -1285,12 +1282,8 @@ const fn chain_rejection(error: &SettlementError) -> Reject {
     }
 }
 
-/// Pending writes for one block, deduplicated by key. Iteration order (and
-/// therefore the operation order in the batch) is the canonical key order.
-type Writes = BTreeMap<StateKey, Option<Record>>;
-
-/// Canonical source beneath the transaction's pending writes.
-enum Source<'a, E>
+/// A speculative batch or one pinned applied database snapshot.
+enum View<'a, E>
 where
     E: StorageContext + Spawner,
 {
@@ -1298,27 +1291,48 @@ where
     Applied(&'a Qmdb<E>),
 }
 
-/// Pending writes over a parent batch or one pinned applied database snapshot.
-struct View<'a, E>
-where
-    E: StorageContext + Spawner,
-{
-    writes: &'a Writes,
-    source: Source<'a, E>,
-}
-
 impl<E> View<'_, E>
 where
     E: StorageContext + Spawner,
 {
     async fn get(&self, key: &StateKey) -> Result<Option<Record>, QmdbError<mmr::Family>> {
-        if let Some(record) = self.writes.get(key) {
-            return Ok(record.clone());
+        match self {
+            Self::Batch(batch) => batch.get(key).await,
+            Self::Applied(db) => db.get(key).await,
         }
-        match self.source {
-            Source::Batch(batch) => batch.get(key).await,
-            Source::Applied(db) => db.get(key).await,
-        }
+    }
+
+    async fn claimed_neighbors(
+        &self,
+        deployment: &Digest,
+        index: u64,
+    ) -> Result<[Option<ClaimedRange>; 2], QmdbError<mmr::Family>> {
+        let key = claimed_key(deployment, index);
+        let (before, after) = match self {
+            Self::Batch(batch) => batch.get_neighbors(&key).await?,
+            Self::Applied(db) => {
+                let Some((_, span)) = db.get_span(&key).await? else {
+                    return Ok([None, None]);
+                };
+                let after = if span.next_key > key {
+                    db.get(&span.next_key)
+                        .await?
+                        .map(|value| (span.next_key, value))
+                } else {
+                    None
+                };
+                let before = (span.key <= key).then_some((span.key, span.value));
+                (before, after)
+            }
+        };
+        Ok([before, after].map(|entry| {
+            let (key, record) = entry?;
+            let start = claimed_start(deployment, &key)?;
+            let Record::Claimed(end) = record else {
+                unreachable!("claimed keys hold range ends");
+            };
+            Some(ClaimedRange { start, end })
+        }))
     }
 
     async fn balance(&self, chain: &Digest, account: &Key) -> Result<u64, QmdbError<mmr::Family>> {
@@ -1458,13 +1472,13 @@ impl Machine {
         let mut fired = Vec::new();
         let faulted_before = self.chain.hard_fault().is_some();
 
-        // Finalize the admitted pipeline front once its inclusive challenge
-        // window has passed. Issued output positions become unclaimed in this batch.
+        // Finalize the admitted pipeline front once its inclusive challenge window has passed.
+        // Its trailing commit location joins the consumed ranges in the same ledger batch.
         match self.chain.finalize(height) {
-            Ok((finalized, claims)) => {
+            Ok((finalized, commit)) => {
                 fired.push(Fired::Finalized {
                     epoch: finalized.epoch,
-                    claims,
+                    commit,
                 });
             }
 
@@ -1895,51 +1909,14 @@ impl Machine {
     where
         E: StorageContext + Spawner,
     {
-        // Earlier claims in this block may split the caller's containing range.
-        // The batch overlay owns those new intervals; committed hints are re-read below.
-        let index = request.claim.position();
-        let updated = view
-            .writes
-            .range(unclaimed_key(config.digest(), 0)..=unclaimed_key(config.digest(), index))
-            .rev()
-            .find_map(|(key, record)| match record {
-                Some(Record::Unclaimed(end)) if index < *end => Some((
-                    key.clone(),
-                    UnclaimedInterval {
-                        start: unclaimed_start(config.digest(), key).expect("range namespace"),
-                        end: *end,
-                    },
-                )),
-                _ => None,
-            });
-        let (key, interval) = if let Some(updated) = updated {
-            updated
-        } else {
-            let key = unclaimed_key(config.digest(), request.start);
-            let end = match view.get(&key).await? {
-                Some(Record::Unclaimed(end)) => end,
-                None => return Ok(Step::outcome(TxOutcome::Unavailable)),
-                Some(_) => unreachable!("unclaimed keys hold interval ends"),
-            };
-            (
-                key,
-                UnclaimedInterval {
-                    start: request.start,
-                    end,
-                },
-            )
-        };
-        let effect = match self.chain.claim_withdrawal(&interval, &request.claim) {
+        let neighbors = view
+            .claimed_neighbors(config.digest(), request.claim.position())
+            .await?;
+        let effect = match self.chain.claim_withdrawal(&neighbors, &request.claim) {
             Ok(effect) => effect,
             Err(error) => return Ok(Step::outcome(claim_rejection(&error))),
         };
-        let mut writes = vec![(key, None)];
-        for fragment in effect.fragments.into_iter().flatten() {
-            writes.push((
-                unclaimed_key(config.digest(), fragment.start),
-                Some(Record::Unclaimed(fragment.end)),
-            ));
-        }
+        let writes = claimed_writes(config.digest(), effect.claimed, neighbors[1]);
         let mut step = Step::applied(writes);
         step.withdrawal = Some(WithdrawalResponse {
             destination: effect.output.destination().clone(),
@@ -1961,6 +1938,25 @@ impl Machine {
             hard_faulted: self.chain.hard_fault().is_some(),
         }
     }
+}
+
+/// A left merge keeps its existing key; a right merge retires the successor key.
+fn claimed_writes(
+    deployment: &Digest,
+    range: ClaimedRange,
+    next: Option<ClaimedRange>,
+) -> Vec<(StateKey, Option<Record>)> {
+    let mut writes = Vec::with_capacity(2);
+    if let Some(next) = next
+        && next.start < range.end
+    {
+        writes.push((claimed_key(deployment, next.start), None));
+    }
+    writes.push((
+        claimed_key(deployment, range.start),
+        Some(Record::Claimed(range.end)),
+    ));
+    writes
 }
 
 /// Builds checked native account updates without committing any clearing or replay effect.
@@ -2352,11 +2348,7 @@ where
     };
     let mut entries = vec![None; deployments.len()];
     let mut machines = (0..deployments.len()).map(|_| None).collect();
-    let writes = Writes::new();
-    let view = View {
-        writes: &writes,
-        source: Source::Applied(&guard),
-    };
+    let view = View::Applied(&guard);
     let step = apply_native(
         native,
         &chain_id,
@@ -2437,7 +2429,7 @@ where
 /// its state machine's stack footprint.
 #[boxed]
 pub(crate) async fn execute<E>(
-    batch: Batch<E>,
+    mut batch: Batch<E>,
     height: Height,
     timestamp: u64,
     timing: &Timing,
@@ -2448,7 +2440,6 @@ where
     E: StorageContext + Spawner,
 {
     let chain_id = native.chain_id();
-    let mut writes = Writes::new();
     let (mut deployments, mut entries) = match batch.get(&registry_key(&chain_id)).await? {
         Some(Record::Registry(ids)) => {
             let entries = vec![None; ids.len()];
@@ -2457,13 +2448,13 @@ where
         None => {
             assert!(native.validate(), "genesis supply and policy are valid");
             for account in &native.balances {
-                writes.insert(
+                batch = batch.write(
                     native_balance_key(&chain_id, &account.key),
                     Some(Record::NativeBalance(account.balance)),
                 );
             }
             for entry in &native.deployments {
-                writes.insert(
+                batch = batch.write(
                     registry_entry_key(&chain_id, entry.deployment.digest()),
                     Some(Record::RegistryEntry(entry.clone())),
                 );
@@ -2473,7 +2464,7 @@ where
                 .iter()
                 .map(|entry| *entry.deployment.digest())
                 .collect::<Vec<_>>();
-            writes.insert(
+            batch = batch.write(
                 registry_key(&chain_id),
                 Some(Record::Registry(deployments.clone())),
             );
@@ -2509,12 +2500,9 @@ where
     for (deployment, machine) in deployments.iter().zip(machines.iter_mut()) {
         let machine = machine.as_mut().expect("all block machines loaded");
         for fired in machine.advance(height.get(), timestamp) {
-            let view = View {
-                writes: &writes,
-                source: Source::Batch(&batch),
-            };
+            let view = View::Batch(&batch);
             let emitted = match &fired {
-                Fired::Finalized { epoch, claims } => {
+                Fired::Finalized { epoch, commit } => {
                     let mut emitted = vec![(
                         admitted_key(deployment, *epoch),
                         Some(Record::Admitted({
@@ -2532,12 +2520,10 @@ where
                         emitted.push((anchor_key(deployment, previous), None));
                     }
 
-                    if let Some(interval) = claims {
-                        emitted.push((
-                            unclaimed_key(deployment, interval.start),
-                            Some(Record::Unclaimed(interval.end)),
-                        ));
-                    }
+                    let neighbors = view.claimed_neighbors(deployment, *commit).await?;
+                    let range = ClaimedRange::insert(*commit, &neighbors)
+                        .expect("a newly finalized commit is a fresh consumed location");
+                    emitted.extend(claimed_writes(deployment, range, neighbors[1]));
 
                     // Finalization retires the slot only when the singleton
                     // still belongs to the finalized epoch: a successor
@@ -2568,16 +2554,13 @@ where
                 }
             };
             for (key, value) in emitted {
-                writes.insert(key, value);
+                batch = batch.write(key, value);
             }
         }
     }
 
     for tx in transactions {
-        let view = View {
-            writes: &writes,
-            source: Source::Batch(&batch),
-        };
+        let view = View::Batch(&batch);
         let step = apply_native(
             native,
             &chain_id,
@@ -2595,12 +2578,12 @@ where
             debug!(outcome = ?step.outcome, digest = ?tx.digest(), "transaction left no effect");
         }
         for (key, value) in step.writes {
-            writes.insert(key, value);
+            batch = batch.write(key, value);
         }
     }
     for (deployment, machine) in deployments.iter().zip(machines.iter()) {
         let machine = machine.as_ref().expect("all block machines loaded");
-        writes.insert(
+        batch = batch.write(
             status_key(deployment),
             Some(Record::Status(machine.status(
                 *deployment,
@@ -2611,22 +2594,18 @@ where
 
         // Both records enter the same atomic batch. The guard must exist at
         // every root containing a checkpoint, including speculative branches.
-        writes.insert(
+        batch = batch.write(
             machine_key(deployment),
             Some(Record::Machine(machine.encode())),
         );
-        writes.insert(machine_guard_key(deployment), Some(Record::MachineGuard));
-        writes.insert(
+        batch = batch.write(machine_guard_key(deployment), Some(Record::MachineGuard));
+        batch = batch.write(
             payout_head_key(deployment),
             Some(Record::PayoutHead(crate::protocol::PayoutTip {
                 payouts: machine.chain.finalized_payouts(),
                 finalized: machine.finalized_epoch(),
             })),
         );
-    }
-    let mut batch = batch;
-    for (key, value) in writes {
-        batch = batch.write(key, value);
     }
     batch.merkleize().await
 }
@@ -2637,7 +2616,83 @@ mod codec_tests {
     use crate::protocol::identities;
     use bytes::BytesMut;
     use commonware_codec::FixedSize as _;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_glue::stateful::db::DatabaseSet as _;
+    use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
+
+    #[test]
+    fn claimed_neighbor_reads_do_not_grow_with_the_deployment_range_map() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = crate::chain::tests::open(context.child("ranges"), "range-neighbors").await;
+            let deployment = Sha256::hash(&[b"claimed-neighbor-deployment"]);
+            let reads = || -> u64 {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|line| line.contains("_log_journal_items_read_total "))
+                    .map(|line| {
+                        line.split_whitespace()
+                            .last()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap()
+                    })
+                    .sum()
+            };
+            let mut previous = 0;
+            for count in [64, 1_024] {
+                let mut batch = db.new_batches().await;
+                for offset in previous..count {
+                    let start = 2 * offset + 1;
+                    batch = batch.write(
+                        claimed_key(&deployment, start),
+                        Some(Record::Claimed(start + 1)),
+                    );
+                }
+                db.apply(batch.merkleize().await.unwrap()).await;
+                previous = count;
+
+                let index = count;
+                let expected = [
+                    Some(ClaimedRange {
+                        start: index - 1,
+                        end: index,
+                    }),
+                    Some(ClaimedRange {
+                        start: index + 1,
+                        end: index + 2,
+                    }),
+                ];
+                let batch = db.new_batches().await;
+                let before = reads();
+                assert_eq!(
+                    View::Batch(&batch)
+                        .claimed_neighbors(&deployment, index)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                let used = reads() - before;
+                assert!(
+                    used > 0 && used <= 4,
+                    "native neighbor lookup read {used} records for {count} ranges"
+                );
+                let guard = db.read().await;
+                let before = reads();
+                assert_eq!(
+                    View::Applied(&guard)
+                        .claimed_neighbors(&deployment, index)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                let used = reads() - before;
+                assert!(
+                    used > 0 && used <= 3,
+                    "applied neighbor lookup read {used} records for {count} ranges"
+                );
+            }
+        });
+    }
 
     #[test]
     fn machine_checkpoint_record_uses_available_bytes() {
@@ -2721,11 +2776,7 @@ mod codec_tests {
         deterministic::Runner::default().start(|context| async move {
             let db = crate::chain::tests::open(context, "trial-writer").await;
             let guard = db.read().await;
-            let writes = Writes::new();
-            let view = View {
-                writes: &writes,
-                source: Source::Applied(&guard),
-            };
+            let view = View::Applied(&guard);
             let chain = Sha256::hash(&[b"trial-writer-chain"]);
             assert_eq!(view.get(&registry_key(&chain)).await.unwrap(), None);
             let mut writer = Box::pin(db.write());
@@ -2796,7 +2847,7 @@ mod codec_tests {
                 payouts: roots.withdrawal_outputs,
                 finalized: None,
             }),
-            Record::Unclaimed(7),
+            Record::Claimed(7),
         ] {
             assert_eq!(Record::decode(record.encode()).unwrap(), record);
             let mut trailing = record.encode().to_vec();

@@ -190,7 +190,7 @@ fn public_lookup_encodings_exclude_private_checkpoint_suffixes() {
         Lookup::Withdrawal {
             account: account.clone(),
         },
-        Lookup::Unclaimed { index: u64::MAX },
+        Lookup::Claimed { index: u64::MAX },
         Lookup::HardFault {
             account: account.clone(),
         },

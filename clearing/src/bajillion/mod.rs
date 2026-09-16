@@ -180,12 +180,16 @@
 //! the registered predecessor and boundary deposits. Intervening payments can change either
 //! request's final release; recovery always uses the surviving finalized balance.
 //!
-//! Clean FIFO finalization updates one approved cumulative payout root/count and issues only its
-//! new nonempty interval of Append locations. The external ledger stores disjoint unclaimed
-//! `(deployment, start) -> end` ranges. A claim supplies the containing start, proves its output at
-//! the latest approved head, and atomically replaces that interval with up to two fragments while
-//! releasing its amount. Zero releases also consume their locations. No finalized epoch root or
-//! spent-position set is retained in this ledger; its size is bounded by outstanding outputs.
+//! Clean FIFO finalization updates one approved cumulative payout root/count and marks its trailing
+//! native Commit location as consumed. The external ledger stores disjoint claimed
+//! `(deployment, start) -> end` ranges. The embedding reads the immediate neighbors and verifies
+//! the output at the latest approved head. It atomically merges the location into those ranges
+//! while releasing the amount. Zero releases also consume their locations. Adjacent claims and the
+//! structurally unclaimable inter-close Commit locations collapse settled history; arbitrary claim
+//! order can still fragment the ledger. If `U` Append outputs remain unpaid, every maximal claimed
+//! range except possibly the last must be separated from the next by a distinct unpaid output, so
+//! the ledger contains at most `U + 1` ranges. The genesis Commit at location zero is excluded;
+//! membership in a claimed range does not by itself prove that the location contained a payout.
 //! Claims have no expiry and remain available through faults without another Bajillion vote.
 //!
 //! Replicas that retain longer native history serve old outputs and refreshed proofs as the

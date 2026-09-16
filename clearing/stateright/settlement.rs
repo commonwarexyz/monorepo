@@ -754,6 +754,7 @@ pub(crate) struct SettlementState {
     pub(crate) custody: u16,
     pub(crate) claimable: u16,
     pub(crate) finalized_payout_operations: u8,
+    // Consumed native locations include finalized Commit positions.
     pub(crate) intervals: std::collections::BTreeMap<u8, u8>,
     pub(crate) total_in: u16,
     pub(crate) released: u16,
@@ -936,6 +937,42 @@ impl SettlementModel {
 
     fn operating(state: &SettlementState) -> bool {
         state.fault.healthy() && state.terminal == Terminal::Dormant
+    }
+
+    fn insert_claimed(state: &mut SettlementState, position: u8) -> Option<()> {
+        let before = state
+            .intervals
+            .range(..=position)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        if before.is_some_and(|(start, end)| start <= position && position < end) {
+            return None;
+        }
+        let after_start = before.map_or(position, |(start, _)| start);
+        let after = state
+            .intervals
+            .range((
+                std::ops::Bound::Excluded(after_start),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(&start, &end)| (start, end));
+        let mut start = position;
+        let mut end = position.checked_add(1)?;
+        if let Some((before_start, before_end)) = before
+            && before_end == position
+        {
+            state.intervals.remove(&before_start);
+            start = before_start;
+        }
+        if let Some((after_start, after_end)) = after
+            && after_start == end
+        {
+            state.intervals.remove(&after_start);
+            end = after_end;
+        }
+        state.intervals.insert(start, end);
+        Some(())
     }
 
     fn head_root(state: &SettlementState) -> Root {
@@ -1402,10 +1439,10 @@ impl SettlementModel {
         let start = state.finalized_payout_operations;
         if let Some(output) = candidate.withdrawal_output {
             assert_eq!(output.position, start);
-            assert!(state.intervals.insert(start, start + 1).is_none());
         }
-        state.finalized_payout_operations =
-            start + u8::from(candidate.withdrawal_output.is_some()) + 1;
+        let commit = start + u8::from(candidate.withdrawal_output.is_some());
+        Self::insert_claimed(state, commit)?;
+        state.finalized_payout_operations = commit + 1;
         state.finalized_batches |= batch.bit();
         state.finalized_epochs.push(candidate.epoch);
         state.expected_epoch = state.expected_epoch.checked_add(1)?;
@@ -1428,25 +1465,11 @@ impl SettlementModel {
         })?;
         if output.position != position
             || (!refresh && position + 2 != state.finalized_payout_operations)
-            || !state
-                .intervals
-                .iter()
-                .any(|(start, end)| *start <= position && position < *end)
             || output.amount > state.withdrawal_reserve[batch.index()]
         {
             return None;
         }
-        let (&start, &end) = state.intervals.range(..=position).next_back()?;
-        if position >= end {
-            return None;
-        }
-        state.intervals.remove(&start);
-        if start < position {
-            state.intervals.insert(start, position);
-        }
-        if position + 1 < end {
-            state.intervals.insert(position + 1, end);
-        }
+        Self::insert_claimed(state, position)?;
         state.claimable = state.claimable.checked_sub(output.amount)?;
         state.released = state.released.checked_add(output.amount)?;
         state.clean_claim_paid = state.clean_claim_paid.checked_add(output.amount)?;
@@ -1884,27 +1907,7 @@ impl SettlementModel {
                         .is_some_and(|output| output.position == position)
             })
         });
-        let actual_positions = state
-            .intervals
-            .iter()
-            .flat_map(|(&start, &end)| start..end)
-            .collect::<Vec<_>>();
-        let mut expected_positions = Batch::ALL
-            .into_iter()
-            .filter(|batch| {
-                state.finalized_batches & batch.bit() != 0
-                    && state.claimed_withdrawals[batch.index()].is_none()
-            })
-            .filter_map(|batch| {
-                batch
-                    .candidate()
-                    .withdrawal_output
-                    .map(|output| output.position)
-            })
-            .collect::<Vec<_>>();
-        expected_positions.sort_unstable();
-        let ledger_exact = actual_positions == expected_positions
-            && state.intervals.len() <= expected_positions.len();
+        let ledger_exact = Self::claimed_ranges_exact(state);
         let custody_conserved = ledger_exact
             && state.custody + state.claimable + state.released == state.total_in
             && state.claimable == batch_total(&state.withdrawal_reserve)
@@ -1932,6 +1935,43 @@ impl SettlementModel {
             && Self::deadlines_observable(state)
             && Self::hard_fault_has_progress(state)
             && registration_exact
+    }
+
+    fn claimed_ranges_exact(state: &SettlementState) -> bool {
+        let actual_positions = state
+            .intervals
+            .iter()
+            .flat_map(|(&start, &end)| start..end)
+            .collect::<Vec<_>>();
+        let expected_positions = (1..state.finalized_payout_operations)
+            .filter(|position| {
+                !Batch::ALL.into_iter().any(|batch| {
+                    state.finalized_batches & batch.bit() != 0
+                        && state.claimed_withdrawals[batch.index()].is_none()
+                        && batch
+                            .candidate()
+                            .withdrawal_output
+                            .is_some_and(|output| output.position == *position)
+                })
+            })
+            .collect::<Vec<_>>();
+        let unclaimed_outputs = Batch::ALL
+            .into_iter()
+            .filter(|batch| {
+                state.finalized_batches & batch.bit() != 0
+                    && state.claimed_withdrawals[batch.index()].is_none()
+                    && batch.candidate().withdrawal_output.is_some()
+            })
+            .count();
+        let mut previous_end = None;
+        let canonical = state.intervals.iter().all(|(&start, &end)| {
+            let valid = start < end && previous_end.is_none_or(|previous| previous < start);
+            previous_end = Some(end);
+            valid
+        });
+        actual_positions == expected_positions
+            && state.intervals.len() <= unclaimed_outputs + 1
+            && canonical
     }
 }
 
@@ -2417,6 +2457,15 @@ fn settlement_invariants_have_negative_controls() {
     };
     assert!(!all_invariants(&model, &skipped));
     assert!(!fifo_without_skips(&model, &skipped));
+
+    let mut adjacent_claimed = SettlementState {
+        finalized_payout_operations: 3,
+        finalized_batches: Batch::B0.bit() | Batch::B1.bit(),
+        ..SettlementState::default()
+    };
+    adjacent_claimed.intervals.insert(1, 2);
+    adjacent_claimed.intervals.insert(2, 3);
+    assert!(!SettlementModel::claimed_ranges_exact(&adjacent_claimed));
 
     // A partial release is neither the requested amount nor zero.
     let mut partial = Batch::B2.candidate();

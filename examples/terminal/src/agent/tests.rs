@@ -324,7 +324,6 @@ async fn consuming_payout_status_query(
     context: &deterministic::Context,
     control: harness::Control,
     index: u64,
-    start: u64,
     claim: WithdrawalClaim<Digest>,
 ) -> SocketAddr {
     let mut listener = context
@@ -344,7 +343,7 @@ async fn consuming_payout_status_query(
                     && matches!(
                         ReadRequest::decode(request.body.clone()),
                         Ok(ReadRequest {
-                            lookup: Lookup::Unclaimed { index: found },
+                            lookup: Lookup::Claimed { index: found },
                             ..
                         }) if found == index
                     )
@@ -355,7 +354,6 @@ async fn consuming_payout_status_query(
                     control
                         .submit(SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                             deployment: deployment(),
-                            start,
                             claim: claim.clone(),
                         }))
                         .await;
@@ -389,7 +387,7 @@ async fn failing_second_payout_status_query(
                     && matches!(
                         ReadRequest::decode(request.body.clone()),
                         Ok(ReadRequest {
-                            lookup: Lookup::Unclaimed { index: found },
+                            lookup: Lookup::Claimed { index: found },
                             ..
                         }) if found == index
                     )
@@ -3731,8 +3729,8 @@ fn finalized_claim_completes_without_operator_bookkeeping() {
                 .payout_status(&context, position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         drop(agent);
 
@@ -3742,7 +3740,7 @@ fn finalized_claim_completes_without_operator_bookkeeping() {
 }
 
 #[test]
-fn payout_discovery_refreshes_a_page_output_at_the_newer_finalized_head() {
+fn delayed_payout_page_is_reopened_at_the_newer_claimed_status_head() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, _) = chain(&context).await;
@@ -3778,7 +3776,7 @@ fn payout_discovery_refreshes_a_page_output_at_the_newer_finalized_head() {
                         && matches!(
                             ReadRequest::decode(request.body.clone()),
                             Ok(ReadRequest {
-                                lookup: Lookup::Unclaimed { index },
+                                lookup: Lookup::Claimed { index },
                                 ..
                             }) if index == position
                         )
@@ -3884,8 +3882,8 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
                 .payout_status(&context, first_position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         assert_eq!(
             agent
@@ -3908,8 +3906,8 @@ fn withdrawal_claim_positions_are_global_across_epochs() {
                     .payout_status(&context, position)
                     .await
                     .unwrap()
-                    .interval
-                    .is_none()
+                    .claimed
+                    .is_some()
             );
         }
     });
@@ -3983,8 +3981,8 @@ fn advisory_withdrawal_substitution_cannot_poison_the_pending_request() {
                 .payout_status(&context, second_position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         assert!(
             refused
@@ -4005,8 +4003,8 @@ fn advisory_withdrawal_substitution_cannot_poison_the_pending_request() {
                 .payout_status(&context, first_position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         assert_eq!(agent.pending_withdrawal.as_ref(), Some(&first));
     });
@@ -4027,13 +4025,17 @@ fn permissionless_spend_between_discovery_and_cache_preserves_the_wallet() {
         finalize(&control, &close).await;
         let (request, position, claim) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
-        let status = chain.payout_status(&context, position).await.unwrap();
-        let start = status.interval.unwrap().start;
-
+        assert!(
+            chain
+                .payout_status(&context, position)
+                .await
+                .unwrap()
+                .claimed
+                .is_none()
+        );
         let mut agent = Agent::open(database.path(), 0).unwrap();
         stage_withdrawal_intent(&mut agent, &request);
-        let query =
-            consuming_payout_status_query(&context, control.clone(), position, start, claim).await;
+        let query = consuming_payout_status_query(&context, control.clone(), position, claim).await;
         let mut racing = client_with_query_and_holders(&context, &control, query, CHAIN);
         let release = agent
             .claim_withdrawal(&context, &mut racing, UNREACHABLE)
@@ -4047,8 +4049,8 @@ fn permissionless_spend_between_discovery_and_cache_preserves_the_wallet() {
                 .payout_status(&context, position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
         agent.ensure_store_usable().unwrap();
@@ -4105,13 +4107,13 @@ fn discovered_payout_is_durable_before_the_followup_status_read() {
 }
 
 #[test]
-fn cached_payout_rejects_a_recent_preissuance_head() {
+fn replayed_preissuance_claimed_absence_cannot_authorize_a_cached_payout() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let before = chain.payout_checkpoint(&context).await.unwrap();
         let position = before.payouts.operations;
-        let stale_request = ReadRequest::new(deployment(), Lookup::Unclaimed { index: position });
+        let stale_request = ReadRequest::new(deployment(), Lookup::Claimed { index: position });
         let stale_response = control.read(stale_request.clone()).await;
 
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
@@ -4207,14 +4209,6 @@ fn spent_cached_payout_completes_after_head_advance_without_a_fresh_opening() {
         finalize(&control, &close).await;
         let (_, position, claim) =
             settlement_withdrawal(&operator, &close, &withdrawals, &wallets()[0].public_key());
-        let start = chain
-            .payout_status(&context, position)
-            .await
-            .unwrap()
-            .interval
-            .unwrap()
-            .start;
-
         let candidate = PendingWithdrawalClaim {
             head: close.roots.withdrawal_outputs,
             claim: claim.clone(),
@@ -4225,7 +4219,6 @@ fn spent_cached_payout_completes_after_head_advance_without_a_fresh_opening() {
         control
             .submit(SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: deployment(),
-                start,
                 claim,
             }))
             .await;
@@ -4234,8 +4227,8 @@ fn spent_cached_payout_completes_after_head_advance_without_a_fresh_opening() {
                 .payout_status(&context, position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
 
         register(&control, &mut operator).await;
@@ -4279,18 +4272,10 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
             settlement_withdrawal(&operator, &source_close, &withdrawals, &account);
         assert_eq!(source_request, first);
 
-        let start = chain
-            .payout_status(&context, position)
-            .await
-            .unwrap()
-            .interval
-            .unwrap()
-            .start;
         control
             .submit(SettlementTx::ClaimWithdrawal(
                 crate::chain::tx::WithdrawalClaimRequest {
                     deployment: deployment(),
-                    start,
                     claim: stale_claim,
                 },
             ))
@@ -4300,8 +4285,8 @@ fn consumed_equal_output_cannot_complete_another_exact_request_after_retirement(
                 .payout_status(&context, position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
 
         // A cold wallet signs another request from the new state. The native output bytes would
@@ -4564,8 +4549,8 @@ fn cached_evidence_claims_after_the_operator_vanishes() {
                 .payout_status(&context, position)
                 .await
                 .unwrap()
-                .interval
-                .is_none()
+                .claimed
+                .is_some()
         );
         drop(agent);
 
@@ -6631,8 +6616,8 @@ fn finalized_zero_withdrawal_completes_without_an_asset_release() {
                     .payout_status(&context, position)
                     .await
                     .unwrap()
-                    .interval
-                    .is_none()
+                    .claimed
+                    .is_some()
             );
             drop(alice);
             let alice = Agent::open(database.path(), 0).unwrap();
@@ -6813,18 +6798,10 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
                 .unwrap();
             if already_released {
                 let position = source_claim.position();
-                let start = chain
-                    .payout_status(&context, position)
-                    .await
-                    .unwrap()
-                    .interval
-                    .unwrap()
-                    .start;
                 control
                     .submit(SettlementTx::ClaimWithdrawal(
                         crate::chain::tx::WithdrawalClaimRequest {
                             deployment: deployment(),
-                            start,
                             claim: source_claim.clone(),
                         },
                     ))
@@ -6834,8 +6811,8 @@ fn uncached_finalized_payouts_require_an_unspent_candidate() {
                         .payout_status(&context, position)
                         .await
                         .unwrap()
-                        .interval
-                        .is_none()
+                        .claimed
+                        .is_some()
                 );
                 assert_eq!(
                     chain

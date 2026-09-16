@@ -709,22 +709,20 @@ impl RefinementDriver {
     }
 
     fn finalize(&mut self) -> bool {
-        let Some(expected) = self.state.pipeline.first().copied() else {
-            return self.fixture.chain.finalize(u64::from(self.now)).is_ok();
+        let expected = self.state.pipeline.first().copied();
+        let Ok(actual) = self.fixture.chain.finalize(u64::from(self.now)) else {
+            return false;
         };
-        self.fixture
-            .chain
-            .finalize(u64::from(self.now))
-            .is_ok_and(|actual| {
-                let candidate = expected.candidate();
-                actual.batch_id == self.material(expected).id
-                    && actual.epoch == u64::from(candidate.epoch)
-                    && actual.successor_root == self.material(expected).successor.root()
-                    && actual.withdrawal_total
-                        == candidate
-                            .withdrawal_output
-                            .map_or(0, |output| u64::from(output.amount))
-            })
+        expected.is_some_and(|expected| {
+            let candidate = expected.candidate();
+            actual.batch_id == self.material(expected).id
+                && actual.epoch == u64::from(candidate.epoch)
+                && actual.successor_root == self.material(expected).successor.root()
+                && actual.withdrawal_total
+                    == candidate
+                        .withdrawal_output
+                        .map_or(0, |output| u64::from(output.amount))
+        })
     }
 
     fn claim_withdrawal(&mut self, source: spec::Batch, position: u8, refresh: bool) -> bool {
@@ -752,10 +750,10 @@ impl RefinementDriver {
             opening.start = u64::from(position);
             claim = WithdrawalClaim::new(output, opening);
         }
-        self.fixture
-            .chain
-            .claim_withdrawal(&claim)
-            .is_ok_and(|actual| actual == expected)
+        let Ok(actual) = self.fixture.chain.claim_withdrawal(&claim) else {
+            return false;
+        };
+        actual == expected
     }
 
     fn apply_production(&mut self, action: spec::SettlementAction) -> bool {
@@ -1070,14 +1068,35 @@ impl RefinementDriver {
             .iter()
             .flat_map(|(&start, &end)| start..end)
             .collect::<Vec<_>>();
-        let expected = self
+        let abstract_positions = self
             .state
             .intervals
             .iter()
             .flat_map(|(&start, &end)| u64::from(start)..u64::from(end))
             .collect::<Vec<_>>();
+        let expected = (1..u64::from(self.state.finalized_payout_operations))
+            .filter(|position| {
+                !BATCHES.into_iter().any(|batch| {
+                    self.state.finalized_batches & (1 << batch.index()) != 0
+                        && self.state.claimed_withdrawals[batch.index()].is_none()
+                        && batch
+                            .candidate()
+                            .withdrawal_output
+                            .is_some_and(|output| u64::from(output.position) == *position)
+                })
+            })
+            .collect::<Vec<_>>();
+        let unclaimed = BATCHES
+            .into_iter()
+            .filter(|batch| {
+                self.state.finalized_batches & (1 << batch.index()) != 0
+                    && self.state.claimed_withdrawals[batch.index()].is_none()
+                    && batch.candidate().withdrawal_output.is_some()
+            })
+            .count();
+        assert_eq!(abstract_positions, expected);
         assert_eq!(actual, expected);
-        assert!(chain.intervals.len() <= expected.len());
+        assert!(chain.intervals.len() <= unclaimed + 1);
         assert_eq!(
             chain.finalized_payouts().operations,
             u64::from(self.state.finalized_payout_operations)
@@ -1396,7 +1415,10 @@ fn absent_recipient_credit_refines_to_a_virtual_successor_without_a_reserve() {
     assert_eq!(row.successor, 1);
     assert_eq!(row.output, SettlementOutput::None);
     assert_eq!(material.close.withdrawal_total, 0);
-    assert!(driver.fixture.chain.intervals.is_empty());
+    assert_eq!(
+        driver.fixture.chain.intervals,
+        std::collections::BTreeMap::from([(1, 3)])
+    );
 }
 
 fn challenge_refined(driver: &mut RefinementDriver, batch: spec::Batch, kind: spec::ChallengeKind) {
@@ -1452,6 +1474,42 @@ fn clean_profile() -> RefinementDriver {
 #[test]
 fn clean_pipeline_and_claims_refine_production_step_by_step() {
     clean_profile();
+}
+
+#[test]
+fn reverse_claim_order_refines_to_one_claimed_range() {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    register_and_admit_refined(&mut driver, spec::Batch::B1);
+    queue_refined(&mut driver, spec::WithdrawalId::Amount);
+    register_and_admit_refined(&mut driver, spec::Batch::B2);
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    queue_refined(&mut driver, spec::WithdrawalId::Close);
+    register_and_admit_refined(&mut driver, spec::Batch::B3);
+    driver.step(spec::SettlementAction::Observe(7));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::Observe(9));
+    driver.step(spec::SettlementAction::Finalize);
+
+    driver.step(spec::SettlementAction::ClaimWithdrawal {
+        refresh: true,
+        source: spec::Batch::B3,
+        position: 5,
+    });
+    driver.step(spec::SettlementAction::ClaimWithdrawal {
+        refresh: true,
+        source: spec::Batch::B2,
+        position: 3,
+    });
+    assert_eq!(
+        driver.fixture.chain.intervals,
+        std::collections::BTreeMap::from([(1, 7)])
+    );
 }
 
 fn rejected_profile() -> RefinementDriver {
@@ -1744,13 +1802,19 @@ fn degraded_amount_refines_production_step_by_step() {
     assert_eq!(row.successor, 1);
     assert_eq!(row.output, SettlementOutput::Withdrawal(0));
     assert_eq!(material.close.withdrawal_total, 0);
-    assert_eq!(driver.fixture.chain.intervals.len(), 1);
+    assert_eq!(
+        driver.fixture.chain.intervals,
+        std::collections::BTreeMap::from([(1, 3), (4, 5)])
+    );
     driver.step(spec::SettlementAction::ClaimWithdrawal {
         refresh: true,
         source: spec::Batch::B2D,
         position: 3,
     });
-    assert!(driver.fixture.chain.intervals.is_empty());
+    assert_eq!(
+        driver.fixture.chain.intervals,
+        std::collections::BTreeMap::from([(1, 5)])
+    );
     assert_eq!(driver.fixture.chain.claimable_balance(), 0);
 }
 

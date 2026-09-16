@@ -402,43 +402,74 @@ struct PipelineEntry<P: PublicKey, D: Digest> {
     batch: PendingBatch<D>,
 }
 
-/// One nonempty disjoint interval of unclaimed native payout locations.
+/// One nonempty disjoint range of consumed native payout-log locations.
 ///
-/// The embedding reads this value from its authenticated ledger under `(deployment, start)`.
-/// Claims must atomically remove that key, insert the returned fragments, and release the output.
+/// The embedding stores this value in its authenticated ledger under `(deployment, start)`.
+/// A claim reads the exact neighboring ranges from one snapshot and atomically applies the
+/// returned merged range with the asset release. Ranges contain both paid Append locations and
+/// known non-payout Commit locations from finalized closes, so membership does not prove that a
+/// payout existed. The genesis Commit at location zero is excluded. If `U` Append outputs remain
+/// unpaid, canonical maximal ranges number at most `U + 1`: every range except possibly the last
+/// must be followed by a distinct unpaid Append location.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UnclaimedInterval {
-    /// Inclusive first unclaimed location.
+pub struct ClaimedRange {
+    /// Inclusive first consumed location.
     pub start: u64,
-    /// Exclusive last unclaimed location.
+    /// Exclusive last consumed location.
     pub end: u64,
 }
-impl UnclaimedInterval {
-    /// Returns whether this interval is a valid nonempty range of possible Append locations.
+impl ClaimedRange {
+    /// Returns whether this value is a valid nonempty range of native locations.
     pub fn is_valid(&self) -> bool {
-        self.start > 0 && self.start < self.end && self.end < mmr::Family::MAX_LEAVES
+        self.start > 0 && self.start < self.end && self.end <= *mmr::Family::MAX_LEAVES
     }
-}
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for UnclaimedInterval {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let start = u.int_in_range(1..=*mmr::Family::MAX_LEAVES - 2)?;
+
+    /// Inserts one consumed location using its predecessor-or-containing and strict successor.
+    ///
+    /// The neighbors must come from the same authenticated ordered-map snapshot. Coverage by an
+    /// existing range is rejected. Only ranges touching the inserted location are merged.
+    pub fn insert(index: u64, neighbors: &[Option<Self>; 2]) -> Result<Self, ClaimError> {
+        if index == 0 || index >= *mmr::Family::MAX_LEAVES {
+            return Err(ClaimError::Unavailable);
+        }
+        let [before, after] = *neighbors;
+        if before.is_some_and(|range| !range.is_valid() || range.start > index || range.end > index)
+            || after.is_some_and(|range| !range.is_valid() || range.start <= index)
+        {
+            return Err(ClaimError::Unavailable);
+        }
+
+        let next = index.checked_add(1).ok_or(ClaimError::Unavailable)?;
         Ok(Self {
-            start,
-            end: u.int_in_range(start + 1..=*mmr::Family::MAX_LEAVES - 1)?,
+            start: before
+                .filter(|range| range.end == index)
+                .map_or(index, |range| range.start),
+            end: after
+                .filter(|range| range.start == next)
+                .map_or(next, |range| range.end),
         })
     }
 }
-impl Write for UnclaimedInterval {
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for ClaimedRange {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let start = u.int_in_range(1..=*mmr::Family::MAX_LEAVES - 1)?;
+        Ok(Self {
+            start,
+            end: u.int_in_range(start + 1..=*mmr::Family::MAX_LEAVES)?,
+        })
+    }
+}
+impl Write for ClaimedRange {
     fn write(&self, buf: &mut impl BufMut) {
         self.start.write(buf);
         self.end.write(buf);
     }
 }
-impl FixedSize for UnclaimedInterval {
+impl FixedSize for ClaimedRange {
     const SIZE: usize = u64::SIZE * 2;
 }
-impl Read for UnclaimedInterval {
+impl Read for ClaimedRange {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let value = Self {
@@ -446,21 +477,21 @@ impl Read for UnclaimedInterval {
             end: u64::read(buf)?,
         };
         if !value.is_valid() {
-            return Err(CodecError::Invalid("UnclaimedInterval", "invalid range"));
+            return Err(CodecError::Invalid("ClaimedRange", "invalid range"));
         }
         Ok(value)
     }
 }
 
-/// Atomic interval replacement and asset release for one verified payout.
+/// Atomic claimed-range merge and asset release for one verified payout.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimEffect {
     /// Stable native Append location consumed by this effect.
     pub index: u64,
     /// Destination and amount authenticated by the latest finalized payout head.
     pub output: WithdrawalOutput,
-    /// Remaining left and right intervals; empty fragments are omitted.
-    pub fragments: [Option<UnclaimedInterval>; 2],
+    /// Claimed range to upsert after removing a merged strict successor, if any.
+    pub claimed: ClaimedRange,
 }
 
 #[derive(Debug)]
@@ -1355,14 +1386,13 @@ where
 
     /// Finalizes the pending pipeline front after its inclusive challenge window.
     ///
-    /// Persist the newly issued nonempty interval with this mutation and the custody transfer.
-    /// Its start is a fresh ledger key. Individual outputs remain claimable without expiry;
-    /// the interval is present even when every newly issued output has amount zero.
-    #[allow(clippy::type_complexity)]
+    /// Insert the returned trailing Commit location into the authenticated claimed-range map
+    /// atomically with this mutation and the custody transfer. A Commit can never contain a
+    /// payout, including when the finalized close contains no outputs.
     pub fn finalize(
         &mut self,
         now: u64,
-    ) -> Result<(FinalizedBatch<H::Digest>, Option<UnclaimedInterval>), SettlementError> {
+    ) -> Result<(FinalizedBatch<H::Digest>, u64), SettlementError> {
         self.observe_time(now);
         if self.fault_settled {
             return Err(SettlementError::HardFaultAlreadySettled);
@@ -1388,16 +1418,14 @@ where
         if entry.admitted.context.predecessor_logs() != &self.finalized_logs {
             return Err(SettlementError::StateAncestry);
         }
-        let start = self.finalized_logs.payouts.operations;
-        let end = entry
+        let commit_index = entry
             .batch
             .roots
             .withdrawal_outputs
             .operations
             .checked_sub(1)
-            .filter(|end| *end >= start)
+            .filter(|index| *index >= self.finalized_logs.payouts.operations)
             .ok_or(SettlementError::StateAncestry)?;
-        let interval = (start < end).then_some(UnclaimedInterval { start, end });
 
         let withdrawal_total = entry.batch.withdrawal_total;
         let claimable_balance = self
@@ -1434,25 +1462,28 @@ where
 
         self.finalized_logs = entry.batch.roots.logs();
         self.expected_epoch = next_epoch;
-        Ok((finalized, interval))
+        Ok((finalized, commit_index))
     }
 
     /// Consumes one payout under the current finalized cumulative head.
     ///
-    /// Supply the containing interval from the same authenticated checkpoint as this chain.
-    /// Persist its deletion, the returned fragments, and the asset release atomically. The
-    /// semantic effect identity is `(deployment, claim.position())`; refreshed proof bytes and
-    /// containing-start hints do not change it. This method remains available after a fault.
+    /// Supply the claimed range immediately before or containing the location and its strict
+    /// successor from the same authenticated checkpoint as this chain. Delete a merged successor,
+    /// upsert the returned range, and release the asset atomically. The semantic effect identity is
+    /// `(deployment, claim.position())`; refreshed proof bytes do not change it. This method
+    /// remains available after a fault.
     pub fn claim_withdrawal(
         &mut self,
-        interval: &UnclaimedInterval,
+        neighbors: &[Option<ClaimedRange>; 2],
         claim: &WithdrawalClaim<H::Digest>,
     ) -> Result<ClaimEffect, ClaimError> {
         let index = claim.position();
-        if !interval.is_valid()
-            || index < interval.start
-            || index >= interval.end
-            || interval.end >= self.finalized_logs.payouts.operations
+        let claimed = ClaimedRange::insert(index, neighbors)?;
+        if neighbors
+            .iter()
+            .flatten()
+            .any(|range| range.end > self.finalized_logs.payouts.operations)
+            || claimed.end > self.finalized_logs.payouts.operations
         {
             return Err(ClaimError::Unavailable);
         }
@@ -1461,21 +1492,11 @@ where
             .claimable_balance
             .checked_sub(output.amount())
             .ok_or(ClaimError::Reserve)?;
-        let fragments = [
-            (interval.start < index).then_some(UnclaimedInterval {
-                start: interval.start,
-                end: index,
-            }),
-            (index + 1 < interval.end).then_some(UnclaimedInterval {
-                start: index + 1,
-                end: interval.end,
-            }),
-        ];
         self.claimable_balance = aggregate;
         Ok(ClaimEffect {
             index,
             output,
-            fragments,
+            claimed,
         })
     }
 
@@ -2281,7 +2302,7 @@ where
 /// `items` must cover [`SettlementConfig::max_deposit_ids`], the admitted closes
 /// awaiting finality, the deployment's account cardinality, and all withdrawal
 /// identifiers retained within the maximum notice window.
-/// Unclaimed interval records are fixed-size values in the external ledger. `destination` must
+/// Claimed range records are fixed-size values in the external ledger. `destination` must
 /// be at least [`SettlementConfig::max_destination_bytes`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bounds {
@@ -2752,11 +2773,11 @@ where
     }
 }
 
-/// Payout adjudication failure. Refresh both the latest-root proof and interval hint on retry.
+/// Payout adjudication failure. Refresh both the latest-root proof and claimed neighbors on retry.
 #[derive(Debug, Error)]
 pub enum ClaimError {
-    /// The supplied current ledger interval does not contain this finalized output.
-    #[error("unclaimed payout interval is unavailable")]
+    /// The supplied claimed neighbors are invalid or already cover this location.
+    #[error("claimed payout neighbors are unavailable")]
     Unavailable,
     /// The output exceeds the aggregate unpaid reserve.
     #[error("claim exceeds the aggregate reserve")]
@@ -3011,38 +3032,57 @@ mod tests {
         }
 
         fn finalize(&mut self, now: u64) -> Result<FinalizedBatch<ShaDigest>, SettlementError> {
-            let (batch, interval) = self.active.finalize(now)?;
-            if let Some(interval) = interval {
-                assert!(
-                    self.intervals
-                        .insert(interval.start, interval.end)
-                        .is_none()
-                );
-            }
+            let (batch, commit_index) = self.active.finalize(now)?;
+            self.insert_claimed(commit_index)
+                .expect("a newly finalized commit is not already claimed");
             Ok(batch)
+        }
+
+        fn claimed_neighbors(&self, index: u64) -> [Option<ClaimedRange>; 2] {
+            let before = self
+                .intervals
+                .range(..=index)
+                .next_back()
+                .map(|(&start, &end)| ClaimedRange { start, end });
+            let after = self
+                .intervals
+                .range((
+                    core::ops::Bound::Excluded(index),
+                    core::ops::Bound::Unbounded,
+                ))
+                .next()
+                .map(|(&start, &end)| ClaimedRange { start, end });
+            [before, after]
+        }
+
+        fn apply_claimed(&mut self, neighbors: [Option<ClaimedRange>; 2], claimed: ClaimedRange) {
+            if let Some(after) = neighbors[1]
+                && claimed.end == after.end
+            {
+                assert_eq!(self.intervals.remove(&after.start), Some(after.end));
+            }
+            let replaced = self.intervals.insert(claimed.start, claimed.end);
+            if neighbors[0].is_some_and(|before| before.start == claimed.start) {
+                assert_eq!(replaced, neighbors[0].map(|before| before.end));
+            } else {
+                assert_eq!(replaced, None);
+            }
+        }
+
+        fn insert_claimed(&mut self, index: u64) -> Result<ClaimedRange, ClaimError> {
+            let neighbors = self.claimed_neighbors(index);
+            let claimed = ClaimedRange::insert(index, &neighbors)?;
+            self.apply_claimed(neighbors, claimed);
+            Ok(claimed)
         }
 
         fn claim_withdrawal(
             &mut self,
             claim: &WithdrawalClaim<ShaDigest>,
         ) -> Result<WithdrawalOutput, ClaimError> {
-            let (&start, &end) = self
-                .intervals
-                .range(..=claim.position())
-                .next_back()
-                .filter(|(_, end)| claim.position() < **end)
-                .ok_or(ClaimError::Unavailable)?;
-            let effect = self
-                .active
-                .claim_withdrawal(&UnclaimedInterval { start, end }, claim)?;
-            self.intervals.remove(&start);
-            for fragment in effect.fragments.into_iter().flatten() {
-                assert!(
-                    self.intervals
-                        .insert(fragment.start, fragment.end)
-                        .is_none()
-                );
-            }
+            let neighbors = self.claimed_neighbors(claim.position());
+            let effect = self.active.claim_withdrawal(&neighbors, claim)?;
+            assert_eq!(self.insert_claimed(effect.index)?, effect.claimed);
             Ok(effect.output)
         }
     }
@@ -3071,6 +3111,115 @@ mod tests {
     type TestContext = CloseContext<VerifyingKey, ShaDigest>;
     type TestDeposits = DepositBatch<VerifyingKey>;
     type TestWithdrawals = WithdrawalBatch<VerifyingKey, ShaDigest>;
+
+    #[test]
+    fn claimed_ranges_merge_in_every_order_and_accept_the_maximum_endpoint() {
+        fn insert(intervals: &mut BTreeMap<u64, u64>, index: u64) {
+            let before = intervals
+                .range(..=index)
+                .next_back()
+                .map(|(&start, &end)| ClaimedRange { start, end });
+            let after = intervals
+                .range((
+                    core::ops::Bound::Excluded(index),
+                    core::ops::Bound::Unbounded,
+                ))
+                .next()
+                .map(|(&start, &end)| ClaimedRange { start, end });
+            let claimed = ClaimedRange::insert(index, &[before, after]).unwrap();
+            if after.is_some_and(|after| claimed.end == after.end) {
+                intervals.remove(&after.unwrap().start);
+            }
+            intervals.insert(claimed.start, claimed.end);
+        }
+
+        for first in 1..=4 {
+            for second in 1..=4 {
+                for third in 1..=4 {
+                    for fourth in 1..=4 {
+                        let order = [first, second, third, fourth];
+                        if BTreeSet::from(order).len() != order.len() {
+                            continue;
+                        }
+                        let mut intervals = BTreeMap::new();
+                        for index in order {
+                            insert(&mut intervals, index);
+                        }
+                        assert_eq!(intervals, BTreeMap::from([(1, 5)]));
+                    }
+                }
+            }
+        }
+
+        let max = *mmr::Family::MAX_LEAVES;
+        let claimed = ClaimedRange::insert(max - 1, &[None, None]).unwrap();
+        assert_eq!(
+            claimed,
+            ClaimedRange {
+                start: max - 1,
+                end: max
+            }
+        );
+        assert_eq!(ClaimedRange::decode(claimed.encode()).unwrap(), claimed);
+    }
+
+    #[test]
+    fn claimed_ranges_reject_invalid_bounds_neighbors_and_duplicates() {
+        let max = *mmr::Family::MAX_LEAVES;
+        assert!(matches!(
+            ClaimedRange::insert(0, &[None, None]),
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(matches!(
+            ClaimedRange::insert(max, &[None, None]),
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(matches!(
+            ClaimedRange::insert(u64::MAX, &[None, None]),
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(matches!(
+            ClaimedRange::insert(
+                4,
+                &[
+                    Some(ClaimedRange { start: 2, end: 5 }),
+                    Some(ClaimedRange { start: 6, end: 7 }),
+                ],
+            ),
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(matches!(
+            ClaimedRange::insert(
+                4,
+                &[
+                    Some(ClaimedRange { start: 5, end: 6 }),
+                    Some(ClaimedRange { start: 7, end: 8 }),
+                ],
+            ),
+            Err(ClaimError::Unavailable)
+        ));
+        assert!(matches!(
+            ClaimedRange::insert(
+                4,
+                &[
+                    Some(ClaimedRange { start: 1, end: 3 }),
+                    Some(ClaimedRange { start: 4, end: 5 }),
+                ],
+            ),
+            Err(ClaimError::Unavailable)
+        ));
+
+        for range in [
+            ClaimedRange { start: 0, end: 1 },
+            ClaimedRange { start: 1, end: 1 },
+            ClaimedRange {
+                start: max - 1,
+                end: u64::MAX,
+            },
+        ] {
+            assert!(ClaimedRange::decode(range.encode()).is_err());
+        }
+    }
 
     #[test]
     fn configured_genesis_checks_canonical_accounts_and_liability() {
@@ -7885,7 +8034,7 @@ mod tests {
             &request,
             10,
         );
-        let consumed_record = fixture.chain.intervals.encode();
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 3)]));
         assert_eq!(fixture.chain.claimable_balance(), 0);
 
         let withdrawals = WithdrawalBatch::empty();
@@ -7934,7 +8083,7 @@ mod tests {
         );
         assert_eq!(fixture.chain.custody_balance(), 20);
         assert_eq!(fixture.chain.claimable_balance(), 0);
-        assert_eq!(fixture.chain.intervals.encode(), consumed_record);
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 4)]));
         assert!(matches!(
             fixture.chain.claim_withdrawal(&claim),
             Err(ClaimError::Unavailable)
@@ -8159,7 +8308,22 @@ mod tests {
     }
 
     #[test]
-    fn finalized_withdrawals_claim_out_of_order_and_drain_one_reserve() {
+    fn claimed_ranges_collapse_finalized_empty_close_commits() {
+        let mut fixture = harness(&[]);
+
+        admit_empty_epoch(&mut fixture, 0, 0, 0, 1);
+        fixture.chain.finalize(2).unwrap();
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 2)]));
+
+        admit_empty_epoch(&mut fixture, 1, 2, 2, 3);
+        fixture.chain.finalize(4).unwrap();
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 3)]));
+        fixture.chain = round_trip(&fixture.chain);
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 3)]));
+    }
+
+    #[test]
+    fn claimed_withdrawals_reject_invalid_proofs_and_drain_reserve() {
         let mut fixture = harness(&[10, 20]);
         let queued = fixture
             .accounts
@@ -8220,22 +8384,28 @@ mod tests {
         assert_eq!(finalized.withdrawal_total, 7);
         assert_eq!(fixture.chain.claimable_balance(), 7);
 
-        for interval in [
-            UnclaimedInterval {
-                start: claims[0].position() + 1,
-                end: claims[0].position() + 2,
-            },
-            UnclaimedInterval {
-                start: 0,
-                end: claims[0].position(),
-            },
+        for neighbors in [
+            [
+                Some(ClaimedRange {
+                    start: claims[0].position(),
+                    end: claims[0].position() + 1,
+                }),
+                None,
+            ],
+            [
+                Some(ClaimedRange {
+                    start: 0,
+                    end: claims[0].position(),
+                }),
+                None,
+            ],
         ] {
             let before = fixture.chain.active.encode();
             assert!(
                 fixture
                     .chain
                     .active
-                    .claim_withdrawal(&interval, &claims[0])
+                    .claim_withdrawal(&neighbors, &claims[0])
                     .is_err()
             );
             assert_eq!(fixture.chain.active.encode(), before);
@@ -8277,7 +8447,7 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_replay_key_includes_the_finalized_batch() {
+    fn claimed_ranges_collapse_inter_close_commits() {
         let mut fixture = harness(&[20]);
         let account = fixture.accounts[0].public_key();
         let first_request = withdrawal(
@@ -8385,6 +8555,7 @@ mod tests {
         assert_eq!(first_claim.position(), 1);
         assert_eq!(second_claim.position(), 3);
         assert_eq!(fixture.chain.claimable_balance(), 7);
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(2, 3), (4, 5)]));
 
         assert!(matches!(
             fixture.chain.claim_withdrawal(&first_claim),
@@ -8402,6 +8573,7 @@ mod tests {
             &first_request,
             3,
         );
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 3), (4, 5)]));
         assert!(matches!(
             fixture.chain.claim_withdrawal(&first_claim),
             Err(ClaimError::Unavailable)
@@ -8411,6 +8583,7 @@ mod tests {
             &second_request,
             4,
         );
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 5)]));
         assert!(matches!(
             fixture.chain.claim_withdrawal(&second_claim),
             Err(ClaimError::Unavailable)
@@ -9735,7 +9908,7 @@ mod tests {
         let custody = fixture.chain.custody_balance();
         let output = fixture.chain.claim_withdrawal(&claim).unwrap();
         assert_eq!(output.amount(), 0);
-        assert!(fixture.chain.intervals.is_empty());
+        assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 3)]));
         assert_eq!(fixture.chain.custody_balance(), custody);
         assert_eq!(fixture.chain.claimable_balance(), 0);
         assert!(fixture.chain.claim_withdrawal(&claim).is_err());
@@ -10739,15 +10912,22 @@ mod tests {
     }
 
     #[test]
-    fn native_interval_ledger_first_middle_last_and_replay_survive_restart() {
-        for order in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
+    fn native_claimed_ledger_first_middle_last_and_replay_survive_restart() {
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
             let mut fixture = harness(&[10, 20, 30]);
             for account in &fixture.accounts {
                 let request = withdrawal(
                     fixture.deployment,
                     fixture.cache.root(),
                     account,
-                    b"interval-ledger",
+                    b"claimed-ledger",
                     amount_action(1),
                     10,
                 );
@@ -10794,10 +10974,13 @@ mod tests {
             );
             fixture.chain.finalize(3).unwrap();
             assert_eq!(fixture.chain.finalized_payouts().operations, 5);
+            let mut claimed = BTreeSet::from([4]);
             let mut unpaid = BTreeSet::from([1, 2, 3]);
-            assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 4)]));
+            assert_eq!(fixture.chain.intervals, BTreeMap::from([(4, 5)]));
+            assert!(fixture.chain.intervals.len() <= unpaid.len() + 1);
             for index in order {
                 let position = claims[index].position();
+                assert!(claimed.insert(position));
                 assert!(unpaid.remove(&position));
                 assert_eq!(
                     fixture
@@ -10813,15 +10996,15 @@ mod tests {
                     .iter()
                     .flat_map(|(&start, &end)| start..end)
                     .collect::<BTreeSet<_>>();
-                assert_eq!(actual, unpaid);
-                assert!(fixture.chain.intervals.len() <= unpaid.len());
+                assert_eq!(actual, claimed);
+                assert!(fixture.chain.intervals.len() <= unpaid.len() + 1);
                 assert_eq!(fixture.chain.claimable_balance(), unpaid.len() as u64);
                 fixture.chain = round_trip(&fixture.chain);
                 let before = fixture.chain.encode();
                 assert!(fixture.chain.claim_withdrawal(&claims[index]).is_err());
                 assert_eq!(fixture.chain.encode(), before);
             }
-            assert!(fixture.chain.intervals.is_empty());
+            assert_eq!(fixture.chain.intervals, BTreeMap::from([(1, 5)]));
         }
     }
 }

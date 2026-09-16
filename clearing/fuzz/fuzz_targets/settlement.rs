@@ -16,8 +16,8 @@ use commonware_clearing::bajillion::{
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     qmdb::{StateHead, StateOpening, StateRoot, account_key},
     settlement::{
-        BatchStatus, Bounds, ClaimError, EpochDeadlinePolicy, Genesis, HardFaultReason,
-        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig, UnclaimedInterval,
+        BatchStatus, Bounds, ClaimedRange, EpochDeadlinePolicy, Genesis, HardFaultReason,
+        HardFaultSettlement, PendingBatch, SettlementChain, SettlementConfig,
     },
     state::SettlementOutput,
     transition::{
@@ -213,11 +213,12 @@ struct ModeledWithdrawalClaim {
     claim: TestWithdrawalClaim,
 }
 
-// Ghost issuance and payment records provide an independent oracle for the interval ledger.
+// Ghost issuance and payment records provide an independent oracle for the claimed-range ledger.
 #[derive(Clone)]
 struct FinalizedClaimBatch {
     batch_id: BatchId<Digest>,
     withdrawal_root: LogHead<Digest>,
+    trailing_commit: u64,
     withdrawals: Vec<ModeledWithdrawalClaim>,
     claimed_withdrawals: BTreeSet<u64>,
     withdrawal_remaining: u64,
@@ -657,6 +658,45 @@ impl Harness {
         }
     }
 
+    fn claimed_neighbors(&self, index: u64) -> [Option<ClaimedRange>; 2] {
+        let before = self
+            .claims
+            .range(..=index)
+            .next_back()
+            .map(|(&start, &end)| ClaimedRange { start, end });
+        let after_start = before.as_ref().map_or(index, |range| range.start);
+        let after = self
+            .claims
+            .range((
+                std::ops::Bound::Excluded(after_start),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(&start, &end)| ClaimedRange { start, end });
+        [before, after]
+    }
+
+    fn persist_claimed(
+        &mut self,
+        index: u64,
+        neighbors: &[Option<ClaimedRange>; 2],
+        claimed: ClaimedRange,
+    ) {
+        if let Some(after) = &neighbors[1]
+            && after.start == index + 1
+        {
+            assert_eq!(self.claims.remove(&after.start), Some(after.end));
+        }
+        self.claims.insert(claimed.start, claimed.end);
+    }
+
+    fn insert_claimed(&mut self, index: u64) {
+        let neighbors = self.claimed_neighbors(index);
+        let claimed = ClaimedRange::insert(index, &neighbors)
+            .expect("a finalized trailing commit is a fresh native position");
+        self.persist_claimed(index, &neighbors, claimed);
+    }
+
     fn assert_error_atomicity(
         before: &Snapshot,
         after: &Snapshot,
@@ -715,16 +755,29 @@ impl Harness {
             .finalized_claim_batches
             .iter()
             .flat_map(|batch| {
-                batch
-                    .withdrawals
-                    .iter()
-                    .filter(|entry| !batch.claimed_withdrawals.contains(&entry.claim.position()))
-                    .map(|entry| entry.claim.position())
+                std::iter::once(batch.trailing_commit).chain(
+                    batch
+                        .withdrawals
+                        .iter()
+                        .filter(|entry| batch.claimed_withdrawals.contains(&entry.claim.position()))
+                        .map(|entry| entry.claim.position()),
+                )
             })
             .collect::<Vec<_>>();
         expected.sort_unstable();
         assert_eq!(actual, expected);
-        assert!(self.claims.len() <= expected.len());
+        let unclaimed = self
+            .finalized_claim_batches
+            .iter()
+            .map(|batch| batch.withdrawals.len() - batch.claimed_withdrawals.len())
+            .sum::<usize>();
+        assert!(self.claims.len() <= unclaimed + 1);
+        let mut previous_end = None;
+        assert!(self.claims.iter().all(|(&start, &end)| {
+            let canonical = start < end && previous_end.is_none_or(|previous| previous < start);
+            previous_end = Some(end);
+            canonical
+        }));
         self.custody
             .checked_add(self.claimable)
             .expect("active and claimable custody fit the accounting domain");
@@ -1993,15 +2046,22 @@ impl Harness {
         } else {
             OutcomeClass::Error
         };
-        let result = self.chain.finalize(now).map(|(batch, claims)| {
-            if let Some(interval) = claims {
-                assert!(self.claims.insert(interval.start, interval.end).is_none());
-            }
-            batch
+        let expected_commit = self.slots.front().map(|slot| {
+            slot.close
+                .roots
+                .withdrawal_outputs
+                .operations
+                .checked_sub(1)
+                .expect("a close payout head contains its trailing commit")
         });
+        let result = self.chain.finalize(now);
+        if let Ok((_, trailing_commit)) = &result {
+            assert_eq!(Some(*trailing_commit), expected_commit);
+            self.insert_claimed(*trailing_commit);
+        }
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
-            let finalized = result
+            let (finalized, _) = result
                 .as_ref()
                 .expect("the oracle predicted successful finalization");
             let slot = self
@@ -2024,6 +2084,8 @@ impl Harness {
         }
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
+            let trailing_commit =
+                expected_commit.expect("the oracle predicted successful finalization");
             let slot = self
                 .slots
                 .pop_front()
@@ -2032,30 +2094,29 @@ impl Harness {
             assert!(now > slot.context.challenge_deadline());
             assert_eq!(slot.withdrawal_claims.len(), slot.withdrawal_outputs.len());
             let withdrawal_remaining = output_total(&slot.withdrawal_outputs);
-            if !slot.withdrawal_claims.is_empty() {
-                let batch_id = slot.batch_id();
-                assert!(
-                    self.finalized_claim_batches
-                        .iter()
-                        .all(|batch| batch.batch_id != batch_id)
-                );
-                self.finalized_claim_batches.push(FinalizedClaimBatch {
-                    batch_id,
-                    withdrawal_root: slot.close.roots.withdrawal_outputs,
-                    withdrawals: slot
-                        .withdrawal_claims
-                        .iter()
-                        .cloned()
-                        .zip(slot.withdrawal_outputs.iter().cloned())
-                        .map(|(claim, output)| {
-                            assert_eq!(claim.output(), &output);
-                            ModeledWithdrawalClaim { claim }
-                        })
-                        .collect(),
-                    claimed_withdrawals: BTreeSet::new(),
-                    withdrawal_remaining,
-                });
-            }
+            let batch_id = slot.batch_id();
+            assert!(
+                self.finalized_claim_batches
+                    .iter()
+                    .all(|batch| batch.batch_id != batch_id)
+            );
+            self.finalized_claim_batches.push(FinalizedClaimBatch {
+                batch_id,
+                withdrawal_root: slot.close.roots.withdrawal_outputs,
+                trailing_commit,
+                withdrawals: slot
+                    .withdrawal_claims
+                    .iter()
+                    .cloned()
+                    .zip(slot.withdrawal_outputs.iter().cloned())
+                    .map(|(claim, output)| {
+                        assert_eq!(claim.output(), &output);
+                        ModeledWithdrawalClaim { claim }
+                    })
+                    .collect(),
+                claimed_withdrawals: BTreeSet::new(),
+                withdrawal_remaining,
+            });
             self.custody = self
                 .custody
                 .checked_sub(withdrawal_remaining)
@@ -2330,7 +2391,7 @@ impl Harness {
                 false,
             )
         };
-        // The unknown-batch action has no applied native interval to serve. AckFork preserves the
+        // The unknown-batch action has no applied native history to serve. AckFork preserves the
         // negative challenge path without advancing the replica solely to manufacture evidence.
         let family = if admitted { mutation % 3 } else { 2 };
         let variant = (mutation / 4) % 4;
@@ -2523,33 +2584,23 @@ impl Harness {
         } else {
             OutcomeClass::Error
         };
-        let interval = self
-            .claims
-            .range(..=claim.position())
-            .next_back()
-            .filter(|(_, end)| claim.position() < **end)
-            .map(|(&start, &end)| UnclaimedInterval { start, end });
-        let result = interval
-            .ok_or(ClaimError::Unavailable)
-            .and_then(|interval| {
-                let effect = self.chain.claim_withdrawal(&interval, &claim)?;
-                self.claims.remove(&interval.start);
-                for fragment in effect.fragments.into_iter().flatten() {
-                    self.claims.insert(fragment.start, fragment.end);
-                }
-                Ok(effect.output)
-            });
+        let neighbors = self.claimed_neighbors(claim.position());
+        let result = self.chain.claim_withdrawal(&neighbors, &claim);
+        if let Ok(effect) = &result {
+            self.persist_claimed(effect.index, &neighbors, effect.claimed.clone());
+        }
         assert_eq!(OutcomeClass::of(&result), expected);
         if let Some((batch_index, position, expected_output)) = accepted {
-            let output = result.expect("the oracle selected an unconsumed withdrawal output");
-            assert_eq!(output, expected_output);
+            let effect = result.expect("the oracle selected an unconsumed withdrawal output");
+            assert_eq!(effect.index, position);
+            assert_eq!(effect.output, expected_output);
             let batch = &mut self.finalized_claim_batches[batch_index];
             assert!(batch.claimed_withdrawals.insert(position));
             batch.withdrawal_remaining = batch
                 .withdrawal_remaining
-                .checked_sub(output.amount())
+                .checked_sub(effect.output.amount())
                 .unwrap();
-            self.claimable = self.claimable.checked_sub(output.amount()).unwrap();
+            self.claimable = self.claimable.checked_sub(effect.output.amount()).unwrap();
         }
         ActionOutcome::new(expected, None)
     }

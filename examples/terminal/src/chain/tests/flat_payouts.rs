@@ -1,6 +1,7 @@
 use super::*;
 use commonware_clearing::bajillion::{
     logs::{LogHead, PayoutOperation},
+    settlement::ClaimedRange,
     transition::WithdrawalClaim,
 };
 use std::{collections::BTreeMap, net::SocketAddr};
@@ -27,6 +28,28 @@ impl ingress::Provider for ProofProvider {
         self.requested.lock().push((head.operations, index));
         self.proofs.get(&(head.operations, index)).cloned()
     }
+}
+
+async fn claimed_record_count(db: &Database<deterministic::Context>, end: u64) -> usize {
+    let mut records = 0;
+    for index in 1..end {
+        records += usize::from(matches!(
+            read(db, &claimed_key(&deployment(), index)).await,
+            Some(Record::Claimed(_))
+        ));
+    }
+    records
+}
+
+async fn unpaid_append_count(
+    db: &Database<deterministic::Context>,
+    claims: &[WithdrawalClaim<Digest>],
+) -> usize {
+    let mut unpaid = 0;
+    for claim in claims {
+        unpaid += usize::from(claimed(db, claim.position()).await.is_none());
+    }
+    unpaid
 }
 
 async fn verify_proposal_custodian_rotation(
@@ -235,6 +258,14 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             1
         );
         let start = results[0].context.predecessor_logs().payouts.operations;
+        let first_commit = start + claims.len() as u64;
+        assert_eq!(
+            claimed(&db, first_commit).await,
+            Some(ClaimedRange {
+                start: first_commit,
+                end: first_commit + 1,
+            })
+        );
         assert_eq!(
             claims
                 .iter()
@@ -338,23 +369,12 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         {
             let epoch = offset + 1;
             let height = 14 + offset as u64;
-            let index = claims[positions[0]].position();
-            let mut hint = None;
-            for candidate in start..=index {
-                if let Some(Record::Unclaimed(end)) =
-                    read(&db, &unclaimed_key(&deployment(), candidate)).await
-                    && index < end
-                {
-                    hint = Some(candidate);
-                }
-            }
-            let hint = hint.unwrap();
+            let observed = claims[positions[0]].position();
             let transactions = positions
                 .iter()
                 .map(|position| {
                     SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                         deployment: deployment(),
-                        start: hint,
                         claim: claims[*position].clone(),
                     })
                 })
@@ -431,8 +451,10 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
                 .unwrap();
             assert_eq!(verified.root(), proposed.merkleized.root());
             drop(verified);
+            assert!(claimed(&db, observed).await.is_none());
             parent = proposed.block;
             db.apply(proposed.merkleized).await;
+            assert!(claimed(&db, observed).await.is_some());
             assert_eq!(status(&db).await.last_finalized, Some(epoch as u64));
             for retired in 0..epoch as u64 {
                 assert_eq!(read(&db, &admitted_key(&deployment(), retired)).await, None);
@@ -469,10 +491,44 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         }
         assert_eq!(status(&db).await.claimable, 0);
         let zero_index = claims[zero].position();
+        let settled_end = results[3].roots.withdrawal_outputs.operations;
+        assert_eq!(claimed(&db, zero_index).await, None);
+        assert!(zero_index > start && zero_index + 1 < settled_end);
+        let left = claimed(&db, zero_index - 1).await.unwrap();
+        let right = claimed(&db, zero_index + 1).await.unwrap();
         assert_eq!(
-            read(&db, &unclaimed_key(&deployment(), zero_index)).await,
-            Some(Record::Unclaimed(zero_index + 1))
+            left,
+            ClaimedRange {
+                start,
+                end: zero_index
+            }
         );
+        assert_eq!(
+            right,
+            ClaimedRange {
+                start: zero_index + 1,
+                end: settled_end,
+            }
+        );
+        assert_eq!(read(&db, &claimed_key(&deployment(), 0)).await, None);
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), left.start)).await,
+            Some(Record::Claimed(left.end))
+        );
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), right.start)).await,
+            Some(Record::Claimed(right.end))
+        );
+        for result in &results {
+            assert_eq!(
+                claimed(&db, result.roots.withdrawal_outputs.operations - 1).await,
+                Some(right)
+            );
+        }
+        let unpaid = unpaid_append_count(&db, claims).await;
+        let range_records = claimed_record_count(&db, settled_end).await;
+        assert_eq!((unpaid, range_records), (1, 2));
+        assert_eq!(range_records, unpaid + 1);
         assert_eq!(requested.lock().len(), 6);
 
         let deadline = 50;
@@ -525,10 +581,8 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         seal_native(&db, deadline + 1, &native, &recovery).await;
         assert_eq!(status(&db).await.custody, 0);
         assert_eq!(status(&db).await.claimable, 0);
-        assert_eq!(
-            read(&db, &unclaimed_key(&deployment(), zero_index)).await,
-            Some(Record::Unclaimed(zero_index + 1))
-        );
+        assert_eq!(claimed(&db, zero_index - 1).await, Some(left));
+        assert_eq!(claimed(&db, zero_index + 1).await, Some(right));
         let mut recovered = Vec::new();
         for wallet in &wallets {
             recovered.push(
@@ -539,7 +593,6 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         }
         let zero_claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: zero_index,
             claim: proofs[&(results[3].roots.withdrawal_outputs.operations, zero_index)].clone(),
         });
         seal_native(
@@ -551,17 +604,26 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         .await;
         assert_eq!(status(&db).await.claimable, 0);
         assert_eq!(
-            read(&db, &unclaimed_key(&deployment(), zero_index)).await,
+            claimed(&db, zero_index).await,
+            Some(ClaimedRange {
+                start,
+                end: settled_end,
+            })
+        );
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), right.start)).await,
             None
         );
+        let unpaid = unpaid_append_count(&db, claims).await;
+        let range_records = claimed_record_count(&db, settled_end).await;
+        assert_eq!((unpaid, range_records), (0, 1));
+        assert_eq!(range_records, unpaid + 1);
         let old = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start,
             claim: claims[zero].clone(),
         });
         let alternate = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start: zero_index,
             claim: proofs[&(results[3].roots.withdrawal_outputs.operations, zero_index)].clone(),
         });
         seal_native(&db, deadline + 3, &native, &[old, alternate]).await;
@@ -577,13 +639,24 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
         drop(db);
         let db = open(context.child("reopen"), "flat-payout-proposals").await;
         for index in start..start + 4 {
-            assert_eq!(read(&db, &unclaimed_key(&deployment(), index)).await, None);
+            assert_eq!(
+                claimed(&db, index).await,
+                Some(ClaimedRange {
+                    start,
+                    end: settled_end,
+                })
+            );
         }
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), start + 1)).await,
+            None
+        );
+        assert_eq!(claimed_record_count(&db, settled_end).await, 1);
     });
 }
 
 #[test]
-fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges() {
+fn certified_payout_status_rejects_preissuance_splices_and_tracks_claimed_merges() {
     deterministic::Runner::default().start(|context| async move {
         let mut rng = test_rng();
         let SchemeFixture {
@@ -646,8 +719,8 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
                 .unwrap();
             claims.push(WithdrawalClaim::new(output, opening));
         }
-        let index = start + 2;
-        let request = req(Lookup::Unclaimed { index });
+        let index = start + 1;
+        let request = req(Lookup::Claimed { index });
         let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
             deployment: deployment(),
             epoch: 0,
@@ -678,9 +751,9 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
             &before,
         )
         .unwrap();
-        assert!(before_verified.unclaimed.is_none());
+        assert!(before_verified.claimed.is_none());
         assert!(
-            claims[2]
+            claims[1]
                 .verify::<Sha256>(&before_verified.payout_tip.unwrap().payouts)
                 .is_err()
         );
@@ -700,19 +773,18 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
             &issued,
         )
         .unwrap();
-        assert_eq!(
-            issued_verified.unclaimed,
-            Some(
-                commonware_clearing::bajillion::settlement::UnclaimedInterval {
-                    start,
-                    end: start + 3
-                }
-            )
-        );
+        assert!(issued_verified.claimed.is_none());
         assert!(
-            claims[2]
+            claims[1]
                 .verify::<Sha256>(&issued_verified.payout_tip.unwrap().payouts)
                 .is_ok()
+        );
+        assert_eq!(
+            claimed(&db, start + 3).await,
+            Some(ClaimedRange {
+                start: start + 3,
+                end: start + 4,
+            })
         );
         let mut splice = before.clone();
         splice.payout = issued.payout.clone();
@@ -738,7 +810,6 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         ));
         let first = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            start,
             claim: claims[1].clone(),
         });
         let (split, _) = certified_read(
@@ -750,7 +821,6 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
                 first.clone(),
                 SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                     deployment: deployment(),
-                    start,
                     claim: claims[0].clone(),
                 }),
                 first,
@@ -758,7 +828,6 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
             &request,
         )
         .await;
-        assert_eq!(read(&db, &unclaimed_key(&deployment(), start)).await, None);
         let verified = light::verify_read::<deterministic::Context, Scheme>(
             &mut rng,
             &schemes[0],
@@ -767,61 +836,84 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
         )
         .unwrap();
         assert_eq!(
-            verified.unclaimed,
-            Some(
-                commonware_clearing::bajillion::settlement::UnclaimedInterval {
-                    start: start + 2,
-                    end: start + 3
-                }
-            )
+            verified.claimed,
+            Some(ClaimedRange {
+                start,
+                end: start + 2,
+            })
         );
-        let mut stale_hint_proof = split.clone();
-        stale_hint_proof.proof = query::ReadProof::Absent {
-            proof: db
-                .read()
-                .await
-                .exclusion_proof(&unclaimed_key(&deployment(), start))
-                .await
-                .unwrap(),
-        };
-        assert!(matches!(
-            light::verify_read::<deterministic::Context, Scheme>(
-                &mut rng,
-                &schemes[0],
-                &request,
-                &stale_hint_proof
-            ),
-            Err(light::Error::Proof)
-        ));
-        let stale = WithdrawalClaimRequest {
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), start)).await,
+            Some(Record::Claimed(start + 2))
+        );
+        let unpaid = unpaid_append_count(&db, &claims).await;
+        let range_records = claimed_record_count(&db, start + 4).await;
+        assert_eq!((unpaid, range_records), (1, 2));
+        assert_eq!(range_records, unpaid + 1);
+        assert!(db.finalize().await.durable().await);
+        drop(db);
+        let db = open(context.child("fragmented_reopen"), "flat-payout-status").await;
+        assert_eq!(
+            claimed(&db, index).await,
+            Some(ClaimedRange {
+                start,
+                end: start + 2,
+            })
+        );
+        assert_eq!(claimed(&db, start + 2).await, None);
+        assert_eq!(
+            claimed(&db, start + 3).await,
+            Some(ClaimedRange {
+                start: start + 3,
+                end: start + 4,
+            })
+        );
+        let unpaid = unpaid_append_count(&db, &claims).await;
+        let range_records = claimed_record_count(&db, start + 4).await;
+        assert_eq!((unpaid, range_records), (1, 2));
+        assert_eq!(range_records, unpaid + 1);
+        let last = WithdrawalClaimRequest {
             deployment: deployment(),
-            start,
             claim: claims[2].clone(),
         };
         let reserve = status(&db).await.claimable;
-        seal_native(
+        let exact_request = req(Lookup::Claimed { index: start });
+        let (merged, _) = certified_read(
             &db,
+            &schemes,
+            participants[0].clone(),
             15,
-            &native(),
-            &[SettlementTx::ClaimWithdrawal(stale.clone())],
-        )
-        .await;
-        assert_eq!(status(&db).await.claimable, reserve);
-        seal_native(
-            &db,
-            16,
-            &native(),
-            &[SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
-                start: start + 2,
-                ..stale
-            })],
+            vec![
+                SettlementTx::ClaimWithdrawal(last.clone()),
+                SettlementTx::ClaimWithdrawal(last),
+            ],
+            &exact_request,
         )
         .await;
         assert_eq!(status(&db).await.claimable, reserve - 1);
+        let merged = light::verify_read::<deterministic::Context, Scheme>(
+            &mut rng,
+            &schemes[0],
+            &exact_request,
+            &merged,
+        )
+        .unwrap();
         assert_eq!(
-            read(&db, &unclaimed_key(&deployment(), start + 2)).await,
+            merged.claimed,
+            Some(ClaimedRange {
+                start,
+                end: start + 4,
+            })
+        );
+        assert_eq!(claimed(&db, start + 2).await, merged.claimed);
+        assert_eq!(
+            read(&db, &claimed_key(&deployment(), start + 3)).await,
             None
         );
+        let unpaid = unpaid_append_count(&db, &claims).await;
+        let range_records = claimed_record_count(&db, start + 4).await;
+        assert_eq!((unpaid, range_records), (0, 1));
+        assert_eq!(range_records, unpaid + 1);
     });
 }
 

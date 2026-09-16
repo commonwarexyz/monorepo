@@ -194,7 +194,7 @@ pub struct Projection {
     pub root: Root,
     pub finalized_balances: [u64; ACCOUNTS],
     pub payout_head: u64,
-    pub unclaimed: BTreeMap<u64, u64>,
+    pub claimed: BTreeMap<u64, u64>,
     pub outputs: [[Option<u64>; ACCOUNTS]; EPOCHS],
     /// Certified consumption exists even when its authenticated amount is zero.
     pub released: [[Option<u64>; ACCOUNTS]; EPOCHS],
@@ -236,7 +236,6 @@ struct Close {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ClaimCache {
     head: u64,
-    start: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -278,7 +277,7 @@ pub struct State {
     root: Root,
     finalized_balances: [u64; ACCOUNTS],
     finalized_payout_head: u64,
-    unclaimed: BTreeMap<u64, u64>,
+    claimed: BTreeMap<u64, u64>,
     claim_cache: [Option<ClaimCache>; EPOCHS * ACCOUNTS],
     released: [[Option<u64>; ACCOUNTS]; EPOCHS],
     reconciliation: Option<Reconciliation>,
@@ -320,11 +319,40 @@ impl State {
             .map(|(epoch, account, _)| epoch * ACCOUNTS + account)
     }
 
-    fn containing_start(&self, id: OutputId) -> Option<u64> {
-        self.unclaimed
+    fn insert_claimed(&mut self, id: OutputId) -> bool {
+        let before = self
+            .claimed
             .range(..=id)
             .next_back()
-            .and_then(|(start, end)| (id < *end).then_some(*start))
+            .map(|(&start, &end)| (start, end));
+        if before.is_some_and(|(start, end)| start <= id && id < end) {
+            return false;
+        }
+        let after_start = before.map_or(id, |(start, _)| start);
+        let after = self
+            .claimed
+            .range((
+                std::ops::Bound::Excluded(after_start),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(&start, &end)| (start, end));
+        let mut start = id;
+        let mut end = id + 1;
+        if let Some((before_start, before_end)) = before
+            && before_end == id
+        {
+            self.claimed.remove(&before_start);
+            start = before_start;
+        }
+        if let Some((after_start, after_end)) = after
+            && after_start == end
+        {
+            self.claimed.remove(&after_start);
+            end = after_end;
+        }
+        self.claimed.insert(start, end);
+        true
     }
 
     fn boundary(&self) -> u8 {
@@ -422,7 +450,7 @@ impl WithdrawalModel {
             root: 0,
             finalized_balances: INITIAL_BALANCES,
             finalized_payout_head: 1,
-            unclaimed: BTreeMap::new(),
+            claimed: BTreeMap::new(),
             claim_cache: [None; EPOCHS * ACCOUNTS],
             released: [[None; ACCOUNTS]; EPOCHS],
             reconciliation: None,
@@ -455,7 +483,7 @@ impl WithdrawalModel {
             root: state.root,
             finalized_balances: state.finalized_balances,
             payout_head: state.finalized_payout_head,
-            unclaimed: state.unclaimed.clone(),
+            claimed: state.claimed.clone(),
             outputs: state
                 .closes
                 .map(|close| close.map_or([None; ACCOUNTS], |c| c.outputs)),
@@ -770,10 +798,8 @@ impl WithdrawalModel {
                 }
                 let close = state.closes[state.root as usize].expect("admission owns a close");
                 state.finalized_balances = close.successor;
-                let end = close.payout_operations - 1;
-                if state.finalized_payout_head < end {
-                    state.unclaimed.insert(state.finalized_payout_head, end);
-                }
+                let commit = close.payout_operations - 1;
+                assert!(state.insert_claimed(commit));
                 state.finalized_payout_head = close.payout_operations;
                 state.root += 1;
                 Outcome::Accepted
@@ -837,7 +863,6 @@ impl WithdrawalModel {
                 let slot = epoch * ACCOUNTS + account;
                 state.claim_cache[slot] = Some(ClaimCache {
                     head: state.finalized_payout_head,
-                    start: state.containing_start(output),
                 });
                 Outcome::Accepted
             }
@@ -858,21 +883,8 @@ impl WithdrawalModel {
                 if epoch >= state.root as usize {
                     return Outcome::Rejected;
                 }
-                let Some(start) = state.containing_start(output) else {
+                if !state.insert_claimed(output) {
                     return Outcome::Rejected;
-                };
-                if cache.start != Some(start) {
-                    return Outcome::Rejected;
-                }
-                let end = state
-                    .unclaimed
-                    .remove(&start)
-                    .expect("covering interval exists");
-                if start < output {
-                    state.unclaimed.insert(start, output);
-                }
-                if output + 1 < end {
-                    state.unclaimed.insert(output + 1, end);
                 }
                 state.claim_cache[slot] = None;
                 state.released[epoch][account] = Some(amount);
@@ -1102,12 +1114,22 @@ impl WithdrawalModel {
                     .is_some_and(|(epoch, account, _)| state.released[epoch][account].is_none())
             })
             .collect::<BTreeSet<_>>();
-        let covered = state
-            .unclaimed
+        let claimed = state
+            .claimed
             .iter()
             .flat_map(|(start, end)| *start..*end)
             .collect::<BTreeSet<_>>();
-        if outstanding != covered || state.unclaimed.len() > outstanding.len() {
+        let expected_claimed = (1..state.finalized_payout_head)
+            .filter(|index| !outstanding.contains(index))
+            .collect::<BTreeSet<_>>();
+        let mut previous_end = None;
+        let canonical = state.claimed.iter().all(|(&start, &end)| {
+            let valid = start < end && previous_end.is_none_or(|previous| previous < start);
+            previous_end = Some(end);
+            valid
+        });
+        if claimed != expected_claimed || !canonical || state.claimed.len() > outstanding.len() + 1
+        {
             return false;
         }
         for account in 0..ACCOUNTS {
@@ -1440,10 +1462,8 @@ impl Model for WithdrawalModel {
             for account in 0..ACCOUNTS {
                 if let Some(output) = state.output_id(epoch, account) {
                     let slot = epoch * ACCOUNTS + account;
-                    let current = state.claim_cache[slot].is_some_and(|cache| {
-                        cache.head == state.finalized_payout_head
-                            && cache.start == state.containing_start(output)
-                    });
+                    let current = state.claim_cache[slot]
+                        .is_some_and(|cache| cache.head == state.finalized_payout_head);
                     if epoch < state.root as usize
                         && state.released[epoch][account].is_none()
                         && !current
@@ -1713,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_head_and_interval_hint_refresh_the_same_output_identity() {
+    fn stale_head_refreshes_the_same_output_identity() {
         let model = WithdrawalModel::default();
         let mut state = model.initial_state();
         apply_all(
@@ -1745,15 +1765,13 @@ mod tests {
                 Action::Claim(first),
             ],
         );
+        let second_claim = model.step(&state, Action::Claim(second));
         assert_eq!(
-            model.step(&state, Action::Claim(second)).outcome,
-            Outcome::Rejected
+            second_claim.outcome,
+            Outcome::Accepted,
+            "a same-head claim does not carry a stale range hint"
         );
-        apply_all(
-            &model,
-            &mut state,
-            [Action::Refresh(second), Action::Claim(second)],
-        );
+        assert_eq!(second_claim.state.claimed, BTreeMap::from([(1, 4)]));
 
         // An empty finalized epoch changes the current native head without changing identity.
         let model = WithdrawalModel::default();
@@ -1771,6 +1789,7 @@ mod tests {
             .head;
         close_and_finalize(&model, &mut state, 1, 0);
         assert_ne!(state.finalized_payout_head, old_head);
+        assert_eq!(state.claimed, BTreeMap::from([(2, 4)]));
         assert_eq!(
             model.step(&state, Action::Claim(output)).outcome,
             Outcome::Rejected
@@ -1780,6 +1799,7 @@ mod tests {
             &mut state,
             [Action::Refresh(output), Action::Claim(output)],
         );
+        assert_eq!(state.claimed, BTreeMap::from([(1, 4)]));
 
         // A different valid path at the same head cannot release the global index twice.
         let released = state.released;

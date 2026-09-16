@@ -31,8 +31,7 @@ use crate::{
         query::{Lookup, ReadRequest},
         state::{
             AdmittedRootsResponse, Record, RegistrationRecord, StatusRecord, WithdrawalResponse,
-            admitted_key, deposit_key, payout_head_key, registration_key, status_key,
-            unclaimed_key, withdrawal_key,
+            admitted_key, deposit_key, registration_key, status_key, withdrawal_key,
         },
         tx::{AdmitRequest, QueueWithdrawalRequest, SettlementTx, WithdrawalClaimRequest},
     },
@@ -1867,7 +1866,7 @@ impl ChainBackend for PendingAdmission {
             _ => anyhow::bail!("unexpected admission lookup"),
         };
         Ok(Verified {
-            unclaimed: None,
+            claimed: None,
             payout_tip: request
                 .lookup
                 .requires_payout_tip()
@@ -2056,16 +2055,22 @@ impl Chain {
     /// Resolves this output against one controlled current harness state.
     async fn claim_withdrawal(
         &self,
+        context: &deterministic::Context,
         _source_batch: BatchId<Digest>,
         claim: &WithdrawalClaim<Digest>,
     ) -> Option<WithdrawalResponse> {
         use crate::chain::query::{Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse};
-        let Some(Record::PayoutHead(head)) =
-            self.control.record(payout_head_key(&deployment())).await
-        else {
-            return None;
-        };
-        let head = head.payouts;
+        let mut client = client::Client::new(
+            self.control.identity(),
+            deployment(),
+            vec![SocketAddr::from(([127, 0, 0, 1], 9_800))],
+            context.child("claim_status"),
+        )
+        .ok()?;
+        let status = ChainBackend::payout_status(&mut client, context, claim.position())
+            .await
+            .ok()?;
+        let head = status.head;
         let EvidenceResponse::Served(Evidence::Payout(refreshed)) = self
             .control
             .evidence(EvidenceRequest {
@@ -2083,35 +2088,17 @@ impl Chain {
         if output != *claim.output() || refreshed.position() != claim.position() {
             return None;
         }
-        let mut containing = None;
-        for start in 0..=claim.position() {
-            if let Some(Record::Unclaimed(end)) = self
-                .control
-                .record(unclaimed_key(&deployment(), start))
-                .await
-                && claim.position() < end
-            {
-                containing = Some(start);
-            }
-        }
-        if let Some(start) = containing {
+        if status.claimed.is_none() {
             self.control
                 .submit(SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                     deployment: deployment(),
-                    start,
                     claim: refreshed,
                 }))
                 .await;
-            for start in 0..=claim.position() {
-                if let Some(Record::Unclaimed(end)) = self
-                    .control
-                    .record(unclaimed_key(&deployment(), start))
-                    .await
-                    && claim.position() < end
-                {
-                    return None;
-                }
-            }
+            ChainBackend::payout_status(&mut client, context, claim.position())
+                .await
+                .ok()?
+                .claimed?;
         }
         Some(output.into())
     }
@@ -4900,7 +4887,11 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
             first.context.predecessor_logs().payouts.operations
         );
 
-        let first_output = released(chain.claim_withdrawal(first_batch, &first_claim).await);
+        let first_output = released(
+            chain
+                .claim_withdrawal(&context, first_batch, &first_claim)
+                .await,
+        );
         assert_eq!(chain.status().await.claimable, 0);
 
         operator.withdraw(1, amount(30)).unwrap();
@@ -4928,16 +4919,28 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
             second.context.predecessor_logs().payouts.operations
         );
         assert_ne!(second_batch, first_batch);
-        let second_output = released(chain.claim_withdrawal(second_batch, &second_claim).await);
+        let second_output = released(
+            chain
+                .claim_withdrawal(&context, second_batch, &second_claim)
+                .await,
+        );
         assert_eq!(chain.status().await.claimable, 0);
         assert_eq!(
-            released(chain.claim_withdrawal(second_batch, &second_claim).await),
+            released(
+                chain
+                    .claim_withdrawal(&context, second_batch, &second_claim)
+                    .await
+            ),
             second_output
         );
 
         // Completion identity remains the native position and output across later finalizations.
         assert_eq!(
-            released(chain.claim_withdrawal(first_batch, &first_claim).await),
+            released(
+                chain
+                    .claim_withdrawal(&context, first_batch, &first_claim)
+                    .await
+            ),
             first_output
         );
         assert_eq!(chain.status().await.claimable, 0);
@@ -5011,7 +5014,7 @@ fn ordinary_withdrawal_is_included_and_claimable() {
             operator.wallets[0].public_key().as_ref()
         );
         chain.admit(&result).await;
-        let release = released(chain.claim_withdrawal(batch_id, &evidence).await);
+        let release = released(chain.claim_withdrawal(&context, batch_id, &evidence).await);
         assert_eq!(release.amount, 25);
         assert_eq!(
             release.destination.as_ref(),
@@ -5020,7 +5023,7 @@ fn ordinary_withdrawal_is_included_and_claimable() {
         assert_eq!(release.amount, evidence.output().amount());
         assert_eq!(&release.destination, evidence.output().destination());
         assert_eq!(
-            released(chain.claim_withdrawal(batch_id, &evidence).await,),
+            released(chain.claim_withdrawal(&context, batch_id, &evidence).await),
             release
         );
     });
@@ -5065,7 +5068,7 @@ fn offset_boundaries_settle_in_their_registered_epoch() {
         let claim = payout_claim(&operator, &result, 0);
         let release = released(
             chain
-                .claim_withdrawal(result.header.batch_id::<Sha256>(), &claim)
+                .claim_withdrawal(&context, result.header.batch_id::<Sha256>(), &claim)
                 .await,
         );
         assert_eq!(release.amount, 7);
@@ -5174,7 +5177,7 @@ fn queued_withdrawal_uses_the_settled_offset_balance() {
             let claim = payout_claim(&operator, result, 0);
             let release = released(
                 chain
-                    .claim_withdrawal(result.header.batch_id::<Sha256>(), &claim)
+                    .claim_withdrawal(&context, result.header.batch_id::<Sha256>(), &claim)
                     .await,
             );
             assert_eq!(release.amount, 7);

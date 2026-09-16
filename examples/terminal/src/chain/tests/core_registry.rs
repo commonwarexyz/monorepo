@@ -364,7 +364,7 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
             crate::chain::state::preflight(&db, &finalized, &native, &Timing::DEFAULT, &direct).await.unwrap(),
             crate::chain::state::Preflight::Eligible { action: None }
         );
-        let interval = unclaimed_key(&deployment(), claim.start);
+        let position = claim.claim.position();
         seal_native(
             &db,
             14,
@@ -382,7 +382,8 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
             read(&db, &deposit_key(&target, &event.id)).await,
             Some(Record::Deposit(event))
         );
-        assert!(matches!(read(&db, &interval).await, Some(Record::Unclaimed(_))));
+        assert!(claimed(&db, position).await.is_none());
+        assert_eq!(read(&db, &claimed_key(&target, position)).await, None);
         assert_eq!(status(&db).await.claimable, 7);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),
@@ -393,7 +394,8 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
         );
         assert_supply(&db, &native, &[]).await;
         seal_native(&db, 15, &native, &[SettlementTx::ClaimWithdrawal(claim)]).await;
-        assert_eq!(read(&db, &interval).await, None);
+        assert!(claimed(&db, position).await.is_some());
+        assert_eq!(read(&db, &claimed_key(&target, position)).await, None);
         assert_eq!(status(&db).await.claimable, 0);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),
