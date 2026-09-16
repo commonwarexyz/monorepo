@@ -129,8 +129,8 @@ O’Grady</a></div>
         protocol for many-to-many payments at massive scale. At each
         settlement, all of that activity is bound by a ~100-byte
         certified commitment that most chains can process. Binding
-        receipts arrive as fast as browsing the web and double as the
-        evidence that holds the system honest. Payments flow through a
+        receipts arrive in one round trip and provide the evidence to
+        hold the operator accountable. Payments flow through a
         non-custodial operator selected by the sender: if the operator
         disappears or censors an account, senders and recipients alike
         can force recovery onchain without its cooperation. And the
@@ -248,7 +248,7 @@ O’Grady</a></div>
         <span class="math inline">D_a=20</span>, and <span
         class="math inline">V_a=\{b:(20,1)\}</span>.</p>
         <p>The wallet durably saves each request before sending it,
-        retries the same bytes after response loss, and retains the
+        retries the same bytes if the response is lost, and retains the
         verified acknowledgment and openings. One signature can also
         advance several recipients in a batch that the operator either
         rejects in full or accepts with one acknowledgment containing an
@@ -301,12 +301,7 @@ O’Grady</a></div>
         c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
         </span></p>
         <p><span class="math inline">b</span>’s three incoming payments
-        end as the entries <span class="math inline">(20,1)</span> in
-        <span class="math inline">a</span>’s vector, <span
-        class="math inline">(4,1)</span> in <span
-        class="math inline">c</span>’s, and <span
-        class="math inline">(6,1)</span> in <span
-        class="math inline">d</span>’s.</p>
+        remain in their payers’ vectors:</p>
         <p><span class="math display">
         \begin{bmatrix}
         \underset{a\to b}{(20,1)} &amp;
@@ -359,11 +354,11 @@ O’Grady</a></div>
         <p><span class="math display">
         \boxed{D_e=C_e.}
         </span></p>
-        <p>Here <span class="math inline">D_e=C_e=54</span>. Summing
-        account balances into <span class="math inline">L_e</span> and
-        <span class="math inline">L_{e+1}</span> cancels payments,
-        leaving only deposits <span class="math inline">F_e</span> and
-        withdrawals <span class="math inline">W_e</span>:</p>
+        <p>Summing across accounts cancels payments, so the total
+        balance changes from <span class="math inline">L_e</span> to
+        <span class="math inline">L_{e+1}</span> only through deposits
+        <span class="math inline">F_e</span> and withdrawals <span
+        class="math inline">W_e</span>:</p>
         <p><span class="math display">
         \boxed{L_{e+1}=L_e+F_e-W_e.}
         </span></p>
@@ -383,8 +378,7 @@ O’Grady</a></div>
         committed by <span
         class="math inline">\mathsf{StateRoot}</span>. Deposits and
         payments can add accounts, and a zero balance removes the
-        record. Payment totals and counts belong to the epoch’s
-        evidence.</p>
+        record.</p>
         <p>When a payment names a new public key, the operator records a
         balance for it without an onchain registration transaction. The
         recipient can spend the balance after the close is admitted, or
@@ -413,8 +407,7 @@ O’Grady</a></div>
         of external payout outputs.</li>
         </ul>
         <p>Activity and payouts use Keyless QMDBs backed by flat Merkle
-        mountain ranges (MMRs). Each log commits its cumulative records
-        under one root.</p>
+        mountain ranges (MMRs).</p>
         <p>Each close appends its sorted account Rows, then its payment
         Entries grouped by payer. A Row records the account’s final
         debit, sequence number, and outgoing-payment binary Merkle tree
@@ -427,9 +420,6 @@ O’Grady</a></div>
         operator’s dealing and the epoch’s context. Validators already
         hold the balances needed to compute the new state, so the
         dealing needs no state-change proof.</p>
-        <p>Tree construction belongs to validators. The operator
-        collects signed activity and proposes the dealing. It can also
-        run QMDB replicas to serve best-effort queries.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. State uses Current Ordered QMDB, while activity and payouts use Keyless QMDB. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances. This close creates no payouts.">
         <div class="image-caption">
         <p>Figure 4: The close binds three validator-derived roots. The
@@ -461,27 +451,24 @@ O’Grady</a></div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.">
         <div class="image-caption">
         <p>Figure 5: Every validator derives the same three QMDB roots
-        before signing one close commitment. Before its vote leaves, it
-        durably commits the three public candidates and then its private
-        checkpoint and signing decision.</p>
+        before signing one close commitment.</p>
         </div>
         <p>The certificate is one 48-byte aggregate signature plus a
         <span class="math inline">\lceil n/8\rceil</span>-byte signer
-        bitmap, with proofs of possession checked when the committee
-        registered. With the 32-byte commitment and an eight-byte
-        bitmap-length prefix, the 100-validator signed header and
-        certificate are 101 bytes. The validator-derived root bundle is
-        184 bytes. Adding the eight-byte withdrawal total makes its
-        descriptor 192 bytes, or 293 bytes together before chain
-        transaction framing. These values are separate from the
-        operator’s dealing.</p>
+        bitmap, with proofs of possession checked at committee
+        registration. Including the 32-byte commitment and an eight-byte
+        bitmap-length prefix, the total for 100 validators is 101 bytes.
+        The validator-derived root bundle is 184 bytes. Adding the
+        eight-byte withdrawal total makes its descriptor 192 bytes, or
+        293 bytes together before chain transaction framing. These
+        values are separate from the operator’s dealing.</p>
         <p>The settlement chain admits the certified close into an
         ordered queue. A close can finalize only after its challenge
         deadline <span class="math inline">\Delta_e</span> has passed
-        and every earlier close has finalized. Candidate log storage may
-        already contain a pending descendant, but a successful challenge
-        discards that logical suffix. Discarded outputs never advance
-        the finalized payout root and cannot be claimed.</p>
+        and every earlier close has finalized. A successful challenge
+        invalidates that close and any pending descendants, whose
+        outputs never enter the finalized payout root and cannot be
+        claimed.</p>
         <h2 id="keeping-proofs-available">Keeping Proofs Available</h2>
         <p>Before releasing a vote, a validator durably commits the
         three public QMDBs in parallel, then durably records their
@@ -528,11 +515,11 @@ O’Grady</a></div>
         <p>Each close’s certified account range records the final
         activity of every disclosed account. A missing payer counts as
         zero debit, so a proof of absence can challenge an omitted
-        payment. For a nonempty range, absence is proved by MMR
-        membership for the adjacent full Rows at adjacent positions, or
-        by membership at the left or right edge. A certified row count
-        of zero proves that the range is empty. Strict key ordering and
-        uniqueness make these cases exhaustive.</p>
+        payment. For a nonempty range, an MMR proof opens the
+        neighboring Rows, or the Row at either end of the range. A
+        certified row count of zero proves that the range is empty.
+        Strict key ordering and uniqueness make these cases
+        exhaustive.</p>
         <p>Receipt holders can prove three kinds of contradiction:</p>
         <ol type="1">
         <li><p><strong>Debit mismatch.</strong> For example, the close
@@ -545,27 +532,22 @@ O’Grady</a></div>
         countersigns different bodies at the same payer sequence
         number.</p></li>
         </ol>
-        <p>Because certification has checked the accounting and signed
-        payer states, a receipt holder can prove a contradiction with
-        signatures, an activity-MMR opening, and any signed payer-vector
-        BMT opening in one onchain call, without an interactive dispute
-        game. Every receipt a user relies on needs an honest holder who
-        retains the private receipt, obtains the public openings from a
-        sufficiently retained native replica, and gets a challenge
-        included by <span class="math inline">\Delta_e</span>. No
-        replica can reconstruct a private receipt nobody saved.</p>
+        <p>Because validators have already checked the accounting and
+        signed payer states, a receipt holder can prove a contradiction
+        in one onchain call using signatures and any required Merkle
+        openings. Every receipt a user relies on needs an honest holder
+        who retains it, obtains the public openings from a replica, and
+        gets a challenge included by <span
+        class="math inline">\Delta_e</span>.</p>
         <p>Suppose <span class="math inline">b</span> has already served
         the API response, but the operator leaves <span
         class="math inline">a</span>’s payment of 20 out of the close.
         The receipt and a public proof of the omission let <span
         class="math inline">b</span> prove operator fault without the
-        operator’s cooperation. That is what makes the receipt binding.
-        An application could use this evidence to compensate <span
-        class="math inline">b</span> from an onchain insurance fund,
-        permanently exclude the operator, or support offchain
-        resolution. The recipient can seek a remedy beyond simply
-        deciding not to use that operator again (unlike other approaches
-        that offer only best-effort preconfirmations).</p>
+        operator’s cooperation. An application could use this evidence
+        to compensate <span class="math inline">b</span> from an onchain
+        insurance fund, permanently exclude the operator, or support
+        offchain resolution.</p>
         <h2 id="a-deadline-to-exit">A Deadline to Exit</h2>
         <p>A successful challenge stops a contested close from
         finalizing, but users must still be able to get their funds out.
@@ -575,9 +557,9 @@ O’Grady</a></div>
         directly onchain, even during an active epoch. The next
         registration must include it.</p>
         <p>Once a withdrawal request is queued onchain or included in an
-        admitted close, its carrying close must finalize before the
-        signed deadline <span class="math inline">T_w</span> to avoid a
-        hard fault. With challenge deadline <span
+        admitted close, the close that carries it must finalize before
+        the signed deadline <span class="math inline">T_w</span> to
+        avoid a hard fault. With challenge deadline <span
         class="math inline">\Delta_e</span>,</p>
         <p><span class="math display">
         \boxed{\Delta_e&lt;t_{\mathrm{finalize}}&lt;T_w.}
@@ -587,13 +569,13 @@ O’Grady</a></div>
         derived withdrawal output, including a zero-valued one, is
         appended to one payout MMR at a stable global index. An MMR
         opening binds that index to the output’s destination and amount.
-        It has no claim deadline and its index is never recycled. A
-        zero-valued output can still be marked claimed, even when its
-        reserve is zero.</p>
-        <p>Pending outputs become claimable only when their carrying
-        close reaches FIFO finality. The chain then advances its
+        The output has no claim deadline, and its index is never
+        recycled.</p>
+        <p>Pending outputs become claimable only when the close that
+        carries them reaches finality. The chain then advances its
         finalized payout root and count and reserves the exact outflow.
-        A challenged or invalidated suffix advances none of them.</p>
+        A challenged or invalidated suffix advances neither root nor
+        count and reserves no outflow.</p>
         <p>A claim supplies the output and an MMR opening against the
         current finalized payout root and count. The chain tracks paid
         indices in an ordered map of disjoint <strong>claimed
@@ -611,15 +593,12 @@ O’Grady</a></div>
         ranges, so these five claims occupy one record. Only payout
         indices 10–14 are shown. Ranges are end-exclusive.</p>
         </div>
-        <p>Each claim checks only its neighboring ranges. The demo folds
-        non-payout log positions into these ranges so close boundaries
-        do not prevent merging. Fully paid history collapses to one
-        range. With <span class="math inline">U</span> outstanding
-        outputs, at most <span class="math inline">U+1</span> ranges
-        remain, even under adversarial claim order.</p>
-        <p>Settlement state therefore includes the three principal roots
-        and counts, bounded pending-close metadata, custody and timing
-        controls, and these claimed ranges.</p>
+        <p>Each claim checks only its neighboring ranges. Non-payout log
+        positions are included in claimed ranges so close boundaries do
+        not prevent merging. Fully paid history collapses to one range.
+        With <span class="math inline">U</span> outstanding outputs, at
+        most <span class="math inline">U+1</span> ranges remain, even
+        under adversarial claim order.</p>
         <h3 id="hard-fault">Hard Fault</h3>
         <p>If the operator misses an admission, deposit, or withdrawal
         deadline, or a holder proves a fault, the deployment permanently
@@ -629,13 +608,13 @@ O’Grady</a></div>
         <p>The recovery rules keep finalized payouts independently
         claimable, with no expiry, and refund unadmitted deposits.
         Accounts recover their balances with QMDB proofs against the
-        frozen root, and each account can claim only once. Payments in a
-        never-admitted or invalidated close do not debit that state or
-        promote its candidate payout suffix.</p>
-        <p>Recovery needs a correct, live settlement chain and
-        independently available balance and payout openings even when
-        the operator disappears. Longer-retention native replicas supply
-        those witnesses. A fault freezes the last surviving finalized
+        frozen root, and each account can claim only once. A close that
+        was never admitted or was invalidated changes neither the
+        recoverable balances nor the finalized payouts.</p>
+        <p>Even if the operator disappears, recovery depends on a
+        correct, live settlement chain and independently available
+        balance and payout openings. Replicas with longer retention
+        supply those proofs. The fault also freezes the last finalized
         payout root and count, against which later claims refresh their
         openings.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
@@ -651,8 +630,9 @@ O’Grady</a></div>
         before <span class="math inline">e</span> finalizes.
         Registration fixes deposits and signed withdrawal authorizations
         before the first payment is acknowledged.</p>
-        <p>For accounts without deposits or withdrawals, new payments
-        can overlap credit imports. The preserved head <span
+        <p>For accounts without deposits or withdrawals, successor
+        payments can proceed while predecessor credits are still being
+        imported. The preserved head <span
         class="math inline">\widetilde B_a</span> is the starting
         balance minus accepted predecessor debits plus credits already
         imported. The remaining predecessor credit is <span
@@ -660,8 +640,8 @@ O’Grady</a></div>
         <p><span class="math display">
         \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
         </span></p>
-        <p>The preserved head is safe to spend against. Importing credit
-        adds <span class="math inline">\rho_a</span> to the live
+        <p>The account can spend from the preserved head. Importing
+        credit adds <span class="math inline">\rho_a</span> to the live
         balance, preserving any successor debits already accepted.</p>
         <p>In the running example, <span
         class="math inline">a\xrightarrow{20}b</span> leaves the
@@ -749,36 +729,10 @@ O’Grady</a></div>
         </div>
         <h3 id="proof-sizes-and-verification">Proof Sizes and
         Verification</h3>
-        <p>Tree openings below use the current roots. Sizes are encoded
-        bytes, and verification starts from decoded inputs. These are
-        measurements at sampled positions, not worst-case bounds.</p>
-        <p>An activity proof shows whether an account appears in the
-        close. Presence opens its account record. Absence opens the
-        neighboring records. Each fixture below contains one close.</p>
-        <div class="clearing-benchmark-table">
-        <table>
-          <thead>
-            <tr>
-              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Activity proof</th>
-              <th colspan="4" style="text-align:center;">Accounts in close</th>
-            </tr>
-            <tr>
-              <th style="text-align:right;">1,000</th>
-              <th style="text-align:right;">10,000</th>
-              <th style="text-align:right;">100,000</th>
-              <th style="text-align:right;">1,000,000</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td>Account present</td><td style="text-align:right;">381 B<br><small>1.20 µs</small></td><td style="text-align:right;">509 B<br><small>1.56 µs</small></td><td style="text-align:right;">606 B<br><small>1.87 µs</small></td><td style="text-align:right;">702 B<br><small>2.14 µs</small></td></tr>
-            <tr><td>Account absent</td><td style="text-align:right;">464 B<br><small>1.33 µs</small></td><td style="text-align:right;">592 B<br><small>1.71 µs</small></td><td style="text-align:right;">689 B<br><small>2.01 µs</small></td><td style="text-align:right;">785 B<br><small>2.24 µs</small></td></tr>
-          </tbody>
-        </table>
-        </div>
-        <p>A complete challenge also carries the signed receipt and,
-        when needed, a payer-vector BMT opening.</p>
-        <p>These four fixtures use one million live accounts, a
-        512-account recipient pool, and one recipient per payer.</p>
+        <p>Complete challenges include the signed receipts and any
+        required Merkle openings. These fixtures use one million live
+        accounts, a 512-account recipient pool, and one recipient per
+        payer. Sizes are encoded bytes.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -801,12 +755,8 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 10: All measured challenges fit in 1 KB. Activity
-        fixtures contain account records without payment entries, and
-        lookup sizes include the record(s) and MMR opening. The trusted
-        log header and account range are separate. Lookup times average
-        three batches of 1,000 verifications. An omitted payer is the
-        absence case of debit mismatch.</p>
+        <p>Figure 10: All measured challenges fit in 1 KB. An omitted
+        payer is the absence case of debit mismatch.</p>
         </div>
         <p>A payout proof opens one output under the current finalized
         root.</p>
@@ -831,9 +781,9 @@ O’Grady</a></div>
         </div>
         <div class="image-caption">
         <p>Figure 11: Each proof includes a 30-byte output and its MMR
-        opening, measured at the middle payout. Verification times
-        average 20 samples. The trusted root and transaction framing are
-        separate.</p>
+        opening, measured at the middle payout. Verification starts from
+        decoded inputs, with times averaged over 20 samples. The trusted
+        root and transaction framing are separate.</p>
         </div>
         <p>Balance proofs authenticate withdrawal requests and recovery
         claims. With one million live accounts, all three measured
@@ -880,14 +830,13 @@ O’Grady</a></div>
         Payments, One Settlement</h2>
         <p>Send a million payments without paying for a million onchain
         transactions.</p>
-        <p>That makes small exchanges practical, like an agent buying a
-        single API response. Recipients can deliver the goods now,
-        knowing the operator has made a binding commitment to the
-        payment. If the operator later omits or contradicts that
-        payment, the signed receipt gives them the evidence to challenge
-        the close.</p>
+        <p>Recipients can deliver the goods as soon as they verify a
+        binding receipt, with evidence to challenge any payment the
+        operator later omits or contradicts. Sharing settlement costs
+        makes small exchanges practical, down to an agent buying a
+        single API response.</p>
         <p>The settlement chain keeps compact commitments and merged
-        claimed ranges, alongside custody and timing controls.</p>
+        claimed ranges, a small fraction of the total activity.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
