@@ -101,7 +101,7 @@ impl<E: Context> Partition<E> {
         Ok(indices)
     }
 
-    /// Open every blob in `names` as a [`Writer`], keyed by blob index.
+    /// Open every blob in `names` as a [`PagedRecovery`], keyed by blob index.
     pub(super) async fn open_many(
         &self,
         names: Vec<Vec<u8>>,
@@ -120,7 +120,7 @@ impl<E: Context> Partition<E> {
         Ok(blobs)
     }
 
-    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
+    /// Scan the partition and open every existing blob as a [`PagedRecovery`], keyed by blob index.
     pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let names = Self::scan_names(&self.context, &self.name).await?;
         self.open_many(names).await

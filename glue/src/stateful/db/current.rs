@@ -1556,7 +1556,7 @@ mod tests {
     #[test]
     fn ordered_managed_db_bounded_initialization_to_target_round_trips() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-rewind-round-trip", &context);
+            let config = fixed_config("ordered-bounded-init-round-trip", &context);
             let db =
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
                     .await
@@ -1603,8 +1603,8 @@ mod tests {
             )
             .await
             .unwrap();
-            let target_after_rewind = <OrderedFixedDb as ManagedDb<_>>::sync_target(&db);
-            assert_eq!(target_after_rewind, target_after_first);
+            let target_after_reopen = <OrderedFixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target_after_reopen, target_after_first);
             drop(db);
 
             let mut wrong_root = target_after_first.clone();

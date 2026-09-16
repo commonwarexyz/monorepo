@@ -243,15 +243,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             let _ = sender.send(Some(result));
         }
 
-        #[cfg(test)]
-        fn observe_identity(&self, identity: &Weak<Generation>) {
-            let hook = self.test.after_identity_observation.lock().take();
-            if let Some((entered, release)) = hook {
-                entered.send(identity.strong_count()).unwrap();
-                let _ = release.recv();
-            }
-        }
-
         /// Wait for the obligation captured when the file was opened.
         pub(crate) async fn wait(receiver: Option<Receiver>) -> Result<(), Error> {
             let Some(mut receiver) = receiver else {
@@ -275,19 +266,27 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 });
             }
         }
+    }
 
-        cfg_if! {
-            if #[cfg(test)] {
-                /// Number of registered syncs.
-                pub(crate) fn len(&self) -> usize {
-                    self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
-                }
-
-                /// Number of syncs that finished successfully.
-                pub(crate) fn finished(&self) -> u64 {
-                    self.test.finished.load(Ordering::Acquire)
-                }
+    #[cfg(test)]
+    impl Pending {
+        /// Report the next observed generation's strong count, then wait for release.
+        fn observe_identity(&self, identity: &Weak<Generation>) {
+            let hook = self.test.after_identity_observation.lock().take();
+            if let Some((entered, release)) = hook {
+                entered.send(identity.strong_count()).unwrap();
+                let _ = release.recv();
             }
+        }
+
+        /// Number of registered syncs.
+        pub(crate) fn len(&self) -> usize {
+            self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
+        }
+
+        /// Number of syncs that finished successfully.
+        pub(crate) fn finished(&self) -> u64 {
+            self.test.finished.load(Ordering::Acquire)
         }
     }
 
@@ -330,22 +329,21 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         pub(crate) fn is_dirty(&self) -> bool {
             self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
         }
+    }
 
-        cfg_if! {
-            if #[cfg(test)] {
-                /// Record a sync that found nothing to persist.
-                ///
-                /// Callers sync freely and the runtime skips the device flush when every completed
-                /// mutation through the open is covered.
-                pub(crate) fn skip_sync(&self) {
-                    self.skipped.fetch_add(1, Ordering::AcqRel);
-                }
+    #[cfg(test)]
+    impl Tracker {
+        /// Record a sync that found nothing to persist.
+        ///
+        /// Callers sync freely and the runtime skips the device flush when every completed
+        /// mutation through the open is covered.
+        pub(crate) fn skip_sync(&self) {
+            self.skipped.fetch_add(1, Ordering::AcqRel);
+        }
 
-                /// Number of syncs skipped because the open was clean.
-                pub(crate) fn skipped(&self) -> u64 {
-                    self.skipped.load(Ordering::Acquire)
-                }
-            }
+        /// Number of syncs skipped because the open was clean.
+        pub(crate) fn skipped(&self) -> u64 {
+            self.skipped.load(Ordering::Acquire)
         }
     }
 

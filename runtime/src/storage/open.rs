@@ -191,10 +191,13 @@ pub(crate) mod tests {
 
     type OpenObservation = (Sender<usize>, Receiver<()>);
 
+    /// Pause this thread's next namespace handoff after reporting arrival through `entered`.
+    /// Resume when `released` receives a message or its sender drops.
     pub(crate) fn pause_namespace(entered: Sender<()>, released: Receiver<()>) {
         NAMESPACE_HANDOFF.with(|hook| *hook.borrow_mut() = Some((entered, released)));
     }
 
+    /// Report whether the registry is locked when this thread next attempts a namespace operation.
     pub(crate) fn watch_registry(entered: Sender<bool>) {
         REGISTRY_OBSERVATION.with(|hook| *hook.borrow_mut() = Some(entered));
     }
@@ -206,6 +209,7 @@ pub(crate) mod tests {
         static REGISTRY_OBSERVATION: RefCell<Option<Sender<bool>>> = const { RefCell::new(None) };
     }
 
+    /// Consume this thread's namespace hook, report arrival, and wait for release.
     pub(super) fn namespace_handoff() {
         NAMESPACE_HANDOFF.with(|hook| {
             if let Some((entered, released)) = hook.borrow_mut().take() {
@@ -215,6 +219,7 @@ pub(crate) mod tests {
         });
     }
 
+    /// Consume this thread's registry hook and report the lock state before attempting entry.
     pub(super) fn registry_entry(locked: bool) {
         REGISTRY_OBSERVATION.with(|hook| {
             if let Some(entered) = hook.borrow_mut().take() {
@@ -223,6 +228,8 @@ pub(crate) mod tests {
         });
     }
 
+    /// Consume this thread's open hook, report the current owner count, and wait for release.
+    /// A missing registration reports zero owners.
     pub(super) fn observe_open(identity: Option<&Weak<Live>>) {
         OPEN_OBSERVATION.with(|hook| {
             if let Some((entered, released)) = hook.borrow_mut().take() {

@@ -125,8 +125,8 @@ struct FuzzInput {
     /// mode adds an empty flush that publishes marker debt, a prune, and bounded section
     /// initialization. These ops complete before the fault window opens, so the
     /// marker-before-data ordering inside bounded initialization is not falsifiable here.
-    /// Prune's ordering is made falsifiable by the interrupted-prune final op
-    /// and by the remove faults armed around every prune.
+    /// Prune's ordering is made falsifiable by the interrupted-prune final op and by the remove
+    /// faults armed around every prune.
     ops: [u8; 24],
     /// Shape of the faulted crash: flush everything then abandon the requests (also the
     /// fallback for the prune arm when untracked), interrupt a blocking sync of every
@@ -232,8 +232,8 @@ async fn frame_valid(
 /// Markers trail durability: under crash cuts (no bit rot) a floor was published only after a
 /// completed joint sync covered it, and prune or bounded initialization durably move markers
 /// before data can shrink, so a floor can never exceed the section's durable record count
-/// and every frame below it must still be in bounds and checksum-valid.
-/// Both halves are asserted here against the image-derived boundaries.
+/// and every frame below it must still be in bounds and checksum-valid. Both halves are asserted
+/// here against the image-derived boundaries.
 ///
 /// Maps each section to `(id, value readable)` per retained position, asserting identity against
 /// the intended append stream since an in-model crash cut cannot forge a CRC-valid record.

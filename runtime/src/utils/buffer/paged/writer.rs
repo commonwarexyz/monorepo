@@ -222,7 +222,8 @@ impl<B: Blob> Recovery<B> {
         // Recovery chooses the valid slot with the larger length. While shrinking, the new
         // checksum must be made durable without becoming authoritative until the old longer slot
         // can be disabled. The sequence below therefore lets recovery observe either the old page
-        // or the new shorter page, but not a footer where both slots were damaged by one torn write.
+        // or the new shorter page, but not a footer where both slots were damaged by
+        // one torn write.
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -387,7 +388,8 @@ impl<B: Blob> Recovery<B> {
     }
 
     /// Durably retain at most `size` logical bytes. A size above the current length leaves the
-    /// length unchanged. Pending repair writes are synchronized even when the length does not change.
+    /// length unchanged. Pending repair writes are synchronized even when the length
+    /// does not change.
     pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
         if size < self.size() {
             self.shrink(size).await?;

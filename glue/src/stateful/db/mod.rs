@@ -191,10 +191,9 @@ impl<DB> Shared<DB> {
 /// Read-only access to a database managed by [`Stateful`](super::Stateful).
 ///
 /// Unlike [`Shared`], this handle cannot acquire a write slot, construct or
-/// apply batches, finalize database state, or prune. Applications
-/// receive readers in
-/// [`Application::capture`](super::Application::capture)
-/// and [`Application::finalized`](super::Application::finalized) so observing
+/// apply batches, finalize database state, or prune. Applications receive readers in
+/// [`Application::capture`](super::Application::capture) and
+/// [`Application::finalized`](super::Application::finalized) so observing
 /// finalized state cannot invalidate concurrent speculative batches.
 ///
 /// ```compile_fail
@@ -512,10 +511,9 @@ impl Barrier {
 ///
 /// # Mutation Safety
 ///
-/// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`]
-/// must not overlap. Implementations panic if an
-/// underlying database mutation returns an error. If a mutation panics or is
-/// cancelled after taking a database from [`Shared`], the affected cell remains
+/// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
+/// Implementations panic if an underlying database mutation returns an error. If a mutation
+/// panics or is cancelled after taking a database from [`Shared`], the affected cell remains
 /// empty and subsequent access panics.
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Unmerkleized`] for every database in the set.
@@ -1000,7 +998,11 @@ macro_rules! impl_database_set {
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
 
-            async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
+            async fn init(
+                context: E,
+                config: Self::Config,
+                expected: Option<Self::SyncTargets>,
+            ) -> Self {
                 let result = join!($(
                     async {
                         let db = $T::init(

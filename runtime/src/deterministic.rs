@@ -1688,7 +1688,7 @@ mod tests {
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
     #[cfg(not(target_arch = "wasm32"))]
-    use std::sync::mpsc;
+    use std::sync::mpsc as sync_mpsc;
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -1708,9 +1708,9 @@ mod tests {
             let name = named.then_some(b"blob".as_slice());
             let worker_context = context.child("namespace");
             let competing_context = context.child("competing");
-            let (entered, entering) = mpsc::channel();
-            let (release, released) = mpsc::channel();
-            let (observed, observing) = mpsc::channel();
+            let (entered, entering) = sync_mpsc::channel();
+            let (release, released) = sync_mpsc::channel();
+            let (observed, observing) = sync_mpsc::channel();
             let operation = move |context: Context, open| async move {
                 if open {
                     Some(context.open("partition", b"blob").await.unwrap())

@@ -158,8 +158,10 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
-/// additionally requires retaining that floor. Keyless only restores commit fields.
+/// Check the selected commit before recovery discards history.
+///
+/// Rebuilding a snapshot from its floor additionally requires retaining that floor. Keyless only
+/// restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,

@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn database_set_bounded_initialization_persists_aligned_immutable_target() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "aligned-rewind");
+            let config = fixed_config(&context, "aligned-bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -683,7 +683,7 @@ mod tests {
 
             let database = FixedDb::init(
                 context.child("reopen"),
-                fixed_config(&context, "aligned-rewind"),
+                fixed_config(&context, "aligned-bounded-init"),
                 None,
             )
             .await
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn managed_db_initializes_fixed_immutable_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "rewind");
+            let config = fixed_config(&context, "bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();

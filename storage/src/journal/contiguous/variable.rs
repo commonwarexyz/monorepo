@@ -1125,8 +1125,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // Check the two newest blobs for interior holes. Only they can hold non-durable data
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
-        // survive. `Writer::new` sizes a blob by its last valid page, so it cannot see such a
-        // hole.
+        // survive. `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see
+        // such a hole.
         let mut valid_lengths = BTreeMap::new();
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
@@ -5706,8 +5706,8 @@ mod tests {
     }
 
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
-    /// page, which `Writer::new`'s backward scan cannot see. Recovery must truncate the suspect
-    /// blob at the hole instead of failing on an unreadable page.
+    /// page, which `PagedRecovery::open`'s backward scan cannot see. Recovery must truncate the
+    /// suspect blob at the hole instead of failing on an unreadable page.
     #[test_traced]
     fn test_variable_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();

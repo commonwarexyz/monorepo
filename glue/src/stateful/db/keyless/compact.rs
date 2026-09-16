@@ -960,7 +960,7 @@ mod tests {
     #[test]
     fn managed_db_initializes_fixed_keyless_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "rewind");
+            let config = fixed_config(&context, "bounded-init");
             let mut db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();

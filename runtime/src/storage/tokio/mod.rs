@@ -191,7 +191,8 @@ impl crate::Storage for Storage {
                         Ok((0, blob_version, data_offset))
                     })()
                     .inspect_err(|error: &Error| {
-                        // Retain creation failures until the namespace entry is removed or replaced.
+                        // Retain creation failures until the namespace entry
+                        // is removed or replaced.
                         let sender = pending
                             .start(&generation)
                             .expect("creation owns its namespace entry");

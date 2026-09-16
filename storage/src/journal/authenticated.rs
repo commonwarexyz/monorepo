@@ -1182,17 +1182,18 @@ pub trait Backing<E: Context>: Mutable {
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
     /// Open recovery storage reset to an empty journal at `size`, discarding stored items
-    /// without opening their blobs. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    /// without reading them. Returns [JournalError::SizeOverflow] for `u64::MAX`.
     fn clear(
         context: E,
         cfg: Self::Config,
         size: u64,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
-    /// Whether stored items may serve a sync range starting at `position`, judged from blob
-    /// names and the checkpoint without opening any data: the retained start is at or below
-    /// `position` and either some stored item may lie at or above it or the journal is empty
-    /// exactly at `position`. A staged clear counts as an empty journal at its target.
+    /// Whether stored items may serve a sync range starting at `position`, without reading them.
+    ///
+    /// The retained start must be at or below `position`, with either a possible item at or above
+    /// it or an empty journal exactly at `position`. A pending reset counts as an empty journal
+    /// at its target.
     fn covers(
         context: &E,
         cfg: &Self::Config,

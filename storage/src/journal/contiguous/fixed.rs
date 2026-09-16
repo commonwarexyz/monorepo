@@ -471,13 +471,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
         // Check the two newest blobs for interior holes before any resize. Only they can hold
         // non-durable data, and a crash during an in-flight fsync can lose an interior page while
-        // later pages survive. `Writer::new` sizes a blob by its last valid page, so it cannot see
-        // such a hole. An item-aligned resize can land within a page, which `Recovery::truncate`
-        // must read and validate before rewriting its partial tip. The scan starts at the
-        // watermark's in-blob prefix. Pages below it are covered by a completed fsync, so in-model
-        // holes are impossible there and any later damage surfaces lazily at read. Above the
-        // watermark, first move the target below any hole and round it down to whole items so
-        // `recover_bounds` sees only intact data.
+        // later pages survive. `PagedRecovery::open` sizes a blob by its last valid page, so it
+        // cannot see such a hole. An item-aligned resize can land within a page, which
+        // `Recovery::truncate` must read and validate before rewriting its partial tip. The scan
+        // starts at the watermark's in-blob prefix. Pages below it are covered by a completed
+        // fsync, so in-model holes are impossible there and any later damage surfaces lazily at
+        // read. Above the watermark, first move the target below any hole and round it down to
+        // whole items so `recover_bounds` sees only intact data.
         let floor = checkpoint.watermark().unwrap_or(0).min(ceiling);
         let floor_blob = super::position_to_blob(floor, items_per_blob);
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
@@ -5297,8 +5297,8 @@ mod tests {
     }
 
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
-    /// page, which `Writer::new`'s backward scan cannot see. Recovery must forward-validate the
-    /// suspect blob and truncate at the hole.
+    /// page, which `PagedRecovery::open`'s backward scan cannot see. Recovery must forward-validate
+    /// the suspect blob and truncate at the hole.
     #[test_traced]
     fn test_fixed_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
