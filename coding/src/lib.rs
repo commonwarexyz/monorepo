@@ -248,14 +248,14 @@ commonware_macros::stability_scope!(ALPHA {
     ///
     /// # Example
     /// ```
-    /// use commonware_coding::{Config, Ocelot8, PhasedScheme as _};
+    /// use commonware_coding::{Config, OcelotHinted8, PhasedScheme as _};
     /// use commonware_cryptography::Sha256;
     /// use commonware_parallel::Sequential;
     /// use commonware_utils::NZU16;
     ///
     /// const STRATEGY: Sequential = Sequential;
     ///
-    /// type O = Ocelot8<Sha256>;
+    /// type O = OcelotHinted8<Sha256>;
     ///
     /// let namespace = b"my-application";
     /// let config = Config {
@@ -689,14 +689,12 @@ mod test {
                 roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
             }
         }
-
     }
 
     mod phased_scheme {
         use super::*;
         use crate::{
-            OcelotHinted8, OcelotHinted16, PhasedScheme,
-            test_suites::phased_roundtrip as roundtrip,
+            OcelotHinted8, OcelotHinted16, PhasedScheme, test_suites::phased_roundtrip as roundtrip,
         };
         use commonware_parallel::Sequential;
 

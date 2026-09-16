@@ -1,12 +1,11 @@
 //! Shared round-trip checks for coding schemes.
 
-use crate::{CodecConfig, Config, PhasedScheme, Scheme};
+use crate::{Config, PhasedScheme, Scheme};
 use arbitrary::Unstructured;
 use commonware_codec::{Encode, Read};
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
 
-const MAX_SHARD_SIZE: usize = 1 << 31;
 const MAX_SHARDS: u16 = 32;
 const MAX_DATA: usize = 1024;
 const MIN_EXTRA_SHARDS: u16 = 1;
@@ -42,9 +41,7 @@ pub fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec
 
 pub fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
     let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-    let read_cfg = CodecConfig {
-        maximum_shard_size: MAX_SHARD_SIZE,
-    };
+    let read_cfg = (*config, data.len());
     for shard in &shards {
         let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
         assert_eq!(decoded_shard, *shard);
@@ -67,9 +64,7 @@ pub fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
 pub fn phased_roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
     let owner = *selected.first().expect("selected must not be empty");
     let (commitment, shards) = S::encode(b"", config, data, &Sequential).unwrap();
-    let read_cfg = CodecConfig {
-        maximum_shard_size: MAX_SHARD_SIZE,
-    };
+    let read_cfg = (*config, data.len());
     for shard in &shards {
         let decoded_shard = S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
         assert_eq!(decoded_shard, *shard);

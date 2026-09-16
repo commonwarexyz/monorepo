@@ -19,6 +19,7 @@ bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros.workspace = true
+commonware-math = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
@@ -42,6 +43,7 @@ rand_chacha.workspace = true
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
 	"commonware-storage/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",

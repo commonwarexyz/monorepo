@@ -1,8 +1,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, PhasedScheme, Scheme};
-use core::iter;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
+use core::iter;
 
 const STRATEGY: Sequential = Sequential;
 

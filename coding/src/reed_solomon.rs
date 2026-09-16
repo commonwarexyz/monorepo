@@ -2497,7 +2497,13 @@ mod tests {
 
             // Each shard is rejected individually.
             for chunk in &chunks {
-                assert!(invalid(&RS::check(&config, &root, chunk.index, chunk)));
+                assert!(invalid(&RS::check(
+                    &config,
+                    &root,
+                    chunk.index,
+                    chunk,
+                    &STRATEGY
+                )));
             }
 
             // The same shards are rejected as a batch.

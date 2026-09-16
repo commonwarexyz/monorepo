@@ -4,7 +4,7 @@ use super::{
     code::{Decoder, Encoder, Impl, stripe_bytes},
     hash,
 };
-use crate::{CodecConfig, Config};
+use crate::Config;
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
     Buf, BufsMut, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt, Write,
@@ -21,10 +21,23 @@ use thiserror::Error;
 
 /// Number of checksum outputs used for early rejection of inconsistent shards.
 const CHECKSUMS: usize = 16;
-/// At most 65,535 originals, each carrying 16 two-byte checksum symbols.
-const MAX_CHECKSUM_BYTES: usize = CHECKSUMS * 2 * u16::MAX as usize;
 /// A systematic prefix needs at most one sibling per level in a 65,536-leaf tree.
 const MAX_PREFIX_SIBLINGS: usize = u16::BITS as usize;
+
+// Shard types cover both fields, so decoding permits two-byte alignment.
+fn maximum_shard_len(config: &Config, maximum: usize) -> Result<usize, commonware_codec::Error> {
+    // Widen before adding framing so the clamped maximum also works on 32-bit targets.
+    let maximum = (maximum as u64).min(u64::from(u32::MAX));
+    let width = (maximum + u32::SIZE as u64)
+        .div_ceil(u64::from(config.minimum_shards.get()))
+        .checked_next_multiple_of(2)
+        .ok_or(commonware_codec::Error::Invalid(
+            "WeakShard",
+            "shard width overflow",
+        ))?;
+    usize::try_from(width)
+        .map_err(|_| commonware_codec::Error::Invalid("WeakShard", "shard width exceeds usize"))
+}
 
 fn coefficient_count<I: Impl>(shard_len: usize) -> Result<usize, Error> {
     if !shard_len.is_multiple_of(I::ALIGN) {
@@ -120,17 +133,26 @@ impl<D: Digest> EncodeSize for StrongShard<D> {
 }
 
 impl<D: Digest> Read for StrongShard<D> {
-    type Cfg = CodecConfig;
+    type Cfg = (Config, usize);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let (config, maximum) = cfg;
+        let data_bytes = u32::read(buf)?;
+        if u64::from(data_bytes) > *maximum as u64 {
+            return Err(commonware_codec::Error::Invalid(
+                "StrongShard",
+                "data exceeds configured maximum",
+            ));
+        }
+        let maximum_checksum = usize::from(config.minimum_shards.get()) * CHECKSUMS * 2;
         Ok(Self {
-            data_bytes: ReadExt::read(buf)?,
+            data_bytes,
             root: ReadExt::read(buf)?,
             original_proof: bmt::Proof {
                 leaf_count: ReadExt::read(buf)?,
                 siblings: Vec::read_range(buf, ..=MAX_PREFIX_SIBLINGS)?,
             },
-            checksum: Bytes::read_cfg(buf, &RangeCfg::new(..=MAX_CHECKSUM_BYTES))?,
+            checksum: Bytes::read_cfg(buf, &RangeCfg::new(..=maximum_checksum))?,
             weak: WeakShard::read_cfg(buf, cfg)?,
         })
     }
@@ -185,11 +207,15 @@ impl<D: Digest> EncodeSize for WeakShard<D> {
 }
 
 impl<D: Digest> Read for WeakShard<D> {
-    type Cfg = CodecConfig;
+    type Cfg = (Config, usize);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (config, maximum): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let width = maximum_shard_len(config, *maximum)?;
         Ok(Self {
-            shard: Bytes::read_cfg(buf, &RangeCfg::new(..=cfg.maximum_shard_size))?,
+            shard: Bytes::read_cfg(buf, &RangeCfg::new(..=width))?,
             index: ReadExt::read(buf)?,
             proof: bmt::Proof::read_cfg(buf, &1)?,
         })
@@ -1406,9 +1432,7 @@ pub mod fuzz {
         let namespace = b"scheme property";
         let (commitment, shards) = scheme.encode(namespace, config, data, &STRATEGY).unwrap();
         let owner = u.choose_index(total)?;
-        let codec = CodecConfig {
-            maximum_shard_size: shards[owner].weak.shard.len(),
-        };
+        let codec = (*config, data.len());
         let owner_shard = StrongShard::decode_cfg(shards[owner].encode(), &codec).unwrap();
         let (checking_data, _, _) = scheme
             .weaken(
@@ -1707,9 +1731,7 @@ pub mod fuzz {
             4 => proof.leaf_count ^= u.int_in_range(1..=u32::MAX)?,
             _ => proof.siblings.resize(MAX_PREFIX_SIBLINGS + 1, owner.root),
         }
-        let codec = CodecConfig {
-            maximum_shard_size: owner.weak.shard.len(),
-        };
+        let codec = (*config, data.len());
         let decoded =
             StrongShard::<<Sha256 as Hasher>::Digest>::decode_cfg(forged.encode(), &codec);
         if forged.original_proof.siblings.len() > MAX_PREFIX_SIBLINGS {
@@ -1982,6 +2004,98 @@ pub mod fuzz {
                 .with_seed(0)
                 .with_search_limit(FUZZ_CASES)
                 .test(|u| Plan::Hinted.run(u));
+        }
+
+        #[test]
+        fn shard_decode_bounds_cover_both_fields() {
+            type Strong = StrongShard<<Sha256 as Hasher>::Digest>;
+            type Weak = WeakShard<<Sha256 as Hasher>::Digest>;
+
+            fn check<I: Impl, const C: usize>(imp: I) {
+                let scheme = OcelotHintedX::<I, Sha256, C>::new(imp);
+                for minimum in [1, 3, 34] {
+                    let config = Config {
+                        minimum_shards: NZU16!(minimum),
+                        extra_shards: NZU16!(4),
+                    };
+                    for length in [0, 1, 2, 5, 1000, 4099] {
+                        let cfg = (config, length);
+                        let (_, shards) = scheme
+                            .encode(b"codec", &config, vec![0; length].as_slice(), &STRATEGY)
+                            .unwrap();
+                        let shard = &shards[0];
+                        assert_eq!(Strong::decode_cfg(shard.encode(), &cfg).unwrap(), *shard);
+                        assert_eq!(
+                            Weak::decode_cfg(shard.weak.encode(), &cfg).unwrap(),
+                            shard.weak
+                        );
+
+                        let mut oversized = shard.clone();
+                        let width = maximum_shard_len(&config, length).unwrap();
+                        oversized.weak.shard = Bytes::from(vec![0; width + 1]);
+                        assert!(matches!(
+                            Weak::decode_cfg(oversized.weak.encode(), &cfg),
+                            Err(commonware_codec::Error::InvalidLength(_))
+                        ));
+                        assert!(matches!(
+                            Strong::decode_cfg(oversized.encode(), &cfg),
+                            Err(commonware_codec::Error::InvalidLength(_))
+                        ));
+                    }
+                }
+
+                let (_, shards) = scheme
+                    .encode(b"codec", &CONFIG, &b"payload"[..], &STRATEGY)
+                    .unwrap();
+                let cfg = (CONFIG, usize::MAX);
+                assert_eq!(
+                    Strong::decode_cfg(shards[0].encode(), &cfg).unwrap(),
+                    shards[0]
+                );
+                assert_eq!(
+                    Weak::decode_cfg(shards[0].weak.encode(), &cfg).unwrap(),
+                    shards[0].weak
+                );
+                assert_eq!(
+                    maximum_shard_len(&CONFIG, usize::MAX).unwrap(),
+                    maximum_shard_len(&CONFIG, u32::MAX as usize).unwrap()
+                );
+            }
+
+            check::<_, CHECKSUMS>(Impl8::new(Portable));
+            check::<_, { CHECKSUMS * 2 }>(Impl16::new(Portable));
+        }
+
+        #[test]
+        fn strong_decode_rejects_payload_length_before_remaining_fields() {
+            type Strong = StrongShard<<Sha256 as Hasher>::Digest>;
+            assert!(matches!(
+                Strong::decode_cfg(8u32.encode(), &(CONFIG, 7)),
+                Err(commonware_codec::Error::Invalid(
+                    "StrongShard",
+                    "data exceeds configured maximum"
+                ))
+            ));
+        }
+
+        #[test]
+        fn strong_decode_bounds_checksum_by_original_count() {
+            type Strong = StrongShard<<Sha256 as Hasher>::Digest>;
+            let scheme = Hinted::new(Impl8::new(Portable));
+            let (_, mut shards) = scheme
+                .encode(b"codec", &CONFIG, &b"payload"[..], &STRATEGY)
+                .unwrap();
+            let shard = &mut shards[0];
+            shard.checksum =
+                Bytes::from(vec![
+                    0;
+                    usize::from(CONFIG.minimum_shards.get()) * CHECKSUMS * 2
+                        + 1
+                ]);
+            assert!(matches!(
+                Strong::decode_cfg(shard.encode(), &(CONFIG, 7)),
+                Err(commonware_codec::Error::InvalidLength(_))
+            ));
         }
 
         #[test]
