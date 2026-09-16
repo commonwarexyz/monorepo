@@ -109,20 +109,6 @@ For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
 The wallet durably saves each request before sending it, retries the same bytes if the response is lost, and retains the verified acknowledgment and openings. One signature can also advance several recipients in a batch that the operator either rejects in full or accepts with one acknowledgment containing an opening for each advanced entry.
 
-## Collecting Fees
-
-An operator can require the payer to include a payment to a designated fee recipient, such as the operator's own account, in the same signed batch. It checks the requested payments and the fee increment before countersigning. If the fee is insufficient, it rejects the batch. The payer authorizes the fee alongside the other payments, and the operator's acknowledgment binds them together.
-
-The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator, so changing it requires no protocol change.
-
-```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
-```
-
-::: {.image-caption}
-Figure 2: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
-:::
-
 ## Optimizing for Hot Accounts
 
 Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Existing accounts can spend receipt-backed incoming credit within the epoch, before settlement. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
@@ -186,7 +172,7 @@ Without deposits or withdrawals, $L_{e+1}=L_e=200$.
 ```
 
 ::: {.image-caption}
-Figure 3: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
+Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
 :::
 
 QMDB's Current Ordered variant, an authenticated key-value store, keeps each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record.
@@ -216,7 +202,7 @@ A 32-byte close commitment binds these results to the operator's dealing and the
 ```
 
 ::: {.image-caption}
-Figure 4: The close binds three validator-derived roots. The activity log appends this close's Rows and original Entries after those from earlier closes. Below, $c$'s Row names the BMT root that $c$ signs, and its two entries sum to the Row's debit of 11.
+Figure 3: The close binds three validator-derived roots. The activity log appends this close's Rows and original Entries after those from earlier closes. Below, $c$'s Row names the BMT root that $c$ signs, and its two entries sum to the Row's debit of 11.
 :::
 
 The settlement chain keeps these commitments and counts, bounded pending-close metadata, custody and timing controls, and claimed payout ranges. Replicas store the underlying account and log records.
@@ -232,7 +218,7 @@ The dealing's $\mathsf{ProposalId}$ hashes its canonical bytes with the authenti
 ```
 
 ::: {.image-caption}
-Figure 5: Every validator derives the same three QMDB roots before signing one close commitment.
+Figure 4: Every validator derives the same three QMDB roots before signing one close commitment.
 :::
 
 The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes. The validator-derived root bundle is 184 bytes. Adding the eight-byte withdrawal total makes its descriptor 192 bytes, or 293 bytes together before chain transaction framing. These values are separate from the operator's dealing.
@@ -294,7 +280,7 @@ A claim supplies the output and an MMR opening against the current finalized pay
 ```
 
 ::: {.image-caption}
-Figure 6: The MMR proves that a payout exists. Claimed ranges prevent paying it twice. Filling a gap merges neighboring ranges, so these five claims occupy one record. Only payout indices 10–14 are shown. Ranges are end-exclusive.
+Figure 5: The MMR proves that a payout exists. Claimed ranges prevent paying it twice. Filling a gap merges neighboring ranges, so these five claims occupy one record. Only payout indices 10–14 are shown. Ranges are end-exclusive.
 :::
 
 Each claim checks only its neighboring ranges. Non-payout log positions are included in claimed ranges so close boundaries do not prevent merging. Fully paid history collapses to one range. With $U$ outstanding outputs, at most $U+1$ ranges remain, even under adversarial claim order.
@@ -334,10 +320,24 @@ $$
 ```
 
 ::: {.image-caption}
-Figure 7: Both calculations include the same predecessor credit. Importing it adds to the live balance, preserving payments already accepted in the successor epoch.
+Figure 6: Both calculations include the same predecessor credit. Importing it adds to the live balance, preserving payments already accepted in the successor epoch.
 :::
 
 Deposits fixed at registration are available immediately. A new account funded only by incoming credit must wait for that close to be admitted before spending. A wallet with a live withdrawal authorization waits until its signed deadline before signing another payment.
+
+## Collecting Fees
+
+An operator can require the payer to include a payment to a designated fee recipient, such as the operator's own account, in the same signed batch. It checks the requested payments and the fee increment before countersigning. If the fee is insufficient, it rejects the batch. The payer authorizes the fee alongside the other payments, and the operator's acknowledgment binds them together.
+
+The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator, so changing it requires no protocol change.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
+```
+
+::: {.image-caption}
+Figure 7: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
+:::
 
 ## The Close Follows Accounts and Edges
 

@@ -253,27 +253,6 @@ O’Grady</a></div>
         advance several recipients in a batch that the operator either
         rejects in full or accepts with one acknowledgment containing an
         opening for each advanced entry.</p>
-        <h2 id="collecting-fees">Collecting Fees</h2>
-        <p>An operator can require the payer to include a payment to a
-        designated fee recipient, such as the operator’s own account, in
-        the same signed batch. It checks the requested payments and the
-        fee increment before countersigning. If the fee is insufficient,
-        it rejects the batch. The payer authorizes the fee alongside the
-        other payments, and the operator’s acknowledgment binds them
-        together.</p>
-        <p>The operator can price each transfer type or payer
-        independently, including volume discounts or negotiated rates.
-        Validators net the fee entry like any other payment, and
-        settlement uses the same commitments and proofs. The fee
-        schedule stays with the operator, so changing it requires no
-        protocol change.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
-        <div class="image-caption">
-        <p>Figure 2: The fee shares the same signed payment root as the
-        recipient payments. Recipient <span class="math inline">b</span>
-        receives the countersigned payer state and an opening for its
-        own entry.</p>
-        </div>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
@@ -366,7 +345,7 @@ O’Grady</a></div>
         class="math inline">L_{e+1}=L_e=200</span>.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
         <div class="image-caption">
-        <p>Figure 3: A separate epoch with 100 million payments of
+        <p>Figure 2: A separate epoch with 100 million payments of
         $0.000001, one atomic unit each. Every sender uses its own
         opening funds. The arrows group independent payments by sender
         and recipient, with both directions between <span
@@ -422,7 +401,7 @@ O’Grady</a></div>
         dealing needs no state-change proof.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. State uses Current Ordered QMDB, while activity and payouts use Keyless QMDB. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances. This close creates no payouts.">
         <div class="image-caption">
-        <p>Figure 4: The close binds three validator-derived roots. The
+        <p>Figure 3: The close binds three validator-derived roots. The
         activity log appends this close’s Rows and original Entries
         after those from earlier closes. Below, <span
         class="math inline">c</span>’s Row names the BMT root that <span
@@ -450,7 +429,7 @@ O’Grady</a></div>
         the validators’ logs.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.">
         <div class="image-caption">
-        <p>Figure 5: Every validator derives the same three QMDB roots
+        <p>Figure 4: Every validator derives the same three QMDB roots
         before signing one close commitment.</p>
         </div>
         <p>The certificate is one 48-byte aggregate signature plus a
@@ -588,7 +567,7 @@ O’Grady</a></div>
         rejected even though its membership opening remains valid.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-payout-ranges.svg" alt="Only finalized payout indices 10 through 14 are shown. Other claimed-map records are outside this illustration. Claimed ranges record paid outputs. Claiming 12 creates [12,13). Claiming 10 and 14 adds [10,11) and [14,15). Claiming 11 joins the first two ranges into [10,13), and claiming 13 merges all five paid outputs into [10,15). Replaying output 12 is rejected because that range already contains it, even though the same MMR opening remains valid. Each claim atomically records its index, reduces the reserve, and pays.">
         <div class="image-caption">
-        <p>Figure 6: The MMR proves that a payout exists. Claimed ranges
+        <p>Figure 5: The MMR proves that a payout exists. Claimed ranges
         prevent paying it twice. Filling a gap merges neighboring
         ranges, so these five claims occupy one record. Only payout
         indices 10–14 are shown. Ranges are end-exclusive.</p>
@@ -657,7 +636,7 @@ O’Grady</a></div>
           <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 7: Both calculations include the same predecessor
+        <p>Figure 6: Both calculations include the same predecessor
         credit. Importing it adds to the live balance, preserving
         payments already accepted in the successor epoch.</p>
         </div>
@@ -666,6 +645,27 @@ O’Grady</a></div>
         close to be admitted before spending. A wallet with a live
         withdrawal authorization waits until its signed deadline before
         signing another payment.</p>
+        <h2 id="collecting-fees">Collecting Fees</h2>
+        <p>An operator can require the payer to include a payment to a
+        designated fee recipient, such as the operator’s own account, in
+        the same signed batch. It checks the requested payments and the
+        fee increment before countersigning. If the fee is insufficient,
+        it rejects the batch. The payer authorizes the fee alongside the
+        other payments, and the operator’s acknowledgment binds them
+        together.</p>
+        <p>The operator can price each transfer type or payer
+        independently, including volume discounts or negotiated rates.
+        Validators net the fee entry like any other payment, and
+        settlement uses the same commitments and proofs. The fee
+        schedule stays with the operator, so changing it requires no
+        protocol change.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="Payer a signs one batch paying 20 to b, 7 to c, and the operator's quoted fee of 2. The signed state binds the epoch, sequence 1, cumulative debit 29, and payment root. Recipient b's receipt contains the operator-countersigned payer state and an opening for b's entry, with amount 20 and payment count 1.">
+        <div class="image-caption">
+        <p>Figure 7: The fee shares the same signed payment root as the
+        recipient payments. Recipient <span class="math inline">b</span>
+        receives the countersigned payer state and an opening for its
+        own entry.</p>
+        </div>
         <h2 id="the-close-follows-accounts-and-edges">The Close Follows
         Accounts and Edges</h2>
         <p>We benchmarked the Commonware Library’s <a
