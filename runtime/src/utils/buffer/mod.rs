@@ -46,8 +46,8 @@ impl From<crate::Handle<()>> for Completion {
 ///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
 ///   observe outstanding work.
 /// - A failure is never lost: every handle cloned from the shared completion reports it, and
-///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
-///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
+///   an unobserved failure surfaces on the next [SyncState::wait_for_pending] call, which also
+///   marks the state [SyncState::Dirty] since the mutations still need durability.
 enum SyncState {
     // No unsynced mutations.
     Clean,
@@ -90,8 +90,8 @@ impl SyncState {
         }
     }
 
-    /// Retain a failed mutation so the next operation observes it, returning a handle that
-    /// reports the same failure.
+    /// Retain a failed mutation for [Self::wait_for_pending] and return a handle that reports
+    /// the same failure.
     fn fail(&mut self, err: crate::Error) -> crate::Handle<()> {
         let failed = Completion::from(crate::Handle::ready(Err(err)));
         let handle = failed.handle();

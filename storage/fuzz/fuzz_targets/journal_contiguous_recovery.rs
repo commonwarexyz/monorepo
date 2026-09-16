@@ -697,7 +697,7 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
 /// Return whether an in-bounds lookup exposed missing or torn page bytes after a possibly
 /// unobserved `start_sync` failure.
 ///
-/// A retained failed write can leave a physical page short or full-sized without a valid checksum.
+/// A failed write can leave a physical page short or full-sized without a valid checksum.
 /// Those are the only lookup errors caused by the supported write faults: range/overflow checks
 /// precede storage I/O, and valid page checksums gate frame and item decoding.
 fn exposed_unobserved_failure<T>(
@@ -821,7 +821,7 @@ async fn settle_held<J: FuzzJournal>(
 
 /// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
 /// which may have left the journal inconsistent. The journal is then dropped to crash. A live read
-/// or replay may also expose missing or torn bytes after an unobserved `start_sync` failure; that
+/// or replay may also expose missing or torn bytes after an unobserved `start_sync` failure. That
 /// ends the cycle so recovery can validate the last durable state. Unexpected lookup errors still
 /// panic. Returns whether a lookup exposed such a failure.
 async fn run_ops<J: FuzzJournal>(
