@@ -11,6 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::future::Future;
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -62,7 +63,7 @@ where
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
-        locs: impl IntoIterator<Item = Location<F>>,
+        locs: impl Iterator<Item = Location<F>> + Send,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
         for loc in locs {
@@ -78,32 +79,32 @@ where
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
-        if self.is_empty() {
-            return Ok(None);
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get_span(
+        &self,
+        key: &K,
+    ) -> impl Future<Output = Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            if self.is_empty() {
+                return Ok(None);
+            }
+
+            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+                return Ok(Some(span));
+            }
+
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+                // DB is empty.
+                return Ok(None);
+            };
+
+            let span = self.find_span(iter.copied(), key).await?.expect(
+                "a span that includes any given key should always exist if db is non-empty",
+            );
+
+            Ok(Some(span))
         }
-
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let span = self.find_span(locs, key).await?;
-        if let Some(span) = span {
-            return Ok(Some(span));
-        }
-
-        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
-            // DB is empty.
-            return Ok(None);
-        };
-
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = iter.copied().collect();
-        let span = self
-            .find_span(locs, key)
-            .await?
-            .expect("a span that includes any given key should always exist if db is non-empty");
-
-        Ok(Some(span))
     }
 
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
