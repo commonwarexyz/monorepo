@@ -283,8 +283,8 @@ impl<E: Context> Writable<E> {
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
-        // seal() waits only for syncs the writer started: a commit whose flush failed before its
-        // sync began is retained solely in the tail sync slot, so it must be drained here too.
+        // A commit whose flush failed before its sync began is retained in the tail sync slot as
+        // well as in the writer. Drain it before opening the next tail.
         self.drain_tail_sync().await?;
 
         // Open the next tail first so a failure leaves the current tail untouched.

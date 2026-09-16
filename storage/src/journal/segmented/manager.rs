@@ -312,9 +312,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// that sync's handle rather than starting a new one.
     ///
     /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
-    /// the started sync resurfaces from the buffer on the section's next operation. A failure to
-    /// flush buffered data while starting the sync, however, is reported only through the
-    /// returned handle, so callers must observe the handle to detect it.
+    /// the started sync, or of the flush that precedes it, resurfaces from the buffer on the
+    /// section's next operation.
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,

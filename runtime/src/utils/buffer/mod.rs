@@ -53,7 +53,7 @@ enum SyncState {
     Clean,
     // Unsynced mutations need a sync.
     Dirty,
-    // A started sync is in flight.
+    // A started sync is in flight, or a retained failure awaits observation.
     Pending(Completion),
 }
 
@@ -90,6 +90,15 @@ impl SyncState {
         }
     }
 
+    /// Retain a failed mutation so the next operation observes it, returning a handle that
+    /// reports the same failure.
+    fn fail(&mut self, err: crate::Error) -> crate::Handle<()> {
+        let failed = Completion::from(crate::Handle::ready(Err(err)));
+        let handle = failed.handle();
+        *self = Self::Pending(failed);
+        handle
+    }
+
     /// Write data with the provided options while tracking durability.
     async fn write_at(
         &mut self,
@@ -101,8 +110,9 @@ impl SyncState {
         self.wait_for_pending().await?;
         let bufs = bufs.into();
         if !options.contains(WriteOptions::SYNC) {
-            blob.write_at(offset, bufs, options).await?;
+            // A failed write may still have landed bytes, so it dirties the blob either way.
             self.mark_dirty();
+            blob.write_at(offset, bufs, options).await?;
             return Ok(());
         }
 
@@ -129,8 +139,8 @@ impl SyncState {
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
-        blob.resize(len).await?;
         self.mark_dirty();
+        blob.resize(len).await?;
         Ok(())
     }
 
@@ -167,7 +177,7 @@ mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
         ReadOptions, Runner, Storage, WriteOptions, deterministic,
-        mocks::{DelayedSyncBlob, next_pending_sync},
+        mocks::{DelayedSyncBlob, WriteFaultContext, WriteFaults, next_pending_sync},
         telemetry::metrics::Registry,
     };
     use commonware_macros::test_traced;
@@ -1564,6 +1574,35 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
             let read = reader.read(10).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"01234XXXXX");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_start_sync_flush_failure_is_retained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, size) = context
+                .open("partition", b"retained_flush_failure")
+                .await
+                .unwrap();
+            let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+
+            // The buffered write inside start_sync fails. The handle reports it, and the writer
+            // must too, because a caller may drop the handle unobserved.
+            writer.write_at(0, b"abc").await.unwrap();
+            faults.arm();
+            let handle = writer.start_sync().await;
+            faults.disarm();
+            assert!(handle.await.is_err());
+
+            // The failure is retained: the next sync reports it instead of crediting the lost
+            // bytes as durable.
+            assert!(writer.sync().await.is_err());
         });
     }
 

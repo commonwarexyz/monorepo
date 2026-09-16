@@ -2351,7 +2351,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
+    /// or lose its failure. A failed data flush or sync fails the next append that reaches
+    /// the blob and the next commit, sync, prune, rewind, or flushing snapshot. A failed
+    /// offsets or recovery-watermark sync is not observed by commit and resurfaces on the
+    /// next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2870,8 +2874,8 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
-    /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
+    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
+    /// slot. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
     fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
