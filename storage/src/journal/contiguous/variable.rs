@@ -1148,9 +1148,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             }
 
             // The floor's blob must retain its acknowledged prefix: a cut at or below the last
-            // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
-            // below the offsets pruning boundary acknowledges nothing here.
+            // acknowledged frame's start lost acknowledged data (a cut inside that frame ends the
+            // frame scan short of the watermark, which `inspect` rejects). A floor at the blob
+            // boundary or below the offsets pruning boundary acknowledges nothing here.
             if blob == floor_blob
                 && floor > blob_first_position(blob, items_per_blob)?
                 && floor > offsets.pruning_boundary()
@@ -1164,7 +1164,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             warn!(blob, valid, size, "truncating to last well-formed page");
 
             // A cap can place the hole below the on-disk watermark, so this data is still
-            // acknowledged. Truncate it in `finish` after the offsets watermark is lowered.
+            // acknowledged. Truncate it in `publish` after the offsets watermark is lowered.
             if max_size.is_some() {
                 valid_lengths.insert(blob, valid);
                 continue;
@@ -1870,6 +1870,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         if new_size < self.bounds.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
+
         // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
         // `clear_to_size` re-stages the same target idempotently before completing.
         self.offsets = self.offsets.stage_clear_intent(new_size).await?;
@@ -2720,9 +2721,7 @@ mod tests {
         },
         utils::codec::View,
     };
-    use commonware_codec::{
-        Buf as CodecBuf, Error as CodecError, FixedSize, Read as CodecRead, Write as CodecWrite,
-    };
+    use commonware_codec::{Buf as CodecBuf, Error as CodecError, FixedSize, Read, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
@@ -2751,9 +2750,9 @@ mod tests {
 
     struct Counted(u64);
 
-    impl CodecWrite for Counted {
+    impl Write for Counted {
         fn write(&self, buf: &mut impl bytes::BufMut) {
-            CodecWrite::write(&self.0, buf);
+            Write::write(&self.0, buf);
         }
     }
 
@@ -2761,7 +2760,7 @@ mod tests {
         const SIZE: usize = 8;
     }
 
-    impl CodecRead for Counted {
+    impl Read for Counted {
         type Cfg = Arc<AtomicUsize>;
 
         fn read_cfg(buf: &mut impl CodecBuf, count: &Self::Cfg) -> Result<Self, CodecError> {
@@ -3070,7 +3069,7 @@ mod tests {
 
     #[test]
     fn test_interrupted_offset_rebuild_preserves_committed_data() {
-        fn config(context: &deterministic::Context) -> Config<<Counted as CodecRead>::Cfg> {
+        fn config(context: &deterministic::Context) -> Config<<Counted as Read>::Cfg> {
             Config {
                 partition: "interrupted-offset-rebuild".into(),
                 items_per_section: NZU64!(256),

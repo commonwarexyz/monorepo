@@ -280,7 +280,8 @@ impl<B: Blob> Recovery<B> {
         Ok(ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
-    /// Durably shrink the retained logical prefix to `target_size`.
+    /// Shrink the retained logical prefix to `target_size`. A page-boundary shrink leaves its
+    /// resize for the caller's sync.
     async fn shrink(&mut self, target_size: u64) -> Result<(), Error> {
         let page_size: u64 = self.cache_ref.page_size().widen();
         let physical_page_size = page_size

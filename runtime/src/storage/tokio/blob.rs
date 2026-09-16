@@ -22,7 +22,7 @@ use tokio::task;
 
 cfg_if! {
     if #[cfg(test)] {
-        use std::sync::{Barrier, mpsc::Receiver};
+        use std::sync::{Barrier, mpsc};
         use tokio::sync::oneshot::Sender as OneshotSender;
     }
 }
@@ -73,7 +73,7 @@ struct Shared {
     /// Resolves the obligation the open registered when its last handle dropped.
     promise: Mutex<Option<Sender>>,
     #[cfg(test)]
-    before_mutation: Mutex<Option<(OneshotSender<()>, Receiver<()>)>>,
+    before_mutation: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
 }
 
 #[cfg(test)]

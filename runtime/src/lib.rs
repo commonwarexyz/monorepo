@@ -873,8 +873,9 @@ stability_scope!(BETA {
     ///
     /// Cloning a blob shares one open, similar to wrapping a single file
     /// descriptor in a lock. A blob has one open at a time: opening it again
-    /// while any clone is alive returns [`Error::BlobAlreadyOpen`]. Use clones
-    /// to share access to a blob.
+    /// while any clone is alive returns [`Error::BlobAlreadyOpen`] unless the
+    /// blob was removed since, see [`Storage::open_versioned`]. Use clones to
+    /// share access to a blob.
     ///
     /// Dropping the last clone of a blob whose writes or resizes are not covered
     /// by a completed [`Blob::sync`] does not make them durable at a known point.

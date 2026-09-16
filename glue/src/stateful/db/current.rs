@@ -1701,10 +1701,10 @@ mod tests {
     /// discarded second target must be rejected.
     #[test]
     fn managed_db_bounded_init_then_apply_crash_recovers_history() {
-        // One operation per page makes the initialization truncation page aligned and one blob
-        // keeps both histories' writes overlapping.
         type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
 
+        // One operation per page makes the initialization truncation page aligned and one blob
+        // keeps both histories' writes overlapping.
         fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
             let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash", pooler);

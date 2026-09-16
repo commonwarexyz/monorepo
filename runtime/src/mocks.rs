@@ -2,7 +2,7 @@
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::{
-    memory::{Blob as MemoryBlob, Storage as InnerMemoryStorage},
+    memory::{Blob as MemBlob, Storage as MemStorage},
     open::{Blob as OpenBlob, Opens},
 };
 use crate::{
@@ -30,7 +30,7 @@ use std::{
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone)]
 pub struct MemoryStorage {
-    inner: InnerMemoryStorage,
+    inner: MemStorage,
     opens: Arc<Opens>,
 }
 
@@ -39,7 +39,7 @@ impl MemoryStorage {
     /// Create an empty memory storage backend.
     pub fn new(pool: BufferPool) -> Self {
         Self {
-            inner: InnerMemoryStorage::new(pool),
+            inner: MemStorage::new(pool),
             opens: Arc::default(),
         }
     }
@@ -75,7 +75,7 @@ impl MemoryStorage {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Storage for MemoryStorage {
-    type Blob = OpenBlob<MemoryBlob>;
+    type Blob = OpenBlob<MemBlob>;
 
     async fn open_versioned(
         &self,

@@ -346,6 +346,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
 
+        // Sections above the initialization ceiling were never opened. Creating one would adopt
+        // its stored bytes and leave it in `discarded` for a later truncation to remove by name.
+        assert!(
+            section <= self.ceiling,
+            "sections above the initialization ceiling must be truncated before creation"
+        );
+
         if !self.blobs.contains_key(&section) {
             let name = section.to_be_bytes();
             let (blob, size) = self.context.open(&self.partition, &name).await?;
@@ -891,6 +898,28 @@ pub(super) mod tests {
                 .await
                 .unwrap();
             manager.truncate_pending(4, 0).await.unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "sections above the initialization ceiling must be truncated before creation"
+    )]
+    fn test_get_or_create_above_ceiling_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            manager.get_or_create(1).await.unwrap();
+            manager.get_or_create(5).await.unwrap();
+            drop(manager);
+
+            // Creating a section above the ceiling would reopen the unopened section's bytes.
+            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+                .await
+                .unwrap();
+            manager.get_or_create(5).await.unwrap();
         });
     }
 

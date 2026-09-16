@@ -1403,6 +1403,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         if new_size < self.bounds.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
+
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);

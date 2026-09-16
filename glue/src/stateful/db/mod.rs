@@ -364,8 +364,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Typically a database-specific state commitment plus the operation range needed to reach it.
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
-    /// Open a database and validate its recovered sync target against `expected`, when supplied.
-    /// Returns [`InitError::TargetMismatch`] if the targets differ.
+    /// Open a database at the latest checkpoint at or below `expected`, when supplied.
+    ///
+    /// Implementations durably discard state beyond the selected checkpoint before returning.
+    /// Returns [`InitError::TargetMismatch`] if the recovered sync target differs from `expected`.
     fn init(
         context: E,
         config: Self::Config,
