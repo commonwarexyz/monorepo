@@ -377,10 +377,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(test)] {
+            /// Failed creation must not expose an unsynced header as a valid blob.
+            ///
+            /// An incomplete header is recreated on the next open. A complete header retains the
+            /// creation failure across repeated opens until the name is removed. Neither failure
+            /// may launch a deferred sync.
             pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
+                // Stop after writing either a partial or complete header, before syncing it.
                 for partial in [true, false] {
                     *pending.test.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
                     assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
+
+                    // Repeated opens must preserve the failure even though the header is parseable.
                     if !partial {
                         for _ in 0..2 {
                             assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)),
@@ -388,6 +396,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                         }
                         storage.remove("failed_creation", Some(b"blob")).await.unwrap();
                     }
+
+                    // Both a torn header and an absent name must yield a fresh, empty blob.
                     let (blob, size) = storage.open("failed_creation", b"blob").await.unwrap();
                     assert_eq!(size, 0);
                     drop(blob);
@@ -396,6 +406,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 assert!(pending.test.deferred.lock().is_empty(), "failed creation must not launch a sync job");
             }
 
+            /// Unlinking a dirty blob keeps its handles readable but suppresses their final sync.
+            ///
+            /// Covers both name and partition removal. If the last handle is dropped first, its
+            /// already registered sync must still complete successfully.
             pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
                 storage: &S,
                 pending: &Pending,
@@ -403,6 +417,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             ) {
                 for by_name in [true, false] {
                     for unlink_first in [false, true] {
+                        // The write exceeds the buffer capacity and reaches the blob without a
+                        // sync, leaving dirty data for the final handle to persist.
                         let partition = "remove_live_dirty";
                         let name = b"blob";
                         let (blob, size) = storage.open(partition, name).await.unwrap();
@@ -425,6 +441,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                             storage.remove(partition, target).await.unwrap();
                         }
 
+                        // Only dropping before unlinking may enqueue a sync, and removing the
+                        // name must not prevent that job from succeeding.
                         let jobs = pending.test.deferred.lock()[before..].to_vec();
                         assert_eq!(jobs.len(), usize::from(!unlink_first));
                         for mut job in jobs {
@@ -439,9 +457,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
             }
 
-            /// A write whose future was dropped lands before the next open reports
-            /// the blob's length.
+            /// A write whose future was dropped lands before the next open reports the blob's
+            /// length or exposes its bytes.
+            ///
+            /// Reopening must wait for any remaining write and sync work after the last handle
+            /// drops, even though the caller no longer observes the write's result.
             pub(crate) async fn check_orphaned_write<S: crate::Storage>(storage: &S) {
+                // Poll once to submit the I/O before abandoning its future and final handle.
                 let (blob, _) = storage.open("orphaned_write", b"blob").await.unwrap();
                 let mut write = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
                 let _ = futures::poll!(write.as_mut());
@@ -456,7 +478,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 storage.remove("orphaned_write", None).await.unwrap();
             }
 
+            /// Successful `SYNC` writes need no deferred sync when the blob is reopened.
+            ///
+            /// Mixing plain and durable writes must retain any sync obligation that the backend's
+            /// write barrier did not cover, regardless of the order of those writes.
             pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
+                // The cache hint must not change durability or require an extra sync on reopen.
                 for (case, options) in [WriteOptions::SYNC, WriteOptions::SYNC | WriteOptions::DONT_CACHE].into_iter().enumerate() {
                     let before = pending.finished();
                     let (blob, _) = storage.open("durable_writes", &[case as u8]).await.unwrap();
@@ -470,6 +497,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     assert_eq!(pending.finished(), before, "successful durable writes need no reopen sync");
                 }
 
+                // Exercise both orders so a durable write cannot hide an uncovered plain write.
                 for plain_first in [false, true] {
                     let before = pending.finished();
                     let name = if plain_first { b"prior".as_slice() } else { b"later".as_slice() };
@@ -486,11 +514,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     assert_eq!(size, 11);
                     assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
                     drop(blob);
+
+                    // Linux's per-write sync covers only the durable write's range. Other
+                    // platforms use a full-file sync, which also covers an earlier plain write.
                     let needs_sync = !plain_first || cfg!(target_os = "linux");
                     assert_eq!(pending.finished() - before, u64::from(needs_sync));
                 }
             }
 
+            /// Reopening a replacement waits for its sync while another partition remains usable.
+            ///
+            /// Covers name and partition removal while the old handle remains readable. Dropping
+            /// that handle must not register work for the replacement or let its reopen return
+            /// before the replacement's own sync completes.
             pub(crate) async fn check_recreate_reopen<S: crate::Storage>(storage: &S, pending: &Pending) {
                 drop(storage.open("independent", b"ready").await.unwrap());
                 for remove_name in [true, false] {
@@ -506,6 +542,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     let reader = current.clone();
                     current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
 
+                    // Block the first deferred sync. The replacement stays alive through a clone
+                    // while the removed open drops, so only the replacement may claim the gate.
                     // Dropping the sender also releases the worker if an assertion unwinds.
                     let (release, gate) = mpsc::channel();
                     pending.test.deferred.lock().clear();
@@ -513,6 +551,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     drop(current);
                     drop(old);
                     drop(reader);
+
+                    // Finish any extra job before testing the blocked reopen. A slow extra sync
+                    // could hide a removed handle claiming the gate meant for the replacement.
                     let jobs = pending.test.deferred.lock().clone();
                     if let Some(mut obsolete) = jobs.get(1).cloned() {
                         timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
@@ -522,12 +563,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     let mut reopen = Box::pin(storage.open(partition, name));
                     let early = timeout(Duration::from_millis(50), &mut reopen).await;
                     let completed_early = early.is_ok();
+
+                    // Waiting for this sync must leave the namespace lock available to unrelated
+                    // scans and opens.
                     let clean_progress = timeout(Duration::from_secs(5), async {
                         let names = storage.scan("independent").await?;
                         let (blob, len) = storage.open("independent", b"ready").await?;
                         drop(blob);
                         Ok::<_, Error>((names, len))
                     }).await;
+
+                    // Release the worker before checking outcomes so failures cannot leave it
+                    // blocked on the gate.
                     drop(release);
                     let (reopened, len) = match early {
                         Ok(result) => result,
