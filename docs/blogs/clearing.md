@@ -340,7 +340,7 @@ Accounts with deposits or withdrawals must resolve their full admitted outcome b
 
 ## The Close Follows Accounts and Edges
 
-We benchmarked the Commonware Library's [reference implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with one million live accounts. We vary active payers $A$, the recipient pool $B$, and recipients per payer $K$. The operator sends the dealing to validators, who derive the close descriptor and certify its commitment.
+We benchmarked the Commonware Library's [reference implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with one million live accounts, a fixed recipient pool of $B=512$, and one recipient per payer $K=1$. We vary active payers $A$. The operator sends the dealing to validators, who derive the close descriptor and certify its commitment.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -351,71 +351,27 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
       <th colspan="4" style="text-align:center;">One million live accounts</th>
     </tr>
     <tr>
-      <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th>
-      <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th>
-      <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 8, <em>K</em> = 8</th>
-      <th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th>
+      <th style="text-align:right;"><em>A</em> = 1,000</th>
+      <th style="text-align:right;"><em>A</em> = 10,000</th>
+      <th style="text-align:right;"><em>A</em> = 100,000</th>
+      <th style="text-align:right;"><em>A</em> = 1,000,000</th>
     </tr>
   </thead>
   <tbody>
-    <tr>
-      <td>Operator dealing</td>
-      <td style="text-align:right;">105 KB</td>
-      <td style="text-align:right;">132 KB</td>
-      <td style="text-align:right;">126 KB</td>
-      <td style="text-align:right;">103 MB</td>
-    </tr>
-    <tr>
-      <td>Close descriptor</td>
-      <td style="text-align:right;">192 B</td>
-      <td style="text-align:right;">192 B</td>
-      <td style="text-align:right;">192 B</td>
-      <td style="text-align:right;">192 B</td>
-    </tr>
-    <tr>
-      <td>Commitment + certificate</td>
-      <td style="text-align:right;">101 B</td>
-      <td style="text-align:right;">101 B</td>
-      <td style="text-align:right;">101 B</td>
-      <td style="text-align:right;">101 B</td>
-    </tr>
+    <tr><td>Operator dealing</td><td style="text-align:right;">103 KB</td><td style="text-align:right;">1.03 MB</td><td style="text-align:right;">10.3 MB</td><td style="text-align:right;">103 MB</td></tr>
+    <tr><td>Operator prepare</td><td style="text-align:right;">1.15 ms</td><td style="text-align:right;">12.1 ms</td><td style="text-align:right;">140 ms</td><td style="text-align:right;">1.60 s</td></tr>
+    <tr><td>Validator durable vote</td><td style="text-align:right;">14.0 ms</td><td style="text-align:right;">70.7 ms</td><td style="text-align:right;">581 ms</td><td style="text-align:right;">6.14 s</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
-```{=html}
-<div class="clearing-benchmark-table">
-<table>
-  <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>Operator: prepare</td><td style="text-align:right;">1.16 ms</td><td style="text-align:right;">3.30 ms</td><td style="text-align:right;">1.61 s</td></tr>
-  </tbody>
-</table>
-</div>
-```
-
-```{=html}
-<div class="clearing-benchmark-table">
-<table>
-  <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 8, <em>K</em> = 8</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>Validator: durable vote</td><td style="text-align:right;">276 ms</td><td style="text-align:right;">1.15 s</td><td style="text-align:right;">1.15 s</td></tr>
-  </tbody>
-</table>
-</div>
-```
+The close descriptor is 192 B, and the commitment with its 100-validator certificate is 101 B.
 
 ::: {.image-caption}
-Figure 8: Encoded payload sizes (decimal KB and MB) and arithmetic-mean processing times. Preparation averages 20 CPU samples. Local durable votes average three runs per workload, with no warmup. Each run starts from an open, durable predecessor and includes sealing, signing, validation, parallel durable commits of the three public databases, then the private checkpoint and signing decision. Setup and reopen checks run outside the timer, and all nine runs reopened successfully.
+Figure 8: Encoded dealing sizes use decimal KB and MB. Processing times average three runs with no warmup. The local durable-vote timer includes sealing, signing, validation, parallel durable commits of the three public databases, then the private checkpoint and signing decision. Each run starts from an encoded dealing and an open, durable predecessor. Setup and reopen checks are outside the timer. All twelve reopen checks passed.
 
-The host was an AWS c8a.4xlarge with 16 AMD EPYC vCPUs and 32 GiB RAM. Storage was a network-attached 160 GiB gp3 EBS SSD, provisioned for 6,000 IOPS and 250 MiB/s, with ext4. Validation and the public databases shared a 16-thread Rayon pool, with two runtime I/O workers and a 16 KiB native cache per public database. The fixtures fit in RAM. Each vote waited for the filesystem durability barriers to the EBS volume. These local measurements exclude networking and use benchmark limits for large dealings.
+Measurements used an AWS c8a.4xlarge with 16 AMD EPYC vCPUs, 32 GiB RAM, and a network-attached 160 GiB gp3 EBS SSD provisioned for 6,000 IOPS and 250 MiB/s, with ext4. Validation and public databases shared 16 adaptive workers, with two runtime I/O workers. Durable-vote runs used a shared 1 GiB page-cache budget and 4 KiB physical pages. State/activity write buffers were 256 MiB, with 8 MiB for other writes and all replay buffers. Full state/activity journal sections occupy about 2.1–2.3 GiB, and full Merkle blobs about 2 GiB. The fixtures fit in RAM. Votes wait for filesystem durability barriers to EBS. Large dealings use benchmark limits.
 :::
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
@@ -430,7 +386,7 @@ Figure 9: Every account repeatedly pays one unit to its next neighbor. More paym
 
 ### Proof Sizes and Verification
 
-Proof sizes below are encoded bytes. Where shown, verification times beneath them are arithmetic means of 20 CPU samples, starting from decoded inputs. These are sampled proof positions, not size bounds.
+Proof sizes below are encoded bytes. Unless noted otherwise, verification times beneath them are arithmetic means of 20 CPU samples, starting from decoded inputs. These are sampled proof positions, not size bounds.
 
 An activity proof checks whether an account appears in a close's certified, sorted account range. Presence opens one Row, while absence between two accounts opens the neighboring Rows. First, we vary the number of accounts in the first close.
 
@@ -440,17 +396,18 @@ An activity proof checks whether an account appears in a close's certified, sort
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Activity proof</th>
-      <th colspan="3" style="text-align:center;">Accounts in the first close</th>
+      <th colspan="4" style="text-align:center;">Accounts in first close</th>
     </tr>
     <tr>
-      <th style="text-align:right;">128</th>
-      <th style="text-align:right;">1,024</th>
+      <th style="text-align:right;">1,000</th>
+      <th style="text-align:right;">10,000</th>
+      <th style="text-align:right;">100,000</th>
       <th style="text-align:right;">1,000,000</th>
     </tr>
   </thead>
   <tbody>
-    <tr><td>Account present</td><td style="text-align:right;">317 B<br><small>973 ns</small></td><td style="text-align:right;">413 B<br><small>1.27 µs</small></td><td style="text-align:right;">702 B<br><small>2.11 µs</small></td></tr>
-    <tr><td>Account absent</td><td style="text-align:right;">400 B<br><small>1.14 µs</small></td><td style="text-align:right;">496 B<br><small>1.43 µs</small></td><td style="text-align:right;">785 B<br><small>2.25 µs</small></td></tr>
+    <tr><td>Account present</td><td style="text-align:right;">381 B<br><small>1.20 µs</small></td><td style="text-align:right;">509 B<br><small>1.56 µs</small></td><td style="text-align:right;">606 B<br><small>1.87 µs</small></td><td style="text-align:right;">702 B<br><small>2.14 µs</small></td></tr>
+    <tr><td>Account absent</td><td style="text-align:right;">464 B<br><small>1.33 µs</small></td><td style="text-align:right;">592 B<br><small>1.71 µs</small></td><td style="text-align:right;">689 B<br><small>2.01 µs</small></td><td style="text-align:right;">785 B<br><small>2.24 µs</small></td></tr>
   </tbody>
 </table>
 </div>
@@ -483,24 +440,34 @@ The log also contains records from earlier closes. The next table keeps 128 acco
 
 A complete challenge also carries the signed receipt and, when needed, a payer-vector BMT opening.
 
+These four fixtures use one million live accounts, a 512-account recipient pool, and one recipient per payer.
+
 ```{=html}
 <div class="clearing-benchmark-table">
 <table>
   <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Complete challenge</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th></tr>
+    <tr>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Complete challenge</th>
+      <th colspan="4" style="text-align:center;">Active payers</th>
+    </tr>
+    <tr>
+      <th style="text-align:right;"><em>A</em> = 1,000</th>
+      <th style="text-align:right;"><em>A</em> = 10,000</th>
+      <th style="text-align:right;"><em>A</em> = 100,000</th>
+      <th style="text-align:right;"><em>A</em> = 1,000,000</th>
+    </tr>
   </thead>
   <tbody>
-    <tr><td>Debit mismatch</td><td style="text-align:right;">654 B <small>present</small><br>657 B <small>omitted</small></td><td style="text-align:right;">718 B <small>present</small><br>753 B <small>omitted</small></td><td style="text-align:right;">943 B <small>present</small><br>978 B <small>omitted</small></td></tr>
-    <tr><td>Entry mismatch</td><td style="text-align:right;">705 B</td><td style="text-align:right;">961 B</td><td style="text-align:right;">994 B</td></tr>
-    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
+    <tr><td>Debit mismatch</td><td style="text-align:right;">622 B <small>present</small><br>657 B <small>omitted</small></td><td style="text-align:right;">751 B <small>present</small><br>786 B <small>omitted</small></td><td style="text-align:right;">847 B <small>present</small><br>882 B <small>omitted</small></td><td style="text-align:right;">943 B <small>present</small><br>978 B <small>omitted</small></td></tr>
+    <tr><td>Entry mismatch</td><td style="text-align:right;">673 B</td><td style="text-align:right;">802 B</td><td style="text-align:right;">898 B</td><td style="text-align:right;">994 B</td></tr>
+    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 10: Activity lookups and complete challenges. The activity fixtures contain account Rows without payment Entries. Lookup sizes include the Row or neighboring Rows and MMR opening. The certified 48-byte log header and account range are separate. Omitted payer is the absence case of debit mismatch.
+Figure 10: Activity lookups and complete challenges. The activity fixtures contain account Rows without payment Entries. Lookup sizes include the Row or neighboring Rows and MMR opening. The certified 48-byte log header and account range are separate. First-table verification times are arithmetic means of three batches of 1,000 decoded lookups. Omitted payer is the absence case of debit mismatch.
 
 An empty close proves absence in 4 B (8.03 ns). The smallest presence and interior-absence cases use one and two accounts: 124 B (427 ns) and 239 B (679 ns), respectively.
 :::
