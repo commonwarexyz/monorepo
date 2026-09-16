@@ -303,6 +303,8 @@ impl CacheRef {
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
+        // Read from the page cache or `blob` until the requested data is fully read.
+        // Fetch missing pages one at a time and copy consecutive cached pages together.
         while !buf.is_empty() {
             // Resolve the missing page, rechecking for a concurrent fill before fetching.
             let count = self
