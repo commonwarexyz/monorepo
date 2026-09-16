@@ -1,4 +1,4 @@
-use super::{Header, Layout, Pending, hold::Hold, resolve_header, sync_dir};
+use super::{Dirs, Header, Layout, Pending, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::channel::oneshot;
@@ -118,11 +118,10 @@ impl crate::Storage for Storage {
         let pending = self.pending.clone();
 
         // Run the open to completion: it mutates the partition directory and the
-        // blob (create, truncate, header write, syncs), and dropping this future
-        // must not abandon that sequence half-done (a straggling truncate could
-        // clobber a successor's blob) or leave a later open trusting a header
-        // whose syncs never ran.
-        let (blob, mut logical_size, blob_version, wait) = self
+        // blob (create, truncate, header write), and dropping this future must
+        // not abandon that sequence half-done (a straggling truncate could
+        // clobber a successor's blob).
+        let (blob, mut logical_size, blob_version, wait, owed) = self
             .dispatch(move || {
                 let parent = match path.parent() {
                     Some(parent) => parent,
@@ -157,18 +156,15 @@ impl crate::Storage for Storage {
                 if existing.is_none() {
                     pending.forget(&partition, Some(&name));
                 }
-                let (generation, wait) = pending.attach(&partition, &name)?;
+                let (generation, wait, owed) = pending.attach(&partition, &name)?;
+                let created = existing.is_none();
 
                 let (mut logical_size, blob_version, data_offset) = match existing {
                     Some(resolved) => resolved,
                     None => (|| {
-                        // Sync the directories before writing the header so a parseable
-                        // header always implies durable directory entries (an open that
-                        // parses a header never re-runs these). The storage directory is
-                        // synced unconditionally: the partition directory existing in the
-                        // namespace does not imply its entry is durable.
-                        sync_dir(parent)?;
-                        sync_dir(&storage_directory)?;
+                        // Write the header without flushing it. The first flush through the
+                        // handle, or the next open of the name, makes the header and the
+                        // directory entries durable together with the first data.
 
                         // Truncate to zero before writing, per the [Header::create] contract.
                         let (region, blob_version) = Header::create(&blob_layouts, &versions);
@@ -185,34 +181,33 @@ impl crate::Storage for Storage {
                             return Err(Error::Closed);
                         }
                         file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                        file.sync_all().map_err(|e| {
-                            Error::BlobSyncFailed(partition.clone(), hex(&name), e.into())
-                        })?;
                         Ok((0, blob_version, data_offset))
                     })()
                     .inspect_err(|error: &Error| {
                         // Retain creation failures until the namespace entry
                         // is removed or replaced.
-                        let sender = pending
-                            .start(&generation)
-                            .expect("creation owns its namespace entry");
-                        pending.finish(&generation.key, sender, Err(error.clone()));
+                        pending.fail(&generation, error.clone());
                     })?,
                 };
 
-                if wait.is_none() {
+                if wait.is_none() && !owed {
                     logical_size =
                         file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
                 }
 
                 // Construct the blob while still holding the filesystem lock.
-                let blob = Self::Blob::new(file, pool, data_offset, hold, generation);
-                Ok((blob, logical_size, blob_version, wait))
+                let dirs = Dirs {
+                    partition: parent.to_path_buf(),
+                    storage: storage_directory,
+                };
+                let blob =
+                    Self::Blob::new(file, pool, data_offset, hold, generation, dirs, created);
+                Ok((blob, logical_size, blob_version, wait, owed))
             })
             .await?;
-        if wait.is_some() {
+        if wait.is_some() || owed {
             Pending::wait(wait).await?;
-            logical_size = blob.size().await?;
+            logical_size = blob.complete().await?;
         }
         Ok((blob, logical_size, blob_version))
     }
@@ -302,7 +297,7 @@ mod tests {
         env,
         future::Future,
         pin::Pin,
-        sync::mpsc::RecvTimeoutError,
+        sync::mpsc::{self, RecvTimeoutError},
         task::{Context, Poll},
     };
 
@@ -988,19 +983,19 @@ mod tests {
         }
     }
 
-    /// Wait for every deferred sync to land.
+    /// Wait for every settling open to finish.
     async fn settle(storage: &Storage) {
-        while storage.pending.len() > 0 {
+        while storage.pending.outstanding() > 0 {
             tokio::task::yield_now().await;
         }
     }
 
-    /// Dropping the last handle with unsynced writes starts a sync, and the next open waits
-    /// for it.
+    /// Dropping the last handle with unsynced writes leaves debt, and the next open flushes it
+    /// before returning.
     #[tokio::test]
-    async fn test_reopen_waits_for_deferred_sync() {
+    async fn test_reopen_flushes_dirty_predecessor() {
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_deferred_{}", random_suffix()));
+            env::temp_dir().join(format!("storage_tokio_reopen_flush_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
@@ -1008,12 +1003,13 @@ mod tests {
         blob.write_at(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
-        assert_eq!(storage.pending.finished(), 0);
         drop(blob);
+        assert!(storage.pending.owes("partition", b"blob"));
+        assert_eq!(storage.pending.completions(), 0);
 
         let (blob, len) = storage.open("partition", b"blob").await.unwrap();
-        assert_eq!(storage.pending.len(), 0);
-        assert_eq!(storage.pending.finished(), 1);
+        assert!(!storage.pending.owes("partition", b"blob"));
+        assert_eq!(storage.pending.completions(), 1);
         assert_eq!(len, 5);
         let read = blob
             .read_at(0, 5, ReadOptions::default())
@@ -1022,17 +1018,19 @@ mod tests {
             .coalesce();
         assert_eq!(read.as_ref(), b"hello");
 
-        // The untouched handle drops clean.
+        // The untouched handle drops clean and the next open owes nothing.
         drop(blob);
         settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 1);
+        assert!(!storage.pending.owes("partition", b"blob"));
+        drop(storage.open("partition", b"blob").await.unwrap());
+        assert_eq!(storage.pending.completions(), 1);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Handles whose mutations are all durable defer nothing.
+    /// Handles whose mutations are all durable leave no debt.
     #[tokio::test]
-    async fn test_synced_drop_defers_nothing() {
+    async fn test_synced_drop_leaves_no_debt() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_synced_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
@@ -1049,21 +1047,24 @@ mod tests {
         blob.resize(16).await.unwrap();
         blob.start_sync().await.await.unwrap();
         drop(blob);
-        settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 0);
 
         let (blob, _) = storage.open("partition", b"sync_write").await.unwrap();
         blob.write_at(0, b"hello", WriteOptions::SYNC)
             .await
             .unwrap();
         drop(blob);
+
         settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 0);
+        for name in [b"sync".as_slice(), b"start_sync", b"sync_write"] {
+            assert!(!storage.pending.owes("partition", name));
+            drop(storage.open("partition", name).await.unwrap());
+        }
+        assert_eq!(storage.pending.completions(), 0);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Clones share one tracker: a sync is deferred only when the last clone drops dirty, and a
+    /// Clones share one tracker: debt is recorded only when the last clone drops dirty, and a
     /// sync through any clone clears the state.
     #[tokio::test]
     async fn test_clones_share_dirty_state() {
@@ -1078,26 +1079,29 @@ mod tests {
             .await
             .unwrap();
         drop(blob);
-        assert_eq!(storage.pending.len(), 0);
+        assert_eq!(storage.pending.outstanding(), 0);
+        assert!(!storage.pending.owes("partition", b"blob"));
         clone.sync().await.unwrap();
         drop(clone);
         settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 0);
+        assert!(!storage.pending.owes("partition", b"blob"));
 
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let clone = blob.clone();
         blob.resize(0).await.unwrap();
         drop(blob);
-        assert_eq!(storage.pending.len(), 0);
+        assert!(!storage.pending.owes("partition", b"blob"));
         drop(clone);
         settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 1);
+        assert!(storage.pending.owes("partition", b"blob"));
+        drop(storage.open("partition", b"blob").await.unwrap());
+        assert_eq!(storage.pending.completions(), 1);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_recreate_reopen_waits_for_current_generation_sync() {
+    async fn test_recreate_reopen_flushes_replacement() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_recreate_{}", random_suffix()));
         let storage = Storage::new(
@@ -1123,7 +1127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_live_dirty_owner_defers_nothing() {
+    async fn test_remove_live_dirty_owner_leaves_no_debt() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_remove_live_{}", random_suffix()));
         let storage = Storage::new(
@@ -1137,7 +1141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_durable_writes_need_no_reopen_sync() {
+    async fn test_durable_writes_need_no_reopen_flush() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_durable_{}", random_suffix()));
         let storage = Storage::new(
@@ -1163,7 +1167,8 @@ mod tests {
     }
 
     /// A sync on an open with no uncovered mutation returns without a device flush, so callers
-    /// may sync freely.
+    /// may sync freely. The first sync of a created blob is never skipped: it makes the header
+    /// and directory entries durable.
     #[tokio::test]
     async fn test_clean_sync_is_skipped() {
         let storage_directory =
@@ -1172,31 +1177,301 @@ mod tests {
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(blob.created());
         blob.sync().await.unwrap();
+        assert!(!blob.created());
+        assert_eq!(storage.pending.creation_flushes(), 1);
         blob.start_sync().await.await.unwrap();
-        assert_eq!(blob.skipped_syncs(), 2);
+        assert_eq!(blob.skipped_syncs(), 1);
 
         // A mutation makes the next sync real, and only the next one.
         blob.write_at(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
         blob.sync().await.unwrap();
-        assert_eq!(blob.skipped_syncs(), 2);
+        assert_eq!(blob.skipped_syncs(), 1);
         blob.sync().await.unwrap();
         blob.resize(3).await.unwrap();
         blob.start_sync().await.await.unwrap();
         blob.start_sync().await.await.unwrap();
-        assert_eq!(blob.skipped_syncs(), 4);
+        assert_eq!(blob.skipped_syncs(), 3);
         drop(blob);
         settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 0);
+        assert!(!storage.pending.owes("partition", b"blob"));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Removing a blob or its partition forgets its pending syncs.
+    /// A created blob's header and directory entries become durable at its first flush, not at
+    /// open. A blob created and dropped without any flush is flushed by its next open.
     #[tokio::test]
-    async fn test_remove_forgets_pending() {
+    async fn test_creation_is_flushed_by_first_sync_or_next_open() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_lazy_creation_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"untouched").await.unwrap();
+        assert!(blob.created());
+        assert_eq!(storage.pending.creation_flushes(), 0);
+        drop(blob);
+        assert!(storage.pending.owes("partition", b"untouched"));
+        let (blob, size) = storage.open("partition", b"untouched").await.unwrap();
+        assert_eq!(size, 0);
+        assert!(!blob.created());
+        assert_eq!(storage.pending.completions(), 1);
+        drop(blob);
+        settle(&storage).await;
+        assert!(!storage.pending.owes("partition", b"untouched"));
+
+        // The first sync covers the header, the directory entries and the data together.
+        let (blob, _) = storage.open("partition", b"written").await.unwrap();
+        blob.write_at(0, b"x", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        assert!(!blob.created());
+        assert_eq!(storage.pending.creation_flushes(), 1);
+        drop(blob);
+        settle(&storage).await;
+        assert!(!storage.pending.owes("partition", b"written"));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A durable write on a created blob flushes the whole file, so the header and an earlier
+    /// plain write are covered together.
+    #[tokio::test]
+    async fn test_durable_write_flushes_creation() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_durable_creation_{}",
+            random_suffix()
+        ));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"ab", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.write_at(2, b"cd", WriteOptions::SYNC).await.unwrap();
+        assert!(!blob.created());
+        assert_eq!(storage.pending.creation_flushes(), 1);
+        drop(blob);
+        settle(&storage).await;
+        assert!(!storage.pending.owes("partition", b"blob"));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A failed flush is retained: the handle reports it on every later sync, and once it drops
+    /// every open of the name fails until the blob is removed.
+    #[tokio::test]
+    async fn test_flush_failure_is_retained() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_flush_failure_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
+        assert!(matches!(blob.sync().await, Err(Error::Closed)));
+        assert!(matches!(blob.sync().await, Err(Error::Closed)));
+        assert!(matches!(blob.start_sync().await.await, Err(Error::Closed)));
+        drop(blob);
+        for _ in 0..2 {
+            assert!(matches!(
+                storage.open("partition", b"blob").await,
+                Err(Error::Closed)
+            ));
+        }
+        storage.remove("partition", Some(b"blob")).await.unwrap();
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        drop(blob);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A completion that fails at open is retained for later opens instead of being retried, so
+    /// a fresh descriptor cannot certify bytes the kernel already reported lost.
+    #[tokio::test]
+    async fn test_completion_failure_is_retained() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_completion_failure_{}",
+            random_suffix()
+        ));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(blob);
+        *storage.pending.test.fail_flush.lock() = Some(Error::WriteFailed);
+        for _ in 0..2 {
+            assert!(matches!(
+                storage.open("partition", b"blob").await,
+                Err(Error::WriteFailed)
+            ));
+        }
+        assert_eq!(storage.pending.completions(), 0);
+        storage.remove("partition", None).await.unwrap();
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        drop(blob);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A completion that fails after its open was cancelled still retains the failure: the
+    /// cancelled open's settlement carries it to the successor waiting on it, which fails
+    /// instead of flushing a fresh descriptor past the error.
+    #[tokio::test]
+    async fn test_cancelled_completion_failure_is_retained() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_cancelled_completion_{}",
+            random_suffix()
+        ));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(blob);
+
+        // Hold the first reopen inside its flush, then cancel it while a second reopen waits.
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        *storage.pending.test.before_complete.lock() = Some((entered, gate));
+        let mut cancelled = Box::pin(storage.open("partition", b"blob"));
+        commonware_macros::select! {
+            entered = entering => entered.unwrap(),
+            _ = &mut cancelled => panic!("reopen must block in its flush"),
+        }
+        drop(cancelled);
+        let mut successor = Box::pin(storage.open("partition", b"blob"));
+        assert!((&mut successor).now_or_never().is_none());
+        storage.scan("partition").await.unwrap();
+
+        // The cancelled flush fails. The successor must inherit that failure, not flush again.
+        *storage.pending.test.fail_flush.lock() = Some(Error::WriteFailed);
+        release.send(()).unwrap();
+        assert!(matches!(successor.await, Err(Error::WriteFailed)));
+        assert_eq!(storage.pending.completions(), 0);
+        assert!(matches!(
+            storage.open("partition", b"blob").await,
+            Err(Error::WriteFailed)
+        ));
+        storage.remove("partition", None).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A reopen whose name is removed and recreated while it flushes publishes nothing into the
+    /// recreated name, which still owes its own flush.
+    #[tokio::test]
+    async fn test_removed_incarnation_completion_publishes_nothing() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_removed_completion_{}",
+            random_suffix()
+        ));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (old, _) = storage.open("partition", b"blob").await.unwrap();
+        old.write_at(0, b"old", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(old);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        *storage.pending.test.before_complete.lock() = Some((entered, gate));
+        let mut reopen = Box::pin(storage.open("partition", b"blob"));
+        commonware_macros::select! {
+            entered = entering => entered.unwrap(),
+            _ = &mut reopen => panic!("reopen must block in its flush"),
+        }
+
+        // Recreate the name underneath the blocked reopen and leave the replacement dirty.
+        storage.remove("partition", Some(b"blob")).await.unwrap();
+        let (current, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+        current
+            .write_at(0, b"new", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(current);
+        release.send(()).unwrap();
+        let (removed, size) = reopen.await.unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(
+            removed
+                .read_at(0, 3, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"old"
+        );
+        drop(removed);
+
+        // The replacement's debt survived the removed incarnation's flush.
+        assert!(storage.pending.owes("partition", b"blob"));
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(
+            blob.read_at(0, 3, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"new"
+        );
+        assert_eq!(storage.pending.completions(), 2);
+        drop(blob);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A blob whose creation was never flushed may crash with data behind a torn header. That
+    /// data was never acknowledged, so the next open recreates the blob instead of failing.
+    #[tokio::test]
+    async fn test_data_bearing_torn_creation_recreates() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_torn_data_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        // A header region that persisted nothing, followed by data the crashed process wrote.
+        let parent = storage_directory.join("partition");
+        fs::create_dir_all(&parent).unwrap();
+        let mut raw = vec![0u8; Layout::V1.data_offset() as usize];
+        raw.extend_from_slice(b"unacknowledged");
+        fs::write(parent.join(hex(b"blob")), &raw).unwrap();
+
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        assert!(blob.created());
+        blob.sync().await.unwrap();
+        drop(blob);
+        assert_eq!(
+            fs::metadata(parent.join(hex(b"blob"))).unwrap().len(),
+            Layout::V1.data_offset()
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Removing a blob or its partition forgets its debt.
+    #[tokio::test]
+    async fn test_remove_forgets_debt() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_forget_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
@@ -1208,10 +1483,14 @@ mod tests {
                 .await
                 .unwrap();
             drop(blob);
+            assert!(storage.pending.owes("partition", name));
         }
         storage.remove("partition", Some(b"a")).await.unwrap();
+        assert!(!storage.pending.owes("partition", b"a"));
+        assert!(storage.pending.owes("partition", b"b"));
         storage.remove("partition", None).await.unwrap();
-        assert_eq!(storage.pending.len(), 0);
+        assert!(!storage.pending.owes("partition", b"b"));
+        assert!(storage.pending.entries.lock().is_empty());
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

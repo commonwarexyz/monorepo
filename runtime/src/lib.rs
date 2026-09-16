@@ -673,12 +673,15 @@ stability_scope!(BETA {
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
     /// The same holds for a blob reopened within a run. A blob has one open at
-    /// a time, see [`Storage::open_versioned`]. Once every handle to a blob has
-    /// been dropped, a handle returned by a later open reads only crash-durable
-    /// bytes, even when operations issued through the dropped handles were
-    /// cancelled or are still in flight. Writes and resizes that no completed
-    /// sync covered are either made durable before the open returns or are not
-    /// visible through the new handle.
+    /// a time, see [`Storage::open_versioned`]. Dropping its last handle closes it
+    /// without I/O. A later open of that blob waits for every operation issued
+    /// through the dropped handles to finish, including cancelled ones, and then
+    /// either makes durable every write, resize and creation that no completed
+    /// sync covered before it returns, or does not expose them through the new
+    /// handle. If making them durable fails, that open fails and so does every
+    /// later open of the blob until it is removed, except that a blob whose
+    /// creation never became durable may instead be found absent and recreated
+    /// empty.
     ///
     /// # Cancellation
     ///
@@ -719,7 +722,11 @@ stability_scope!(BETA {
         /// A blob has one open at a time. Clone the returned blob to share it, and
         /// drop every clone before opening the blob again.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
+        /// A new blob is durably created by its first completed [`Blob::sync`],
+        /// [`Blob::start_sync`] or non-empty [`WriteOptions::SYNC`] write, by the next open
+        /// of the blob, or when the runtime next starts (see the `Storage` durability
+        /// notes). Until then a crash may leave it absent, and a later open recreates it
+        /// empty.
         ///
         /// # Errors
         ///
@@ -877,12 +884,12 @@ stability_scope!(BETA {
     /// blob was removed since, see [`Storage::open_versioned`]. Use clones to
     /// share access to a blob.
     ///
-    /// Dropping the last clone of a blob whose writes or resizes are not covered
-    /// by a completed [`Blob::sync`] does not make them durable at a known point.
-    /// A runtime may sync them afterwards, surfacing a failure to later
-    /// [`Storage::open_versioned`] calls for the same blob until it is removed, or a
-    /// later handle may not see them at all. Call `sync` before dropping to make
-    /// changes durable and to observe errors.
+    /// Dropping a blob performs no I/O. Writes and resizes that no completed
+    /// [`Blob::sync`] covered are made durable, or discarded, by the next
+    /// [`Storage::open_versioned`] of the same blob, and a failure to make them
+    /// durable fails that open and every later one until the blob is removed.
+    /// Call `sync` before dropping to make changes durable when you need them
+    /// and to observe the error yourself.
     ///
     /// # Durability
     ///
@@ -936,9 +943,11 @@ stability_scope!(BETA {
         /// Make every write and resize that completed before this call durable.
         ///
         /// A write still in flight on another clone is covered by its own
-        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. A runtime may
-        /// return at once when every completed mutation is already covered, so
-        /// callers may sync freely.
+        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. The first sync
+        /// of a blob this open created also makes its creation durable, see
+        /// [`Storage::open_versioned`]. A runtime may return at once when every completed mutation is
+        /// already covered, so callers may sync freely. Once a sync through this open
+        /// has failed, every later sync through it returns that failure.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that every write and resize that completed before this call is

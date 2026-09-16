@@ -421,7 +421,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             );
             let tail = super::position_to_blob(target, items_per_blob);
             let mut pending = BTreeMap::new();
-            pending.insert(tail, partition.open_recovery(tail).await?);
+
+            // Keep a durable tail at the target before the checkpoint records that position.
+            // The empty tail is the only blob state witnessing a non-zero start, and a blob is
+            // created durably by its first flush rather than by the open that returns it.
+            let mut writer = partition.open_recovery(tail).await?;
+            writer.sync().await?;
+            pending.insert(tail, writer);
             let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
             if ceiling < target {
                 return Err(Error::ItemPruned(ceiling));
@@ -848,8 +854,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             self.cfg.write_buffer,
         );
         let blob = super::position_to_blob(size, self.cfg.items_per_blob.get());
-        self.pending
-            .insert(blob, self.partition.open_recovery(blob).await?);
+
+        // Keep a durable tail at the target before the checkpoint records that position. The
+        // empty tail is the only blob state witnessing a non-zero start, and a blob is created
+        // durably by its first flush rather than by the open that returns it.
+        let mut writer = self.partition.open_recovery(blob).await?;
+        writer.sync().await?;
+        self.pending.insert(blob, writer);
         self.discarded.clear();
         self.bounds = size..size;
         self.watermark = size;
@@ -1416,6 +1427,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.blobs
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
+
+        // Keep a durable tail at the new size before the checkpoint records that position. The
+        // empty tail is the only blob state witnessing a non-zero start, and a blob is created
+        // durably by its first flush rather than by the open that returns it.
+        let sync = self.blobs.start_sync().await;
+        sync.await?;
         self.bounds = new_size..new_size;
         self.barrier = Barrier::new(new_size);
 
@@ -2268,6 +2285,88 @@ mod tests {
         );
     }
 
+    /// Assert the empty tail blob created by a clear was made durable before the checkpoint
+    /// write that records its position.
+    ///
+    /// A blob is created durably by its first flush, not by the open that returns it, and the
+    /// empty tail is the only on-disk witness of a non-zero start.
+    fn assert_tail_synced_before_checkpoint(
+        recordings: &Recordings,
+        blob_partition: &str,
+        metadata_partition: &str,
+        tail_blob: u64,
+    ) {
+        let name = tail_blob.to_be_bytes();
+        let events = recordings.storage_events();
+        let (opened, incarnation) = events
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, event)| match event {
+                StorageEvent::Opened {
+                    incarnation,
+                    partition,
+                    name: opened_name,
+                } if partition == blob_partition && opened_name == name.as_slice() => {
+                    Some((index, *incarnation))
+                }
+                _ => None,
+            })
+            .expect("tail blob was opened");
+        let metadata: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                StorageEvent::Opened {
+                    incarnation,
+                    partition,
+                    ..
+                } if partition == metadata_partition => Some(*incarnation),
+                _ => None,
+            })
+            .collect();
+        let checkpoint = events
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, event)| match event {
+                StorageEvent::Synced { incarnation } if metadata.contains(incarnation) => {
+                    Some(index)
+                }
+                StorageEvent::Wrote {
+                    incarnation,
+                    options,
+                } if metadata.contains(incarnation) && options.contains(WriteOptions::SYNC) => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .expect("checkpoint was made durable");
+        let synced = events
+            .iter()
+            .enumerate()
+            .skip(opened + 1)
+            .find_map(|(index, event)| match event {
+                StorageEvent::Synced {
+                    incarnation: observed,
+                }
+                | StorageEvent::StartedSync {
+                    incarnation: observed,
+                } if *observed == incarnation => Some(index),
+                StorageEvent::Wrote {
+                    incarnation: observed,
+                    options,
+                } if *observed == incarnation && options.contains(WriteOptions::SYNC) => {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .expect("tail blob was synced");
+        assert!(
+            synced < checkpoint,
+            "checkpoint recorded the tail position before the tail was durable: {events:?}",
+        );
+    }
+
     fn recovery_lifetime_cfg(pooler: &impl BufferPooler, partition: &str) -> Config {
         Config {
             partition: partition.into(),
@@ -2365,6 +2464,95 @@ mod tests {
             assert_eq!(journal.bounds(), 40..41);
             assert_eq!(journal.read(40).await.unwrap(), 360);
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_open_syncs_completed_clear_tail_before_checkpoint() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..25u64 {
+                (journal, _) = journal.append(&test_digest(value)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            Journal::<_, Digest>::test_stage_clear(context.child("stage"), &cfg.partition, 100)
+                .await
+                .unwrap();
+
+            // Completing the staged clear creates the empty tail that records position 100.
+            let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
+                .await
+                .unwrap();
+            let recovery = Recovery::<_, Digest>::open(
+                context.child("recovery"),
+                cfg.clone(),
+                checkpoint,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(recovery.size(), 100);
+            assert_tail_synced_before_checkpoint(
+                &recordings,
+                &blob_partition(&cfg),
+                &format!("{}-metadata", cfg.partition),
+                10,
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_clear_to_size_syncs_tail_before_checkpoint() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = recovery_lifetime_cfg(&context, "reset-tail-durability");
+            let checkpoint = Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                .await
+                .unwrap();
+            let recovery =
+                Recovery::<_, u64>::open(context.child("recovery"), cfg.clone(), checkpoint, None)
+                    .await
+                    .unwrap();
+            let recovery = append_rebuilt_offsets(Box::new(recovery)).await;
+
+            // The reset leaves one empty tail blob recording position 40.
+            let recovery = recovery.clear_to_size(40).await.unwrap();
+            assert_eq!(recovery.size(), 40);
+            assert_tail_synced_before_checkpoint(
+                &recordings,
+                &blob_partition(&cfg),
+                &format!("{}-metadata", cfg.partition),
+                5,
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_clear_to_size_syncs_tail_before_checkpoint() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..25u64 {
+                (journal, _) = journal.append(&test_digest(value)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // The clear leaves one empty tail blob recording position 100.
+            journal.0 = journal.0.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_tail_synced_before_checkpoint(
+                &recordings,
+                &blob_partition(&cfg),
+                &format!("{}-metadata", cfg.partition),
+                10,
+            );
         });
     }
 

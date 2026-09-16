@@ -1,8 +1,9 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
-        Generation, Pending, Sender, Tracker, defer_sync,
+        Debt, Dirs, Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
+        sync_dirs,
     },
 };
 use cfg_if::cfg_if;
@@ -62,15 +63,17 @@ impl Cache {
 /// A blob's file with the writes no completed sync covers.
 ///
 /// Every operation retains the file, carrying the directory hold into the blocking pool and
-/// keeping the open's obligation pending until the operation finishes. Dropping the last
-/// reference resolves that obligation immediately when a completed sync covers every mutation.
-/// Otherwise, the next open waits for a deferred sync.
+/// keeping the open's settlement pending until the operation finishes. Dropping the last
+/// reference performs no I/O: it records what the open left unflushed for the next open of the
+/// blob to establish before that open returns.
 struct Shared {
     file: Arc<Held>,
     tracker: Tracker,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
-    /// Resolves the obligation the open registered when its last handle dropped.
+    /// Directories whose entries the flush of a created blob makes durable.
+    dirs: Dirs,
+    /// Settles the open once its last handle dropped and every operation finished.
     promise: Mutex<Option<Sender>>,
     #[cfg(test)]
     before_mutation: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
@@ -100,22 +103,78 @@ impl Drop for Shared {
         let Some(sender) = self.promise.lock().take() else {
             return;
         };
-        if !self.tracker.is_dirty() {
-            self.pending.resolve(&self.key, sender, Ok(()));
-            return;
+        self.pending.settle(
+            &self.key,
+            sender,
+            self.tracker.debt(),
+            self.tracker.failure(),
+        );
+    }
+}
+
+impl Shared {
+    /// Flush the file, and with `full` also its directory entries, so a created blob's header
+    /// and name become durable together.
+    fn barrier(&self, full: bool) -> Result<(), Error> {
+        #[cfg(test)]
+        if let Some(error) = self.pending.take_flush_failure() {
+            return Err(error);
         }
-        let file = self.file.clone();
-        let key = self.key.clone();
-        defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
-            Blob::sync_inner(&file, &key.0, &key.1)
-        });
+        let (partition, name) = &self.key;
+        if !full {
+            return Blob::sync_inner(&self.file, partition, name);
+        }
+        self.file
+            .sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        sync_dirs(&self.dirs)
+    }
+
+    /// Flush this open's mutations, and its creation if no flush covered it yet. Success credits
+    /// the tracker and failure poisons it. A poisoned open rejects every later durability claim.
+    fn flush(&self, seen: u64) -> Result<(), Error> {
+        if let Some(error) = self.tracker.failure() {
+            return Err(error);
+        }
+        let created = self.tracker.created();
+        let result = self.barrier(created);
+        match &result {
+            Ok(()) => {
+                self.tracker.end_sync(seen);
+                if created {
+                    self.tracker.end_creation();
+                    #[cfg(test)]
+                    self.pending.flushed_creation();
+                }
+            }
+            Err(error) => self.tracker.poison(error),
+        }
+        result
+    }
+
+    /// Establish a settled predecessor's debt through this open's file.
+    ///
+    /// A failure also poisons this open, so its settlement retains the error for every later
+    /// open even when a successor attached while the flush was still running.
+    fn complete(&self, debt: Debt) -> Result<(), Error> {
+        #[cfg(test)]
+        self.pending.before_complete();
+        let result = self.barrier(debt.created);
+        if let Err(error) = &result {
+            self.tracker.poison(error);
+        }
+        #[cfg(test)]
+        if result.is_ok() {
+            self.pending.completed();
+        }
+        result
     }
 }
 
 /// One open of a blob, shared by its clones.
 ///
-/// Dropping the last clone releases the name and registers the obligation a
-/// later open waits for, which [Shared] resolves once every operation issued
+/// Dropping the last clone releases the name and registers the settlement a
+/// later open waits for, which [Shared] publishes once every operation issued
 /// through this open has finished.
 struct Open {
     shared: Arc<Shared>,
@@ -152,20 +211,29 @@ pub struct Blob {
 }
 
 impl Blob {
-    /// Read the captured file's length after its predecessor's operations have settled.
-    pub(super) async fn size(&self) -> Result<u64, Error> {
-        let file = self.open.shared.clone();
+    /// Establish what the settled predecessor left unflushed, then read the captured file's
+    /// length. A failed flush is retained for every later open of the name.
+    pub(super) async fn complete(&self) -> Result<u64, Error> {
+        let shared = self.open.shared.clone();
+        let identity = Arc::downgrade(&self.open.generation);
         let offset = self.data_offset;
         task::spawn_blocking(move || {
             #[cfg(test)]
             {
-                let hook = file.pending.test.before_metadata.lock().take();
+                let hook = shared.pending.test.before_metadata.lock().take();
                 if let Some((entered, release)) = hook {
                     let _ = entered.send(());
                     let _ = release.recv();
                 }
             }
-            file.metadata()
+            let debt = shared.pending.debt(&shared.key, &identity)?;
+            if !debt.is_clear() {
+                let result = shared.complete(debt);
+                shared.pending.clear(&shared.key, &identity, &result);
+                result?;
+            }
+            shared
+                .metadata()
                 .map(|metadata| metadata.len() - offset)
                 .map_err(|_| Error::ReadFailed)
         })
@@ -179,12 +247,19 @@ impl Blob {
         data_offset: u64,
         hold: Arc<Hold>,
         generation: Arc<Generation>,
+        dirs: Dirs,
+        created: bool,
     ) -> Self {
+        let tracker = Tracker::default();
+        if created {
+            tracker.create();
+        }
         let shared = Arc::new(Shared {
             file: Held::new(file, hold),
-            tracker: Tracker::default(),
+            tracker,
             pending: generation.pending.clone(),
             key: generation.key.clone(),
+            dirs,
             promise: Mutex::new(None),
             #[cfg(test)]
             before_mutation: Mutex::new(None),
@@ -203,6 +278,12 @@ impl Blob {
     #[cfg(test)]
     pub(super) fn skipped_syncs(&self) -> u64 {
         self.open.tracker.skipped()
+    }
+
+    /// Whether this open created the blob and has not flushed its creation yet.
+    #[cfg(test)]
+    pub(super) fn created(&self) -> bool {
+        self.open.tracker.created()
     }
 
     pub(super) fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
@@ -445,10 +526,14 @@ impl crate::Blob for Blob {
         };
 
         // Plain syscall paths own mutation debt before submission, including worker unwind.
-        // Durability is fused for one submission. Larger writes finish with one full-file sync.
+        // Durability is fused for one submission once the blob's creation is durable. Larger
+        // writes and a created blob's first durable write finish with one full-file flush.
         cfg_if! {
             if #[cfg(target_os = "linux")] {
-                let flags = (sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE).then_some(libc::RWF_DSYNC);
+                let flags = (sync
+                    && !self.open.tracker.created()
+                    && bufs.chunk_count() <= IOVEC_BATCH_SIZE)
+                    .then_some(libc::RWF_DSYNC);
             } else {
                 let flags = None;
             }
@@ -477,8 +562,10 @@ impl crate::Blob for Blob {
             // Remaining buffers stay owned here until terminal error accounting completes.
             // Their owners may unwind when dropped.
             let result = Self::write_vectored_at(cache, &file, offset, &mut bufs, flags);
-            if fused && result.is_err() {
+            if fused && let Err(error) = &result {
+                // A failed fused write may have consumed the kernel's writeback error.
                 file.tracker.write();
+                file.tracker.poison(error);
             }
             result?;
             if !fused {
@@ -486,9 +573,7 @@ impl crate::Blob for Blob {
             }
             if sync && !fused {
                 let seen = file.tracker.begin_sync();
-                let (partition, name) = &file.key;
-                Self::sync_inner(&file, partition, name)?;
-                file.tracker.end_sync(seen);
+                file.flush(seen)?;
             }
             Ok(())
         })
@@ -520,29 +605,30 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if !self.open.tracker.is_dirty() {
+        if let Some(error) = self.open.tracker.failure() {
+            return Err(error);
+        }
+        if !self.open.tracker.needs_sync() {
             #[cfg(test)]
             self.open.tracker.skip_sync();
             return Ok(());
         }
         let file = self.open.shared.clone();
         let seen = self.open.tracker.begin_sync();
-        task::spawn_blocking(move || {
-            let (partition, name) = &file.key;
-            Self::sync_inner(&file, partition, name)?;
-            file.tracker.end_sync(seen);
-            Ok(())
-        })
-        .await
-        .map_err(|e| {
-            let err: std::io::Error = e.into();
-            let (partition, name) = &self.open.key;
-            Error::BlobSyncFailed(partition.clone(), hex(name), err.into())
-        })?
+        task::spawn_blocking(move || file.flush(seen))
+            .await
+            .map_err(|e| {
+                let err: std::io::Error = e.into();
+                let (partition, name) = &self.open.key;
+                Error::BlobSyncFailed(partition.clone(), hex(name), err.into())
+            })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if !self.open.tracker.is_dirty() {
+        if let Some(error) = self.open.tracker.failure() {
+            return Handle::ready(Err(error));
+        }
+        if !self.open.tracker.needs_sync() {
             #[cfg(test)]
             self.open.tracker.skip_sync();
             return Handle::ready(Ok(()));
@@ -554,11 +640,7 @@ impl crate::Blob for Blob {
         let after_start_sync = self.after_start_sync.clone();
         task::spawn_blocking(move || {
             // Release this operation's blob ownership before publishing its completion.
-            let (partition, name) = &file.key;
-            let result = Self::sync_inner(&file, partition, name);
-            if result.is_ok() {
-                file.tracker.end_sync(seen);
-            }
+            let result = file.flush(seen);
             drop(file);
             let _ = tx.send(result);
             #[cfg(test)]
@@ -616,24 +698,15 @@ mod tests {
             Layout::V0..=Layout::V0,
         );
         let mut reopening = None;
-        let mut old_sync = None;
         if replace {
+            // The removed incarnation's reopen stays in flight while the name is recreated
+            // underneath it. Whether it flushes the unlinked file or reads no debt, it publishes
+            // nothing into the recreated name.
             let (old, _) = storage.open("partition", b"blob").await.unwrap();
             old.write_at(0, b"old", WriteOptions::default())
                 .await
                 .unwrap();
-            let (release, gate) = mpsc::channel();
-            *storage.pending.test.before_sync.lock() = Some(gate);
             drop(old);
-            let wait = storage
-                .pending
-                .syncs
-                .lock()
-                .get(&("partition".into(), b"blob".to_vec()))
-                .unwrap()
-                .sync
-                .clone();
-            old_sync = Some((release, wait));
             let mut open = Box::pin(storage.open("partition", b"blob"));
             assert!((&mut open).now_or_never().is_none());
             storage.scan("partition").await.unwrap();
@@ -663,16 +736,12 @@ mod tests {
         drop(blob);
         let wait = storage
             .pending
-            .syncs
+            .entries
             .lock()
             .get(&("partition".into(), b"blob".to_vec()))
             .unwrap()
-            .sync
+            .settle
             .clone();
-        if let Some((release, wait)) = old_sync {
-            release.send(()).unwrap();
-            Pending::wait(wait).await.unwrap();
-        }
 
         let attachment = if retire_before_attach {
             let (entered, entering) = ::tokio::sync::oneshot::channel();
@@ -689,7 +758,7 @@ mod tests {
             entering.await.unwrap();
             release.send(()).unwrap();
             Pending::wait(wait.clone()).await.unwrap();
-            assert!(storage.pending.syncs.lock().is_empty());
+            assert_eq!(storage.pending.outstanding(), 0);
             release_attach.send(()).unwrap();
         } else {
             // Namespace dispatch completes before this barrier. The mutation still owns
@@ -781,8 +850,9 @@ mod tests {
             blob.write_at(0, b"old", WriteOptions::default())
                 .await
                 .unwrap();
-            let (sync_release, sync_gate) = mpsc::channel();
-            *storage.pending.test.before_sync.lock() = Some(sync_gate);
+            let (flush_entered, _flush_entering) = ::tokio::sync::oneshot::channel();
+            let (flush_release, flush_gate) = mpsc::channel();
+            *storage.pending.test.before_complete.lock() = Some((flush_entered, flush_gate));
             drop(blob);
             let (entered, entering) = ::tokio::sync::oneshot::channel();
             let (release, gate) = mpsc::channel();
@@ -790,7 +860,7 @@ mod tests {
             let mut opening = Box::pin(storage.open("partition", b"blob"));
             assert!((&mut opening).now_or_never().is_none());
             storage.scan("partition").await.unwrap();
-            sync_release.send(()).unwrap();
+            flush_release.send(()).unwrap();
             commonware_macros::select! {
                 entered = entering => entered.unwrap(),
                 _ = &mut opening => panic!("open must wait for metadata"),
@@ -803,6 +873,8 @@ mod tests {
             release.send(()).unwrap();
             let (blob, size) = retry.await.unwrap();
             assert_eq!(size, 3);
+            assert_eq!(storage.pending.completions(), 1);
+            assert!(!storage.pending.owes("partition", b"blob"));
             assert_eq!(
                 blob.read_at(0, 3, ReadOptions::default())
                     .await
@@ -853,18 +925,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_oversized_missing_header_is_not_recreated() {
+    async fn test_oversized_torn_creation_is_recreated() {
         let (storage, directory) = storage_for_reopen_test("oversized_header", Layout::ALL);
         let parent = directory.join("partition");
         std::fs::create_dir_all(&parent).unwrap();
-        let path = parent.join(hex(b"blob"));
-        let raw = vec![0; 4097];
-        std::fs::write(&path, &raw).unwrap();
+
+        // A header region that persisted nothing, behind data no flush ever acknowledged:
+        // the open recreates the blob and discards the data.
+        let path = parent.join(hex(b"torn"));
+        std::fs::write(&path, vec![0; 4097]).unwrap();
+        let (blob, size) = storage.open("partition", b"torn").await.unwrap();
+        assert_eq!(size, 0);
+        blob.sync().await.unwrap();
+        drop(blob);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            Layout::V1.data_offset()
+        );
+
+        // A header region that is not a canonical creation prefix stays corrupt at the
+        // same length.
+        let garbage_path = parent.join(hex(b"garbage"));
+        let garbage = vec![0xFF; 4097];
+        std::fs::write(&garbage_path, &garbage).unwrap();
         assert!(matches!(
-            storage.open("partition", b"blob").await,
+            storage.open("partition", b"garbage").await,
             Err(Error::BlobCorrupt(_, _, _))
         ));
-        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        assert_eq!(std::fs::read(&garbage_path).unwrap(), garbage);
+
         storage.remove("partition", None).await.unwrap();
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
@@ -898,6 +987,9 @@ mod tests {
     async fn test_fused_write_error_is_recorded_before_buffer_drop() {
         let (storage, directory) = storage_for_reopen_test("write_error_order", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // Flush the creation first so the durable write takes the fused path.
+        blob.sync().await.unwrap();
         let accounted = Arc::new(AtomicBool::new(false));
         let bufs = bytes::Bytes::from_owner(WriteErrorObserver {
             shared: Arc::downgrade(&blob.open.shared),
@@ -908,12 +1000,14 @@ mod tests {
         // must precede retirement of the supplied buffers.
         let offset = i64::MAX as u64 + 1 - blob.data_offset;
         let result = blob.write_at(offset, bufs, WriteOptions::SYNC).await;
+        let poisoned = blob.open.tracker.failure().is_some();
         drop(blob);
         storage.remove("partition", None).await.unwrap();
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
         assert!(matches!(result, Err(Error::OffsetOverflow)));
         assert!(accounted.load(Ordering::Acquire));
+        assert!(poisoned, "a failed fused write must poison the open");
     }
 
     struct PanickingOwner {
@@ -968,8 +1062,9 @@ mod tests {
         assert_eq!(bytes.unwrap().coalesce().as_ref(), b"x");
         assert!(matches!(result, Err(Error::WriteFailed)));
 
+        let (entered, _entering) = ::tokio::sync::oneshot::channel();
         let (release, gate) = mpsc::channel();
-        *storage.pending.test.before_sync.lock() = Some(gate);
+        *storage.pending.test.before_complete.lock() = Some((entered, gate));
         drop(blob);
         let mut reopen = Box::pin(storage.open("partition", b"blob"));
         let early = ::tokio::time::timeout(std::time::Duration::from_millis(20), &mut reopen).await;
@@ -990,14 +1085,14 @@ mod tests {
             b"x"
         );
         drop(blob);
-        let syncs = storage.pending.finished();
+        let flushes = storage.pending.completions();
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
         assert!(
             waited,
             "reopen returned before the failed write was made durable"
         );
-        assert_eq!(syncs, 1);
+        assert_eq!(flushes, 1);
     }
 
     #[tokio::test]
@@ -1027,7 +1122,7 @@ mod tests {
             let bytes = reopened
                 .read_at(0, len as usize, ReadOptions::default())
                 .await?;
-            Ok((len, bytes.coalesce(), storage.pending.finished()))
+            Ok((len, bytes.coalesce(), storage.pending.completions()))
         }
         .await;
 
@@ -1037,7 +1132,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(storage_directory);
         assert_eq!(len, 10);
         assert_eq!(bytes.as_ref(), b"after sync");
-        assert_eq!(syncs, 1, "reopen did not wait for the later write's sync");
+        assert_eq!(syncs, 1, "reopen did not flush the later write");
     }
 
     #[cfg(not(target_os = "linux"))]

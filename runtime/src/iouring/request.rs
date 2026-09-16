@@ -277,8 +277,16 @@ impl Request {
             Self::WriteAt(r) => {
                 // Only plain writes stay in `Writing`. Settle here so a caller that stopped
                 // waiting still leaves the open's debt correct.
-                r.file
-                    .wrote(r.state != WriteAtState::Writing, result.is_ok());
+                r.file.wrote(
+                    r.state != WriteAtState::Writing,
+                    matches!(
+                        r.state,
+                        WriteAtState::WritingSync
+                            | WriteAtState::Syncing
+                            | WriteAtState::SyncingFull
+                    ),
+                    &result,
+                );
                 (
                     RequestOutput::WriteAt(result),
                     RetiredResources::File {
@@ -289,8 +297,9 @@ impl Request {
                 )
             }
             Self::Sync(r) => {
-                if result.is_ok() {
-                    r.file.tracker.end_sync(r.seen);
+                match &result {
+                    Ok(()) => r.file.synced(r.seen, r.created),
+                    Err(error) => r.file.sync_failed(error),
                 }
                 (
                     RequestOutput::Sync(result),
@@ -327,7 +336,7 @@ pub enum RequestOutput {
     ReadAt(Result<IoBufMut, (IoBufMut, Error)>),
     /// Completion of the whole positioned write and durability sequence.
     WriteAt(Result<(), Error>),
-    /// Completion of a data sync.
+    /// Completion of a sync.
     Sync(Result<(), Error>),
     /// Completion of a socket connection attempt.
     Connect(Result<(), Error>),
@@ -358,7 +367,7 @@ pub enum RetiredResources {
     },
     /// Storage open, directory hold, and any positioned I/O buffer/cache owners.
     File {
-        /// Storage open carrying its file, directory hold, and sync obligation.
+        /// Storage open carrying its file, directory hold, and durability debt.
         _file: Arc<Shared>,
         /// Shared capability state retained by positioned I/O.
         _cache: Option<Cache>,
@@ -649,18 +658,43 @@ pub enum WriteAtState {
     WritingSync,
     /// Submit plain writes, then issue one trailing data sync.
     WritingBeforeSync,
+    /// Submit plain writes, then issue one trailing full sync, which also covers the header of
+    /// a blob whose creation no flush covered yet.
+    WritingBeforeFull,
     /// Issue the trailing data sync.
     Syncing,
+    /// Issue the trailing full sync.
+    SyncingFull,
 }
 
-/// Build a data-only fsync SQE.
-fn build_datasync_sqe(file: &File) -> SqueueEntry {
-    opcode::Fsync::new(Fd(file.as_raw_fd()))
-        .flags(io_uring::types::FsyncFlags::DATASYNC)
-        .build()
+impl WriteAtState {
+    /// Whether the next SQE is the trailing sync rather than another write.
+    const fn syncing(&self) -> bool {
+        matches!(self, Self::Syncing | Self::SyncingFull)
+    }
+
+    /// The trailing sync this phase leads into, if any.
+    const fn trailing(&self) -> Option<Self> {
+        match self {
+            Self::WritingBeforeSync => Some(Self::Syncing),
+            Self::WritingBeforeFull => Some(Self::SyncingFull),
+            _ => None,
+        }
+    }
 }
 
-/// Return the terminal data-sync status, or `None` for a retry.
+/// Build an fsync SQE, restricted to the data a reader needs unless `full` also demands the
+/// file's metadata.
+fn build_fsync_sqe(file: &File, full: bool) -> SqueueEntry {
+    let fsync = opcode::Fsync::new(Fd(file.as_raw_fd()));
+    if full {
+        fsync.build()
+    } else {
+        fsync.flags(io_uring::types::FsyncFlags::DATASYNC).build()
+    }
+}
+
+/// Return the terminal sync status, or `None` for a retry.
 fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
     match CqeResult::from_raw(result, state) {
         CqeResult::Retry => None,
@@ -703,8 +737,8 @@ impl WriteAtRequest {
 
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
-        if self.state == WriteAtState::Syncing {
-            return build_datasync_sqe(&self.file);
+        if self.state.syncing() {
+            return build_fsync_sqe(&self.file, self.state == WriteAtState::SyncingFull);
         }
 
         let fd = Fd(self.file.as_raw_fd());
@@ -738,7 +772,7 @@ impl WriteAtRequest {
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
-        if self.state == WriteAtState::Syncing {
+        if self.state.syncing() {
             return on_sync_cqe(state, result);
         }
 
@@ -752,12 +786,13 @@ impl WriteAtRequest {
                 self.write.advance(n);
                 self.offset += n as u64;
                 if self.write.is_complete() {
-                    if self.state == WriteAtState::WritingBeforeSync {
+                    match self.state.trailing() {
                         // All batches must finish before the trailing sync starts.
-                        self.state = WriteAtState::Syncing;
-                        None
-                    } else {
-                        Some(Ok(()))
+                        Some(trailing) => {
+                            self.state = trailing;
+                            None
+                        }
+                        None => Some(Ok(())),
                     }
                 } else {
                     None
@@ -773,18 +808,26 @@ pub struct SyncRequest {
     pub file: Arc<Shared>,
     /// Completed mutations that preceded this barrier's submission.
     seen: u64,
+    /// Whether this barrier also retires the blob's unflushed creation.
+    created: bool,
 }
 
 impl SyncRequest {
-    /// Record the mutation frontier this sync can cover before ring submission.
+    /// Record the durability this sync can credit before ring submission.
     pub fn new(file: Arc<Shared>) -> Self {
         let seen = file.tracker.begin_sync();
-        Self { file, seen }
+        let created = file.tracker.created();
+        Self {
+            file,
+            seen,
+            created,
+        }
     }
 
-    /// Build the fsync SQE for this request.
+    /// Build the fsync SQE for this request. A created blob's first barrier makes the whole
+    /// file durable, alongside the directory entries its caller already flushed.
     fn build_sqe(&self) -> SqueueEntry {
-        build_datasync_sqe(&self.file)
+        build_fsync_sqe(&self.file, self.created)
     }
 
     /// Classify one fsync CQE and decide whether the logical request completes

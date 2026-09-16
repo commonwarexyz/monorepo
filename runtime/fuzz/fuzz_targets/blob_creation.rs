@@ -58,8 +58,9 @@ enum CreationOutcome {
 /// sub-prelude file is always recreated, a parseable header is honored before healing is
 /// considered (a blob version disagreement or nonzero padding on an intact region never
 /// heals), and only failures a torn write can produce fall through to the torn-creation
-/// classifier, which accepts a canonical prefix (with any blob version, the CRC binding the
-/// written prelude) followed by zeros.
+/// classifier, which accepts a header region holding a canonical prefix (with any blob version,
+/// the CRC binding the written prelude) followed by zeros, whatever the file's length: bytes
+/// past the region belong to a creation whose first flush never completed.
 fn creation_outcome(image: &[u8], version: u16) -> CreationOutcome {
     // Too short to hold any header: recreated as new regardless of content.
     if image.len() < PRELUDE {
@@ -99,17 +100,16 @@ fn creation_outcome(image: &[u8], version: u16) -> CreationOutcome {
         };
     }
 
-    // Torn-creation classifier: the written prefix ends at the last nonzero byte, must match
-    // a canonical V1 region (blob version free, CRC bytes prefixing the CRC over the written
-    // prelude), and everything past it must be zero.
-    if image.len() > REGION {
+    // Torn-creation classifier over the header region alone: the written prefix ends at the
+    // last nonzero byte, must match a canonical V1 region (blob version free, CRC bytes
+    // prefixing the CRC over the written prelude), and everything past it in the region must
+    // be zero.
+    let region = &image[..image.len().min(REGION)];
+    let head_len = region.len().min(PARSE_LEN);
+    if region[head_len..].iter().any(|&byte| byte != 0) {
         return CreationOutcome::Rejected;
     }
-    let head_len = image.len().min(PARSE_LEN);
-    if image[head_len..].iter().any(|&byte| byte != 0) {
-        return CreationOutcome::Rejected;
-    }
-    let head = &image[..head_len];
+    let head = &region[..head_len];
     let written = head
         .iter()
         .rposition(|&byte| byte != 0)

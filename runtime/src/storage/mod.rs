@@ -13,11 +13,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fs::File,
         io::{self, Read as _, Seek as _, SeekFrom},
         ops::RangeInclusive,
-        path::Path,
+        path::{Path, PathBuf},
         ptr,
         sync::{
             Arc, Weak,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
     };
     #[cfg(target_os = "linux")]
@@ -90,13 +90,32 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         })
     }
 
-    /// Deferred syncs and the live opens that can still register them.
+    /// Make a created blob's directory entries durable: its partition directory and the storage
+    /// directory, whose entry for the partition may itself be new.
+    pub(crate) fn sync_dirs(dirs: &Dirs) -> Result<(), Error> {
+        sync_dir(&dirs.partition)?;
+        sync_dir(&dirs.storage)
+    }
+
+    /// Directories whose entries a created blob's first flush makes durable.
+    #[derive(Clone)]
+    pub(crate) struct Dirs {
+        /// The partition directory holding the blob.
+        pub(crate) partition: PathBuf,
+        /// The storage directory holding the partition.
+        pub(crate) storage: PathBuf,
+    }
+
+    /// The live open of each blob name and the durability debt its dropped handles left behind.
     ///
-    /// A name has at most one live open. Its identity binds registration to that open, while
-    /// the receiver retains outstanding work and errors until the name is removed or recreated.
+    /// A name has at most one live open. Its identity binds settlement to that open, and the
+    /// entry retains outstanding work, unflushed state and failures until the name is removed or
+    /// recreated. Dropping a handle performs no I/O: the next open of the name establishes
+    /// whatever durability the dropped handles left behind, and a failure to do so is retained
+    /// for every later open until the blob is removed.
     #[derive(Default)]
     pub(crate) struct Pending {
-        syncs: Mutex<HashMap<(String, Vec<u8>), Entry>>,
+        entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
         #[cfg(test)]
         test: TestState,
     }
@@ -108,32 +127,63 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     #[cfg(test)]
     #[derive(Default)]
     struct TestState {
-        /// Number of deferred sync jobs that finished successfully.
-        finished: AtomicU64,
-        /// Completion receivers for every prepared deferred sync, including completed jobs.
-        deferred: Mutex<Vec<Receiver>>,
-        /// Pause the next prepared deferred sync before it flushes the file.
-        before_sync: Mutex<Option<MpscReceiver<()>>>,
+        /// Number of flushes an open performed to establish a settled predecessor's debt.
+        completions: AtomicU64,
+        /// Number of flushes that made a created blob's header and directory entries durable.
+        creation_flushes: AtomicU64,
+        /// Report that the next completion is about to flush the file, then pause it.
+        before_complete: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+        /// Fail the next flush through a blob handle or an open's completion with this error.
+        fail_flush: Mutex<Option<Error>>,
         /// Pause namespace dispatch after sending or dropping its result and releasing its lock
         /// and directory hold, before returning to the caller.
         after_dispatch: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Fail header creation with `Error::Closed` after writing this many bytes, capped at the
-        /// header length, and before syncing the file.
+        /// header length.
         fail_creation_after: Mutex<Option<usize>>,
         /// Report the current generation strong count after a liveness check, then pause while
         /// the registry remains locked.
         after_identity_observation: Mutex<Option<(MpscSender<usize>, MpscReceiver<()>)>>,
-        /// Pause reading the captured file's length on reopen, after predecessor work completes.
+        /// Pause an open after its predecessor settled, before it reads the debt and the file's
+        /// length.
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Pause the next attachment before it locks the registry, letting predecessor work retire.
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+    }
+
+    /// Durability a dropped open left for the next open of its name to establish.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct Debt {
+        /// Mutations no completed sync covered.
+        pub(crate) dirty: bool,
+        /// A header and directory entries no flush made durable.
+        pub(crate) created: bool,
+    }
+
+    impl Debt {
+        /// Whether nothing is owed.
+        pub(crate) const fn is_clear(self) -> bool {
+            !self.dirty && !self.created
+        }
     }
 
     #[derive(Default)]
     struct Entry {
         /// Liveness checks must not acquire an owner: its destructor locks this registry.
         identity: Weak<Generation>,
-        sync: Option<Receiver>,
+        /// Fires once every operation issued through the previous open has finished.
+        settle: Option<Receiver>,
+        /// Debt the previous opens left, released by the open that establishes it.
+        debt: Debt,
+        /// A durability failure retained until the name is removed or recreated.
+        failed: Option<Error>,
+    }
+
+    impl Entry {
+        /// Whether the entry carries nothing a later open must observe.
+        const fn is_clear(&self) -> bool {
+            self.settle.is_none() && self.debt.is_clear() && self.failed.is_none()
+        }
     }
 
     /// The live open of one namespace entry, dropped with the last handle of that open.
@@ -143,9 +193,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     impl Generation {
-        /// Release the name for a later open, returning the sender that resolves the obligation
-        /// every later open waits for. `None` once the name was removed or recreated, or while a
-        /// retained failure still blocks it.
+        /// Release the name for a later open, returning the sender that settles this open once
+        /// every operation issued through it has finished. `None` once the name was removed or
+        /// recreated, or while an earlier open is still settling.
         pub(crate) fn release(&self) -> Option<Sender> {
             self.pending.start(self)
         }
@@ -153,115 +203,172 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     impl Drop for Generation {
         fn drop(&mut self) {
-            let mut syncs = self.pending.syncs.lock();
-            if syncs.get(&self.key).is_some_and(|entry| {
-                ptr::eq(entry.identity.as_ptr(), self) && entry.sync.is_none()
+            let mut entries = self.pending.entries.lock();
+            if entries.get(&self.key).is_some_and(|entry| {
+                ptr::eq(entry.identity.as_ptr(), self) && entry.is_clear()
             }) {
-                syncs.remove(&self.key);
+                entries.remove(&self.key);
             }
         }
     }
 
-    /// The result of a pending sync, `None` while it runs.
-    type Outcome = Option<Result<(), Error>>;
-    type Receiver = watch::Receiver<Outcome>;
-    pub(crate) type Sender = watch::Sender<Outcome>;
+    /// Whether the previous open of a name has settled.
+    type Receiver = watch::Receiver<bool>;
+    pub(crate) type Sender = watch::Sender<bool>;
 
     impl Pending {
         /// Attach a fresh open to a name while the backend holds its namespace lock.
         ///
-        /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive.
-        /// A missing receiver proves predecessor work has retired. Descriptor metadata must be
-        /// observed after attachment, or after awaiting the returned receiver.
+        /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive. Returns
+        /// the name's retained failure until the name is removed. Otherwise returns the open's generation,
+        /// the receiver that fires once a still-settling predecessor has finished its operations,
+        /// and whether the name carries debt or outstanding work the open must observe through
+        /// [Self::debt] before trusting the file. Descriptor metadata must be observed after
+        /// attachment, or after awaiting the returned receiver.
         pub(crate) fn attach(
             self: &Arc<Self>,
             partition: &str,
             name: &[u8],
-        ) -> Result<(Arc<Generation>, Option<Receiver>), Error> {
+        ) -> Result<(Arc<Generation>, Option<Receiver>, bool), Error> {
             #[cfg(test)]
             if let Some((entered, released)) = self.test.before_attach.lock().take() {
                 let _ = entered.send(());
                 let _ = released.recv();
             }
             let key = (partition.to_owned(), name.to_vec());
-            let mut syncs = self.syncs.lock();
-            let entry = syncs.entry(key.clone()).or_default();
+            let mut entries = self.entries.lock();
+            let entry = entries.entry(key.clone()).or_default();
             let live = entry.identity.strong_count() != 0;
             #[cfg(test)]
             self.observe_identity(&entry.identity);
             if live {
                 return Err(Error::BlobAlreadyOpen(partition.to_owned(), hex(name)));
             }
+            if let Some(failed) = &entry.failed {
+                return Err(failed.clone());
+            }
             let generation = Arc::new(Generation { pending: self.clone(), key });
             entry.identity = Arc::downgrade(&generation);
-            Ok((generation, entry.sync.clone()))
+            let owed = entry.settle.is_some() || !entry.debt.is_clear();
+            Ok((generation, entry.settle.clone(), owed))
         }
 
-        /// Register work only while this identity still owns its name and no earlier obligation
-        /// is outstanding.
+        /// Register settlement only while this identity still owns its name and no earlier
+        /// open is still settling.
         fn start(&self, generation: &Generation) -> Option<Sender> {
-            let mut syncs = self.syncs.lock();
-            let entry = syncs.get_mut(&generation.key)?;
-            if !ptr::eq(entry.identity.as_ptr(), generation) || entry.sync.is_some() {
+            let mut entries = self.entries.lock();
+            let entry = entries.get_mut(&generation.key)?;
+            if !ptr::eq(entry.identity.as_ptr(), generation) || entry.settle.is_some() {
                 return None;
             }
-            let (sender, receiver) = watch::channel(None);
-            entry.sync = Some(receiver);
+            let (sender, receiver) = watch::channel(false);
+            entry.settle = Some(receiver);
             Some(sender)
         }
 
-        /// Publish a deferred sync's result, see [Self::resolve].
-        fn finish(&self, key: &(String, Vec<u8>), sender: Sender, result: Result<(), Error>) {
-            #[cfg(test)]
-            if result.is_ok() {
-                self.test.finished.fetch_add(1, Ordering::AcqRel);
-            }
-            self.resolve(key, sender, result);
-        }
-
-        /// Publish an obligation's result. A success releases its debt and a failure retains it.
-        pub(crate) fn resolve(
+        /// Settle a dropped open once every operation issued through it has finished: record the
+        /// debt and any failure it leaves behind, then wake the open waiting for it.
+        ///
+        /// Debt only accumulates. The open that establishes it releases it through [Self::clear].
+        pub(crate) fn settle(
             &self,
             key: &(String, Vec<u8>),
             sender: Sender,
-            result: Result<(), Error>,
+            debt: Debt,
+            failure: Option<Error>,
         ) {
-            if result.is_ok() {
-                let mut syncs = self.syncs.lock();
-                if let Some(entry) = syncs.get_mut(key)
-                    && entry.sync.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
+            {
+                let mut entries = self.entries.lock();
+                if let Some(entry) = entries.get_mut(key)
+                    && entry.settle.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
                 {
-                    entry.sync = None;
+                    entry.settle = None;
+                    entry.debt.dirty |= debt.dirty;
+                    entry.debt.created |= debt.created;
+                    if failure.is_some() {
+                        entry.failed = failure;
+                    }
                     let live = entry.identity.strong_count() != 0;
                     #[cfg(test)]
                     self.observe_identity(&entry.identity);
-                    if !live {
-                        syncs.remove(key);
+                    if !live && entry.is_clear() {
+                        entries.remove(key);
                     }
                 }
             }
-            let _ = sender.send(Some(result));
+            let _ = sender.send(true);
         }
 
-        /// Wait for the obligation captured when the file was opened.
+        /// Wait for the previous open's operations to finish.
         pub(crate) async fn wait(receiver: Option<Receiver>) -> Result<(), Error> {
             let Some(mut receiver) = receiver else {
                 return Ok(());
             };
             receiver
-                .wait_for(Option::is_some)
+                .wait_for(|settled| *settled)
                 .await
-                .map_or(Err(Error::Closed), |outcome| {
-                    outcome.clone().expect("outcome is published")
-                })
+                .map(|_| ())
+                .map_err(|_| Error::Closed)
+        }
+
+        /// The debt the open identified by `identity` must establish before trusting its file,
+        /// or the failure retained for its name. Read after the predecessor settled. Nothing is
+        /// owed once the name was removed or recreated under this open.
+        ///
+        /// The identity is weak so a cancelled open's completion neither keeps the name open nor
+        /// publishes into a successor's entry.
+        pub(crate) fn debt(&self, key: &(String, Vec<u8>), identity: &Weak<Generation>) -> Result<Debt, Error> {
+            let entries = self.entries.lock();
+            let Some(entry) = entries.get(key) else {
+                return Ok(Debt::default());
+            };
+            if !Weak::ptr_eq(&entry.identity, identity) {
+                return Ok(Debt::default());
+            }
+            if let Some(failed) = &entry.failed {
+                return Err(failed.clone());
+            }
+            Ok(entry.debt)
+        }
+
+        /// Publish the outcome of establishing the debt read through [Self::debt]: success
+        /// releases it and a failure is retained for every later open until the name is removed.
+        /// Ignored once the name was removed or recreated under this open.
+        pub(crate) fn clear(
+            &self,
+            key: &(String, Vec<u8>),
+            identity: &Weak<Generation>,
+            result: &Result<(), Error>,
+        ) {
+            let mut entries = self.entries.lock();
+            let Some(entry) = entries.get_mut(key) else {
+                return;
+            };
+            if !Weak::ptr_eq(&entry.identity, identity) {
+                return;
+            }
+            match result {
+                Ok(()) => entry.debt = Debt::default(),
+                Err(error) => entry.failed = Some(error.clone()),
+            }
+        }
+
+        /// Retain a creation failure for `generation`'s name until it is removed or recreated.
+        pub(crate) fn fail(&self, generation: &Generation, error: Error) {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.get_mut(&generation.key)
+                && ptr::eq(entry.identity.as_ptr(), generation)
+            {
+                entry.failed = Some(error);
+            }
         }
 
         /// Detach a removed name, or every name in a removed partition.
         pub(crate) fn forget(&self, partition: &str, name: Option<&[u8]>) {
             if let Some(name) = name {
-                self.syncs.lock().remove(&(partition.to_owned(), name.to_vec()));
+                self.entries.lock().remove(&(partition.to_owned(), name.to_vec()));
             } else {
-                self.syncs.lock().retain(|(stored, _), _| {
+                self.entries.lock().retain(|(stored, _), _| {
                     stored != partition
                 });
             }
@@ -279,14 +386,51 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
         }
 
-        /// Number of registered syncs.
-        pub(crate) fn len(&self) -> usize {
-            self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
+        /// Take the injected failure for the next flush, if any.
+        pub(crate) fn take_flush_failure(&self) -> Option<Error> {
+            self.test.fail_flush.lock().take()
         }
 
-        /// Number of syncs that finished successfully.
-        pub(crate) fn finished(&self) -> u64 {
-            self.test.finished.load(Ordering::Acquire)
+        /// Report that a completion is about to flush, then wait for release.
+        pub(crate) fn before_complete(&self) {
+            let hook = self.test.before_complete.lock().take();
+            if let Some((entered, released)) = hook {
+                let _ = entered.send(());
+                let _ = released.recv();
+            }
+        }
+
+        /// Count a completion that established a predecessor's debt.
+        pub(crate) fn completed(&self) {
+            self.test.completions.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Count a flush that made a created blob durable.
+        pub(crate) fn flushed_creation(&self) {
+            self.test.creation_flushes.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Number of names whose previous open has not settled yet.
+        pub(crate) fn outstanding(&self) -> usize {
+            self.entries.lock().values().filter(|entry| entry.settle.is_some()).count()
+        }
+
+        /// Whether `name` carries debt or a retained failure no open has established yet.
+        pub(crate) fn owes(&self, partition: &str, name: &[u8]) -> bool {
+            self.entries
+                .lock()
+                .get(&(partition.to_owned(), name.to_vec()))
+                .is_some_and(|entry| !entry.debt.is_clear() || entry.failed.is_some())
+        }
+
+        /// Number of completions opens performed for settled predecessors.
+        pub(crate) fn completions(&self) -> u64 {
+            self.test.completions.load(Ordering::Acquire)
+        }
+
+        /// Number of flushes that made created blobs durable.
+        pub(crate) fn creation_flushes(&self) -> u64 {
+            self.test.creation_flushes.load(Ordering::Acquire)
         }
     }
 
@@ -294,12 +438,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Shared by every handle of one open, it counts mutations requiring a full-file barrier.
     /// Each sync credits only mutations completed before it began, so a mutation racing a sync
-    /// stays dirty.
+    /// stays dirty. It also records whether this open created the blob, whose header and
+    /// directory entries the first flush makes durable, and retains the first durability
+    /// failure so a later flush cannot certify bytes the kernel already reported lost.
     #[derive(Default)]
     pub(crate) struct Tracker {
         written: AtomicU64,
         completed: AtomicU64,
         synced: AtomicU64,
+        created: AtomicBool,
+        failed: Mutex<Option<Error>>,
         #[cfg(test)]
         skipped: AtomicU64,
     }
@@ -329,6 +477,48 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         pub(crate) fn is_dirty(&self) -> bool {
             self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
         }
+
+        /// Record that this open created the blob and owes the flush that makes its header and
+        /// directory entries durable.
+        pub(crate) fn create(&self) {
+            self.created.store(true, Ordering::Release);
+        }
+
+        /// Whether the blob's creation still awaits its flush.
+        pub(crate) fn created(&self) -> bool {
+            self.created.load(Ordering::Acquire)
+        }
+
+        /// Credit a completed creation flush.
+        pub(crate) fn end_creation(&self) {
+            self.created.store(false, Ordering::Release);
+        }
+
+        /// Whether a flush has work to do: uncovered mutations or an unflushed creation.
+        pub(crate) fn needs_sync(&self) -> bool {
+            self.is_dirty() || self.created()
+        }
+
+        /// Retain the first durability failure this open observed.
+        pub(crate) fn poison(&self, error: &Error) {
+            let mut failed = self.failed.lock();
+            if failed.is_none() {
+                *failed = Some(error.clone());
+            }
+        }
+
+        /// The retained durability failure, if any.
+        pub(crate) fn failure(&self) -> Option<Error> {
+            self.failed.lock().clone()
+        }
+
+        /// What this open leaves for the next open of its name to establish.
+        pub(crate) fn debt(&self) -> Debt {
+            Debt {
+                dirty: self.is_dirty(),
+                created: self.created(),
+            }
+        }
     }
 
     #[cfg(test)]
@@ -347,56 +537,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Create the final sync that resolves an open's pending obligation.
-    /// `sync` must own its file and directory hold through completion.
-    pub(crate) fn prepare_sync(
-        pending: Arc<Pending>,
-        key: (String, Vec<u8>),
-        sender: Sender,
-        sync: impl FnOnce() -> Result<(), Error> + Send + 'static,
-    ) -> impl FnOnce() + Send + 'static {
-        #[cfg(test)]
-        let gate = {
-            pending.test.deferred.lock().push(sender.subscribe());
-            pending.test.before_sync.lock().take()
-        };
-        move || {
-            #[cfg(test)]
-            if let Some(gate) = gate {
-                let _ = gate.recv();
-            }
-            let result = sync();
-            pending.finish(&key, sender, result);
-        }
-    }
-
-    /// Run a Tokio blob's final sync on the blocking pool, or inline outside a runtime.
-    ///
-    /// A shutting-down pool may discard queued work. The next startup flush then owns durability.
-    pub(crate) fn defer_sync(
-        pending: Arc<Pending>,
-        key: (String, Vec<u8>),
-        sender: Sender,
-        sync: impl FnOnce() -> Result<(), Error> + Send + 'static,
-    ) {
-        let work = prepare_sync(pending, key, sender, sync);
-        match ::tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(work);
-            }
-            Err(_) => work(),
-        }
-    }
-
     cfg_if! {
         if #[cfg(test)] {
-            /// Failed creation must not expose an unsynced header as a valid blob.
+            /// Failed creation must not expose an unflushed header as a valid blob.
             ///
             /// An incomplete header is recreated on the next open. A complete header retains the
             /// creation failure across repeated opens until the name is removed. Neither failure
-            /// may launch a deferred sync.
+            /// flushes anything or leaves debt for a later open.
             pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
-                // Stop after writing either a partial or complete header, before syncing it.
+                let flushes = pending.creation_flushes();
+                let completions = pending.completions();
+
+                // Stop after writing either a partial or complete header.
                 for partial in [true, false] {
                     *pending.test.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
                     assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
@@ -416,13 +568,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     drop(blob);
                     storage.remove("failed_creation", None).await.unwrap();
                 }
-                assert!(pending.test.deferred.lock().is_empty(), "failed creation must not launch a sync job");
+                assert_eq!(pending.creation_flushes(), flushes, "failed creation must not flush");
+                assert_eq!(pending.completions(), completions, "failed creation must not leave debt");
             }
 
-            /// Unlinking a dirty blob keeps its handles readable but suppresses their final sync.
+            /// Unlinking a dirty blob keeps its handles readable and leaves nothing to flush.
             ///
-            /// Covers both name and partition removal. If the last handle is dropped first, its
-            /// already registered sync must still complete successfully.
+            /// Covers name and partition removal with the last handle dropped before or after the
+            /// unlink. Removal forgets the name's debt, so a later open creates a fresh blob
+            /// without flushing a file that no longer exists.
             pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
                 storage: &S,
                 pending: &Pending,
@@ -431,15 +585,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 for by_name in [true, false] {
                     for unlink_first in [false, true] {
                         // The write exceeds the buffer capacity and reaches the blob without a
-                        // sync, leaving dirty data for the final handle to persist.
+                        // sync, leaving dirty data behind the final handle.
                         let partition = "remove_live_dirty";
                         let name = b"blob";
                         let (blob, size) = storage.open(partition, name).await.unwrap();
                         let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
                         writer.write_at(0, b"dirty").await.unwrap();
                         writer.wait_for_sync().await.unwrap();
-                        let before = pending.test.deferred.lock().len();
-                        let finished = pending.finished();
+                        let completions = pending.completions();
                         let target = by_name.then_some(name.as_slice());
 
                         if unlink_first {
@@ -453,19 +606,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                             drop(writer);
                             storage.remove(partition, target).await.unwrap();
                         }
+                        assert!(!pending.owes(partition, name), "removal must forget the name's debt");
 
-                        // Only dropping before unlinking may enqueue a sync, and removing the
-                        // name must not prevent that job from succeeding.
-                        let jobs = pending.test.deferred.lock()[before..].to_vec();
-                        assert_eq!(jobs.len(), usize::from(!unlink_first));
-                        for mut job in jobs {
-                            timeout(Duration::from_secs(10), job.wait_for(Option::is_some))
-                                .await.unwrap().unwrap().clone().unwrap().unwrap();
-                        }
-                        assert_eq!(pending.finished() - finished, u64::from(!unlink_first));
-                        if by_name {
-                            storage.remove(partition, None).await.unwrap();
-                        }
+                        // The name is fresh again and nothing is flushed on its behalf.
+                        let (blob, size) = storage.open(partition, name).await.unwrap();
+                        assert_eq!(size, 0);
+                        drop(blob);
+                        assert_eq!(pending.completions(), completions);
+                        storage.remove(partition, None).await.unwrap();
                     }
                 }
             }
@@ -491,14 +639,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 storage.remove("orphaned_write", None).await.unwrap();
             }
 
-            /// Successful `SYNC` writes need no deferred sync when the blob is reopened.
+            /// Successful `SYNC` writes leave nothing for a reopen to flush.
             ///
-            /// Mixing plain and durable writes must retain any sync obligation that the backend's
-            /// write barrier did not cover, regardless of the order of those writes.
+            /// The first durable write of a created blob flushes the whole file. Afterwards,
+            /// mixing plain and durable writes must retain any debt the backend's write barrier
+            /// did not cover, regardless of the order of those writes.
             pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
-                // The cache hint must not change durability or require an extra sync on reopen.
+                // The cache hint must not change durability or require a flush on reopen.
                 for (case, options) in [WriteOptions::SYNC, WriteOptions::SYNC | WriteOptions::DONT_CACHE].into_iter().enumerate() {
-                    let before = pending.finished();
+                    let before = pending.completions();
                     let (blob, _) = storage.open("durable_writes", &[case as u8]).await.unwrap();
                     blob.write_at(0, b"first", options).await.unwrap();
                     blob.write_at(5, b"second", options).await.unwrap();
@@ -507,41 +656,52 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     assert_eq!(size, 11);
                     assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
                     drop(blob);
-                    assert_eq!(pending.finished(), before, "successful durable writes need no reopen sync");
+                    assert_eq!(pending.completions(), before, "successful durable writes need no reopen flush");
                 }
 
-                // Exercise both orders so a durable write cannot hide an uncovered plain write.
-                for plain_first in [false, true] {
-                    let before = pending.finished();
-                    let name = if plain_first { b"prior".as_slice() } else { b"later".as_slice() };
-                    let (blob, _) = storage.open("durable_writes", name).await.unwrap();
-                    let (first, second) = if plain_first {
-                        (WriteOptions::default(), WriteOptions::SYNC)
-                    } else {
-                        (WriteOptions::SYNC, WriteOptions::default())
-                    };
-                    blob.write_at(0, b"first", first).await.unwrap();
-                    blob.write_at(5, b"second", second).await.unwrap();
-                    drop(blob);
-                    let (blob, size) = storage.open("durable_writes", name).await.unwrap();
-                    assert_eq!(size, 11);
-                    assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
-                    drop(blob);
+                // Exercise both orders so a durable write cannot hide an uncovered plain write,
+                // on a blob whose creation is still unflushed and on one whose creation is durable.
+                for settled in [false, true] {
+                    for plain_first in [false, true] {
+                        let before = pending.completions();
+                        let name = [2 + u8::from(settled), u8::from(plain_first)];
+                        let (blob, _) = storage.open("durable_writes", &name).await.unwrap();
+                        if settled {
+                            blob.sync().await.unwrap();
+                        }
+                        let (first, second) = if plain_first {
+                            (WriteOptions::default(), WriteOptions::SYNC)
+                        } else {
+                            (WriteOptions::SYNC, WriteOptions::default())
+                        };
+                        blob.write_at(0, b"first", first).await.unwrap();
+                        blob.write_at(5, b"second", second).await.unwrap();
+                        drop(blob);
+                        let (blob, size) = storage.open("durable_writes", &name).await.unwrap();
+                        assert_eq!(size, 11);
+                        assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+                        drop(blob);
 
-                    // Linux's per-write sync covers only the durable write's range. Other
-                    // platforms use a full-file sync, which also covers an earlier plain write.
-                    let needs_sync = !plain_first || cfg!(target_os = "linux");
-                    assert_eq!(pending.finished() - before, u64::from(needs_sync));
+                        // A created blob's first durable write flushes the whole file. Once
+                        // creation is durable, Linux's per-write sync covers only the durable
+                        // write's range while other platforms use a full-file sync, which also
+                        // covers an earlier plain write.
+                        let needs_flush = !plain_first || (settled && cfg!(target_os = "linux"));
+                        assert_eq!(pending.completions() - before, u64::from(needs_flush), "settled={settled} plain_first={plain_first}");
+                    }
                 }
             }
 
-            /// Reopening a replacement waits for its sync while another partition remains usable.
+            /// Reopening a replacement flushes its debt while another partition remains usable.
             ///
             /// Covers name and partition removal while the old handle remains readable. Dropping
-            /// that handle must not register work for the replacement or let its reopen return
-            /// before the replacement's own sync completes.
+            /// that handle must not record debt for the replacement, and the replacement's reopen
+            /// must not return before its own flush completes.
             pub(crate) async fn check_recreate_reopen<S: crate::Storage>(storage: &S, pending: &Pending) {
-                drop(storage.open("independent", b"ready").await.unwrap());
+                // Make the independent blob durable so its later open owes nothing.
+                let (ready, _) = storage.open("independent", b"ready").await.unwrap();
+                ready.sync().await.unwrap();
+                drop(ready);
                 for remove_name in [true, false] {
                     let partition = "recreate_pending";
                     let name = b"blob";
@@ -555,29 +715,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     let reader = current.clone();
                     current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
 
-                    // Block the first deferred sync. The replacement stays alive through a clone
-                    // while the removed open drops, so only the replacement may claim the gate.
-                    // Dropping the sender also releases the worker if an assertion unwinds.
+                    // Block the reopen's flush. The replacement stays alive through a clone while
+                    // the removed open drops, so only the replacement may record debt. Dropping
+                    // the sender also releases the worker if an assertion unwinds.
+                    let (entered, _entering) = ::tokio::sync::oneshot::channel();
                     let (release, gate) = mpsc::channel();
-                    pending.test.deferred.lock().clear();
-                    *pending.test.before_sync.lock() = Some(gate);
+                    *pending.test.before_complete.lock() = Some((entered, gate));
+                    let completions = pending.completions();
                     drop(current);
                     drop(old);
                     drop(reader);
-
-                    // Finish any extra job before testing the blocked reopen. A slow extra sync
-                    // could hide a removed handle claiming the gate meant for the replacement.
-                    let jobs = pending.test.deferred.lock().clone();
-                    if let Some(mut obsolete) = jobs.get(1).cloned() {
-                        timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
-                            .await.unwrap().unwrap().clone().unwrap().unwrap();
-                    }
 
                     let mut reopen = Box::pin(storage.open(partition, name));
                     let early = timeout(Duration::from_millis(50), &mut reopen).await;
                     let completed_early = early.is_ok();
 
-                    // Waiting for this sync must leave the namespace lock available to unrelated
+                    // Waiting for this flush must leave the namespace lock available to unrelated
                     // scans and opens.
                     let clean_progress = timeout(Duration::from_secs(5), async {
                         let names = storage.scan("independent").await?;
@@ -598,8 +751,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     storage.remove(partition, None).await.unwrap();
                     assert_eq!(len, 3);
                     assert_eq!(bytes.as_ref(), b"new");
-                    assert!(!completed_early, "reopen exposed the replacement before its deferred sync");
-                    let (names, len) = clean_progress.expect("a dirty sync blocked another partition").unwrap();
+                    assert!(!completed_early, "reopen exposed the replacement before its flush");
+                    assert_eq!(pending.completions() - completions, 1, "the replacement's debt is flushed once");
+                    let (names, len) = clean_progress.expect("a flush blocked another partition").unwrap();
                     assert_eq!(names, vec![b"ready".to_vec()]);
                     assert_eq!(len, 0);
                 }
@@ -623,7 +777,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         file.take(requested as u64).read_to_end(&mut raw).map_err(|_| Error::ReadFailed)?;
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
-        // A complete prefix must retain the original length for oversized-file rejection.
+        // A complete prefix must retain the original length, which yields the logical size.
         let parse_len = if raw.len() < requested { raw.len() as u64 } else { raw_len };
         header::resolve(&raw, parse_len, layouts, versions, partition, name)
     }
@@ -679,7 +833,7 @@ pub(crate) mod tests {
     mod tracker {
         use crate::{
             Error,
-            storage::{Pending, Tracker, defer_sync},
+            storage::{Debt, Pending, Tracker},
         };
         use std::{
             sync::{Arc, mpsc},
@@ -733,15 +887,43 @@ pub(crate) mod tests {
             assert!(!tracker.is_dirty());
         }
 
+        #[test]
+        fn test_created_blob_needs_its_first_flush() {
+            let tracker = Tracker::default();
+            assert!(!tracker.needs_sync());
+            tracker.create();
+            assert!(tracker.needs_sync());
+            assert!(!tracker.is_dirty());
+            assert_eq!(
+                tracker.debt(),
+                Debt {
+                    dirty: false,
+                    created: true
+                }
+            );
+            tracker.end_creation();
+            assert!(!tracker.needs_sync());
+            assert!(tracker.debt().is_clear());
+        }
+
+        #[test]
+        fn test_first_failure_is_retained() {
+            let tracker = Tracker::default();
+            assert!(tracker.failure().is_none());
+            tracker.poison(&Error::Closed);
+            tracker.poison(&Error::ReadFailed);
+            assert!(matches!(tracker.failure(), Some(Error::Closed)));
+        }
+
         fn key() -> (String, Vec<u8>) {
             ("a".to_owned(), b"1".to_vec())
         }
 
-        fn check_last_generation_drop_during_observation(resolve: bool) {
+        fn check_last_generation_drop_during_observation(settle: bool) {
             let pending = Arc::new(Pending::default());
-            let (generation, _) = pending.attach("a", b"1").unwrap();
+            let (generation, _, _) = pending.attach("a", b"1").unwrap();
             let identity = Arc::downgrade(&generation);
-            let sender = resolve.then(|| generation.release().unwrap());
+            let sender = settle.then(|| generation.release().unwrap());
             let outcome = sender.as_ref().map(|sender| sender.subscribe());
             let (entered, entering) = mpsc::channel();
             let (release, released) = mpsc::channel();
@@ -752,7 +934,7 @@ pub(crate) mod tests {
                 let done = done.clone();
                 thread::spawn(move || {
                     if let Some(sender) = sender {
-                        pending.resolve(&key(), sender, Ok(()));
+                        pending.settle(&key(), sender, Debt::default(), None);
                     } else {
                         assert!(matches!(
                             pending.attach("a", b"1"),
@@ -797,13 +979,13 @@ pub(crate) mod tests {
             dropper.join().unwrap();
             independent.join().unwrap();
             if let Some(outcome) = outcome {
-                assert!(matches!(&*outcome.borrow(), Some(Ok(()))));
+                assert!(*outcome.borrow());
             }
-            assert!(pending.syncs.lock().is_empty());
+            assert!(pending.entries.lock().is_empty());
         }
 
         #[test]
-        fn test_last_generation_drop_during_resolve() {
+        fn test_last_generation_drop_during_settle() {
             check_last_generation_drop_during_observation(true);
         }
 
@@ -813,51 +995,174 @@ pub(crate) mod tests {
         }
 
         #[tokio::test]
-        async fn test_wait_observes_pending_sync() {
+        async fn test_wait_observes_settling_predecessor() {
             let pending = Arc::new(Pending::default());
-            let (generation, wait) = pending.attach("a", b"1").unwrap();
+            let (generation, wait, owed) = pending.attach("a", b"1").unwrap();
+            assert!(!owed);
             Pending::wait(wait).await.unwrap();
             let sender = generation.release().unwrap();
             drop(generation);
-            let (generation, wait) = pending.attach("a", b"1").unwrap();
+            let (generation, wait, owed) = pending.attach("a", b"1").unwrap();
+            assert!(owed);
             let waiter = tokio::spawn(Pending::wait(wait));
             tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
-            pending.finish(&key(), sender, Ok(()));
+            pending.settle(&key(), sender, Debt::default(), None);
             waiter.await.unwrap().unwrap();
-            assert_eq!(pending.len(), 0);
-            assert_eq!(pending.finished(), 1);
+            assert_eq!(pending.outstanding(), 0);
+            assert!(
+                pending
+                    .debt(&key(), &Arc::downgrade(&generation))
+                    .unwrap()
+                    .is_clear()
+            );
             drop(generation);
-            assert!(pending.syncs.lock().is_empty());
+            assert!(pending.entries.lock().is_empty());
         }
 
-        #[tokio::test]
-        async fn test_failed_sync_stays_until_forgotten() {
+        #[test]
+        fn test_debt_is_established_by_the_next_open() {
             let pending = Arc::new(Pending::default());
-            let (generation, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.attach("a", b"1").unwrap();
+            let sender = first.release().unwrap();
+            drop(first);
+            pending.settle(
+                &key(),
+                sender,
+                Debt {
+                    dirty: true,
+                    created: false,
+                },
+                None,
+            );
+            assert!(pending.owes("a", b"1"));
+
+            // Debt accumulates across settled opens until an open establishes it.
+            let (second, wait, owed) = pending.attach("a", b"1").unwrap();
+            assert!(wait.is_none());
+            assert!(owed);
+            assert_eq!(
+                pending.debt(&key(), &Arc::downgrade(&second)).unwrap(),
+                Debt {
+                    dirty: true,
+                    created: false
+                }
+            );
+            let sender = second.release().unwrap();
+            drop(second);
+            pending.settle(
+                &key(),
+                sender,
+                Debt {
+                    dirty: false,
+                    created: true,
+                },
+                None,
+            );
+            let (third, _, owed) = pending.attach("a", b"1").unwrap();
+            assert!(owed);
+            assert_eq!(
+                pending.debt(&key(), &Arc::downgrade(&third)).unwrap(),
+                Debt {
+                    dirty: true,
+                    created: true
+                }
+            );
+            pending.clear(&key(), &Arc::downgrade(&third), &Ok(()));
+            assert!(
+                pending
+                    .debt(&key(), &Arc::downgrade(&third))
+                    .unwrap()
+                    .is_clear()
+            );
+            assert!(!pending.owes("a", b"1"));
+            drop(third);
+            assert!(pending.entries.lock().is_empty());
+        }
+
+        #[test]
+        fn test_failures_stay_until_forgotten() {
+            let pending = Arc::new(Pending::default());
+
+            // A failure published at settlement blocks later opens.
+            let (generation, _, _) = pending.attach("a", b"1").unwrap();
             let sender = generation.release().unwrap();
-            pending.finish(&key(), sender, Err(Error::Closed));
+            pending.settle(&key(), sender, Debt::default(), Some(Error::Closed));
             drop(generation);
             for _ in 0..2 {
-                let (generation, wait) = pending.attach("a", b"1").unwrap();
-                assert!(matches!(Pending::wait(wait).await, Err(Error::Closed)));
-
-                // A failed open cannot replace the retained failure with its own release.
-                assert!(generation.release().is_none());
-                drop(generation);
-                assert_eq!(pending.len(), 1);
+                assert!(matches!(pending.attach("a", b"1"), Err(Error::Closed)));
             }
             pending.forget("a", Some(b"1"));
-            let (generation, wait) = pending.attach("a", b"1").unwrap();
-            Pending::wait(wait).await.unwrap();
+
+            // A failed completion is retained the same way, and success never overwrites it.
+            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            pending.clear(
+                &key(),
+                &Arc::downgrade(&generation),
+                &Err(Error::ReadFailed),
+            );
+            assert!(matches!(
+                pending.debt(&key(), &Arc::downgrade(&generation)),
+                Err(Error::ReadFailed)
+            ));
+            pending.clear(&key(), &Arc::downgrade(&generation), &Ok(()));
+            assert!(matches!(
+                pending.debt(&key(), &Arc::downgrade(&generation)),
+                Err(Error::ReadFailed)
+            ));
             drop(generation);
-            assert!(pending.syncs.lock().is_empty());
+            assert!(matches!(pending.attach("a", b"1"), Err(Error::ReadFailed)));
+
+            // A creation failure is retained until the name is forgotten.
+            pending.forget("a", Some(b"1"));
+            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            pending.fail(&generation, Error::WriteFailed);
+            drop(generation);
+            assert!(matches!(pending.attach("a", b"1"), Err(Error::WriteFailed)));
+            pending.forget("a", Some(b"1"));
+            drop(pending.attach("a", b"1").unwrap());
+            assert!(pending.entries.lock().is_empty());
+        }
+
+        #[test]
+        fn test_stale_settlement_leaves_a_recreated_name_alone() {
+            let pending = Arc::new(Pending::default());
+            let (old, _, _) = pending.attach("a", b"1").unwrap();
+            let stale = old.release().unwrap();
+            pending.forget("a", Some(b"1"));
+            let (current, _, owed) = pending.attach("a", b"1").unwrap();
+            assert!(!owed);
+
+            // The removed open's settlement and outcome must not touch the replacement's entry.
+            pending.settle(
+                &key(),
+                stale,
+                Debt {
+                    dirty: true,
+                    created: true,
+                },
+                Some(Error::Closed),
+            );
+            assert!(old.release().is_none());
+            pending.clear(&key(), &Arc::downgrade(&old), &Err(Error::Closed));
+            assert!(!pending.owes("a", b"1"));
+            assert!(
+                pending
+                    .debt(&key(), &Arc::downgrade(&current))
+                    .unwrap()
+                    .is_clear()
+            );
+            drop(old);
+            let sender = current.release().unwrap();
+            drop(current);
+            pending.settle(&key(), sender, Debt::default(), None);
+            assert!(pending.entries.lock().is_empty());
         }
 
         #[test]
         fn test_live_open_refuses_a_second_attach() {
             let pending = Arc::new(Pending::default());
-            let (first, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.attach("a", b"1").unwrap();
             assert!(matches!(
                 pending.attach("a", b"1"),
                 Err(Error::BlobAlreadyOpen(partition, name)) if partition == "a" && name == "31"
@@ -869,54 +1174,17 @@ pub(crate) mod tests {
         #[test]
         fn test_generations_retire_and_release_clean_entries() {
             let pending = Arc::new(Pending::default());
-            let (first, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.attach("a", b"1").unwrap();
             let sender = first.release().unwrap();
             drop(first);
-            assert_eq!(pending.syncs.lock().len(), 1);
-            pending.finish(&key(), sender, Ok(()));
-            assert!(pending.syncs.lock().is_empty());
+            assert_eq!(pending.entries.lock().len(), 1);
+            pending.settle(&key(), sender, Debt::default(), None);
+            assert!(pending.entries.lock().is_empty());
 
             for name in 0..128u64 {
                 drop(pending.attach("clean", &name.to_be_bytes()).unwrap());
-                assert!(pending.syncs.lock().is_empty());
+                assert!(pending.entries.lock().is_empty());
             }
-
-            let (old, _) = pending.attach("a", b"1").unwrap();
-            pending.forget("a", Some(b"1"));
-            let (current, _) = pending.attach("a", b"1").unwrap();
-            let current_sync = current.release().unwrap();
-            assert!(old.release().is_none());
-            drop(old);
-            assert_eq!(pending.len(), 1);
-            drop(current);
-            assert_eq!(pending.len(), 1);
-            pending.finish(&key(), current_sync, Ok(()));
-            assert!(pending.syncs.lock().is_empty());
-        }
-
-        #[tokio::test]
-        async fn test_defer_sync_runs_on_the_blocking_pool() {
-            let pending = Arc::new(Pending::default());
-            let (generation, _) = pending.attach("a", b"1").unwrap();
-            let sender = generation.release().unwrap();
-            drop(generation);
-            defer_sync(pending.clone(), key(), sender, || Ok(()));
-            Pending::wait(pending.attach("a", b"1").unwrap().1)
-                .await
-                .unwrap();
-            assert_eq!(pending.finished(), 1);
-            assert_eq!(pending.len(), 0);
-        }
-
-        #[test]
-        fn test_defer_sync_runs_inline_without_a_runtime() {
-            let pending = Arc::new(Pending::default());
-            let (generation, _) = pending.attach("a", b"1").unwrap();
-            let sender = generation.release().unwrap();
-            drop(generation);
-            defer_sync(pending.clone(), key(), sender, || Ok(()));
-            assert_eq!(pending.finished(), 1);
-            assert!(pending.syncs.lock().is_empty());
         }
     }
 
