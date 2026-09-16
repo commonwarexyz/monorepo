@@ -4119,7 +4119,7 @@ mod tests {
     #[test_traced]
     fn test_pipelined_handoff_retains_stalled_proposal_after_parent_certification() {
         let n = 5;
-        let namespace = b"pipelined_handoff_reissues_after_certification".to_vec();
+        let namespace = b"pipelined_handoff_retains_after_certification".to_vec();
         let epoch = Epoch::new(333);
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
