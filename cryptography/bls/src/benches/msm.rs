@@ -6,6 +6,17 @@ use commonware_cryptography_bls::bls12381::{
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
+// COMMONWARE_MSM_LARGE=1 selects the opt-in 100k/1M, 128-bit workloads.
+// Use a filter such as "group=g1 points=100000 bits=128" for one group and size.
+// Include the space after the count: Criterion's regex also matches numeric prefixes.
+pub(super) fn large_workloads() -> bool {
+    match std::env::var("COMMONWARE_MSM_LARGE") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        _ => panic!("COMMONWARE_MSM_LARGE must be unset or 1"),
+    }
+}
+
 fn coefficient(index: usize, bits: usize) -> Scalar {
     let mut state = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     let mut bytes = [0u8; 32];
@@ -28,7 +39,7 @@ fn coefficient(index: usize, bits: usize) -> Scalar {
 
 macro_rules! bench_group {
     ($c:ident, $group:ident, $label:literal, $raw:ty, $affine:ty, $generator:path,
-     $mult:path, $to_affine:path, $scratch_size:path, $pippenger:path,
+     $mult:path, $add:path, $to_affine:path, $scratch_size:path, $pippenger:path,
      $compress:path, $size:literal) => {{
         let raw_multiply = |scalar: &Scalar| {
             let mut bytes = scalar.to_bytes();
@@ -45,37 +56,15 @@ macro_rules! bench_group {
             encoded
         };
 
-        for count in [1, 2, 8, 16, 31, 32, 64, 128, 256] {
-            let point_scalars: Vec<_> = (0..count)
-                .map(|i| Scalar::from_u64((i as u64 + 3).wrapping_mul(0x1_0000_01b3)))
-                .collect();
-            let points: Vec<_> = point_scalars
-                .iter()
-                .map(|scalar| $group::generator().mul(scalar))
-                .collect();
-            let raw_points: Vec<$raw> = point_scalars
-                .iter()
-                .map(|scalar| raw_multiply(scalar))
-                .collect();
-
-            for bits in [128, 255] {
-                let scalars: Vec<_> = (0..count).map(|i| coefficient(i, bits)).collect();
-                let blst_scalars: Vec<blst_fr> = scalars
-                    .iter()
-                    .map(|scalar| {
-                        let bytes = scalar.to_bytes();
-                        let mut encoded = blst_scalar::default();
-                        let mut field = blst_fr::default();
-                        // SAFETY: bytes is a canonical 32-byte scalar, and both outputs are
-                        // valid writable scalar representations.
-                        unsafe {
-                            blst::blst_scalar_from_bendian(&mut encoded, bytes.as_ptr());
-                            blst::blst_fr_from_scalar(&mut field, &encoded);
-                        }
-                        field
-                    })
-                    .collect();
-
+        let large = large_workloads();
+        let counts: &[usize] = if large {
+            &[100_000, 1_000_000]
+        } else {
+            &[1, 2, 8, 16, 31, 32, 64, 128, 256]
+        };
+        let widths: &[usize] = if large { &[128] } else { &[128, 255] };
+        for &count in counts {
+            for &bits in widths {
                 // Each call includes blst's required projective/field-scalar preparation and
                 // allocations, matching the preparation included by the native public API.
                 let blst_msm = |raw_points: &[$raw], field_scalars: &[blst_fr]| {
@@ -118,11 +107,68 @@ macro_rules! bench_group {
                     result
                 };
 
-                let expected = blst_msm(&raw_points, &blst_scalars);
-                assert_eq!(
-                    $group::msm_vartime(&points, &scalars).unwrap().to_bytes(),
-                    raw_bytes(&expected)
-                );
+                let make_fixtures = || {
+                    let (points, raw_points) = if large {
+                        // P_i = (i + 3) * step * G gives distinct projective inputs
+                        // with linear setup work and no per-point scalar multiplication.
+                        let step = Scalar::from_u64(0x1_0000_01b3);
+                        let first = Scalar::from_u64(3 * 0x1_0000_01b3);
+                        let increment = $group::generator().mul(&step);
+                        let raw_increment = raw_multiply(&step);
+                        let mut point = $group::generator().mul(&first);
+                        let mut raw_point = raw_multiply(&first);
+                        let mut points = Vec::with_capacity(count);
+                        let mut raw_points = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            points.push(point);
+                            raw_points.push(raw_point);
+                            point = point.add(&increment);
+                            let mut next = <$raw>::default();
+                            // SAFETY: Both inputs are initialized subgroup points, and
+                            // next is a distinct writable projective output.
+                            unsafe { $add(&mut next, &raw_point, &raw_increment) };
+                            raw_point = next;
+                        }
+                        (points, raw_points)
+                    } else {
+                        let weights: Vec<_> = (0..count)
+                            .map(|i| Scalar::from_u64((i as u64 + 3).wrapping_mul(0x1_0000_01b3)))
+                            .collect();
+                        (
+                            weights
+                                .iter()
+                                .map(|scalar| $group::generator().mul(scalar))
+                                .collect(),
+                            weights.iter().map(raw_multiply).collect(),
+                        )
+                    };
+                    let scalars: Vec<_> = (0..count).map(|i| coefficient(i, bits)).collect();
+                    let blst_scalars: Vec<blst_fr> = scalars
+                        .iter()
+                        .map(|scalar| {
+                            let bytes = scalar.to_bytes();
+                            let mut encoded = blst_scalar::default();
+                            let mut field = blst_fr::default();
+                            // SAFETY: bytes is a canonical 32-byte scalar, and both outputs
+                            // are valid writable scalar representations.
+                            unsafe {
+                                blst::blst_scalar_from_bendian(&mut encoded, bytes.as_ptr());
+                                blst::blst_fr_from_scalar(&mut field, &encoded);
+                            }
+                            field
+                        })
+                        .collect();
+                    let expected = blst_msm(&raw_points, &blst_scalars);
+                    assert_eq!(
+                        $group::msm_vartime(&points, &scalars).unwrap().to_bytes(),
+                        raw_bytes(&expected)
+                    );
+                    (points, raw_points, scalars, blst_scalars)
+                };
+
+                // Criterion invokes these closures only for selected benchmarks. Sharing
+                // the fixtures also keeps construction and equality checks outside timing.
+                let mut fixtures = None;
                 $c.bench_function(
                     &format!(
                         "{}/group={} points={count} bits={bits} impl=native",
@@ -130,10 +176,14 @@ macro_rules! bench_group {
                         $label
                     ),
                     |b| {
+                        let (points, _, scalars, _) = fixtures.get_or_insert_with(make_fixtures);
                         b.iter(|| {
                             black_box(
-                                $group::msm_vartime(black_box(&points), black_box(&scalars))
-                                    .unwrap(),
+                                $group::msm_vartime(
+                                    black_box(points.as_slice()),
+                                    black_box(scalars.as_slice()),
+                                )
+                                .unwrap(),
                             )
                         });
                     },
@@ -145,8 +195,13 @@ macro_rules! bench_group {
                         $label
                     ),
                     |b| {
+                        let (_, raw_points, _, blst_scalars) =
+                            fixtures.get_or_insert_with(make_fixtures);
                         b.iter(|| {
-                            black_box(blst_msm(black_box(&raw_points), black_box(&blst_scalars)))
+                            black_box(blst_msm(
+                                black_box(raw_points.as_slice()),
+                                black_box(blst_scalars.as_slice()),
+                            ))
                         });
                     },
                 );
@@ -164,6 +219,7 @@ fn bench(c: &mut Criterion) {
         blst::blst_p1_affine,
         blst::blst_p1_generator,
         blst::blst_p1_mult,
+        blst::blst_p1_add_or_double,
         blst::blst_p1s_to_affine,
         blst::blst_p1s_mult_pippenger_scratch_sizeof,
         blst::blst_p1s_mult_pippenger,
@@ -178,6 +234,7 @@ fn bench(c: &mut Criterion) {
         blst::blst_p2_affine,
         blst::blst_p2_generator,
         blst::blst_p2_mult,
+        blst::blst_p2_add_or_double,
         blst::blst_p2s_to_affine,
         blst::blst_p2s_mult_pippenger_scratch_sizeof,
         blst::blst_p2s_mult_pippenger,

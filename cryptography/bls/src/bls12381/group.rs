@@ -9,14 +9,17 @@
 //! public keys or signatures must enforce that requirement separately.
 
 use crate::bls12381::{Fp, extension::Fp2, scalar::Scalar};
+use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_cryptography_vroom::with_backend;
+use rand_core::CryptoRng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
 mod homogeneous;
 mod msm;
+mod subgroup;
 pub(super) use msm::EncodedScalar;
 
 // Thirteen windows cover a u64; twenty-six cover a u128. The final partial
@@ -130,6 +133,26 @@ macro_rules! group {
         }
 
         impl $name {
+            /// Decodes a batch of canonical compressed points with randomized subgroup checks.
+            ///
+            /// The original points are returned in order, including identities and duplicates.
+            /// Empty input returns an empty vector. Invalid encodings, failed subgroup checks,
+            /// and allocation failures return `None`; no partial result is returned.
+            ///
+            /// All encodings are checked before sampling private, single-use coefficients.
+            /// For any fixed batch containing a point outside the subgroup, the probability
+            /// of acceptance is at most 2^-128 per call under the crate's
+            /// [randomness requirements](crate#randomness). Retrying rejected batches and
+            /// accepting any successful retry increases that probability.
+            ///
+            /// Timing and memory access depend on the public inputs and sampled coefficients.
+            pub fn batch_from_bytes(
+                rng: &mut impl CryptoRng,
+                bytes: &[[u8; $size]],
+            ) -> Option<Vec<Self>> {
+                with_backend(subgroup::DecodeBatch { rng, bytes })
+            }
+
             /// The additive identity.
             pub const IDENTITY: Self = Self {
                 x: <$field>::ZERO,
@@ -427,9 +450,18 @@ impl G1 {
 
     /// Decodes a canonical compressed point in G1. The identity is accepted.
     pub fn from_bytes(bytes: &[u8; 48]) -> Option<Self> {
+        let point = Self::on_curve(bytes)?;
+        (bytes[0] & 0x40 != 0 || with_backend(homogeneous::InSubgroup(&point))).then(|| Self {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        })
+    }
+
+    fn on_curve(bytes: &[u8; 48]) -> Option<homogeneous::G1Point> {
         let (infinity, sort, coordinate) = compressed_flags(bytes)?;
         if infinity {
-            return Some(Self::IDENTITY);
+            return Some(homogeneous::G1Point::identity());
         }
         let x = Fp::from_bytes(&coordinate)?;
         let y = x.square().mul(x).add(Fp::from_u64(4)).sqrt()?;
@@ -438,8 +470,7 @@ impl G1 {
             &y.neg(),
             y.lexicographically_largest() ^ Choice::from(u8::from(sort)),
         );
-        let point = homogeneous::G1Point::from_affine(x, y);
-        with_backend(homogeneous::InSubgroup(&point)).then(|| Self::from_affine(x, y))
+        Some(homogeneous::G1Point::from_affine(x, y))
     }
 }
 
@@ -517,9 +548,18 @@ impl G2 {
 
     /// Decodes a canonical compressed point in G2. The identity is accepted.
     pub fn from_bytes(bytes: &[u8; 96]) -> Option<Self> {
+        let point = Self::on_curve(bytes)?;
+        (bytes[0] & 0x40 != 0 || with_backend(homogeneous::InSubgroup(&point))).then(|| Self {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        })
+    }
+
+    fn on_curve(bytes: &[u8; 96]) -> Option<homogeneous::G2Point> {
         let (infinity, sort, coordinate) = compressed_flags(bytes)?;
         if infinity {
-            return Some(Self::IDENTITY);
+            return Some(homogeneous::G2Point::identity());
         }
         let x = Fp2 {
             c0: Fp::from_bytes(coordinate[48..].try_into().unwrap())?,
@@ -532,8 +572,7 @@ impl G2 {
             &y.neg(),
             Choice::from(u8::from(y.lexicographically_largest() != sort)),
         );
-        let point = homogeneous::G2Point::from_affine(x, y);
-        with_backend(homogeneous::InSubgroup(&point)).then(|| Self::from_affine(x, y))
+        Some(homogeneous::G2Point::from_affine(x, y))
     }
 }
 

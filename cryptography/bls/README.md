@@ -11,6 +11,14 @@ The curve families share [VROOM field arithmetic](../vroom), with portable and A
 
 Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
+## Batch subgroup checks
+
+The [batch subgroup soundness note](src/bls12381/group/subgroup.md) explains the G1/G2 construction and its per-call error bound. Check its exact parameter inequalities from the workspace root:
+
+```sh
+python3 cryptography/bls/scripts/subgroup.py
+```
+
 ## References
 
 - [VROOM](https://eprint.iacr.org/2026/393), the residue arithmetic design.

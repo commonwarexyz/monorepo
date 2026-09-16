@@ -70,7 +70,7 @@ macro_rules! point {
             }
 
             #[inline(always)]
-            fn identity() -> Self {
+            pub(super) fn identity() -> Self {
                 Self {
                     x: <$field>::ZERO.into(),
                     y: <$field>::ONE.into(),

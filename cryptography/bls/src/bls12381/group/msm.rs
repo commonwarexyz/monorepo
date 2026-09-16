@@ -45,7 +45,7 @@ impl EncodedScalar {
     // Adjacent Booth windows share one bit. The bottom window supplies a zero
     // below bit zero, and an extra top window absorbs a carry beyond the input.
     #[inline(always)]
-    pub fn digit(&self, window: usize, width: usize) -> i16 {
+    pub fn digit(&self, window: usize, width: usize) -> i32 {
         let bit = window * width;
         let start = bit.saturating_sub(1);
         let mut value = 0u32;
@@ -57,12 +57,13 @@ impl EncodedScalar {
             value <<= 1;
         }
         value &= (1 << (width + 1)) - 1;
-        ((value + 1) >> 1) as i16 - ((value >> width) << width) as i16
+        ((value + 1) >> 1) as i32 - ((value >> width) << width) as i32
     }
 }
 
 // blst uses an eight-point table below 32 terms, then picks bucket widths from
-// the input count. The cap bounds bucket storage independently of the slice length.
+// the input count. The cap bounds bucket storage and limits Booth extraction to
+// three bytes, including an overlapping bit at any byte offset.
 pub(super) fn window_width(points: usize) -> usize {
     if points < 32 {
         return 4;
@@ -75,7 +76,7 @@ pub(super) fn window_width(points: usize) -> usize {
     } else {
         bits - 1
     };
-    width.min(10)
+    width.min(16)
 }
 
 #[inline(always)]
@@ -382,6 +383,62 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
+    #[test]
+    fn compute_wide_windows_reuses_largest_bucket() {
+        let count = 1 << 19;
+        assert_eq!(window_width(count), 16);
+        let weight = 0x7fff8000u64;
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&weight.to_le_bytes());
+        let scalar = EncodedScalar(bytes);
+        let terms = (0..count)
+            .map(|_| Term {
+                point: AdditivePoint(1),
+                scalar,
+            })
+            .collect();
+        let result = compute(
+            terms,
+            scalar.bits(),
+            &AdditiveContext::default(),
+            AdditivePoint(0),
+        );
+        assert_eq!(result, AdditivePoint(count as i64 * weight as i64));
+    }
+
+    #[test]
+    fn booth_width_15_negative_digit_does_not_overflow() {
+        let mut bytes = [0; 32];
+        bytes[1] = 0x40;
+        let scalar = EncodedScalar(bytes);
+        let digits = [
+            i128::from(scalar.digit(0, 15)),
+            i128::from(scalar.digit(1, 15)),
+        ];
+        assert_eq!(digits, [-16384i128, 1]);
+        let reconstructed = (digits[1] << 15) + digits[0];
+        assert_eq!(reconstructed, 1i128 << 14);
+    }
+
+    #[test]
+    fn booth_width_16_preserves_positive_extreme() {
+        let mut bytes = [0; 32];
+        bytes[..4].copy_from_slice(&0x7fff8000u32.to_le_bytes());
+        let scalar = EncodedScalar(bytes);
+        let digits = [
+            i128::from(scalar.digit(0, 16)),
+            i128::from(scalar.digit(1, 16)),
+        ];
+        assert_eq!(digits, [-32768i128, 32768i128]);
+        let reconstructed = (digits[1] << 16) + digits[0];
+        assert_eq!(reconstructed, 0x7fff8000i128);
+
+        let full = EncodedScalar([0xff; 32]);
+        assert_eq!(i128::from(full.digit(0, 16)), -1);
+        assert_eq!(i128::from(full.digit(16, 16)), 1);
+    }
+
     #[test]
     fn booth_windows_reconstruct_integer() {
         let mut values = alloc::vec![[0; 32], [0xff; 32], [0x55; 32], [0xaa; 32]];
@@ -400,7 +457,7 @@ mod tests {
         }
         for value in values {
             let scalar = EncodedScalar(value);
-            for width in 4..=10 {
+            for width in 4..=16 {
                 let mut result = BigInt::from(0);
                 for window in (0..scalar.bits() / width + 1).rev() {
                     let digit = scalar.digit(window, width);
@@ -410,6 +467,8 @@ mod tests {
                 assert_eq!(result, BigInt::from_bytes_le(Sign::Plus, &value));
             }
         }
-        assert_eq!(window_width(usize::MAX), 10);
+        assert_eq!(window_width(100_000), 13);
+        assert_eq!(window_width(1_000_000), 16);
+        assert_eq!(window_width(usize::MAX), 16);
     }
 }

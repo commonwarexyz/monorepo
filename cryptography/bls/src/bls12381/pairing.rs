@@ -64,13 +64,20 @@ pub fn pairing(p: &G1, q: &G2) -> Gt {
 ///
 /// Timing may depend on the points and their projective representations.
 pub fn multi_pairing(pairs: &[(G1, G2)]) -> Gt {
-    with_backend(Pairings(pairs))
+    let Some(product) = with_backend(MillerProduct(pairs)) else {
+        return Gt::IDENTITY;
+    };
+
+    // Each nonidentity state is kQ with 1 <= k <= |z| < r. At doubling,
+    // Y and Z are nonzero; at addition, kQ is neither Q nor -Q. Thus the
+    // v*w line coefficient is nonzero and the Miller product is invertible.
+    with_backend(FinalExponent(product))
 }
 
-struct Pairings<'a>(&'a [(G1, G2)]);
+struct MillerProduct<'a>(&'a [(G1, G2)]);
 
-impl WithBackend for Pairings<'_> {
-    type Output = Gt;
+impl WithBackend for MillerProduct<'_> {
+    type Output = Option<fp12::Standard>;
 
     #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
@@ -95,14 +102,22 @@ impl WithBackend for Pairings<'_> {
             }
         }
         if Fp12::from_bounded(product) == Fp12::ONE {
-            return Gt::IDENTITY;
+            return None;
         }
+        Some(product)
+    }
+}
 
-        // Each nonidentity state is kQ with 1 <= k <= |z| < r. At doubling,
-        // Y and Z are nonzero; at addition, kQ is neither Q nor -Q. Thus the
-        // v*w line coefficient is nonzero and the Miller product is invertible.
+struct FinalExponent(fp12::Standard);
+
+impl WithBackend for FinalExponent {
+    type Output = Gt;
+
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
         Gt(Fp12::from_bounded(
-            final_exponentiation_inner(&product, &ring).expect("Miller products are nonzero"),
+            final_exponentiation_inner(&self.0, &Ring::new(backend))
+                .expect("Miller products are nonzero"),
         ))
     }
 }
@@ -172,20 +187,30 @@ fn prepare<B: Backend>(
     count
 }
 
-#[inline(always)]
-fn raise_to_z_over_two<const N: i64, B: Backend>(
-    value: &fp12::Fp12<N>,
-    ring: &Ring<Bls12381, B>,
-) -> fp12::Fp12<6> {
-    let mut result = fp12::cyclotomic_square(value, ring);
-    for squarings in [2, 3, 9, 32, 15] {
-        let product = fp12::mul(&result, value, ring);
-        result = core::array::from_fn(|i| product[i].recast_rns::<Range<0, 6>>());
-        for _ in 0..squarings {
-            result = fp12::cyclotomic_square(&result, ring);
+struct RaiseZOverTwo<'a, const N: i64>(&'a fp12::Fp12<N>);
+
+impl<const N: i64> WithBackend for RaiseZOverTwo<'_, N> {
+    type Output = fp12::Fp12<6>;
+
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        let ring = Ring::<Bls12381, B>::new(backend);
+        let mut result = fp12::cyclotomic_square(self.0, &ring);
+        for squarings in [2, 3, 9, 32, 15] {
+            let product = fp12::mul(&result, self.0, &ring);
+            result = core::array::from_fn(|i| product[i].recast_rns::<Range<0, 6>>());
+            for _ in 0..squarings {
+                result = fp12::cyclotomic_square(&result, &ring);
+            }
         }
+        fp12::conjugate(&result, &ring)
     }
-    fp12::conjugate(&result, ring)
+}
+
+// The backend-neutral boundary gives the shared chain its own validated target-feature scope.
+#[inline(never)]
+fn dispatched_raise_to_z_over_two<const N: i64>(value: &fp12::Fp12<N>) -> fp12::Fp12<6> {
+    with_backend(RaiseZOverTwo(value))
 }
 
 #[inline(always)]
@@ -193,7 +218,7 @@ fn raise_to_z<const N: i64, B: Backend>(
     value: &fp12::Fp12<N>,
     ring: &Ring<Bls12381, B>,
 ) -> fp12::Fp12<6> {
-    fp12::cyclotomic_square(&raise_to_z_over_two(value, ring), ring)
+    fp12::cyclotomic_square(&dispatched_raise_to_z_over_two(value), ring)
 }
 
 // The easy part establishes the cyclotomic invariant. Common bound 6 survives
@@ -208,7 +233,7 @@ fn final_exponentiation_inner<B: Backend>(
     let easy = fp12::mul(&fp12::frobenius2(&easy, ring), &easy, ring);
     let y0 = fp12::cyclotomic_square(&easy, ring);
     let y1 = raise_to_z(&y0, ring);
-    let y2 = raise_to_z_over_two(&y1, ring);
+    let y2 = dispatched_raise_to_z_over_two(&y1);
     let y1 = fp12::mul(&y1, &fp12::conjugate(&easy, ring), ring);
     let y1 = fp12::mul(&fp12::conjugate(&y1, ring), &y2, ring);
     let y2 = raise_to_z(&y1, ring);
