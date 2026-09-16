@@ -82,7 +82,7 @@ use crate::{
     qmdb::{
         Error, ROOT_BAGGING,
         any::ValueEncoding,
-        batch_chain, find_inactivity_floor_at,
+        chain, find_inactivity_floor_at,
         metrics::Metrics,
         operation::{Committable, Key},
     },
@@ -708,9 +708,9 @@ where
         Ok(self.journal.destroy().await?)
     }
 
-    /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
-    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.size(), self.root)
+    /// The [`Commitment`](chain::Commitment) for the database's current state.
+    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -737,13 +737,13 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
     ///
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::batch_chain`] for more details).
+    ///   [`crate::qmdb::chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain (the tip or any
     ///   unapplied ancestor) declares an inactivity floor below the previous
     ///   commit's floor (or, for the oldest unapplied commit, below the

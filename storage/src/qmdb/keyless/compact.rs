@@ -33,7 +33,7 @@ use crate::{
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
         compact::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
@@ -100,7 +100,7 @@ where
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
     appends: Vec<V::Value>,
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, V, S>>>,
-    base: batch_chain::Commitment<F, H::Digest>,
+    base: chain::Commitment<F, H::Digest>,
 }
 
 /// A speculative batch whose root digest has been computed.
@@ -113,7 +113,7 @@ where
     operations: Arc<Vec<Operation<F, V>>>,
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
-    pub(super) bounds: batch_chain::Bounds<F, D>,
+    pub(super) bounds: chain::Bounds<F, D>,
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> sync::MerkleizedBatch
@@ -147,7 +147,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -265,7 +265,7 @@ where
 {
     pub(super) fn new<E, C>(
         db: &Db<F, E, V, H, C, S>,
-        base: batch_chain::Commitment<F, H::Digest>,
+        base: chain::Commitment<F, H::Digest>,
     ) -> Self
     where
         E: Context,
@@ -319,9 +319,9 @@ where
         Operation<F, V>: Read<Cfg = C>,
     {
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -344,7 +344,7 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = batch_chain::collect_ancestor_bounds(
+        let ancestors = chain::collect_ancestor_bounds(
             live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
@@ -355,7 +355,7 @@ where
             operations,
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
                 tip: Commitment::new(total_size, root),
@@ -519,8 +519,8 @@ where
     }
 
     /// The [`Commitment`] for the database's current state.
-    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root())
+    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.last_commit_loc + 1, self.root())
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -538,7 +538,7 @@ where
             operations: Arc::new(Vec::new()),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 
@@ -565,7 +565,7 @@ where
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::batch_chain`] for more details).
+    ///   [`crate::qmdb::chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own

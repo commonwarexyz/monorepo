@@ -258,7 +258,7 @@ where
             apply_batch_size,
             config.init_concurrency,
             config.init_buffer,
-            config.init_cache_size,
+            config.init_cache,
             config.grafted_metadata_partition,
             strategy,
         )

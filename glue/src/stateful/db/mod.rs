@@ -1987,7 +1987,7 @@ pub(crate) mod tests {
                     merkle_config: merkle_config(context, &partition),
                     journal_config: fixed_journal_config(context, &partition),
                     translator: TwoCap,
-                    init_cache_size: Some(NZUsize!(1024)),
+                    init_cache: Some(NZUsize!(1024)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 }
@@ -2001,7 +2001,7 @@ pub(crate) mod tests {
                     merkle_config: merkle_config(context, &partition),
                     journal_config: variable_journal_config(context, &partition, ((), ())),
                     translator: TwoCap,
-                    init_cache_size: Some(NZUsize!(1024)),
+                    init_cache: Some(NZUsize!(1024)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 }
@@ -2021,7 +2021,7 @@ pub(crate) mod tests {
                     journal_config: fixed_journal_config(context, &partition),
                     grafted_metadata_partition: format!("{partition}-grafted-metadata"),
                     translator: TwoCap,
-                    init_cache_size: Some(NZUsize!(1024)),
+                    init_cache: Some(NZUsize!(1024)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 }
@@ -2036,7 +2036,7 @@ pub(crate) mod tests {
                     journal_config: variable_journal_config(context, &partition, ((), ())),
                     grafted_metadata_partition: format!("{partition}-grafted-metadata"),
                     translator: TwoCap,
-                    init_cache_size: Some(NZUsize!(1024)),
+                    init_cache: Some(NZUsize!(1024)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 }

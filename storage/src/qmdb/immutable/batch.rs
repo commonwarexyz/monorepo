@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
         immutable::operation::Operation,
         operation::Key,
         sync::{self, Target},
@@ -70,7 +70,7 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 ///
 /// Reads through the chain, constructing child batches, and applying the batch later are
 /// only valid while every batch applied to the DB since this batch was merkleized is an
-/// ancestor of this batch (see [`crate::qmdb::batch_chain`] for more details).
+/// ancestor of this batch (see [`crate::qmdb::chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
@@ -89,7 +89,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F, D>,
+    pub(super) bounds: chain::Bounds<F, D>,
 }
 
 impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
@@ -256,9 +256,9 @@ where
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -293,7 +293,7 @@ where
         let mut ancestors = Vec::new();
         for batch in live_ancestors {
             ancestor_diffs.push(Arc::clone(&batch.diff));
-            ancestors.push(batch_chain::AncestorBounds {
+            ancestors.push(chain::AncestorBounds {
                 floor: batch.bounds.inactivity_floor,
                 state: batch.commitment(),
             });
@@ -304,7 +304,7 @@ where
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_diffs,
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
                 tip: Commitment::new(total_size, root),
@@ -428,7 +428,7 @@ where
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -557,7 +557,7 @@ where
             diff: Arc::new(Vec::new()),
             parent: None,
             ancestor_diffs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }

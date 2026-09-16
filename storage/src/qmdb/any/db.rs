@@ -12,7 +12,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
+        Error, bitmap::Shared, chain::Commitment, delete_known_loc, metrics::Metrics,
         update_known_loc,
     },
 };
