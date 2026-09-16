@@ -81,8 +81,8 @@ impl<K: Kernel> Impl for Impl16<K> {
     fn mul_add(self, dst: &mut [u8], src: &[u8], c: GF16) {
         assert!(src.len().is_multiple_of(2), "shard length is not aligned");
         // Subfield coefficients multiply both byte planes independently.
-        if c.0 <= u8::MAX as u16 {
-            return Impl8::new(self.kernel).mul_add(dst, src, GF8(c.0 as u8));
+        if let Some(c) = c.subfield() {
+            return Impl8::new(self.kernel).mul_add(dst, src, c);
         }
         self.kernel.run(MulAdd::<true> { dst, src, c });
     }
@@ -90,8 +90,8 @@ impl<K: Kernel> Impl for Impl16<K> {
     fn mul_into(self, dst: &mut [u8], src: &[u8], c: GF16) {
         assert!(src.len().is_multiple_of(2), "shard length is not aligned");
         // Subfield coefficients multiply both byte planes independently.
-        if c.0 <= u8::MAX as u16 {
-            return Impl8::new(self.kernel).mul_into(dst, src, GF8(c.0 as u8));
+        if let Some(c) = c.subfield() {
+            return Impl8::new(self.kernel).mul_into(dst, src, c);
         }
         self.kernel.run(MulAdd::<false> { dst, src, c });
     }
@@ -110,16 +110,16 @@ impl<K: Kernel> Impl for Impl16<K> {
 
     fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: GF16) {
         assert!(x.len().is_multiple_of(2), "shard length is not aligned");
-        if c.0 <= u8::MAX as u16 {
-            return Impl8::new(self.kernel).fft_butterfly(x, y, GF8(c.0 as u8));
+        if let Some(c) = c.subfield() {
+            return Impl8::new(self.kernel).fft_butterfly(x, y, c);
         }
         self.kernel.run(Butterfly::<false> { x, y, c });
     }
 
     fn ifft_butterfly(self, x: &mut [u8], y: &mut [u8], c: GF16) {
         assert!(x.len().is_multiple_of(2), "shard length is not aligned");
-        if c.0 <= u8::MAX as u16 {
-            return Impl8::new(self.kernel).ifft_butterfly(x, y, GF8(c.0 as u8));
+        if let Some(c) = c.subfield() {
+            return Impl8::new(self.kernel).ifft_butterfly(x, y, c);
         }
         self.kernel.run(Butterfly::<true> { x, y, c });
     }
@@ -130,11 +130,11 @@ impl<K: Kernel> Impl for Impl16<K> {
         shard_len: usize,
         coefficients: [GF16; 3],
     ) {
-        if coefficients.iter().all(|c| c.0 <= u8::MAX as u16) {
+        if let [Some(c0), Some(c1), Some(c2)] = coefficients.map(GF16::subfield) {
             return Impl8::new(self.kernel).fft_butterfly_two_layers(
                 quarters,
                 shard_len,
-                coefficients.map(|c| GF8(c.0 as u8)),
+                [c0, c1, c2],
             );
         }
         self.kernel.run(ButterflyTwoLayers::<false> {
@@ -150,11 +150,11 @@ impl<K: Kernel> Impl for Impl16<K> {
         shard_len: usize,
         coefficients: [GF16; 3],
     ) {
-        if coefficients.iter().all(|c| c.0 <= u8::MAX as u16) {
+        if let [Some(c0), Some(c1), Some(c2)] = coefficients.map(GF16::subfield) {
             return Impl8::new(self.kernel).ifft_butterfly_two_layers(
                 quarters,
                 shard_len,
-                coefficients.map(|c| GF8(c.0 as u8)),
+                [c0, c1, c2],
             );
         }
         self.kernel.run(ButterflyTwoLayers::<true> {
@@ -599,28 +599,14 @@ fn checksum_edge<K: Kernel>(
     }
 }
 
-fn checksum_scalar(shard: &[u8], coefficients: &[u8], range: Range<usize>) -> (u8, u8) {
-    let symbols = shard.len() / 2;
-    let mut lo = 0;
-    let mut hi = 0;
-    for i in range {
-        let block_start = i / BLOCK_SYMBOLS * BLOCK_BYTES;
-        let block_symbols = (symbols - i / BLOCK_SYMBOLS * BLOCK_SYMBOLS).min(BLOCK_SYMBOLS);
-        let lane = i % BLOCK_SYMBOLS;
-        let coefficient = GF8(coefficients[i]);
-        lo ^= GF8(shard[block_start + lane]).mul_inner(coefficient).0;
-        hi ^= GF8(shard[block_start + block_symbols + lane])
-            .mul_inner(coefficient)
-            .0;
-    }
-    (lo, hi)
-}
-
 impl WithKernel for ChecksumRange<'_> {
     type Output = ();
 
     #[inline(always)]
     fn call<K: Kernel>(self, kernel: K) {
+        const {
+            assert!(K::LANES > 0 && K::LANES <= BLOCK_SYMBOLS);
+        }
         let Self {
             shard,
             coefficients,
@@ -652,18 +638,13 @@ impl WithKernel for ChecksumRange<'_> {
         let start = range.start / 2;
         let end = range.end / 2;
         let zero = [0; BLOCK_SYMBOLS];
+        let zero = kernel.load(&zero[..K::LANES]);
         for (output_block, out) in out.chunks_mut(BLOCK_BYTES).enumerate() {
             let block_symbols = out.len() / 2;
             let (out_lo, out_hi) = out.split_at_mut(block_symbols);
             for (lane, (out_lo, out_hi)) in out_lo.iter_mut().zip(out_hi).enumerate() {
                 let output = output_block * BLOCK_SYMBOLS + lane;
                 let row = &coefficients[output * symbols..(output + 1) * symbols];
-                if K::LANES > BLOCK_SYMBOLS {
-                    (*out_lo, *out_hi) = checksum_scalar(shard, row, start..end);
-                    continue;
-                }
-
-                let zero = kernel.load(&zero[..K::LANES]);
                 let mut sum = ChecksumAccumulator {
                     vector_lo: zero,
                     vector_hi: zero,
@@ -882,6 +863,10 @@ mod tests {
 
     #[test]
     fn minifuzz_impl_matches_portable() {
+        eprintln!(
+            "Ocelot GF16 differential backend: {}",
+            crate::ocelot::kernel::selected_name()
+        );
         for plan in ImplPlan::ALL {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)

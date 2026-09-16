@@ -1231,6 +1231,10 @@ mod tests {
 
     #[test]
     fn minifuzz_impl_matches_portable() {
+        eprintln!(
+            "Ocelot GF8 differential backend: {}",
+            crate::ocelot::kernel::selected_name()
+        );
         for plan in ImplPlan::ALL {
             commonware_invariants::minifuzz::Builder::default()
                 .with_seed(0)
