@@ -259,13 +259,13 @@ O’Grady</a></div>
         independently, including volume discounts or negotiated rates.
         Validators net the fee entry like any other payment, and
         settlement uses the same commitments and proofs. The fee
-        schedule stays with the operator; changing it requires no
+        schedule stays with the operator, so changing it requires no
         protocol change.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-fees.svg" alt="In a separate example, payer a batches payments of 20 to b, 7 to c, and a fee of 2 to the operator's designated account. One payer signature covers the whole batch. The operator checks the fee against its quoted policy and countersigns the same payer state, acknowledging all three payments together. Validators process the fee as an ordinary payment.">
         <div class="image-caption">
         <p>Figure 2: The payer includes the operator’s quoted fee in the
         same signed batch as the recipient payments. One
-        countersignature acknowledges the whole batch; validators
+        countersignature acknowledges the whole batch, and validators
         process every entry as an ordinary payment.</p>
         </div>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
@@ -421,16 +421,16 @@ O’Grady</a></div>
         hold the balances needed to compute the new state, so the
         dealing needs no state-change proof.</p>
         <p>Tree construction belongs to validators. The operator
-        collects signed activity and proposes the dealing; it may also
+        collects signed activity and proposes the dealing. It can also
         run QMDB replicas to serve best-effort queries.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. The activity and payout logs use flat MMRs. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances; this close creates no payouts.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. The activity and payout logs use flat MMRs. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances. This close creates no payouts.">
         <div class="image-caption">
         <p>Figure 4: The close binds three validator-derived roots. The
         activity log appends this close’s Rows and original Entries
         after those from earlier closes. Below, <span
         class="math inline">c</span>’s Row names the BMT root that <span
-        class="math inline">c</span> signs; its two entries sum to the
-        Row’s debit of 11.</p>
+        class="math inline">c</span> signs, and its two entries sum to
+        the Row’s debit of 11.</p>
         </div>
         <p>The settlement chain keeps these commitments and counts,
         bounded pending-close metadata, custody and timing controls, and
@@ -464,7 +464,7 @@ O’Grady</a></div>
         registered. With the 32-byte commitment and an eight-byte
         bitmap-length prefix, the 100-validator signed header and
         certificate are 101 bytes. The validator-derived root bundle is
-        184 bytes; adding the eight-byte withdrawal total makes its
+        184 bytes. Adding the eight-byte withdrawal total makes its
         descriptor 192 bytes, or 293 bytes together before chain
         transaction framing. These values are separate from the
         operator’s dealing.</p>
@@ -497,7 +497,7 @@ O’Grady</a></div>
         refresh payout proofs against the latest finalized root. If
         every replica discards those records, the entitlement remains
         but its proof is unavailable. Wallets must also retain their
-        private signed receipts; the public logs cannot recreate
+        private signed receipts because the public logs cannot recreate
         them.</p>
         <h2 id="the-unavoidable-challenge">The Unavoidable
         Challenge</h2>
@@ -597,9 +597,10 @@ O’Grady</a></div>
         class="math inline">s</span> of the current unclaimed interval
         <span class="math inline">[s,t)</span> containing its index
         <span class="math inline">i</span>. The opening proves that the
-        payout exists; the interval proves that it remains unclaimed.
-        The map stores only <span class="math inline">t</span> under
-        <span class="math inline">s</span>. The chain checks <span
+        payout exists, and the interval proves that it remains
+        unclaimed. The map stores only <span
+        class="math inline">t</span> under <span
+        class="math inline">s</span>. The chain checks <span
         class="math inline">s\le i&lt;t</span>, then removes the
         interval and inserts the nonempty pieces <span
         class="math inline">[s,i)</span> and <span
@@ -609,7 +610,7 @@ O’Grady</a></div>
         though the old MMR membership proof is still valid.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-payout-ranges.svg" alt="Four steps show one payout MMR root and output 12 opening remaining unchanged while the end-exclusive unclaimed ranges collapse. The initial range 10 through 15 contains indices 10, 11, 12, 13, and 14. Claiming interior index 12 atomically splits it into 10 through 12 and 13 through 15, reduces the reserve, and pays the destination. Claiming edge indices 10 and 14 shrinks the ranges to singleton intervals 11 through 12 and 13 through 14. Claiming 11 and 13 deletes those last ranges. Replaying output 12 is rejected because its index is in no unclaimed interval, even though its MMR proof remains valid. No claimed set is stored and no MMR leaf is deleted.">
         <div class="image-caption">
-        <p>Figure 6: The payout MMR proves output 12; the
+        <p>Figure 6: The payout MMR proves output 12, and the
         unclaimed-range map makes it claimable once. An interior claim
         splits a range, edge claims shrink it, and claiming its last
         item deletes it. Ranges are end-exclusive.</p>
@@ -638,10 +639,10 @@ O’Grady</a></div>
         promote its candidate payout suffix.</p>
         <p>Recovery needs a correct, live settlement chain and
         independently available balance and payout openings even when
-        the operator disappears. Commitment roots alone cannot serve
-        those witnesses; longer-retention native replicas do. A fault
-        freezes the last surviving finalized payout root and count,
-        against which later claims refresh their openings.</p>
+        the operator disappears. Longer-retention native replicas supply
+        those witnesses. A fault freezes the last surviving finalized
+        payout root and count, against which later claims refresh their
+        openings.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
         Transitions</h2>
         <p>A payment reaches finality through an admitted close, after
@@ -695,8 +696,8 @@ O’Grady</a></div>
         active payers <span class="math inline">A</span>, the recipient
         pool <span class="math inline">B</span>, and recipients per
         payer <span class="math inline">K</span>. The operator sends the
-        dealing to validators; validators derive the close descriptor
-        and certify its commitment.</p>
+        dealing to validators, who derive the close descriptor and
+        certify its commitment.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -762,17 +763,17 @@ O’Grady</a></div>
         <p>Figure 8: Encoded payload sizes (decimal KB and MB) and
         arithmetic-mean processing times. Preparation averages 20 CPU
         samples. Durable acknowledgment averages three runs per
-        workload, with no warmup; it includes sealing, signing,
+        workload, with no warmup. It includes sealing, signing,
         validation, parallel durable commits of the three public
         databases, then the private checkpoint and signing decision.
-        Setup and reopen checks run outside the timer; all nine runs
+        Setup and reopen checks run outside the timer, and all nine runs
         reopened successfully.</p>
         <p>The host was an AWS c8a.4xlarge with 16 AMD EPYC vCPUs and 32
         GiB RAM. Storage was a network-attached 160 GiB gp3 EBS SSD,
         provisioned for 6,000 IOPS and 250 MiB/s, with ext4. Validation
         and the public databases shared a 16-thread Rayon pool, with two
         runtime I/O workers and a 16 KiB native cache per public
-        database. The fixtures fit in RAM; each acknowledgment waited
+        database. The fixtures fit in RAM. Each acknowledgment waited
         for the filesystem durability barriers to the EBS volume. These
         local measurements exclude networking and use benchmark limits
         for large dealings. <a
@@ -788,7 +789,7 @@ O’Grady</a></div>
         <p>Figure 9: Every account repeatedly pays one unit to its next
         neighbor. More payments share the byte cost of the operator’s
         dealing and the 100-validator committee’s certificate. The right
-        plot includes the 101-byte commitment and certificate; the
+        plot includes the 101-byte commitment and certificate. The
         192-byte close descriptor is separate.</p>
         </div>
         <h3 id="proof-sizes-and-verification">Proof Sizes and
@@ -798,9 +799,9 @@ O’Grady</a></div>
         from decoded inputs. These are sampled proof positions, not size
         bounds.</p>
         <p>An activity proof checks whether an account appears in a
-        close’s certified, sorted account range. Presence opens one Row;
-        absence between two accounts opens the neighboring Rows. First,
-        we vary the number of accounts in the first close.</p>
+        close’s certified, sorted account range. Presence opens one Row,
+        while absence between two accounts opens the neighboring Rows.
+        First, we vary the number of accounts in the first close.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -823,7 +824,7 @@ O’Grady</a></div>
         <p>The log also contains records from earlier closes. The next
         table keeps 128 accounts in the current close and varies the
         number of accounts in one earlier close. Accounts can appear in
-        both closes; zero means there is no earlier close.</p>
+        both closes. Zero means there is no earlier close.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -863,7 +864,7 @@ O’Grady</a></div>
         <p>Figure 10: Activity lookups and complete challenges. The
         activity fixtures contain account Rows without payment Entries.
         Lookup sizes include the Row or neighboring Rows and MMR
-        opening; the certified 48-byte log header and account range are
+        opening. The certified 48-byte log header and account range are
         separate. Challenges use a 512-account recipient pool. Omitted
         payer is the absence case of debit mismatch.</p>
         <p>An empty close proves absence in 4 B (8.03 ns). The smallest
@@ -918,8 +919,8 @@ O’Grady</a></div>
         <p>Figure 11: Payout claims include a 30-byte output and its MMR
         opening. The first table opens the middle output. In the second,
         both claims use the root after the new payout was appended. The
-        chain holds the 48-byte finalized log header separately;
-        transaction framing is excluded. Pruning stored records does not
+        chain holds the 48-byte finalized log header separately.
+        Transaction framing is excluded. Pruning stored records does not
         shorten the MMR path.</p>
         </div>
         <p>QMDB proofs authenticate balances for forced withdrawal
@@ -943,8 +944,8 @@ O’Grady</a></div>
         <div class="image-caption">
         <p>Figure 12: QMDB Current Ordered proofs for a middle account
         and a missing key, using SHA-256, MMB with 32-byte chunks, and
-        8-byte balances. Lookups omit the known account key; recovery
-        includes it. The trusted root and chain framing are
+        8-byte balances. Lookups omit the known account key, which
+        recovery claims include. The trusted root and chain framing are
         separate.</p>
         </div>
         <p>Adjust the workload and committee size below to estimate the
