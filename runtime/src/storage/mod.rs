@@ -4,6 +4,10 @@ use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
+    use ::tokio::sync::watch;
+    use cfg_if::cfg_if;
+    use commonware_formatting::hex;
+    use commonware_utils::sync::Mutex;
     use std::{
         collections::HashMap,
         fs::File,
@@ -18,21 +22,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     };
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
-    use ::tokio::sync::watch;
-    use commonware_formatting::hex;
-    #[cfg(test)]
-    use crate::{Blob as _, BufferPool, ReadOptions, WriteOptions, buffer::Write};
-    use commonware_utils::sync::Mutex;
-    #[cfg(test)]
-    use commonware_utils::NZUsize;
-    #[cfg(test)]
-    use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
-    #[cfg(test)]
-    use ::tokio::sync::oneshot::Sender as OneshotSender;
-    #[cfg(test)]
-    use std::time::Duration;
-    #[cfg(test)]
-    use ::tokio::time::timeout;
+
+    cfg_if! {
+        if #[cfg(test)] {
+            use crate::{Blob as _, BufferPool, ReadOptions, WriteOptions, buffer::Write};
+            use ::tokio::{sync::oneshot::Sender as OneshotSender, time::timeout};
+            use commonware_utils::NZUsize;
+            use std::{
+                sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
+                time::Duration,
+            };
+        }
+    }
 
     /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
     /// but did not `fsync` are crash-durable before any storage structure reads.
@@ -45,7 +46,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8.
     pub(crate) fn sync(dir: &Path) -> io::Result<()> {
-        cfg_if::cfg_if! {
+        cfg_if! {
             if #[cfg(target_os = "linux")] {
                 let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
@@ -261,16 +262,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
         }
 
-        /// Number of registered syncs.
-        #[cfg(test)]
-        pub(crate) fn len(&self) -> usize {
-            self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
-        }
+        cfg_if! {
+            if #[cfg(test)] {
+                /// Number of registered syncs.
+                pub(crate) fn len(&self) -> usize {
+                    self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
+                }
 
-        /// Number of syncs that finished successfully.
-        #[cfg(test)]
-        pub(crate) fn finished(&self) -> u64 {
-            self.finished.load(Ordering::Acquire)
+                /// Number of syncs that finished successfully.
+                pub(crate) fn finished(&self) -> u64 {
+                    self.finished.load(Ordering::Acquire)
+                }
+            }
         }
     }
 
@@ -314,17 +317,21 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
         }
 
-        /// Record a sync that found nothing to persist. Callers sync freely and the runtime
-        /// skips the device flush when every completed mutation through the open is covered.
-        #[cfg(test)]
-        pub(crate) fn skip_sync(&self) {
-            self.skipped.fetch_add(1, Ordering::AcqRel);
-        }
+        cfg_if! {
+            if #[cfg(test)] {
+                /// Record a sync that found nothing to persist.
+                ///
+                /// Callers sync freely and the runtime skips the device flush when every completed
+                /// mutation through the open is covered.
+                pub(crate) fn skip_sync(&self) {
+                    self.skipped.fetch_add(1, Ordering::AcqRel);
+                }
 
-        /// Number of syncs skipped because the open was clean.
-        #[cfg(test)]
-        pub(crate) fn skipped(&self) -> u64 {
-            self.skipped.load(Ordering::Acquire)
+                /// Number of syncs skipped because the open was clean.
+                pub(crate) fn skipped(&self) -> u64 {
+                    self.skipped.load(Ordering::Acquire)
+                }
+            }
         }
     }
 
@@ -369,175 +376,175 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
-        for partial in [true, false] {
-            *pending.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
-            assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
-            if !partial {
-                for _ in 0..2 {
-                    assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)),
-                        "a parseable header must not hide the failed creation barrier");
+    cfg_if! {
+        if #[cfg(test)] {
+            pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
+                for partial in [true, false] {
+                    *pending.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
+                    assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
+                    if !partial {
+                        for _ in 0..2 {
+                            assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)),
+                                "a parseable header must not hide the failed creation barrier");
+                        }
+                        storage.remove("failed_creation", Some(b"blob")).await.unwrap();
+                    }
+                    let (blob, size) = storage.open("failed_creation", b"blob").await.unwrap();
+                    assert_eq!(size, 0);
+                    drop(blob);
+                    storage.remove("failed_creation", None).await.unwrap();
                 }
-                storage.remove("failed_creation", Some(b"blob")).await.unwrap();
-            }
-            let (blob, size) = storage.open("failed_creation", b"blob").await.unwrap();
-            assert_eq!(size, 0);
-            drop(blob);
-            storage.remove("failed_creation", None).await.unwrap();
-        }
-        assert!(pending.deferred.lock().is_empty(), "failed creation must not launch a sync job");
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
-        storage: &S,
-        pending: &Pending,
-        pool: &BufferPool,
-    ) {
-        for by_name in [true, false] {
-            for unlink_first in [false, true] {
-                let partition = "remove_live_dirty";
-                let name = b"blob";
-                let (blob, size) = storage.open(partition, name).await.unwrap();
-                let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
-                writer.write_at(0, b"dirty").await.unwrap();
-                writer.wait_for_sync().await.unwrap();
-                let before = pending.deferred.lock().len();
-                let finished = pending.finished();
-                let target = by_name.then_some(name.as_slice());
-
-                if unlink_first {
-                    storage.remove(partition, target).await.unwrap();
-                    assert_eq!(
-                        writer.read_at(0, 5).await.unwrap().coalesce().as_ref(),
-                        b"dirty",
-                    );
-                    drop(writer);
-                } else {
-                    drop(writer);
-                    storage.remove(partition, target).await.unwrap();
-                }
-
-                let jobs = pending.deferred.lock()[before..].to_vec();
-                assert_eq!(jobs.len(), usize::from(!unlink_first));
-                for mut job in jobs {
-                    timeout(Duration::from_secs(10), job.wait_for(Option::is_some))
-                        .await.unwrap().unwrap().clone().unwrap().unwrap();
-                }
-                assert_eq!(pending.finished() - finished, u64::from(!unlink_first));
-                if by_name {
-                    storage.remove(partition, None).await.unwrap();
-                }
-            }
-        }
-    }
-
-    /// A write whose future was dropped lands before the next open reports the blob's length.
-    #[cfg(test)]
-    pub(crate) async fn check_orphaned_write<S: crate::Storage>(storage: &S) {
-        let (blob, _) = storage.open("orphaned_write", b"blob").await.unwrap();
-        let mut write = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
-        let _ = futures::poll!(write.as_mut());
-        drop(write);
-        drop(blob);
-
-        let (blob, len) = storage.open("orphaned_write", b"blob").await.unwrap();
-        assert_eq!(len, 8);
-        let read = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
-        assert_eq!(read.coalesce().as_ref(), b"orphaned");
-        drop(blob);
-        storage.remove("orphaned_write", None).await.unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
-        for (case, options) in [WriteOptions::SYNC, WriteOptions::SYNC | WriteOptions::DONT_CACHE].into_iter().enumerate() {
-            let before = pending.finished();
-            let (blob, _) = storage.open("durable_writes", &[case as u8]).await.unwrap();
-            blob.write_at(0, b"first", options).await.unwrap();
-            blob.write_at(5, b"second", options).await.unwrap();
-            drop(blob);
-            let (blob, size) = storage.open("durable_writes", &[case as u8]).await.unwrap();
-            assert_eq!(size, 11);
-            assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
-            drop(blob);
-            assert_eq!(pending.finished(), before, "successful durable writes need no reopen sync");
-        }
-
-        for plain_first in [false, true] {
-            let before = pending.finished();
-            let name = if plain_first { b"prior".as_slice() } else { b"later".as_slice() };
-            let (blob, _) = storage.open("durable_writes", name).await.unwrap();
-            let (first, second) = if plain_first {
-                (WriteOptions::default(), WriteOptions::SYNC)
-            } else {
-                (WriteOptions::SYNC, WriteOptions::default())
-            };
-            blob.write_at(0, b"first", first).await.unwrap();
-            blob.write_at(5, b"second", second).await.unwrap();
-            drop(blob);
-            let (blob, size) = storage.open("durable_writes", name).await.unwrap();
-            assert_eq!(size, 11);
-            assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
-            drop(blob);
-            let needs_sync = !plain_first || cfg!(target_os = "linux");
-            assert_eq!(pending.finished() - before, u64::from(needs_sync));
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn check_recreate_reopen<S: crate::Storage>(storage: &S, pending: &Pending) {
-        drop(storage.open("independent", b"ready").await.unwrap());
-        for remove_name in [true, false] {
-            let partition = "recreate_pending";
-            let name = b"blob";
-            let (old, _) = storage.open(partition, name).await.unwrap();
-            old.write_at(0, b"old", WriteOptions::default()).await.unwrap();
-            storage.remove(partition, remove_name.then_some(name.as_slice())).await.unwrap();
-            assert_eq!(old.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"old");
-
-            let (current, len) = storage.open(partition, name).await.unwrap();
-            assert_eq!(len, 0);
-            let reader = current.clone();
-            current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
-
-            // Dropping the sender also releases the worker if an assertion unwinds.
-            let (release, gate) = mpsc::channel();
-            pending.deferred.lock().clear();
-            *pending.before_sync.lock() = Some(gate);
-            drop(current);
-            drop(old);
-            drop(reader);
-            let jobs = pending.deferred.lock().clone();
-            if let Some(mut obsolete) = jobs.get(1).cloned() {
-                timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
-                    .await.unwrap().unwrap().clone().unwrap().unwrap();
+                assert!(pending.deferred.lock().is_empty(), "failed creation must not launch a sync job");
             }
 
-            let mut reopen = Box::pin(storage.open(partition, name));
-            let early = timeout(Duration::from_millis(50), &mut reopen).await;
-            let completed_early = early.is_ok();
-            let clean_progress = timeout(Duration::from_secs(5), async {
-                let names = storage.scan("independent").await?;
-                let (blob, len) = storage.open("independent", b"ready").await?;
+            pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
+                storage: &S,
+                pending: &Pending,
+                pool: &BufferPool,
+            ) {
+                for by_name in [true, false] {
+                    for unlink_first in [false, true] {
+                        let partition = "remove_live_dirty";
+                        let name = b"blob";
+                        let (blob, size) = storage.open(partition, name).await.unwrap();
+                        let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
+                        writer.write_at(0, b"dirty").await.unwrap();
+                        writer.wait_for_sync().await.unwrap();
+                        let before = pending.deferred.lock().len();
+                        let finished = pending.finished();
+                        let target = by_name.then_some(name.as_slice());
+
+                        if unlink_first {
+                            storage.remove(partition, target).await.unwrap();
+                            assert_eq!(
+                                writer.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+                                b"dirty",
+                            );
+                            drop(writer);
+                        } else {
+                            drop(writer);
+                            storage.remove(partition, target).await.unwrap();
+                        }
+
+                        let jobs = pending.deferred.lock()[before..].to_vec();
+                        assert_eq!(jobs.len(), usize::from(!unlink_first));
+                        for mut job in jobs {
+                            timeout(Duration::from_secs(10), job.wait_for(Option::is_some))
+                                .await.unwrap().unwrap().clone().unwrap().unwrap();
+                        }
+                        assert_eq!(pending.finished() - finished, u64::from(!unlink_first));
+                        if by_name {
+                            storage.remove(partition, None).await.unwrap();
+                        }
+                    }
+                }
+            }
+
+            /// A write whose future was dropped lands before the next open reports
+            /// the blob's length.
+            pub(crate) async fn check_orphaned_write<S: crate::Storage>(storage: &S) {
+                let (blob, _) = storage.open("orphaned_write", b"blob").await.unwrap();
+                let mut write = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
+                let _ = futures::poll!(write.as_mut());
+                drop(write);
                 drop(blob);
-                Ok::<_, Error>((names, len))
-            }).await;
-            drop(release);
-            let (reopened, len) = match early {
-                Ok(result) => result,
-                Err(_) => reopen.await,
-            }.unwrap();
-            let bytes = reopened.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce();
-            drop(reopened);
-            storage.remove(partition, None).await.unwrap();
-            assert_eq!(len, 3);
-            assert_eq!(bytes.as_ref(), b"new");
-            assert!(!completed_early, "reopen exposed the replacement before its deferred sync");
-            let (names, len) = clean_progress.expect("a dirty sync blocked another partition").unwrap();
-            assert_eq!(names, vec![b"ready".to_vec()]);
-            assert_eq!(len, 0);
+
+                let (blob, len) = storage.open("orphaned_write", b"blob").await.unwrap();
+                assert_eq!(len, 8);
+                let read = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+                assert_eq!(read.coalesce().as_ref(), b"orphaned");
+                drop(blob);
+                storage.remove("orphaned_write", None).await.unwrap();
+            }
+
+            pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
+                for (case, options) in [WriteOptions::SYNC, WriteOptions::SYNC | WriteOptions::DONT_CACHE].into_iter().enumerate() {
+                    let before = pending.finished();
+                    let (blob, _) = storage.open("durable_writes", &[case as u8]).await.unwrap();
+                    blob.write_at(0, b"first", options).await.unwrap();
+                    blob.write_at(5, b"second", options).await.unwrap();
+                    drop(blob);
+                    let (blob, size) = storage.open("durable_writes", &[case as u8]).await.unwrap();
+                    assert_eq!(size, 11);
+                    assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+                    drop(blob);
+                    assert_eq!(pending.finished(), before, "successful durable writes need no reopen sync");
+                }
+
+                for plain_first in [false, true] {
+                    let before = pending.finished();
+                    let name = if plain_first { b"prior".as_slice() } else { b"later".as_slice() };
+                    let (blob, _) = storage.open("durable_writes", name).await.unwrap();
+                    let (first, second) = if plain_first {
+                        (WriteOptions::default(), WriteOptions::SYNC)
+                    } else {
+                        (WriteOptions::SYNC, WriteOptions::default())
+                    };
+                    blob.write_at(0, b"first", first).await.unwrap();
+                    blob.write_at(5, b"second", second).await.unwrap();
+                    drop(blob);
+                    let (blob, size) = storage.open("durable_writes", name).await.unwrap();
+                    assert_eq!(size, 11);
+                    assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+                    drop(blob);
+                    let needs_sync = !plain_first || cfg!(target_os = "linux");
+                    assert_eq!(pending.finished() - before, u64::from(needs_sync));
+                }
+            }
+
+            pub(crate) async fn check_recreate_reopen<S: crate::Storage>(storage: &S, pending: &Pending) {
+                drop(storage.open("independent", b"ready").await.unwrap());
+                for remove_name in [true, false] {
+                    let partition = "recreate_pending";
+                    let name = b"blob";
+                    let (old, _) = storage.open(partition, name).await.unwrap();
+                    old.write_at(0, b"old", WriteOptions::default()).await.unwrap();
+                    storage.remove(partition, remove_name.then_some(name.as_slice())).await.unwrap();
+                    assert_eq!(old.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"old");
+
+                    let (current, len) = storage.open(partition, name).await.unwrap();
+                    assert_eq!(len, 0);
+                    let reader = current.clone();
+                    current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
+
+                    // Dropping the sender also releases the worker if an assertion unwinds.
+                    let (release, gate) = mpsc::channel();
+                    pending.deferred.lock().clear();
+                    *pending.before_sync.lock() = Some(gate);
+                    drop(current);
+                    drop(old);
+                    drop(reader);
+                    let jobs = pending.deferred.lock().clone();
+                    if let Some(mut obsolete) = jobs.get(1).cloned() {
+                        timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
+                            .await.unwrap().unwrap().clone().unwrap().unwrap();
+                    }
+
+                    let mut reopen = Box::pin(storage.open(partition, name));
+                    let early = timeout(Duration::from_millis(50), &mut reopen).await;
+                    let completed_early = early.is_ok();
+                    let clean_progress = timeout(Duration::from_secs(5), async {
+                        let names = storage.scan("independent").await?;
+                        let (blob, len) = storage.open("independent", b"ready").await?;
+                        drop(blob);
+                        Ok::<_, Error>((names, len))
+                    }).await;
+                    drop(release);
+                    let (reopened, len) = match early {
+                        Ok(result) => result,
+                        Err(_) => reopen.await,
+                    }.unwrap();
+                    let bytes = reopened.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce();
+                    drop(reopened);
+                    storage.remove(partition, None).await.unwrap();
+                    assert_eq!(len, 3);
+                    assert_eq!(bytes.as_ref(), b"new");
+                    assert!(!completed_early, "reopen exposed the replacement before its deferred sync");
+                    let (names, len) = clean_progress.expect("a dirty sync blocked another partition").unwrap();
+                    assert_eq!(names, vec![b"ready".to_vec()]);
+                    assert_eq!(len, 0);
+                }
+            }
         }
     }
 

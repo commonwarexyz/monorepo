@@ -8,8 +8,6 @@ use crate::{
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::{channel::oneshot, sync::Mutex};
-#[cfg(test)]
-use std::sync::{Barrier, mpsc::Receiver};
 use std::{
     fs::File,
     io::IoSlice,
@@ -20,9 +18,14 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-#[cfg(test)]
-use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::task;
+
+cfg_if! {
+    if #[cfg(test)] {
+        use std::sync::{Barrier, mpsc::Receiver};
+        use tokio::sync::oneshot::Sender as OneshotSender;
+    }
+}
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
