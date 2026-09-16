@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-15T00:00:00Z"
+modified-time: "2026-09-16T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/15/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in QMDB databases and apply only the changes at each settlement.*
+*Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in QMDB databases and apply only the changes at each settlement.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
