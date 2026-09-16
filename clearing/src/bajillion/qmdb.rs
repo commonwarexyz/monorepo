@@ -909,7 +909,7 @@ mod tests {
             },
             grafted_metadata_partition: format!("{prefix}-balances-grafts"),
             translator: EightCap,
-            init_cache_size: Some(NZUsize!(64)),
+            init_cache: Some(NZUsize!(64)),
             init_buffer: NZUsize!(4096),
             init_concurrency: (),
         }

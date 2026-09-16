@@ -327,5 +327,7 @@ for settlement rules.
 
 This local demo uses deterministic wallet keys and trusted committee setup, with
 keys stored in plaintext. Chain followers retain block history; native balance and
-log replicas can recover from authenticated checkpoints and prune history older than their protected boundaries. Each epoch supports up to 1,024 payment entries, 1,024 deposits,
-and 1,024 withdrawals, touching at most 4,096 accounts.
+log replicas can recover from authenticated checkpoints and prune history older than
+their protected boundaries. Each epoch supports up to 1,024 payment entries and
+1,024 withdrawals, touching at most 4,096 accounts. The deployment supports up to
+1,024 deposit IDs over its lifetime.

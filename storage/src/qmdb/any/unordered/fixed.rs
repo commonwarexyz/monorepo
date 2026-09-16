@@ -641,7 +641,7 @@ pub(crate) mod test {
     }
 
     /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical
+    /// with the cache disabled (`init_cache = None`) or enabled must produce the identical
     /// root and key-value state.
     #[test_traced("WARN")]
     fn test_unordered_fixed_init_cache_equivalence() {
@@ -678,7 +678,7 @@ pub(crate) mod test {
             // so every root and key-value result must match the pre-drop state.
             for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
                 let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-                cfg.init_cache_size = cache_size;
+                cfg.init_cache = cache_size;
                 let ctx = context
                     .child("reopen")
                     .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));

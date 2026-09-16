@@ -173,7 +173,7 @@ fn config(
         },
         grafted_metadata_partition: format!("{prefix}-chain-grafted-metadata"),
         translator: StateTranslator,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }

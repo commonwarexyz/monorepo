@@ -15,8 +15,8 @@ use crate::{
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
-        batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
+        chain::{self, Bounds, Commitment},
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -332,7 +332,7 @@ where
 /// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
 /// the batch later are only valid while every batch applied to the DB since this batch was
 /// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
-/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for more details).
+/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -360,7 +360,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     ancestor_base_locs: AncestorBaseLocs<U::Key, F>,
 
     /// Position and floor bounds for this batch chain.
-    pub(crate) bounds: batch_chain::Bounds<F, D>,
+    pub(crate) bounds: chain::Bounds<F, D>,
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
@@ -1244,7 +1244,7 @@ where
         let ancestors: Vec<_> = self
             .ancestors
             .iter()
-            .map(|a| batch_chain::AncestorBounds {
+            .map(|a| chain::AncestorBounds {
                 floor: a.bounds.inactivity_floor,
                 state: a.commitment(),
             })
@@ -1258,7 +1258,7 @@ where
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
             ancestor_base_locs,
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base_state,
                 db: self.db_state,
                 tip: Commitment::new(commit_loc + 1, root),
@@ -1651,7 +1651,7 @@ where
             v.extend(parent.ancestors());
             v
         });
-        let db_state = batch_chain::effective_boundary(
+        let db_state = chain::effective_boundary(
             self.base.db(),
             ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -2120,8 +2120,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors())
-                .collect();
+            chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors()).collect();
         let before = self.get_neighbor(key, false, &ancestors, db).await?;
         let after = self.get_neighbor(key, true, &ancestors, db).await?;
         Ok((before, after))
@@ -2681,7 +2680,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -2903,7 +2902,7 @@ where
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
             ancestor_base_locs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }
@@ -2938,7 +2937,7 @@ where
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`crate::qmdb::Error::StaleBatch`] (see
-    /// [`crate::qmdb::batch_chain`] for more details).
+    /// [`crate::qmdb::chain`] for more details).
     ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
@@ -3520,7 +3519,7 @@ mod tests {
                     replay_buffer: config.journal_config.replay_buffer,
                 },
                 translator: config.translator,
-                init_cache_size: config.init_cache_size,
+                init_cache: config.init_cache,
                 init_buffer: config.init_buffer,
                 init_concurrency: config.init_concurrency,
             };

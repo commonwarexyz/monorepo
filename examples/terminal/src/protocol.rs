@@ -889,7 +889,7 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
         },
         grafted_metadata_partition: format!("{prefix}-grafted"),
         translator: EightCap,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(2097152),
         init_concurrency: (),
     }

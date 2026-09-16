@@ -18,8 +18,8 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
-        batch_chain::Bounds,
         bitmap::{Shared, fill_from},
+        chain::Bounds,
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -31,7 +31,10 @@ use ahash::AHashMap;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap::{self, Readable as _};
+use commonware_utils::{
+    Widen,
+    bitmap::{self, Readable as _},
+};
 use core::ops::Range;
 use std::sync::Arc;
 
@@ -77,11 +80,18 @@ impl<const N: usize> ChunkOverlay<N> {
 
     /// Create an overlay of `len` total bits on top of `base`. The `base` handed to later
     /// `set_bit` / `clear_bit` / `chunk_mut` calls must be the bitmap given here.
+    /// `capacity` estimates the number of distinct chunks the overlay will modify,
+    /// including appended chunks.
     fn new<B: bitmap::Readable<N>>(base: &B, len: u64, capacity: usize) -> Self {
+        // Every dirty chunk is unpruned and below len, including the final partial chunk.
+        let parent = Dimensions::of(base);
+        let max_chunks =
+            usize::try_from(len.div_ceil(Self::CHUNK_BITS) - Widen::widen(parent.pruned_chunks))
+                .unwrap_or(usize::MAX);
         Self {
-            chunks: AHashMap::with_capacity(capacity),
+            chunks: AHashMap::with_capacity(capacity.min(max_chunks)),
             len,
-            parent: Dimensions::of(base),
+            parent,
         }
     }
 

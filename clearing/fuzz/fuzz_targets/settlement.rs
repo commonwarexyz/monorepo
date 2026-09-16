@@ -2587,7 +2587,7 @@ impl Harness {
         let neighbors = self.claimed_neighbors(claim.position());
         let result = self.chain.claim_withdrawal(&neighbors, &claim);
         if let Ok(effect) = &result {
-            self.persist_claimed(effect.index, &neighbors, effect.claimed.clone());
+            self.persist_claimed(effect.index, &neighbors, effect.claimed);
         }
         assert_eq!(OutcomeClass::of(&result), expected);
         if let Some((batch_index, position, expected_output)) = accepted {

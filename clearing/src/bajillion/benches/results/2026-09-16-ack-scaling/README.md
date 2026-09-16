@@ -17,7 +17,8 @@ then the private checkpoint and signing decision. Each sample starts from an
 open, durable predecessor. Fixture construction, copying, opening, raw reopen
 verification, cleanup, and networking are outside the timer. All twelve reopen
 checks passed. The fixtures fit in RAM and the filesystem cache is retained.
-Large dealings use explicit benchmark limits.
+All fixtures use benchmark limits, since one million accounts exceed the deployed
+genesis bound.
 
 Operator preparation starts from detached inputs and ends at the prepared
 dealing. Activity verification starts from decoded inputs and ends at the
