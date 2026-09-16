@@ -50,9 +50,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
-    qmdb::{
-        Error, any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root,
-    },
+    qmdb::{Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root},
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -482,9 +480,9 @@ where
         Ok(self.journal.destroy().await?)
     }
 
-    /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
-    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.journal.size(), self.root)
+    /// The [`Commitment`](chain::Commitment) for the database's current state.
+    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.journal.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -497,7 +495,7 @@ where
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
             parent: None,
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 
@@ -519,7 +517,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
     ///
     /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the

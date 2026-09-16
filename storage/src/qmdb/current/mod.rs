@@ -13,7 +13,7 @@
 //! A batch remains usable only while its ancestor chain is still the committed prefix of the
 //! DB. Once a non-ancestor batch is applied, that batch and all of its descendants are stale.
 //! Reads and merkleization refuse with `StaleRead`, and applying is rejected with
-//! `StaleBatch` (see [`crate::qmdb::batch_chain`]).
+//! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
 //! Concretely
 //! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
@@ -367,9 +367,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve index
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
+    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
+    /// index collisions without re-reading the log; `None` disables it.
+    pub init_cache: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -388,7 +388,7 @@ impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T,
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
-            init_cache_size: cfg.init_cache_size,
+            init_cache: cfg.init_cache,
             init_buffer: cfg.init_buffer,
             init_concurrency: cfg.init_concurrency,
         }
@@ -766,7 +766,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -809,7 +809,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -1730,7 +1730,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
-                init_cache_size: Some(NZUsize!(1024)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(1),
             };

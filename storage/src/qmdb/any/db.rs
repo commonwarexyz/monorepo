@@ -12,8 +12,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, batch_chain::Commitment, delete_known_loc, metrics::Metrics,
-        operation::Floored as _, update_known_loc,
+        Error, chain::Commitment, delete_known_loc, metrics::Metrics, operation::Floored as _,
+        update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};

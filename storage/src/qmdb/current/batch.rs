@@ -18,7 +18,7 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
-        batch_chain::{Bounds, OnChain},
+        chain::{Bounds, OnChain},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -30,7 +30,10 @@ use ahash::AHashMap;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap::{self, Readable as _};
+use commonware_utils::{
+    Widen,
+    bitmap::{self, Readable as _},
+};
 use core::ops::Range;
 use std::sync::Arc;
 
@@ -76,11 +79,18 @@ impl<const N: usize> ChunkOverlay<N> {
 
     /// Create an overlay of `len` total bits on top of `base`. The `base` handed to later
     /// `set_bit` / `clear_bit` / `chunk_mut` calls must be the bitmap given here.
+    /// `capacity` estimates the number of distinct chunks the overlay will modify,
+    /// including appended chunks.
     fn new<B: bitmap::Readable<N>>(base: &B, len: u64, capacity: usize) -> Self {
+        // Every dirty chunk is unpruned and below len, including the final partial chunk.
+        let parent = Dimensions::of(base);
+        let max_chunks =
+            usize::try_from(len.div_ceil(Self::CHUNK_BITS) - Widen::widen(parent.pruned_chunks))
+                .unwrap_or(usize::MAX);
         Self {
-            chunks: AHashMap::with_capacity(capacity),
+            chunks: AHashMap::with_capacity(capacity.min(max_chunks)),
             len,
-            parent: Dimensions::of(base),
+            parent,
         }
     }
 
@@ -290,7 +300,7 @@ where
 /// Once a non-ancestor batch is applied, this batch and all of its descendants are stale.
 /// Reading through or merkleizing them refuses with [`Error::StaleRead`], and applying them
 /// is rejected with [`Error::StaleBatch`] without mutating committed state (see
-/// [`crate::qmdb::batch_chain`]).
+/// [`crate::qmdb::chain`]).
 ///
 /// Building a child off a batch that `apply_batch` has consumed (the just-applied
 /// parent) is valid. The committed bitmap then equals the parent's post-apply state,
@@ -926,7 +936,7 @@ pub(crate) type Overlays<const N: usize> = Vec<Arc<ChunkOverlay<N>>>;
 /// A chunk comes from the newest overlay that materialized it, else from the committed bitmap.
 ///
 /// The view performs no validity check of its own. Its committed-read consumers run behind the
-/// batch-chain gate (see [`crate::qmdb::batch_chain`]), which refuses stale batches before they
+/// batch-chain gate (see [`crate::qmdb::chain`]), which refuses stale batches before they
 /// read through it.
 #[derive(Debug)]
 pub(crate) struct BitmapView<'a, const N: usize> {
