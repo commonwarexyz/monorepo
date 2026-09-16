@@ -4,8 +4,9 @@ use std::{hint::black_box, num::NonZeroUsize};
 
 const INSERTS_PER_ITERATION: usize = 1024;
 
-/// Benchmarks the steady-state insert path under churn. Every key is fresh, so
-/// each insertion into the full cache invokes the eviction path.
+/// Benchmarks the steady-state insert path under churn. Every key is fresh and
+/// never read, so each insertion into the full cache evicts the unreferenced
+/// Small tail into Ghost. Main is never swept here (see `mixed`).
 fn bench_insert(c: &mut Criterion) {
     for capacity in [1usize << 10, 1 << 14, 1 << 18] {
         let mut cache = Cache::new(NonZeroUsize::new(capacity).unwrap());

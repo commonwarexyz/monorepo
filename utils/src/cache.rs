@@ -3,7 +3,7 @@
 //! Clock2Q+ separates residents into a Small probation queue and a Main CLOCK
 //! ring. New entries enter Small, where hits outside a correlation window earn
 //! promotion to Main. Main gives referenced entries a second chance before
-//! eviction. A bounded Ghost queue records keys evicted from Small; a later
+//! eviction. A bounded Ghost queue records keys evicted from Small. A later
 //! request for one of these keys consumes its history and enters Main directly.
 //! During warm-up, cold entries fill Small first and then Main.
 //!
@@ -89,7 +89,7 @@ struct Entry<K, V> {
 /// or retained in Ghost history. Violating this requirement is a logic error
 /// and may cause incorrect lookups or admission decisions.
 pub struct Cache<K, V> {
-    /// Resident membership; each indexed slot owns its canonical key.
+    /// Resident membership. Each indexed slot owns its canonical key.
     /// Twice the resident limit allows tombstone cleanup without growing.
     index: HashTable<Slot>,
     /// Shared hashing state for resident and Ghost indexes.
@@ -430,7 +430,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         self.index_slot(slot, hash);
 
         // Bookkeeping is complete before destructors can run. Small victims
-        // transfer their owned key; Main and free-slot keys have no history.
+        // transfer their owned key. Main and free-slot keys have no history.
         if let Some(victim_hash) = historical_hash {
             self.ghost.push(
                 displaced_key.expect("victim must own a key"),
@@ -503,6 +503,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         location
     }
 }
+
 impl<K: Hash + Eq + Default, V> Cache<K, V> {
     /// Pre-allocates all slots up to capacity, each holding a value from `make`,
     /// and leaves them free for reuse.
@@ -1541,7 +1542,7 @@ mod tests {
         }
         // Oracle: last value written for each live key. A key the cache
         // reports as present must hold its last-written value (no stale or
-        // conjured values); an evicted key is simply absent.
+        // conjured values). An evicted key is simply absent.
         let mut model = HashMap::new();
         for op in ops {
             match op {
@@ -1595,7 +1596,7 @@ mod tests {
             // The slot vector never exceeds capacity, proving reuse.
             prop_assert!(cache.slots.len() <= capacity);
             // Every present key holds its last-written value and was logically
-            // inserted; absent keys are an allowed (evicted) state.
+            // inserted. Absent keys are an allowed (evicted) state.
             for key in 0..keys {
                 let present = cache.contains(&key);
                 prop_assert_eq!(present, cache.peek(&key).is_some());
@@ -1776,6 +1777,8 @@ mod tests {
                         .wrapping_sub(self.topology[slot].admitted_at())
                         & ADMISSION_GENERATION_MASK;
                     assert!(age < self.small.correlation_window);
+                } else {
+                    assert_eq!(self.topology[slot].admitted_at(), 0);
                 }
                 let expected_prev = rank.checked_sub(1).map(|rank| small[rank]);
                 let expected_next = small.get(rank + 1).copied();
@@ -1827,6 +1830,7 @@ mod tests {
             }
 
             assert!(self.ghost.index.len() <= self.ghost.capacity);
+            assert!(self.ghost.slots.len() <= self.ghost.capacity);
             let ghost = self.ghost_order();
             assert_eq!(ghost.len(), self.ghost.index.len());
             let ghost_free = self.ghost.check_free_slots();
