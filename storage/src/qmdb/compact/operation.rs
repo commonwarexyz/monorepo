@@ -1,0 +1,34 @@
+//! The operation type a compact db is built over.
+
+use crate::{
+    merkle::{Family, Location},
+    qmdb::operation::Floored,
+};
+use commonware_codec::CodecShared;
+
+pub(in crate::qmdb) mod sealed {
+    pub trait Sealed {}
+}
+
+/// The operation type a compact db is built over.
+pub trait Operation<F: Family>:
+    sealed::Sealed + Floored<F> + CodecShared + Clone + 'static
+{
+    /// The commit metadata type.
+    type Metadata: Clone + Send + Sync + 'static;
+
+    /// The mutations a batch accumulates before merkleization, in application order.
+    type Mutations: Default + Send + IntoIterator<IntoIter: ExactSizeIterator + Send>;
+
+    /// The name recorded on tracing spans.
+    const NAME: &'static str;
+
+    /// Build a commit operation.
+    fn commit(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
+
+    /// Build the operation for one of a batch's mutations.
+    fn mutation(mutation: <Self::Mutations as IntoIterator>::Item) -> Self;
+
+    /// The metadata carried by a commit operation; `None` for any other operation.
+    fn metadata(&self) -> Option<&Self::Metadata>;
+}
