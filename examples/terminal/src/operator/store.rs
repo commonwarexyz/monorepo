@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction},
-    commitment::{Opening, Tree},
+    commitment::Opening,
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE},
     qmdb::StateRoot,
     transition::{EpochContext, Header, RootBundle},
@@ -39,6 +39,9 @@ use std::{
 #[cfg(test)]
 use tests::CountingSha256 as Sha256;
 use thiserror::Error;
+
+mod payments;
+pub(crate) use payments::SendsVerdict;
 
 const SCHEMA_VERSION: i64 = 19;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
@@ -176,6 +179,7 @@ pub(crate) struct IncomingPayment {
 
 /// One payer's accepted endpoint in the live epoch: its epoch cumulative debit, its
 /// epoch-local batch sequence (zero when none), and its cumulative out vector.
+#[derive(Clone)]
 pub(crate) struct Endpoint {
     pub(crate) cumulative_debit: u64,
     pub(crate) seq: u64,
@@ -257,33 +261,13 @@ pub(crate) struct AcceptedBatch {
 }
 
 /// The store's verdict on one submitted batch.
+#[cfg(test)]
 pub(crate) enum SendVerdict {
     /// The batch, or its exact replay, is committed with its acceptance.
     Accepted(Box<AcceptedBatch>),
-    /// Corrective rejection: the signed endpoint does not extend the payer's accepted
-    /// state, so the payer must adopt this endpoint, re-sign, and retry.
+    /// The signed endpoint does not extend the payer's accepted state. This hint
+    /// admits no new send and does not resolve an earlier ambiguous authorization.
     Stale(Endpoint),
-}
-
-/// Fully validated admission of one new batch, or its corrective rejection.
-enum Admission {
-    Stale(Endpoint),
-    Admit(Box<Plan>),
-}
-
-struct Plan {
-    epoch: u64,
-    total: u64,
-    payer: StoredAccount,
-    /// The payer's merged cumulative out vector after this batch.
-    vector: OutVector<Key>,
-    tree: Tree<Digest>,
-    credits: Vec<Credit>,
-}
-
-struct Credit {
-    amount: u64,
-    receiver: StoredAccount,
 }
 
 pub(crate) struct StagedDeposit {
@@ -495,6 +479,11 @@ pub(crate) struct Store {
     fail_payment_commit: bool,
     #[cfg(test)]
     fail_payment_write: bool,
+    #[cfg(test)]
+    payment_commit_gates: std::collections::VecDeque<(
+        commonware_utils::channel::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
     #[cfg(test)]
     fail_deposit_commit: bool,
     #[cfg(test)]
@@ -766,6 +755,8 @@ impl Store {
             fail_payment_commit: false,
             #[cfg(test)]
             fail_payment_write: false,
+            #[cfg(test)]
+            payment_commit_gates: std::collections::VecDeque::new(),
             #[cfg(test)]
             fail_deposit_commit: false,
             #[cfg(test)]
@@ -1386,154 +1377,6 @@ impl Store {
         })
     }
 
-    pub(crate) fn accept_send(
-        &mut self,
-        context: &EpochPaymentContext,
-        protocol: &Protocol,
-        authorization: SendAuthorization<Key, Digest>,
-        entries: &[Entry],
-    ) -> Result<SendVerdict> {
-        #[cfg(test)]
-        let fail_commit = std::mem::take(&mut self.fail_payment_commit);
-        #[cfg(test)]
-        let fail_write = std::mem::take(&mut self.fail_payment_write);
-        let verdict = mutate(&mut self.connection, "payment", |transaction| {
-            if let Some(accepted) = find_accepted_batch(transaction, &authorization, entries)? {
-                return Ok(SendVerdict::Accepted(Box::new(accepted)));
-            }
-            let plan = match validate_new_batch(transaction, context, &authorization, entries)? {
-                Admission::Stale(endpoint) => return Ok(SendVerdict::Stale(endpoint)),
-                Admission::Admit(plan) => plan,
-            };
-            let epoch = plan.epoch;
-            let epoch_sql = sql_u64(epoch, "epoch")?;
-            let seq = authorization.body().seq();
-            let seq_sql = sql_u64(seq, "batch sequence")?;
-
-            upsert_account_state(transaction, epoch, &plan.payer)?;
-            let body = authorization.body().clone();
-            let encoded_body = body.encode();
-            let operator_signature = protocol
-                .operator()
-                .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, encoded_body.as_ref());
-            let ack = Ack::from_raw_unchecked(
-                body,
-                authorization.payer_signature().clone(),
-                operator_signature,
-            );
-            transaction
-                .prepare_cached(
-                    "INSERT INTO acks(epoch, payer, seq, cumulative_debit, ack)
-                     VALUES(?1, ?2, ?3, ?4, ?5)",
-                )?
-                .execute(params![
-                    epoch_sql,
-                    plan.payer.key.as_ref(),
-                    seq_sql,
-                    sql_u64(ack.body().cumulative_debit(), "cumulative debit")?,
-                    ack.encode().as_ref(),
-                ])?;
-
-            // Every credited entry lands in this one transaction: the payer debit, each
-            // receiver credit, each cumulative edge advance, and each serving-log row
-            // commit or roll back together. Each entry's opening is computed once here,
-            // under this batch's acknowledged root, and served verbatim thereafter.
-            let mut advance_edge = transaction.prepare_cached(
-                "INSERT INTO out_entries(epoch, payer, recipient, cumulative, count)
-                 VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(epoch, payer, recipient) DO UPDATE SET
-                     cumulative = excluded.cumulative,
-                     count = excluded.count",
-            )?;
-            let mut insert_entry = transaction.prepare_cached(
-                "INSERT INTO accepted_entries(
-                     epoch, payer, seq, recipient, amount, cumulative, count, opening
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
-            let mut accepted = Vec::with_capacity(plan.credits.len());
-            for credit in &plan.credits {
-                upsert_account_state(transaction, epoch, &credit.receiver)?;
-                let position = plan
-                    .vector
-                    .entries()
-                    .binary_search_by(|entry| {
-                        entry.recipient.as_ref().cmp(credit.receiver.key.as_ref())
-                    })
-                    .expect("every credited recipient is in the merged vector");
-                let entry = &plan.vector.entries()[position];
-                let (cumulative, count) = (entry.cumulative, entry.count);
-                let opening = plan
-                    .tree
-                    .opening(u32::try_from(position)?)
-                    .context("open accepted entry")?;
-                advance_edge.execute(params![
-                    epoch_sql,
-                    plan.payer.key.as_ref(),
-                    credit.receiver.key.as_ref(),
-                    sql_u64(cumulative, "edge cumulative credit")?,
-                    sql_u64(count, "edge payment count")?,
-                ])?;
-                let encoded = opening.encode();
-                ensure!(
-                    encoded.len() <= MAX_OPENING_BYTES,
-                    "entry opening exceeds the operator bound"
-                );
-                insert_entry.execute(params![
-                    epoch_sql,
-                    plan.payer.key.as_ref(),
-                    seq_sql,
-                    credit.receiver.key.as_ref(),
-                    sql_u64(credit.amount, "entry amount")?,
-                    sql_u64(cumulative, "entry cumulative")?,
-                    sql_u64(count, "entry count")?,
-                    encoded.as_ref(),
-                ])?;
-                accepted.push(AcceptedEntry {
-                    recipient: credit.receiver.key.clone(),
-                    cumulative,
-                    count,
-                    opening,
-                });
-            }
-            #[cfg(test)]
-            if fail_write {
-                return Err(rusqlite::Error::ExecuteReturnedResults.into());
-            }
-            Ok(SendVerdict::Accepted(Box::new(AcceptedBatch {
-                epoch,
-                sequence: seq,
-                total: plan.total,
-                acceptance: Acceptance {
-                    ack,
-                    entries: accepted,
-                },
-            })))
-        })?;
-        #[cfg(test)]
-        if fail_commit {
-            return Err(
-                CommitUnknown::new("payment", rusqlite::Error::ExecuteReturnedResults).into(),
-            );
-        }
-        Ok(verdict)
-    }
-
-    pub(crate) fn payment_requires_epoch_registration(
-        &self,
-        context: &EpochPaymentContext,
-        authorization: &SendAuthorization<Key, Digest>,
-        entries: &[Entry],
-    ) -> Result<bool> {
-        if find_accepted_batch(&self.connection, authorization, entries)?.is_some() {
-            return Ok(false);
-        }
-        match validate_new_batch(&self.connection, context, authorization, entries)? {
-            // A corrective rejection admits nothing, so it triggers no registration.
-            Admission::Stale(_) => Ok(false),
-            Admission::Admit(_) => Ok(true),
-        }
-    }
-
     /// Reads any committed batch for one authorization across every epoch.
     ///
     /// This is a durable, side-effect-free read of committed acknowledgment rows. It
@@ -1549,6 +1392,7 @@ impl Store {
     }
 
     /// Reads one payer's accepted endpoint in the live epoch, for the corrective rejection.
+    #[cfg(test)]
     pub(crate) fn payer_endpoint(&self, payer: &Key) -> Result<Endpoint> {
         let epoch = self.epoch()?;
         let epoch_sql = sql_u64(epoch, "epoch")?;
@@ -2128,7 +1972,7 @@ impl Store {
 
     pub(crate) fn current_entry_count(&self) -> Result<usize> {
         let count: i64 = self.connection.query_row(
-            "SELECT count(*) FROM accepted_entries WHERE epoch = ?1",
+            "SELECT COALESCE(SUM(count), 0) FROM out_entries WHERE epoch = ?1",
             [sql_u64(self.epoch()?, "epoch")?],
             |row| row.get(0),
         )?;
@@ -2301,155 +2145,6 @@ impl Store {
             payments,
         })
     }
-}
-
-fn validate_new_batch(
-    connection: &Connection,
-    context: &EpochPaymentContext,
-    authorization: &SendAuthorization<Key, Digest>,
-    entries: &[Entry],
-) -> Result<Admission> {
-    let epoch = metadata_epoch(connection)?;
-    ensure!(epoch == context.epoch(), "payment context is stale");
-    ensure!(
-        metadata_payment_context(connection)?.as_ref() == Some(context),
-        "payment anchor is stale"
-    );
-    let epoch_sql = sql_u64(epoch, "epoch")?;
-    let accepted = epoch_entry_count(connection, epoch_sql)?;
-    ensure!(
-        entries.len() <= MAX_ACCEPTED_PAYMENTS - accepted.min(MAX_ACCEPTED_PAYMENTS),
-        "epoch payment capacity is exhausted"
-    );
-
-    authorization
-        .verify(context)
-        .context("verify payer authorization")?;
-    let body = authorization.body();
-    let payer_key = body.payer().clone();
-    let mut payer = eligible_account(connection, epoch, &payer_key)?;
-
-    // The wire carries per-batch deltas: strictly recipient-sorted, unique, positive, and
-    // never self-crediting.
-    ensure!(!entries.is_empty(), "batched send credits no entries");
-    ensure!(
-        entries
-            .windows(2)
-            .all(|pair| pair[0].recipient < pair[1].recipient),
-        "batch entries are not strictly recipient-sorted"
-    );
-    let mut total = 0_u64;
-    for entry in entries {
-        ensure!(
-            entry.recipient != payer_key,
-            "self-payments are omitted from this operator"
-        );
-        ensure!(entry.amount > 0, "batch entry amount must be positive");
-        total = checked_sql_add(total, entry.amount, "batch total")?;
-    }
-    let gross = connection
-        .prepare_cached("SELECT COALESCE(SUM(amount), 0) FROM accepted_entries WHERE epoch = ?1")?
-        .query_row([epoch_sql], |row| row.get::<_, i64>(0))?;
-    checked_sql_add(
-        from_sql_u64(gross, "epoch gross payment")?,
-        total,
-        "epoch gross payment",
-    )?;
-
-    // Endpoint discipline: the signed body must extend the payer's accepted state by
-    // exactly this batch. The replay probe already ran, so a re-signed accepted sequence
-    // is wallet equivocation and fails closed, while a skipped or mismatched endpoint
-    // earns the corrective rejection carrying the operator's current view.
-    let (prior_seq, prior_debit) = payer_endpoint(connection, epoch_sql, &payer_key)?;
-    ensure!(
-        body.seq() > prior_seq,
-        "batch sequence is already bound to another accepted endpoint"
-    );
-    let expected_seq = prior_seq
-        .checked_add(1)
-        .context("batch sequence overflow")?;
-    let expected_debit = checked_sql_add(prior_debit, total, "payer cumulative debit")?;
-    let current = out_entries_for(connection, epoch_sql, &payer_key)?;
-    if body.seq() != expected_seq || body.cumulative_debit() != expected_debit {
-        return Ok(Admission::Stale(Endpoint {
-            cumulative_debit: prior_debit,
-            seq: prior_seq,
-            entries: current,
-        }));
-    }
-    ensure!(
-        payer.current >= total,
-        "payer has insufficient available balance"
-    );
-
-    // Merge the deltas into the payer's cumulative vector and require the signed root to
-    // commit exactly the merged result. A mismatch means the payer merged from another
-    // view of its own vector, which the corrective rejection repairs.
-    let mut merged = current.clone();
-    for entry in entries {
-        match merged.binary_search_by(|edge| edge.recipient.cmp(&entry.recipient)) {
-            Ok(position) => {
-                merged[position].cumulative = checked_sql_add(
-                    merged[position].cumulative,
-                    entry.amount,
-                    "edge cumulative credit",
-                )?;
-                merged[position].count =
-                    checked_sql_add(merged[position].count, 1, "edge payment count")?;
-            }
-            Err(position) => merged.insert(
-                position,
-                OutEntry {
-                    recipient: entry.recipient.clone(),
-                    cumulative: entry.amount,
-                    count: 1,
-                },
-            ),
-        }
-    }
-    ensure!(
-        merged.len() <= MAX_ENTRIES,
-        "payer vector capacity is exhausted"
-    );
-    let vector = OutVector::new(epoch, payer_key, merged).context("assemble merged out vector")?;
-    let tree = vector
-        .commitment::<Sha256, Digest>()
-        .context("commit merged out vector")?;
-    if tree.root() != body.send_root() {
-        return Ok(Admission::Stale(Endpoint {
-            cumulative_debit: prior_debit,
-            seq: prior_seq,
-            entries: current,
-        }));
-    }
-    payer.current -= total;
-
-    let mut credits = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let mut receiver = match effective_account(connection, epoch, &entry.recipient)? {
-            Some(receiver) => receiver,
-            None => StoredAccount {
-                name: account_name(connection, &entry.recipient)?,
-                key: entry.recipient.clone(),
-                predecessor: 0,
-                current: 0,
-            },
-        };
-        receiver.current =
-            checked_sql_add(receiver.current, entry.amount, "receiver account balance")?;
-        credits.push(Credit {
-            amount: entry.amount,
-            receiver,
-        });
-    }
-    Ok(Admission::Admit(Box::new(Plan {
-        epoch,
-        total,
-        payer,
-        vector,
-        tree,
-        credits,
-    })))
 }
 
 fn find_accepted_batch(
@@ -2917,7 +2612,7 @@ fn metadata_deposit_events(connection: &Connection) -> Result<usize> {
 
 fn epoch_entry_count(connection: &Connection, epoch: i64) -> Result<usize> {
     let count = connection
-        .prepare_cached("SELECT count(*) FROM accepted_entries WHERE epoch = ?1")?
+        .prepare_cached("SELECT COALESCE(SUM(count), 0) FROM out_entries WHERE epoch = ?1")?
         .query_row([epoch], |row| row.get::<_, i64>(0))?;
     usize::try_from(count).context("entry count does not fit usize")
 }
@@ -3309,7 +3004,10 @@ mod tests {
     fn accepted(result: Result<SendVerdict>) -> AcceptedBatch {
         match result.unwrap() {
             SendVerdict::Accepted(accepted) => *accepted,
-            SendVerdict::Stale(_) => panic!("the send earned a corrective rejection"),
+            SendVerdict::Stale(endpoint) => panic!(
+                "the send earned a corrective rejection at sequence {}",
+                endpoint.seq
+            ),
         }
     }
 
@@ -3336,7 +3034,12 @@ mod tests {
 
         let error = fixture
             .store
-            .payment_requires_epoch_registration(&fixture.context, &send, &entries)
+            .payment_requires_epoch_registration(
+                &fixture.context,
+                &fixture.protocol,
+                &send,
+                &entries,
+            )
             .unwrap_err();
         assert!(format!("{error:#}").contains(expected));
 
@@ -3523,7 +3226,12 @@ mod tests {
         assert!(
             fixture
                 .store
-                .payment_requires_epoch_registration(&fixture.context, &invalid, &entries,)
+                .payment_requires_epoch_registration(
+                    &fixture.context,
+                    &fixture.protocol,
+                    &invalid,
+                    &entries,
+                )
                 .is_err()
         );
         let error = rejected_payment(fixture.store.accept_send(
@@ -3566,7 +3274,7 @@ mod tests {
             invalid,
             &entries,
         ));
-        assert!(format!("{error:#}").contains("accepted payer signature"));
+        assert!(format!("{error:#}").contains("verify payer authorization"));
         assert_eq!(fixture.store.total_changes(), changes);
     }
 
@@ -3581,8 +3289,8 @@ mod tests {
             &initial_entries,
         ));
         let opening = initial.acceptance.entries[0].opening.encode();
-        let payer = fixture.payer.public_key();
         let receiver = fixture.receiver.public_key();
+        let capacity_payer = SigningKey::from_seed(103).public_key();
         let transaction = fixture.store.connection.transaction().unwrap();
         for index in 1..(MAX_ACCEPTED_PAYMENTS - 1) {
             let seq = i64::try_from(index).unwrap() + 1_000;
@@ -3591,17 +3299,38 @@ mod tests {
                     "INSERT INTO accepted_entries(
                          epoch, payer, seq, recipient, amount, cumulative, count, opening
                      ) VALUES(0, ?1, ?2, ?3, 1, 1, 1, ?4)",
-                    params![payer.as_ref(), seq, receiver.as_ref(), opening.as_ref()],
+                    params![
+                        capacity_payer.as_ref(),
+                        seq,
+                        receiver.as_ref(),
+                        opening.as_ref()
+                    ],
                 )
                 .unwrap();
         }
+        transaction
+            .execute(
+                "INSERT INTO out_entries(epoch, payer, recipient, cumulative, count)
+             VALUES(0, ?1, ?2, ?3, ?3)",
+                params![
+                    capacity_payer.as_ref(),
+                    receiver.as_ref(),
+                    i64::try_from(MAX_ACCEPTED_PAYMENTS - 2).unwrap()
+                ],
+            )
+            .unwrap();
         transaction.commit().unwrap();
 
         let (retry_send, retry_entries) = fixture.send(2);
         assert!(
             fixture
                 .store
-                .payment_requires_epoch_registration(&fixture.context, &retry_send, &retry_entries)
+                .payment_requires_epoch_registration(
+                    &fixture.context,
+                    &fixture.protocol,
+                    &retry_send,
+                    &retry_entries
+                )
                 .unwrap()
         );
         let first = accepted(fixture.store.accept_send(
@@ -3614,7 +3343,12 @@ mod tests {
         assert!(
             !fixture
                 .store
-                .payment_requires_epoch_registration(&fixture.context, &retry_send, &retry_entries)
+                .payment_requires_epoch_registration(
+                    &fixture.context,
+                    &fixture.protocol,
+                    &retry_send,
+                    &retry_entries
+                )
                 .unwrap()
         );
         let replay = accepted(fixture.store.accept_send(
@@ -3630,7 +3364,12 @@ mod tests {
         let (new_send, new_entries) = fixture.send(3);
         let error = fixture
             .store
-            .payment_requires_epoch_registration(&fixture.context, &new_send, &new_entries)
+            .payment_requires_epoch_registration(
+                &fixture.context,
+                &fixture.protocol,
+                &new_send,
+                &new_entries,
+            )
             .unwrap_err();
         assert!(format!("{error:#}").contains("payment capacity"));
         let error = rejected_payment(fixture.store.accept_send(

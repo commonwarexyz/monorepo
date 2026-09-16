@@ -86,6 +86,11 @@ impl Read for PayoutTip {
 /// Maximum entries in one batched send, bounding adversarial acceptance decoding.
 pub(crate) const MAX_ENTRIES: usize = 256;
 
+/// Bounds the independently authorized sends in one wallet submission.
+pub(crate) const MAX_SENDS_PER_BATCH: usize = 1024;
+/// Bounds the aggregate recipient increments in one wallet submission.
+pub(crate) const MAX_BATCH_SEND_ENTRIES: usize = 16_384;
+
 const DEPLOYMENT_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPLOYMENT";
 
 /// Deterministic deployment identity for in-process protocol fixtures.

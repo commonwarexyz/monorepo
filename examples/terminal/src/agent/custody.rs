@@ -412,6 +412,10 @@ impl Agent {
         match &self.pending_withdrawal {
             Some(_) => {}
             None => {
+                ensure!(
+                    self.pending_payments.is_empty(),
+                    "a payment batch remains unresolved"
+                );
                 // The signed deadline is an absolute block height, so it is
                 // chosen from a recency-bounded status read: a certified tip
                 // whose timestamp is within the recency threshold of the

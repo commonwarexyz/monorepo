@@ -65,7 +65,7 @@ pub(crate) struct Agent {
     /// Durable optimistic signing state: the cached operator-served context and its
     /// verified affordability floor. Absent for a fresh wallet and after invalidation.
     pub(super) cache: Option<ContextCache>,
-    pub(super) pending_payment: Option<PendingPayment>,
+    pub(super) pending_payments: Vec<PendingPayment>,
     pub(super) pending_deposit: Option<crate::chain::tx::DepositRequest>,
     pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
@@ -175,7 +175,7 @@ impl Agent {
             receivers,
             deposit_nonce,
             cache: state.cache,
-            pending_payment: state.pending_payment,
+            pending_payments: state.pending_payments,
             pending_deposit: state.pending_deposit,
             pending_transfer: state.pending_transfer,
             pending_withdrawal: state.pending_withdrawal,
@@ -288,17 +288,9 @@ impl Agent {
         self.store.has_receipt(payer, id)
     }
 
-    /// The exact unresolved send survives restarts and can only be retried or resolved.
+    /// The exact unresolved batch survives restarts and can only be retried or resolved.
     pub(crate) const fn has_pending_payment(&self) -> bool {
-        self.pending_payment.is_some()
-    }
-
-    pub(crate) async fn operator_status<E: Network + Clock>(
-        &self,
-        network: &E,
-        operator: SocketAddr,
-    ) -> Result<operator_rpc::StatusResponse> {
-        operator_rpc::status(network, operator).await
+        !self.pending_payments.is_empty()
     }
 
     /// Reads the account head against its finalized or admitted predecessor root.

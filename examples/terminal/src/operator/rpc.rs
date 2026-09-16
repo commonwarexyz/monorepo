@@ -1,11 +1,14 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, Operator, SendOutcome},
+    actor::{CloseEvent, Operator, SendOutcome, SendsOutcome},
     store::MAX_INCOMING_PAGE,
 };
 use crate::{
-    protocol::{Acceptance, Entry, Key, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
+    protocol::{
+        Acceptance, Entry, Key, MAX_BATCH_SEND_ENTRIES, MAX_DESTINATION_BYTES, MAX_ENTRIES,
+        MAX_SENDS_PER_BATCH, Receipt,
+    },
     rpc,
 };
 use anyhow::{Context, Result, bail};
@@ -44,6 +47,7 @@ pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 pub(crate) const METHOD_INCOMING_PAYMENTS: u8 = 13;
 pub(crate) const METHOD_COMMITTED_ENTRY: u8 = 14;
 pub(crate) const METHOD_PAYOUT_PROOF: u8 = 15;
+pub(crate) const METHOD_ACCEPT_SENDS: u8 = 16;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
@@ -195,6 +199,80 @@ impl Read for AcceptSendRequest {
             authorization: SendAuthorization::read(buf)?,
             entries: Vec::<Entry>::read_cfg(buf, &(RangeCfg::new(1..=MAX_ENTRIES), ()))?,
         })
+    }
+}
+
+/// Contiguous independently signed sends from one payer under one context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AcceptSendsRequest {
+    pub(crate) sends: Vec<AcceptSendRequest>,
+}
+
+impl AcceptSendsRequest {
+    pub(crate) fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.sends.is_empty() && self.sends.len() <= MAX_SENDS_PER_BATCH,
+            "payment batch has an invalid send count"
+        );
+        let first = self.sends[0].authorization.body();
+        let mut sequence = first.seq();
+        let mut entries = 0_usize;
+        for (position, send) in self.sends.iter().enumerate() {
+            let body = send.authorization.body();
+            anyhow::ensure!(
+                body.payer() == first.payer()
+                    && body.epoch() == first.epoch()
+                    && body.anchor() == first.anchor()
+                    && body.seq() == sequence,
+                "payment batch does not form one contiguous payer sequence"
+            );
+            anyhow::ensure!(
+                !send.entries.is_empty() && send.entries.len() <= MAX_ENTRIES,
+                "payment send has an invalid entry count"
+            );
+            entries = entries
+                .checked_add(send.entries.len())
+                .context("payment batch entry count overflow")?;
+            anyhow::ensure!(
+                entries <= MAX_BATCH_SEND_ENTRIES,
+                "payment batch has too many entries"
+            );
+            if position + 1 < self.sends.len() {
+                sequence = sequence
+                    .checked_add(1)
+                    .context("payment batch sequence overflow")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Write for AcceptSendsRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.sends.write(buf);
+    }
+}
+
+impl EncodeSize for AcceptSendsRequest {
+    fn encode_size(&self) -> usize {
+        self.sends.encode_size()
+    }
+}
+
+impl Read for AcceptSendsRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        let request = Self {
+            sends: Vec::<AcceptSendRequest>::read_cfg(
+                buf,
+                &(RangeCfg::new(1..=MAX_SENDS_PER_BATCH), ()),
+            )?,
+        };
+        request
+            .validate()
+            .map_err(|_| CodecError::Invalid("AcceptSendsRequest", "invalid payment sequence"))?;
+        Ok(request)
     }
 }
 
@@ -453,6 +531,119 @@ impl Read for AcceptSendResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => Ok(Self::Accepted(AcceptedBatchResponse::read(buf)?)),
+            1 => Ok(Self::Stale {
+                context: PaymentContext::read(buf)?,
+                cumulative_debit: u64::read(buf)?,
+                seq: u64::read(buf)?,
+                entries: Vec::<OutEntry<Key>>::read_cfg(
+                    buf,
+                    &(RangeCfg::new(0..=MAX_ENTRIES), ()),
+                )?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+/// The operator's atomic reply to one contiguous payer submission.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AcceptSendsResponse {
+    /// Every send, or its exact replay, is committed in request order.
+    Accepted(Vec<AcceptedBatchResponse>),
+    /// The submission does not extend the operator's live payer endpoint.
+    Stale {
+        context: PaymentContext<Key, Digest>,
+        cumulative_debit: u64,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
+    },
+}
+
+impl From<SendsOutcome> for AcceptSendsResponse {
+    fn from(outcome: SendsOutcome) -> Self {
+        match outcome {
+            SendsOutcome::Accepted(accepted) => {
+                Self::Accepted(accepted.into_iter().map(Into::into).collect())
+            }
+            SendsOutcome::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            },
+        }
+    }
+}
+
+impl Write for AcceptSendsResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Accepted(accepted) => {
+                0u8.write(buf);
+                accepted.write(buf);
+            }
+            Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => {
+                1u8.write(buf);
+                context.write(buf);
+                cumulative_debit.write(buf);
+                seq.write(buf);
+                entries.write(buf);
+            }
+        }
+    }
+}
+
+impl EncodeSize for AcceptSendsResponse {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Accepted(accepted) => accepted.encode_size(),
+            Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => {
+                context.encode_size()
+                    + cumulative_debit.encode_size()
+                    + seq.encode_size()
+                    + entries.encode_size()
+            }
+        }
+    }
+}
+
+impl Read for AcceptSendsResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => {
+                let accepted = Vec::<AcceptedBatchResponse>::read_cfg(
+                    buf,
+                    &(RangeCfg::new(1..=MAX_SENDS_PER_BATCH), ()),
+                )?;
+                let entries = accepted.iter().try_fold(0_usize, |total, response| {
+                    total.checked_add(response.acceptance.entries.len())
+                });
+                if !matches!(entries, Some(total) if total <= MAX_BATCH_SEND_ENTRIES) {
+                    return Err(CodecError::Invalid(
+                        "AcceptSendsResponse",
+                        "too many accepted entries",
+                    ));
+                }
+                Ok(Self::Accepted(accepted))
+            }
             1 => Ok(Self::Stale {
                 context: PaymentContext::read(buf)?,
                 cumulative_debit: u64::read(buf)?,
@@ -880,6 +1071,7 @@ pub(crate) enum OperatorRequest {
     Status,
     PaymentHead(PaymentHeadRequest),
     AcceptSend(AcceptSendRequest),
+    AcceptSends(AcceptSendsRequest),
     AcceptedBatch(AcceptSendRequest),
     WithdrawalOpening(WithdrawalOpeningRequest),
     ApplyWithdrawal(ApplyWithdrawalRequest),
@@ -904,6 +1096,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_ACCEPT_SEND => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptSend)
             .context("decode accept-send request"),
+        METHOD_ACCEPT_SENDS => AcceptSendsRequest::decode(body)
+            .map(OperatorRequest::AcceptSends)
+            .context("decode accept-sends request"),
         METHOD_ACCEPTED_BATCH => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptedBatch)
             .context("decode accepted-batch request"),
@@ -952,6 +1147,12 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
                 .accept_send(request.authorization, request.entries)
                 .context("accept payment send")?;
             Ok(AcceptSendResponse::from(outcome).encode())
+        }
+        OperatorRequest::AcceptSends(request) => {
+            let outcome = operator
+                .accept_sends(request)
+                .context("accept payment sends")?;
+            Ok(AcceptSendsResponse::from(outcome).encode())
         }
         OperatorRequest::AcceptedBatch(request) => {
             let batch = operator
@@ -1101,6 +1302,18 @@ pub(crate) async fn accept_send<E: Network + Clock>(
     .context("decode accepted payment")
 }
 
+pub(crate) async fn accept_sends<E: Network + Clock>(
+    network: &E,
+    address: SocketAddr,
+    request: AcceptSendsRequest,
+) -> Result<AcceptSendsResponse> {
+    request.validate().context("validate payment sends")?;
+    AcceptSendsResponse::decode(
+        invoke(network, address, METHOD_ACCEPT_SENDS, request.encode()).await?,
+    )
+    .context("decode accepted payments")
+}
+
 /// Fetches the committed batch for one send, if the operator holds it.
 ///
 /// This is an optional receipts fetch for a wallet that already decided commitment from a
@@ -1225,8 +1438,12 @@ pub(crate) async fn payout_proof<E: Network + Clock>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Protocol, identities, wallets};
+    use crate::protocol::{Protocol, Wallet, identities, wallets};
     use bytes::BytesMut;
+    use commonware_clearing::bajillion::{
+        commitment::VectorRoot,
+        payment::{SendAuthorization, VectorSendBody},
+    };
     use commonware_cryptography::{Hasher, Sha256};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
@@ -1244,6 +1461,41 @@ mod tests {
             method,
             body: body.into(),
         }
+    }
+
+    fn sends_request(count: usize, entries_per_send: usize) -> AcceptSendsRequest {
+        let payer = Wallet::from_seed("payer", 8_001);
+        let recipient = Wallet::from_seed("recipient", 8_002).public_key();
+        let context = PaymentContext::new(
+            Sha256::hash(&[b"rpc-batch-anchor"]),
+            12,
+            Wallet::from_seed("operator", 8_003).public_key(),
+        );
+        let sends = (0..count)
+            .map(|offset| {
+                let sequence = u64::try_from(offset).unwrap() + 1;
+                let body = VectorSendBody::new(
+                    &context,
+                    payer.public_key(),
+                    sequence,
+                    sequence,
+                    VectorRoot {
+                        digest: Sha256::hash(&[&sequence.to_be_bytes()]),
+                    },
+                );
+                AcceptSendRequest {
+                    authorization: SendAuthorization::sign(body, payer.signer()),
+                    entries: vec![
+                        Entry {
+                            recipient: recipient.clone(),
+                            amount: 1,
+                        };
+                        entries_per_send
+                    ],
+                }
+            })
+            .collect();
+        AcceptSendsRequest { sends }
     }
 
     #[test]
@@ -1440,6 +1692,31 @@ mod tests {
     }
 
     #[test]
+    fn accept_sends_request_codec_enforces_shape_and_bounds() {
+        let maximum = sends_request(MAX_SENDS_PER_BATCH, 1);
+        assert_eq!(
+            AcceptSendsRequest::decode(maximum.encode()).unwrap(),
+            maximum
+        );
+
+        let empty = AcceptSendsRequest { sends: Vec::new() };
+        assert!(AcceptSendsRequest::decode(empty.encode()).is_err());
+
+        let oversized = sends_request(MAX_SENDS_PER_BATCH + 1, 1);
+        assert!(AcceptSendsRequest::decode(oversized.encode()).is_err());
+
+        let sends = MAX_BATCH_SEND_ENTRIES / MAX_ENTRIES + 1;
+        let too_many_entries = sends_request(sends, MAX_ENTRIES);
+        assert!(too_many_entries.validate().is_err());
+        assert!(AcceptSendsRequest::decode(too_many_entries.encode()).is_err());
+
+        let mut non_contiguous = sends_request(2, 1);
+        let replacement = sends_request(1, 1).sends.into_iter().next().unwrap();
+        non_contiguous.sends[1] = replacement;
+        assert!(AcceptSendsRequest::decode(non_contiguous.encode()).is_err());
+    }
+
+    #[test]
     fn operator_methods_round_trip() {
         let mut operator = operator();
         let mut wallets = wallets();
@@ -1598,6 +1875,52 @@ mod tests {
     }
 
     #[test]
+    fn accept_sends_dispatches_an_ordered_replay_and_fresh_suffix() {
+        let mut operator = operator();
+        let wallets = wallets();
+        let (first_authorization, first_entries) = operator
+            .sign_send(0, &[(wallets[1].public_key(), 2)])
+            .unwrap();
+        let first = AcceptSendRequest {
+            authorization: first_authorization,
+            entries: first_entries,
+        };
+        let first_response = AcceptSendResponse::decode(success_body(handle(
+            &mut operator,
+            request(METHOD_ACCEPT_SEND, first.encode()),
+        )))
+        .unwrap();
+        assert!(matches!(first_response, AcceptSendResponse::Accepted(_)));
+
+        let (second_authorization, second_entries) = operator
+            .sign_send(0, &[(wallets[2].public_key(), 3)])
+            .unwrap();
+        let batch = AcceptSendsRequest {
+            sends: vec![
+                first,
+                AcceptSendRequest {
+                    authorization: second_authorization,
+                    entries: second_entries,
+                },
+            ],
+        };
+        let response = AcceptSendsResponse::decode(success_body(handle(
+            &mut operator,
+            request(METHOD_ACCEPT_SENDS, batch.encode()),
+        )))
+        .unwrap();
+
+        let AcceptSendsResponse::Accepted(accepted) = response else {
+            panic!("contiguous batch was rejected as stale");
+        };
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].sequence, 1);
+        assert_eq!(accepted[1].sequence, 2);
+        assert_eq!(accepted[0].total, 2);
+        assert_eq!(accepted[1].total, 3);
+    }
+
+    #[test]
     fn payment_resolution_response_round_trips_every_variant() {
         let mut operator = operator();
         let wallets = wallets();
@@ -1674,7 +1997,7 @@ mod tests {
             }],
         };
 
-        for response in [accepted, stale] {
+        for response in [accepted.clone(), stale.clone()] {
             let encoded = response.encode();
             assert_eq!(
                 AcceptSendResponse::decode(encoded.clone()).unwrap(),
@@ -1689,6 +2012,45 @@ mod tests {
         }
         assert!(matches!(
             AcceptSendResponse::decode(Bytes::from_static(&[2u8])),
+            Err(CodecError::InvalidEnum(2))
+        ));
+
+        let accepted = match accepted {
+            AcceptSendResponse::Accepted(accepted) => accepted,
+            AcceptSendResponse::Stale { .. } => unreachable!(),
+        };
+        let stale = match stale {
+            AcceptSendResponse::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => AcceptSendsResponse::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            },
+            AcceptSendResponse::Accepted(_) => unreachable!(),
+        };
+        let mut oversized = accepted.clone();
+        let entries_per_acceptance = MAX_BATCH_SEND_ENTRIES / MAX_SENDS_PER_BATCH + 1;
+        assert!(entries_per_acceptance <= MAX_ENTRIES);
+        oversized.acceptance.entries =
+            vec![oversized.acceptance.entries[0].clone(); entries_per_acceptance];
+        let oversized = AcceptSendsResponse::Accepted(vec![oversized; MAX_SENDS_PER_BATCH]);
+        assert!(AcceptSendsResponse::decode(oversized.encode()).is_err());
+
+        for response in [AcceptSendsResponse::Accepted(vec![accepted]), stale] {
+            let encoded = response.encode();
+            assert_eq!(AcceptSendsResponse::decode(encoded).unwrap(), response);
+        }
+        assert!(
+            AcceptSendsResponse::decode(AcceptSendsResponse::Accepted(Vec::new()).encode())
+                .is_err()
+        );
+        assert!(matches!(
+            AcceptSendsResponse::decode(Bytes::from_static(&[2u8])),
             Err(CodecError::InvalidEnum(2))
         ));
     }

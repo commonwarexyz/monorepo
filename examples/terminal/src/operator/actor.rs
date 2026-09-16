@@ -4,11 +4,13 @@
 use super::store::{AccountView, Endpoint, StoreSnapshot};
 use super::{
     qmdb,
+    rpc::{AcceptSendRequest, AcceptSendsRequest},
     store::{
-        AcceptedBatch, CloseRejected, EpochData, IncomingPayment, MutationFailed, SendVerdict,
+        AcceptedBatch, CloseRejected, EpochData, IncomingPayment, MutationFailed, SendsVerdict,
         StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus, StoredCloseOutcome,
         withdrawal_amount,
     },
+    verify::{VerifiedSends, verify_sends},
 };
 #[cfg(test)]
 use crate::protocol::{
@@ -31,12 +33,14 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 #[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
+use commonware_clearing::bajillion::payment::VectorSendBody;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::HigherEntryLookup,
     commitment::{VectorKind, VectorRoot},
     logs::LogHead,
-    payment::{PaymentContext, SendAuthorization, VectorSendBody},
+    payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
     settlement::Genesis,
     transition::{BatchId, EpochContext, RootBundle, Terminal, WithdrawalClaim},
@@ -92,6 +96,18 @@ pub(crate) enum SendOutcome {
     /// The send, or its exact replay, is committed with its acceptance.
     Accepted(AcceptedBatch),
     /// An unauthenticated hint about the operator's current epoch endpoint.
+    Stale {
+        context: PaymentContext<Key, Digest>,
+        cumulative_debit: u64,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
+    },
+}
+
+/// The verdict for a complete ordered payer submission.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum SendsOutcome {
+    Accepted(Vec<AcceptedBatch>),
     Stale {
         context: PaymentContext<Key, Digest>,
         cumulative_debit: u64,
@@ -184,6 +200,8 @@ pub(crate) struct Operator {
     panic_close_worker: bool,
     #[cfg(test)]
     result_failure: Option<ResultFailure>,
+    #[cfg(test)]
+    registration_probe_failure: std::cell::Cell<Option<usize>>,
 }
 
 impl Operator {
@@ -358,6 +376,8 @@ impl Operator {
             panic_close_worker: false,
             #[cfg(test)]
             result_failure: None,
+            #[cfg(test)]
+            registration_probe_failure: std::cell::Cell::new(None),
         };
         operator.start_next_persisted_close()?;
         Ok(operator)
@@ -500,132 +520,165 @@ impl Operator {
             .committed_entry(epoch, payer, recipient)
     }
 
+    pub(crate) fn payment_strategy(&self) -> commonware_parallel::Rayon {
+        self.protocol.strategy().clone()
+    }
+
     pub(crate) fn accept_send(
         &mut self,
         authorization: SendAuthorization<Key, Digest>,
         entries: Vec<Entry>,
     ) -> Result<SendOutcome> {
-        self.ensure_operating()?;
-
-        // Exact replays remain readable after an account drains or its epoch closes.
-        // The store transaction validates new authorizations before any mutation.
-        if let Some(accepted) = self.store.accepted_batch(&authorization, &entries)? {
-            return Ok(SendOutcome::Accepted(accepted));
-        }
-
-        // The corrective response reports the live context. The wallet must resolve
-        // its saved authorization before using that context for another send.
-        let context = self.registration.context.payment().clone();
-        let body = authorization.body();
-        let account_name = |identities: &[AccountIdentity], key: &Key| {
-            identities
-                .iter()
-                .find(|identity| identity.key == *key && identity.name != "Account")
-                .map_or_else(|| key.to_string(), |identity| identity.name.to_string())
-        };
-        let payer = account_name(&self.identities, body.payer());
-        let seq = body.seq();
-        let cumulative_debit = body.cumulative_debit();
-        let rebound = VectorSendBody::new(
-            &context,
-            body.payer().clone(),
-            body.seq(),
-            body.cumulative_debit(),
-            body.send_root(),
-        );
-        if rebound != *body {
-            let endpoint = self.store.payer_endpoint(body.payer())?;
-            println!(
-                "payment rejected stale context: payer={payer} sent_epoch={} sent_anchor={} seq={seq} live_epoch={} live_anchor={}",
-                body.epoch(),
-                short_digest(body.anchor()),
-                context.epoch(),
-                short_digest(context.anchor()),
-            );
-            return Ok(SendOutcome::Stale {
-                context,
-                cumulative_debit: endpoint.cumulative_debit,
-                seq: endpoint.seq,
-                entries: endpoint.entries,
-            });
-        }
-        self.ensure_balance_intake_horizon()?;
-        self.ensure_payer_eligible(body.payer())?;
-        let result = self.store.accept_send(
-            self.registration.context.payment(),
-            &self.protocol,
-            authorization,
-            &entries,
-        );
-        match self.guard_store(result)? {
-            SendVerdict::Accepted(accepted) => {
-                let recipients = entries
-                    .iter()
-                    .map(|entry| {
-                        let recipient = account_name(&self.identities, &entry.recipient);
-                        format!("{recipient}:{}", entry.amount)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                println!(
-                    "payment accepted: epoch={} seq={} payer={payer} recipients=[{recipients}] total={}",
-                    accepted.epoch, accepted.sequence, accepted.total,
-                );
-                Ok(SendOutcome::Accepted(*accepted))
-            }
-            SendVerdict::Stale(endpoint) => {
-                println!(
-                    "payment rejected stale endpoint: epoch={} payer={payer} sent_seq={seq} sent_debit={cumulative_debit} accepted_seq={} accepted_debit={}",
-                    context.epoch(),
-                    endpoint.seq,
-                    endpoint.cumulative_debit,
-                );
-                Ok(SendOutcome::Stale {
+        Ok(
+            match self.accept_sends(AcceptSendsRequest {
+                sends: vec![AcceptSendRequest {
+                    authorization,
+                    entries,
+                }],
+            })? {
+                SendsOutcome::Accepted(mut accepted) => {
+                    SendOutcome::Accepted(accepted.pop().expect("one submitted send"))
+                }
+                SendsOutcome::Stale {
                     context,
-                    cumulative_debit: endpoint.cumulative_debit,
-                    seq: endpoint.seq,
-                    entries: endpoint.entries,
-                })
-            }
-        }
+                    cumulative_debit,
+                    seq,
+                    entries,
+                } => SendOutcome::Stale {
+                    context,
+                    cumulative_debit,
+                    seq,
+                    entries,
+                },
+            },
+        )
     }
 
-    /// Reports whether accepting this send must first register the epoch with settlement.
-    ///
-    /// This probe keeps the full validation of a new live-context send: registering an
-    /// epoch starts settlement's liveness clock, so only a payer-authorized send may
-    /// trigger it. A stale send short-circuits to `false` instead, because acceptance
-    /// answers it with the corrective rejection and admits nothing.
+    pub(crate) fn accept_sends(&mut self, request: AcceptSendsRequest) -> Result<SendsOutcome> {
+        #[cfg(test)]
+        let mut rng = commonware_utils::test_rng();
+        #[cfg(not(test))]
+        let mut rng = rand::rng();
+        let verified = verify_sends(vec![request], &mut rng, self.protocol.strategy())
+            .pop()
+            .expect("one submitted batch")?;
+        self.accept_verified_sends(vec![verified])?
+            .pop()
+            .expect("one submitted batch")
+    }
+
+    pub(crate) fn accept_verified_sends(
+        &mut self,
+        requests: Vec<VerifiedSends>,
+    ) -> Result<Vec<Result<SendsOutcome>>> {
+        self.ensure_operating()?;
+        let context = self.registration.context.payment().clone();
+        let requests = requests
+            .into_iter()
+            .map(|request| {
+                let admission = self.ensure_balance_intake_horizon().and_then(|()| {
+                    self.ensure_payer_eligible(
+                        request.request().sends[0].authorization.body().payer(),
+                    )
+                });
+                (request, admission)
+            })
+            .collect();
+        let result = self
+            .store
+            .accept_verified_sends(&context, &self.protocol, requests);
+        let committed = self.guard_store(result)?;
+        if committed.requests > 0 {
+            println!(
+                "payment group committed: epoch={} requests={} entries={}",
+                committed.epoch, committed.requests, committed.entries,
+            );
+        }
+        Ok(committed
+            .verdicts
+            .into_iter()
+            .map(|verdict| {
+                Ok(match verdict? {
+                    SendsVerdict::Accepted(accepted) => SendsOutcome::Accepted(accepted),
+                    SendsVerdict::Stale(endpoint) => SendsOutcome::Stale {
+                        context: context.clone(),
+                        cumulative_debit: endpoint.cumulative_debit,
+                        seq: endpoint.seq,
+                        entries: endpoint.entries,
+                    },
+                })
+            })
+            .collect())
+    }
+
+    pub(crate) fn send_requires_epoch_registration_verified(
+        &self,
+        request: &VerifiedSends,
+    ) -> Result<bool> {
+        #[cfg(test)]
+        if let Some(remaining) = self.registration_probe_failure.get() {
+            if remaining == 0 {
+                self.registration_probe_failure.set(None);
+                return Err(rusqlite::Error::InvalidQuery.into());
+            }
+            self.registration_probe_failure.set(Some(remaining - 1));
+        }
+        self.ensure_operating()?;
+        let context = self.registration.context.payment();
+        if self.store.chain_deadlines(context.epoch())?.is_some() {
+            return Ok(false);
+        }
+        let required =
+            self.store
+                .sends_require_epoch_registration(context, &self.protocol, request)?;
+        if required {
+            self.ensure_balance_intake_horizon()?;
+            self.ensure_payer_eligible(request.request().sends[0].authorization.body().payer())?;
+        }
+        Ok(required)
+    }
+
     pub(crate) fn send_requires_epoch_registration(
         &self,
         authorization: &SendAuthorization<Key, Digest>,
         entries: &[Entry],
     ) -> Result<bool> {
-        self.ensure_operating()?;
-        let context = self.registration.context.payment();
-        let body = authorization.body();
-        let rebound = VectorSendBody::new(
-            context,
-            body.payer().clone(),
-            body.seq(),
-            body.cumulative_debit(),
-            body.send_root(),
-        );
-        if rebound != *body {
-            return Ok(false);
-        }
-        if self.store.accepted_batch(authorization, entries)?.is_some() {
-            return Ok(false);
-        }
-        self.ensure_payer_eligible(body.payer())?;
-        let required = self.store.chain_deadlines(context.epoch())?.is_none()
-            && self
-                .store
-                .payment_requires_epoch_registration(context, authorization, entries)?;
-        if required {
-            self.ensure_balance_intake_horizon()?;
-        }
-        Ok(required)
+        #[cfg(test)]
+        let mut rng = commonware_utils::test_rng();
+        #[cfg(not(test))]
+        let mut rng = rand::rng();
+        let verified = verify_sends(
+            vec![AcceptSendsRequest {
+                sends: vec![AcceptSendRequest {
+                    authorization: authorization.clone(),
+                    entries: entries.to_vec(),
+                }],
+            }],
+            &mut rng,
+            self.protocol.strategy(),
+        )
+        .pop()
+        .expect("one submitted batch")?;
+        self.send_requires_epoch_registration_verified(&verified)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_registration_probe_after(&self, successful_probes: usize) {
+        self.registration_probe_failure.set(Some(successful_probes));
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fail_next_payment_commit(&mut self) {
+        self.store.fail_next_payment_commit();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_next_payment_commit(
+        &mut self,
+        entered: commonware_utils::channel::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.store.gate_next_payment_commit(entered, release);
     }
 
     #[cfg(test)]

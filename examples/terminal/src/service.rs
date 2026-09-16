@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod lifecycle;
+mod payments;
 
 use crate::{
     agent::Agent,
@@ -26,9 +27,9 @@ use commonware_codec::Encode as _;
 use commonware_cryptography::sha256::Digest;
 #[cfg(test)]
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{
-    Clock, Handle, Listener, Network, Runner as _, Spawner as _, Supervisor as _, tokio,
-};
+#[cfg(test)]
+use commonware_runtime::{Clock, Listener};
+use commonware_runtime::{Handle, Network, Runner as _, Spawner as _, Supervisor as _, tokio};
 use commonware_utils::{Acknowledgement as _, sync::Mutex};
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
@@ -50,7 +51,8 @@ fn runtime() -> tokio::Runner {
         tokio::Config::new()
             .with_worker_threads(2)
             .with_connect_timeout(Duration::from_secs(5))
-            .with_read_write_timeout(Duration::from_secs(5)),
+            .with_read_write_timeout(Duration::from_secs(5))
+            .with_zero_linger(false),
     )
 }
 
@@ -66,6 +68,7 @@ pub(crate) fn run_operator(
             .with_worker_threads(3)
             .with_connect_timeout(Duration::from_secs(5))
             .with_read_write_timeout(Duration::from_secs(5))
+            .with_zero_linger(false)
             .with_storage_directory(node_dir.join("runtime")),
     );
     runtime.start(move |context| async move {
@@ -123,6 +126,7 @@ pub(crate) fn run_operator(
             )
             .context("initialize SQLite operator")?,
         ));
+        let payment_strategy = operator.lock().payment_strategy();
 
         if let Some(observed) = held {
             observe(&context, &mut chain, &operator, observed).await?;
@@ -141,44 +145,71 @@ pub(crate) fn run_operator(
         let driver_handle =
             start_close_driver(&context, chain.clone(), operator.clone(), genesis.timing());
         handles.push(driver_handle);
-        let mut listener = context.bind(bind).await.context("bind operator RPC")?;
+        let timing = genesis.timing();
+        let (payment_sender, payment_handle) = payments::start(
+            context.child("payments"),
+            chain.clone(),
+            operator.clone(),
+            payment_strategy,
+        );
+        handles.push(payment_handle);
+        let listener = context.bind(bind).await.context("bind operator RPC")?;
         println!("Operator ready at {bind}");
         println!("Ready to accept payments; epochs close automatically.");
 
         // The agent-facing RPC loop, supervised alongside the node actors.
-        let timing = genesis.timing();
         let rpc_handle = context.child("rpc").spawn({
-            let mut chain = chain.clone();
+            let chain = chain.clone();
+            let operator = operator.clone();
             move |context| async move {
-                loop {
-                    // The runtime folds every accept failure into one error
-                    // class, so treat a failed accept as transient instead of
-                    // tearing down the operator.
-                    let (_, mut sink, mut stream) = match listener.accept().await {
-                        Ok(connection) => connection,
-                        Err(error) => {
-                            eprintln!("accept operator RPC failed; retrying: {error}");
-                            context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
-                            continue;
-                        }
-                    };
-                    let Ok(request) = rpc::recv_request(&mut stream).await else {
-                        continue;
-                    };
-                    let response = match operator_rpc::decode_request(request) {
-                        Ok(request) => {
-                            match prepare_request(&context, &mut chain, &operator, &request, timing).await {
-                                Ok(Some(response)) => response,
-                                Ok(None) => {
-                                    operator_rpc::handle_decoded(&mut operator.lock(), request)
-                                }
-                                Err(error) => rpc::error_response(format!("{error:#}")),
+                let request_context = context.child("request");
+                payments::serve_connections(context, listener, move |request| {
+                    let mut chain = chain.clone();
+                    let operator = operator.clone();
+                    let payment_sender = payment_sender.clone();
+                    let context = request_context.child("connection");
+                    async move {
+                        match operator_rpc::decode_request(request) {
+                            Ok(operator_rpc::OperatorRequest::AcceptSends(request)) => {
+                                payments::submit(
+                                    &payment_sender,
+                                    request,
+                                    payments::ResponseKind::Batch,
+                                )
+                                .await
                             }
+                            Ok(operator_rpc::OperatorRequest::AcceptSend(request)) => {
+                                payments::submit(
+                                    &payment_sender,
+                                    operator_rpc::AcceptSendsRequest {
+                                        sends: vec![request],
+                                    },
+                                    payments::ResponseKind::Single,
+                                )
+                                .await
+                            }
+                            Ok(request) => {
+                                match prepare_request(
+                                    &context,
+                                    &mut chain,
+                                    &operator,
+                                    &request,
+                                    timing,
+                                )
+                                .await
+                                {
+                                    Ok(Some(response)) => response,
+                                    Ok(None) => {
+                                        operator_rpc::handle_decoded(&mut operator.lock(), request)
+                                    }
+                                    Err(error) => rpc::error_response(format!("{error:#}")),
+                                }
+                            }
+                            Err(error) => rpc::error_response(format!("{error:#}")),
                         }
-                        Err(error) => rpc::error_response(format!("{error:#}")),
-                    };
-                    let _ = rpc::send_response(&mut sink, &response).await;
-                }
+                    }
+                })
+                .await
             }
         });
         handles.push(rpc_handle);
@@ -847,7 +878,10 @@ mod tests {
         fs,
         num::NonZeroU64,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicBool, AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            mpsc,
+        },
     };
 
     /// The in-process chain's query address.
@@ -859,6 +893,30 @@ mod tests {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_701);
 
     static TEMP_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct NoNetworkChain;
+
+    impl Chain for NoNetworkChain {
+        fn holders(&self) -> Result<Vec<SocketAddr>> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        fn deployment(&self) -> Digest {
+            crate::protocol::deployment()
+        }
+
+        async fn read<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        async fn submit<E: Env>(&mut self, _: &E, _: &SettlementTx) -> Result<Submission> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+    }
 
     struct TempDatabases {
         directory: PathBuf,
@@ -1903,6 +1961,273 @@ mod tests {
                 rpc::Response::Success { .. }
             ));
             assert_eq!(operator.snapshot().unwrap().payments.len(), 1);
+        });
+    }
+
+    #[test]
+    fn payment_verification_runs_one_group_ahead_of_commits() {
+        fn payment(operator: &Mutex<Operator>, payer: usize) -> operator_rpc::AcceptSendsRequest {
+            let identities = wallets();
+            let recipient = identities[(payer + 1) % identities.len()].public_key();
+            let operator = operator.lock();
+            let (authorization, entries) = operator.sign_send(payer, &[(recipient, 1)]).unwrap();
+            operator_rpc::AcceptSendsRequest {
+                sends: vec![operator_rpc::AcceptSendRequest {
+                    authorization,
+                    entries,
+                }],
+            }
+        }
+
+        let databases = TempDatabases::new();
+        let operator_database = databases.operator().to_path_buf();
+        let (operator, first, second, third) = deterministic::Runner::timed(Duration::from_secs(
+            15,
+        ))
+        .start(move |context| async move {
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let operator = Arc::new(Mutex::new(
+                Operator::open(&operator_database, NonZeroUsize::new(2).unwrap()).unwrap(),
+            ));
+            let mut chain = client(&context, &control);
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            let first = payment(&operator, 0);
+            let second = payment(&operator, 1);
+            let third = payment(&operator, 2);
+            (operator, first, second, third)
+        });
+
+        runtime().start(move |context| async move {
+            async fn wait_signal<E: Clock>(context: &E, receiver: &mpsc::Receiver<()>) {
+                for _ in 0..100 {
+                    if receiver.try_recv().is_ok() {
+                        return;
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                panic!("payment stage did not make progress");
+            }
+
+            struct Releases(Vec<mpsc::Sender<()>>);
+
+            impl Drop for Releases {
+                fn drop(&mut self) {
+                    for release in &self.0 {
+                        let _ = release.send(());
+                    }
+                }
+            }
+
+            let (first_entered, first_commit) = commonware_utils::channel::oneshot::channel();
+            let (release_first, first_release) = mpsc::channel();
+            let (second_entered, second_commit) = commonware_utils::channel::oneshot::channel();
+            let (release_second, second_release) = mpsc::channel();
+            let _releases = Releases(vec![release_first.clone(), release_second.clone()]);
+            {
+                let mut operator = operator.lock();
+                operator.gate_next_payment_commit(first_entered, first_release);
+                operator.gate_next_payment_commit(second_entered, second_release);
+            }
+
+            let (verifier_started, started) = mpsc::sync_channel(4);
+            let (verifier_finished, finished) = mpsc::sync_channel(4);
+            let hooks = payments::TestHooks {
+                verifier_started,
+                verifier_finished,
+            };
+            let strategy = operator.lock().payment_strategy();
+            let (sender, coordinator) = payments::start_with_hooks(
+                context.child("payments"),
+                NoNetworkChain,
+                operator,
+                strategy,
+                hooks,
+            );
+
+            let first_response = context.child("first").spawn({
+                let sender = sender.clone();
+                move |_| async move {
+                    payments::submit(&sender, first, payments::ResponseKind::Batch).await
+                }
+            });
+            wait_signal(&context, &started).await;
+            wait_signal(&context, &finished).await;
+            commonware_macros::select! {
+                result = first_commit => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("first payment writer did not reach the commit gate")
+                },
+            }
+
+            let mut second_response = context.child("second").spawn({
+                let sender = sender.clone();
+                move |_| async move {
+                    payments::submit(&sender, second, payments::ResponseKind::Batch).await
+                }
+            });
+            wait_signal(&context, &started).await;
+            wait_signal(&context, &finished).await;
+            let second_waited_for_first = futures::poll!(&mut second_response).is_pending();
+
+            let third_response =
+                payments::enqueue(&sender, third, payments::ResponseKind::Batch).await;
+            context.sleep(Duration::from_millis(100)).await;
+            let third_waited_for_ahead =
+                matches!(started.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+            release_first.send(()).unwrap();
+            let first_succeeded =
+                matches!(first_response.await.unwrap(), rpc::Response::Success { .. });
+            commonware_macros::select! {
+                result = second_commit => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("second payment writer did not reach the commit gate")
+                },
+            }
+            let second_waited_for_commit = futures::poll!(&mut second_response).is_pending();
+            release_second.send(()).unwrap();
+            let second_succeeded = matches!(
+                second_response.await.unwrap(),
+                rpc::Response::Success { .. }
+            );
+            let third_succeeded =
+                matches!(third_response.await.unwrap(), rpc::Response::Success { .. });
+
+            coordinator.abort();
+            let _ = coordinator.await;
+            assert!(first_succeeded && second_succeeded && third_succeeded);
+            assert!(
+                second_waited_for_first,
+                "the ahead group acknowledged before the current commit"
+            );
+            assert!(
+                third_waited_for_ahead,
+                "a third verifier started while the ahead slot was occupied"
+            );
+            assert!(
+                second_waited_for_commit,
+                "the ahead group acknowledged inside its own commit"
+            );
+        });
+    }
+
+    #[test]
+    fn native_large_response_survives_one_request_server_close() {
+        const CLIENTS: usize = 16;
+        const RESPONSE_BYTES: usize = 512 * 1024;
+
+        runtime().start(|context| async move {
+            let listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = Bytes::from(vec![0x5a; RESPONSE_BYTES]);
+            let expected = body.clone();
+            let (completed, completions) = mpsc::sync_channel(CLIENTS);
+            let server = context
+                .child("large_response")
+                .spawn(move |context| async move {
+                    payments::serve_connections_with_completion(
+                        context,
+                        listener,
+                        move |request| {
+                            assert_eq!(request.body, Bytes::from_static(b"large"));
+                            let body = body.clone();
+                            async move { rpc::Response::Success { body } }
+                        },
+                        completed,
+                    )
+                    .await;
+                });
+
+            let mut clients = Vec::with_capacity(CLIENTS);
+            for _ in 0..CLIENTS {
+                let (mut sink, stream) = context.dial(address).await.unwrap();
+                rpc::send_request(
+                    &mut sink,
+                    &rpc::Request {
+                        method: 1,
+                        body: Bytes::from_static(b"large"),
+                    },
+                )
+                .await
+                .unwrap();
+                clients.push((sink, stream));
+            }
+            for _ in 0..CLIENTS {
+                let mut observed = None;
+                for _ in 0..500 {
+                    match completions.try_recv() {
+                        Ok(sent) => {
+                            observed = Some(sent);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            context.sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("large-response completion failed: {error}"),
+                    }
+                }
+                assert_eq!(
+                    observed,
+                    Some(true),
+                    "server failed to send a large response"
+                );
+            }
+            for (_, mut stream) in clients {
+                assert_eq!(
+                    rpc::recv_response(&mut stream).await.unwrap(),
+                    rpc::Response::Success {
+                        body: expected.clone(),
+                    }
+                );
+            }
+            server.abort();
+            let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn registration_probe_recheck_error_cannot_admit_payment() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = Arc::new(Mutex::new(
+                Operator::open(Path::new(":memory:"), NonZeroUsize::new(2).unwrap()).unwrap(),
+            ));
+            let identities = wallets();
+            let request = {
+                let operator = operator.lock();
+                let (authorization, entries) = operator
+                    .sign_send(0, &[(identities[1].public_key(), 1)])
+                    .unwrap();
+                operator_rpc::AcceptSendsRequest {
+                    sends: vec![operator_rpc::AcceptSendRequest {
+                        authorization,
+                        entries,
+                    }],
+                }
+            };
+            let strategy = operator.lock().payment_strategy();
+            operator.lock().fail_registration_probe_after(1);
+            let (sender, coordinator) = payments::start(
+                context.child("payments"),
+                NoNetworkChain,
+                operator.clone(),
+                strategy,
+            );
+
+            let response = payments::submit(&sender, request, payments::ResponseKind::Batch).await;
+            let no_payment_committed = operator.lock().snapshot().unwrap().payments.is_empty();
+
+            coordinator.abort();
+            let _ = coordinator.await;
+            assert!(matches!(response, rpc::Response::Error { .. }));
+            assert!(
+                no_payment_committed,
+                "a failed registration recheck admitted an unregistered payment"
+            );
         });
     }
 

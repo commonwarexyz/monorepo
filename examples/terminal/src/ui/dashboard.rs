@@ -1,6 +1,6 @@
 //! Wallet dashboard with persistent controls and space for recent activity.
 
-use super::UiState;
+use super::{OperatorState, UiState};
 use crate::agent::Agent;
 use ratatui::{
     Frame,
@@ -15,9 +15,12 @@ const DRAFT_ACCENT: Color = Color::Green;
 
 pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     let area = frame.area();
-    let operator_status = state.operator.map_or("UNAVAILABLE", |status| {
-        if status.faulted { "FENCED" } else { "ONLINE" }
-    });
+    let operator_status = match state.operator {
+        OperatorState::Checking => "CHECKING",
+        OperatorState::Available(status) if status.faulted => "FENCED",
+        OperatorState::Available(_) => "ONLINE",
+        OperatorState::Unavailable => "UNAVAILABLE",
+    };
     let settlement_status = state.settlement.as_ref().map_or("UNAVAILABLE", |status| {
         if status.hard_faulted {
             "HARD FAULT"
@@ -84,14 +87,20 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
 
     let roles = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sections[1]);
-    let operator = state.operator.map_or_else(
-        || {
+    let operator = match state.operator {
+        OperatorState::Checking => {
             vec![
                 Line::raw("Waiting for operator status"),
                 Line::raw("Issues payment receipts"),
             ]
-        },
-        |status| {
+        }
+        OperatorState::Unavailable => {
+            vec![
+                Line::raw("Operator status unavailable"),
+                Line::raw("Issues payment receipts"),
+            ]
+        }
+        OperatorState::Available(status) => {
             vec![
                 Line::raw(format!(
                     "Epoch {} | {} recent payments",
@@ -111,8 +120,8 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
                     state.pending_closes.len()
                 )),
             ]
-        },
-    );
+        }
+    };
     frame.render_widget(
         Paragraph::new(operator).block(
             panel(format!(" Operator / receipts - {operator_status} "))
@@ -251,7 +260,7 @@ pub(super) fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
 }
 
 fn amount(value: Option<u64>) -> String {
-    value.map_or_else(|| "unavailable".to_string(), |value| value.to_string())
+    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
 }
 
 fn emphasis(color: Color) -> Style {
@@ -261,7 +270,7 @@ fn emphasis(color: Color) -> Style {
 fn status_style(status: &str) -> Style {
     emphasis(match status {
         "FENCED" | "HARD FAULT" => Color::Red,
-        "UNAVAILABLE" => Color::Yellow,
+        "CHECKING" | "UNAVAILABLE" => Color::Yellow,
         _ => ACCENT,
     })
 }
@@ -351,14 +360,14 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_values_are_distinct_from_zero_and_faults_are_prominent() {
+    fn checking_unavailable_and_faulted_roles_are_distinct() {
         let mut state = UiState::new();
         for (width, height) in [(80, 24), (120, 35)] {
             let output = draw(width, height, &state);
-            assert!(output.contains("With operator unavailable"), "{output}");
-            assert!(output.contains("Onchain unavailable"), "{output}");
+            assert!(output.contains("With operator unknown"), "{output}");
+            assert!(output.contains("Onchain unknown"), "{output}");
             assert!(
-                output.contains("Operator / receipts - UNAVAILABLE"),
+                output.contains("Operator / receipts - CHECKING"),
                 "{output}"
             );
             assert!(
@@ -366,9 +375,19 @@ mod tests {
                 "{output}"
             );
         }
+        state.operator = OperatorState::Unavailable;
+        let unavailable = draw(80, 24, &state);
+        assert!(
+            unavailable.contains("Operator / receipts - UNAVAILABLE"),
+            "{unavailable}"
+        );
+        assert!(
+            unavailable.contains("Operator status unavailable"),
+            "{unavailable}"
+        );
         state.balance = Some(0);
         state.native_balance = Some(u64::MAX);
-        state.operator = Some(StatusResponse {
+        state.operator = OperatorState::Available(StatusResponse {
             epoch: 7,
             accounts: 4,
             present_accounts: 3,

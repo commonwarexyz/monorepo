@@ -2136,6 +2136,231 @@ fn rotate_epoch(operator: &mut Operator, epoch: u64) {
 }
 
 #[test]
+fn send_sequence_rejects_the_whole_fresh_suffix() {
+    let mut operator = operator();
+    let recipient = operator.wallets[1].public_key();
+    let first = operator.sign_send(0, &[(recipient.clone(), 1)]).unwrap();
+    let endpoint = Endpoint {
+        seq: 1,
+        cumulative_debit: 1,
+        entries: vec![OutEntry {
+            recipient: recipient.clone(),
+            cumulative: 1,
+            count: 1,
+        }],
+    };
+    let second = sign_send_at(
+        operator.registration.context.payment(),
+        &operator.wallets[0],
+        &endpoint,
+        &[(recipient, INITIAL_BALANCE)],
+    )
+    .unwrap();
+    let result = operator.accept_sends(operator_rpc::AcceptSendsRequest {
+        sends: [first, second]
+            .into_iter()
+            .map(|(authorization, entries)| operator_rpc::AcceptSendRequest {
+                authorization,
+                entries,
+            })
+            .collect(),
+    });
+    assert!(result.is_err());
+    assert!(operator.snapshot().unwrap().payments.is_empty());
+}
+
+#[test]
+fn payment_group_commit_unknown_recovers_all_members() {
+    let database = TempDatabase::new();
+    let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+    let first = operator
+        .sign_send(0, &[(operator.wallets[2].public_key(), 1)])
+        .unwrap();
+    let second = operator
+        .sign_send(1, &[(operator.wallets[2].public_key(), 1)])
+        .unwrap();
+    operator.fail_next_payment_commit();
+    let requests = [first, second]
+        .into_iter()
+        .map(
+            |(authorization, entries)| operator_rpc::AcceptSendsRequest {
+                sends: vec![operator_rpc::AcceptSendRequest {
+                    authorization,
+                    entries,
+                }],
+            },
+        )
+        .collect();
+    let verified = verify_sends(
+        requests,
+        &mut commonware_utils::test_rng(),
+        &operator.payment_strategy(),
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>>>()
+    .unwrap();
+    let result = operator.accept_verified_sends(verified);
+    assert!(result.is_err());
+    assert!(operator.fault().is_some());
+    drop(operator);
+
+    let operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+    assert_eq!(operator.snapshot().unwrap().payments.len(), 2);
+}
+
+type SignedSend = (SendAuthorization<Key, Digest>, Vec<Entry>);
+
+fn submit_group(
+    operator: &mut Operator,
+    batches: Vec<Vec<SignedSend>>,
+) -> Result<Vec<Result<SendsOutcome>>> {
+    let requests = batches
+        .into_iter()
+        .map(|batch| operator_rpc::AcceptSendsRequest {
+            sends: batch
+                .into_iter()
+                .map(|(authorization, entries)| operator_rpc::AcceptSendRequest {
+                    authorization,
+                    entries,
+                })
+                .collect(),
+        })
+        .collect();
+    let verified = verify_sends(
+        requests,
+        &mut commonware_utils::test_rng(),
+        &operator.payment_strategy(),
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    operator.accept_verified_sends(verified)
+}
+
+#[test]
+fn payment_group_adds_hot_recipient_credits_and_reuses_them_in_order() {
+    let mut operator = operator();
+    operator.pay(1, 2, INITIAL_BALANCE).unwrap();
+    let shared = operator.wallets[1].public_key();
+    let receiver = operator.wallets[2].public_key();
+    let first = operator.sign_send(0, &[(shared.clone(), 7)]).unwrap();
+    let second = operator.sign_send(2, &[(shared.clone(), 5)]).unwrap();
+    let reuse = operator.sign_send(1, &[(receiver, 12)]).unwrap();
+    let results =
+        submit_group(&mut operator, vec![vec![first], vec![second], vec![reuse]]).unwrap();
+    assert!(
+        results
+            .into_iter()
+            .all(|result| matches!(result, Ok(SendsOutcome::Accepted(_))))
+    );
+    assert_eq!(
+        operator
+            .store
+            .current_account(&shared)
+            .unwrap()
+            .unwrap()
+            .current,
+        0
+    );
+    assert_eq!(operator.store.current_entry_count().unwrap(), 4);
+    operator.validate_current_epoch().unwrap();
+}
+
+#[test]
+fn payment_group_rejects_one_payer_atomically_and_commits_another() {
+    let mut operator = operator();
+    let receiver = operator.wallets[2].public_key();
+    let first = operator.sign_send(0, &[(receiver.clone(), 1)]).unwrap();
+    let second = sign_send_at(
+        operator.registration.context.payment(),
+        &operator.wallets[0],
+        &Endpoint {
+            seq: 1,
+            cumulative_debit: 1,
+            entries: vec![OutEntry {
+                recipient: receiver.clone(),
+                cumulative: 1,
+                count: 1,
+            }],
+        },
+        &[(receiver.clone(), INITIAL_BALANCE)],
+    )
+    .unwrap();
+    let other = operator.sign_send(1, &[(receiver, 3)]).unwrap();
+    let results = submit_group(&mut operator, vec![vec![first, second], vec![other]]).unwrap();
+    assert!(results[0].is_err());
+    assert!(matches!(&results[1], Ok(SendsOutcome::Accepted(accepted)) if accepted.len() == 1));
+    assert_eq!(
+        operator
+            .store
+            .payer_endpoint(&operator.wallets[0].public_key())
+            .unwrap()
+            .seq,
+        0
+    );
+    assert_eq!(operator.store.current_entry_count().unwrap(), 1);
+    operator.validate_current_epoch().unwrap();
+}
+
+#[test]
+fn payment_batch_replays_its_prefix_and_commits_only_the_fresh_suffix() {
+    let mut operator = operator();
+    let recipient = operator.wallets[1].public_key();
+    let first = operator.sign_send(0, &[(recipient.clone(), 1)]).unwrap();
+    let first_accepted = operator
+        .accept_send(first.0.clone(), first.1.clone())
+        .unwrap()
+        .into_accepted();
+    let second = operator.sign_send(0, &[(recipient, 2)]).unwrap();
+    let request = operator_rpc::AcceptSendsRequest {
+        sends: vec![first, second]
+            .into_iter()
+            .map(|(authorization, entries)| operator_rpc::AcceptSendRequest {
+                authorization,
+                entries,
+            })
+            .collect(),
+    };
+    let accepted = match operator.accept_sends(request.clone()).unwrap() {
+        SendsOutcome::Accepted(accepted) => accepted,
+        SendsOutcome::Stale { .. } => panic!("the suffix extends the live endpoint"),
+    };
+    assert_eq!(accepted.len(), 2);
+    assert_eq!(accepted[0].acceptance, first_accepted.acceptance);
+    let replay = match operator.accept_sends(request).unwrap() {
+        SendsOutcome::Accepted(accepted) => accepted,
+        SendsOutcome::Stale { .. } => panic!("exact replay must remain accepted"),
+    };
+    assert_eq!(
+        accepted
+            .iter()
+            .map(|batch| &batch.acceptance)
+            .collect::<Vec<_>>(),
+        replay
+            .iter()
+            .map(|batch| &batch.acceptance)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(operator.store.current_entry_count().unwrap(), 2);
+    operator.validate_current_epoch().unwrap();
+}
+
+#[test]
+fn payment_group_write_failure_rolls_back_every_payer_and_fences() {
+    let database = TempDatabase::new();
+    let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+    let recipient = operator.wallets[2].public_key();
+    let first = operator.sign_send(0, &[(recipient.clone(), 1)]).unwrap();
+    let second = operator.sign_send(1, &[(recipient, 2)]).unwrap();
+    operator.store.fail_next_payment_write();
+    assert!(submit_group(&mut operator, vec![vec![first], vec![second]]).is_err());
+    assert!(operator.fault().is_some());
+    drop(operator);
+    let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+    assert_eq!(operator.store.current_entry_count().unwrap(), 0);
+    operator.validate_current_epoch().unwrap();
+}
+
+#[test]
 fn payment_is_atomic_and_rejects_overspend() {
     let mut operator = operator();
     let accepted = operator.pay(0, 1, 25).unwrap();
@@ -3869,7 +4094,7 @@ fn foreground_payment_failure_fences_deferred_proof_reads() {
 #[test]
 fn unknown_payment_commit_fences_the_connection() {
     let mut operator = operator();
-    operator.store.fail_next_payment_commit();
+    operator.fail_next_payment_commit();
     let error = match operator.pay(0, 1, 10) {
         Ok(_) => panic!("unknown payment commit was acknowledged"),
         Err(error) => error,
