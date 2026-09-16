@@ -45,6 +45,15 @@
 //! additionally arms input-driven remove failures, sampled per blob removal, so a prune can fail
 //! after removing only some of its blobs and strand a partially pruned image for recovery.
 //!
+//! # Started syncs
+//!
+//! `StartSync` begins a durable sync and either drops the handle or holds it. A dropped handle
+//! credits nothing: the journal stays in use, so a flush that failed inside the call must not let
+//! later appends damage acknowledged bytes, which the recovery oracle checks. A held handle is
+//! observed before the next durability operation. Completion credits the size at the call, and
+//! failure requires the next `sync` to fail, since the journal must retain a failure its caller
+//! may never have observed.
+//!
 //! # Positions
 //!
 //! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
@@ -54,7 +63,9 @@
 //! start, `ItemOutOfRange` past the end). `Rewind` runs once, usually clamped, occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
+use commonware_runtime::{
+    BufferPooler, Handle, ReadOptions, Runner, Supervisor as _, deterministic,
+};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -122,6 +133,9 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
+    /// Begin a durable sync. Drop the handle unobserved, or hold it until the next durability
+    /// operation observes it.
+    StartSync { hold: bool },
     /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
     Snapshot,
     /// Commit the journal.
@@ -301,6 +315,13 @@ impl Expected {
         self.candidates.clear();
     }
 
+    /// A held `start_sync` handle completed: everything appended before the call is durable and
+    /// exact. Later appends stay non-durable, so the size ceiling is untouched.
+    fn started_sync_completed(&mut self, size: u64) {
+        self.durable_len = self.durable_len.max(size);
+        self.candidates.retain(|&pos, _| pos >= size);
+    }
+
     /// Successful rewind: the truncated tail may or may not persist, so recovered size is in
     /// `[target, prev]`. Until a durability barrier a crash can resurface the pre-rewind bytes,
     /// so each truncated value stays admissible at the position it held.
@@ -358,6 +379,7 @@ trait FuzzJournal: Sized {
     fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send;
     fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
@@ -436,6 +458,10 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         FixedJournal::sync(self).await
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        FixedJournal::start_sync(self).await
     }
 
     async fn snapshot(self) -> Result<Self, Error> {
@@ -518,6 +544,10 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        VariableJournal::start_sync(self).await
     }
 
     async fn snapshot(self) -> Result<Self, Error> {
@@ -714,6 +744,31 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
     }
 }
 
+/// Observe every held `start_sync` handle before a durability operation. A completed handle
+/// credits the size at its call. A failed one must have been retained by the journal, so the
+/// next sync fails and the cycle ends.
+async fn settle_held<J: FuzzJournal>(
+    journal: J,
+    held: &mut Vec<(u64, Handle<()>)>,
+    expected: &mut Expected,
+) -> Option<J> {
+    let mut failed = false;
+    for (size, handle) in held.drain(..) {
+        match handle.await {
+            Ok(()) => expected.started_sync_completed(size),
+            Err(_) => failed = true,
+        }
+    }
+    if failed {
+        assert!(
+            journal.sync().await.is_err(),
+            "sync succeeded after a start_sync handle reported failure"
+        );
+        return None;
+    }
+    Some(journal)
+}
+
 /// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
 /// which may have left the journal inconsistent. The journal is then dropped to crash. Reads and
 /// replays never fault, so a bad one panics instead of ending the cycle.
@@ -725,7 +780,23 @@ async fn run_ops<J: FuzzJournal>(
     params: Params,
 ) {
     let faults = ctx.storage_fault_config();
+    let mut held: Vec<(u64, Handle<()>)> = Vec::new();
     for op in ops {
+        // Every durability operation first observes the held start_sync handles, so a credit
+        // never spans a rewind and a retained failure surfaces where the contract says it must.
+        if matches!(
+            op,
+            JournalOperation::Sync
+                | JournalOperation::Commit
+                | JournalOperation::Rewind { .. }
+                | JournalOperation::Prune { .. }
+        ) {
+            journal = match settle_held(journal, &mut held, expected).await {
+                Some(journal) => journal,
+                None => return,
+            };
+        }
+
         // A mutation error ends the cycle.
         journal = match op {
             JournalOperation::Append { value } => {
@@ -771,6 +842,30 @@ async fn run_ops<J: FuzzJournal>(
                     return;
                 }
             },
+
+            // The call itself only fails on an inline checkpoint write. Its handle carries the
+            // data flush and sync outcome: dropped, it credits nothing and the journal stays in
+            // use. Held, `settle_held` observes it before the next durability operation.
+            JournalOperation::StartSync { hold } => {
+                let size = journal.size().await;
+                match journal.start_sync().await {
+                    Ok((journal, handle)) => {
+                        if *hold {
+                            held.push((size, handle));
+                        } else {
+                            drop(handle);
+                        }
+                        journal
+                    }
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "start_sync reported corruption mid-cycle: {err:?}"
+                        );
+                        return;
+                    }
+                }
+            }
 
             // A snapshot flushes buffered data without a durability barrier, changing no
             // durability expectation. It schedules unsynced partial-page rewrites for the

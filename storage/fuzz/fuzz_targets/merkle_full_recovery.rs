@@ -2,10 +2,13 @@
 
 //! Persisted Merkle (MMR and MMB) crash recovery under injected sync, write, and remove faults.
 //!
-//! The op phase interleaves appends with sync, flush, and abandoned start_sync barriers, plus
-//! prune drives with remove faults armed so a prune can fail after removing only some blobs.
-//! The oracle checks the recovered size, leaf count, and prune boundary against tracked
-//! durable floors and attempted ceilings, then compares every readable node against an
+//! The op phase interleaves appends with sync, flush, and start_sync barriers, plus prune
+//! drives with remove faults armed so a prune can fail after removing only some blobs. A
+//! start_sync handle is either dropped, crediting nothing while the instance stays in use, or
+//! held and observed before the next durability operation: completion credits the size at the
+//! call, and failure requires the next sync to fail whenever leaves were added since the last
+//! completed sync. The oracle checks the recovered size, leaf count, and prune boundary against
+//! tracked durable floors and attempted ceilings, then compares every readable node against an
 //! independently rebuilt reference tree so a same-size corruption cannot pass. A sentinel
 //! append, sync, and reopen prove the recovered instance still writes durably.
 
@@ -13,7 +16,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    BufferPooler, Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, Position, full::Config,
@@ -45,8 +48,9 @@ enum MerkleOperation {
     Sync,
     /// Flush cached nodes to the journal without a durability barrier.
     Flush,
-    /// Begin a durable sync and abandon its completion handle.
-    StartSync,
+    /// Begin a durable sync. Drop the handle unobserved, or hold it until the next durability
+    /// operation observes it.
+    StartSync { hold: bool },
     /// Prune leaves up to a location.
     PruneToLoc { loc: u64 },
     /// Prune all nodes.
@@ -145,15 +149,52 @@ async fn run_operations<F: MerkleFamily>(
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
     let mut leaves = Vec::new();
+    let mut held: Vec<(u64, u64, Handle<()>)> = Vec::new();
+    let mut unsynced_nodes = false;
 
     // A failed operation breaks out of the loop.
     for op in operations.iter() {
+        // Every durability operation first observes the held start_sync handles. A completed
+        // handle proves the size and leaf count at its call durable. A failed one must have
+        // been retained: when leaves were added since the last completed sync, the next sync
+        // fails and the run ends. Otherwise the journal had nothing to flush, so only a no-op
+        // blob sync or the watermark advance can have failed, and a sync may skip the clean
+        // journal and report the already durable state.
+        if matches!(
+            op,
+            MerkleOperation::Sync | MerkleOperation::PruneToLoc { .. } | MerkleOperation::PruneAll
+        ) {
+            let mut failed = false;
+            for (size, leaf_count, handle) in held.drain(..) {
+                match handle.await {
+                    Ok(()) => {
+                        min_size = min_size.max(size);
+                        min_leaves = min_leaves.max(leaf_count);
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            if failed {
+                match merkle.sync().await {
+                    Err(_) => break,
+                    Ok(synced) => {
+                        assert!(
+                            !unsynced_nodes,
+                            "sync succeeded after a start_sync handle reported failure"
+                        );
+                        merkle = synced;
+                    }
+                }
+            }
+        }
+
         merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 let merkle = merkle.apply_batch(&batch).unwrap();
                 leaves.push(*data);
+                unsynced_nodes = true;
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
                 merkle
@@ -171,6 +212,7 @@ async fn run_operations<F: MerkleFamily>(
                     max_leaves = max_leaves.max(leaves);
                     min_pruned = pruned;
                     max_pruned = max_pruned.max(pruned);
+                    unsynced_nodes = false;
                     merkle
                 }
             },
@@ -182,15 +224,24 @@ async fn run_operations<F: MerkleFamily>(
                 Ok(merkle) => merkle,
             },
 
-            // The completion handle is dropped unobserved, so nothing is credited as
-            // durable: the abandoned sync may or may not have completed by the crash.
-            MerkleOperation::StartSync => match merkle.start_sync().await {
-                Err(_) => break,
-                Ok((merkle, handle)) => {
-                    drop(handle);
-                    merkle
+            // A dropped handle credits nothing: the abandoned sync may or may not have
+            // completed by the crash, and the instance stays in use. A held handle is
+            // observed before the next durability operation.
+            MerkleOperation::StartSync { hold } => {
+                let size = merkle.size().as_u64();
+                let leaf_count = merkle.leaves().as_u64();
+                match merkle.start_sync().await {
+                    Err(_) => break,
+                    Ok((merkle, handle)) => {
+                        if *hold {
+                            held.push((size, leaf_count, handle));
+                        } else {
+                            drop(handle);
+                        }
+                        merkle
+                    }
                 }
-            },
+            }
 
             MerkleOperation::PruneToLoc { loc } => {
                 let leaves = *merkle.leaves();
@@ -226,6 +277,7 @@ async fn run_operations<F: MerkleFamily>(
                             min_leaves = merkle.leaves().as_u64();
                             max_size = max_size.max(min_size);
                             max_leaves = max_leaves.max(min_leaves);
+                            unsynced_nodes = false;
                             merkle
                         }
                     }
@@ -262,6 +314,7 @@ async fn run_operations<F: MerkleFamily>(
                             min_leaves = merkle.leaves().as_u64();
                             max_size = max_size.max(min_size);
                             max_leaves = max_leaves.max(min_leaves);
+                            unsynced_nodes = false;
                             merkle
                         }
                     }
