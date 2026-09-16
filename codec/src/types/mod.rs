@@ -106,27 +106,19 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Buf, BufsMut, Error, Read, Write};
+    use crate::{Buf, BufsMut, Read, Write};
     use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
     /// This lets tests distinguish the generic per-element path from the
     /// specialized `u8` path while keeping the same encoded representation.
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq, Read)]
     pub struct Byte(pub u8);
 
     impl Write for Byte {
         fn write(&self, buf: &mut impl BufMut) {
             buf.put_u8(self.0);
-        }
-    }
-
-    impl Read for Byte {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-            Ok(Self(<u8 as Read>::read_cfg(buf, &())?))
         }
     }
 

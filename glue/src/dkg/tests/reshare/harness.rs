@@ -29,9 +29,7 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
-};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
@@ -64,7 +62,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -159,28 +157,9 @@ impl Network {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 pub(super) struct TestDirectory(Option<Addresses<PublicKey>>);
-
-impl Write for TestDirectory {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl EncodeSize for TestDirectory {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
-    }
-}
-
-impl Read for TestDirectory {
-    type Cfg = RangeCfg<usize>;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Option::<Addresses<PublicKey>>::read_cfg(buf, cfg).map(Self)
-    }
-}
 
 impl Directory<PublicKey> for TestDirectory {
     fn codec_config(peers: &Set<PublicKey>) -> Self::Cfg {
@@ -240,54 +219,16 @@ impl DkgManager for TestManager {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg(())]
 pub(super) struct Block {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
+    #[codec(cfg = &(MAX_PARTICIPANTS, max_supported_mode()))]
     payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
-}
-
-impl Write for Block {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.state_root.write(buf);
-        self.range.write(buf);
-        self.payload.write(buf);
-    }
-}
-
-impl EncodeSize for Block {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.state_root.encode_size()
-            + self.range.encode_size()
-            + self.payload.encode_size()
-    }
-}
-
-impl Read for Block {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            state_root: sha256::Digest::read(buf)?,
-            range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
-                buf,
-                &(MAX_PARTICIPANTS, max_supported_mode()),
-            )?,
-        })
-    }
 }
 
 impl Digestible for Block {

@@ -18,7 +18,7 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -49,8 +49,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
+    spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
@@ -132,11 +132,17 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds())]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
+    #[codec(cfg = &())]
     context: Context<sha256::Digest, ed25519::PublicKey>,
+    #[codec(cfg = &())]
     parent: sha256::Digest,
+    #[codec(cfg = &())]
     height: Height,
+    #[codec(cfg = &cfg)]
     payload: Option<Payload<V, ed25519::PrivateKey, D>>,
 }
 
@@ -160,37 +166,6 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
             Some(Payload::EpochInfo(info)) => Some(info),
             _ => None,
         }
-    }
-}
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> Write for Block<V, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.payload.write(buf);
-    }
-}
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.payload.encode_size()
-    }
-}
-
-impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            payload: Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
-        })
     }
 }
 

@@ -1,10 +1,7 @@
 use crate::{Ingress, authenticated::data::Data};
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg,
-    varint::UInt,
-};
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt, Write, config::RangeCfg, varint::UInt};
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::{BufMut, Clock};
+use commonware_runtime::Clock;
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
@@ -21,15 +18,6 @@ pub enum Error {
     #[error("synchrony bound violated")]
     SynchronyBound,
 }
-
-/// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
-/// Prefix byte used to identify a [Payload] with variant Greeting.
-const GREETING_PREFIX: u8 = 1;
-/// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 2;
-/// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 3;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
@@ -50,92 +38,30 @@ pub struct PayloadConfig {
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write, Read)]
+#[read_cfg(PayloadConfig)]
 pub enum Payload<C: PublicKey> {
     /// Arbitrary data sent between peers.
-    Data(Data),
+    #[codec(tag = 0)]
+    Data(#[codec(cfg = &RangeCfg::new(..=cfg.max_data_length))] Data),
 
     /// A greeting message containing the peer's own information.
     ///
     /// This must be the first message sent after connection establishment.
     /// The connection will be terminated if this message is not received first
     /// or if it is received more than once.
-    Greeting(Info<C>),
+    #[codec(tag = 1)]
+    Greeting(#[codec(cfg = &())] Info<C>),
 
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
-    BitVec(BitVec),
+    #[codec(tag = 2)]
+    BitVec(#[codec(cfg = &cfg.max_bit_vec)] BitVec),
 
     /// A vector of verifiable peer information.
-    Peers(Vec<Info<C>>),
-}
-
-impl<C: PublicKey> EncodeSize for Payload<C> {
-    fn encode_size(&self) -> usize {
-        (match self {
-            Self::Data(data) => data.encode_size(),
-            Self::Greeting(info) => info.encode_size(),
-            Self::BitVec(bit_vec) => bit_vec.encode_size(),
-            Self::Peers(peers) => peers.encode_size(),
-        }) + 1
-    }
-}
-
-impl<C: PublicKey> Write for Payload<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf);
-                data.write(buf);
-            }
-            Self::Greeting(info) => {
-                GREETING_PREFIX.write(buf);
-                info.write(buf);
-            }
-            Self::BitVec(bit_vec) => {
-                BIT_VEC_PREFIX.write(buf);
-                bit_vec.write(buf);
-            }
-            Self::Peers(peers) => {
-                PEERS_PREFIX.write(buf);
-                peers.write(buf);
-            }
-        }
-    }
-}
-
-impl<C: PublicKey> Read for Payload<C> {
-    type Cfg = PayloadConfig;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let PayloadConfig {
-            max_bit_vec,
-            max_peers,
-            max_data_length,
-        } = cfg;
-
-        let payload_type = <u8>::read(buf)?;
-        match payload_type {
-            DATA_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Self::Data(data))
-            }
-            GREETING_PREFIX => {
-                let info = Info::<C>::read(buf)?;
-                Ok(Self::Greeting(info))
-            }
-            BIT_VEC_PREFIX => {
-                let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
-                Ok(Self::BitVec(bit_vec))
-            }
-            PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_cfg(buf, &(RangeCfg::new(..=*max_peers), ()))?;
-                Ok(Self::Peers(peers))
-            }
-            other => Err(CodecError::InvalidEnum(other)),
-        }
-    }
+    #[codec(tag = 3)]
+    Peers(#[codec(cfg = &(RangeCfg::new(..=cfg.max_peers), ()))] Vec<Info<C>>),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -159,49 +85,37 @@ where
 /// BitVec is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write, Read)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[read_cfg(u64)]
 pub struct BitVec {
     /// The index that the bit vector applies to.
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     pub index: u64,
 
     /// The bit vector itself.
     pub bits: BitMap,
 }
 
-impl EncodeSize for BitVec {
-    fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.bits.encode_size()
-    }
-}
-
-impl Write for BitVec {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
-        self.bits.write(buf);
-    }
-}
-
-impl Read for BitVec {
-    type Cfg = u64;
-
-    fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, CodecError> {
-        let index = UInt::read(buf)?.into();
-        let bits = BitMap::read_cfg(buf, max_bits)?;
-        Ok(Self { index, bits })
-    }
-}
-
 /// A signed message from a peer attesting to its own ingress address and public key at a given time.
 ///
 /// This is used to share the peer's ingress address and public key with other peers in a verified
 /// manner.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write, Read)]
 pub struct Info<C: PublicKey> {
     /// The ingress address of the peer (how to dial them).
     pub ingress: Ingress,
 
     /// The timestamp (epoch milliseconds) at which the ingress was signed over.
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     pub timestamp: u64,
 
     /// The public key of the peer.
@@ -246,41 +160,6 @@ impl<C: PublicKey> Info<C> {
             public_key: signer.public_key(),
             signature,
         }
-    }
-}
-
-impl<C: PublicKey> EncodeSize for Info<C> {
-    fn encode_size(&self) -> usize {
-        self.ingress.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.public_key.encode_size()
-            + self.signature.encode_size()
-    }
-}
-
-impl<C: PublicKey> Write for Info<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.ingress.write(buf);
-        UInt(self.timestamp).write(buf);
-        self.public_key.write(buf);
-        self.signature.write(buf);
-    }
-}
-
-impl<C: PublicKey> Read for Info<C> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let ingress = Ingress::read(buf)?;
-        let timestamp = UInt::read(buf)?.into();
-        let public_key = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
-        Ok(Self {
-            ingress,
-            timestamp,
-            public_key,
-            signature,
-        })
     }
 }
 
@@ -377,7 +256,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 mod tests {
     use super::*;
     use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::{Decode, DecodeExt, Error as CodecError};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
@@ -398,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_data_prefix_value() {
-        assert_eq!(DATA_PREFIX, 0);
+        assert_eq!(crate::authenticated::data::DATA_PREFIX, 0);
     }
 
     #[test]

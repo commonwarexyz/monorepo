@@ -1,12 +1,14 @@
 //! Fixed-size retained bytes for checking storage decode ownership.
 
-use bytes::{BufMut, Bytes};
+use bytes::Bytes;
 use commonware_codec::{Buf, Error, FixedSize, Read, Write, util::at_least};
 
 /// A fixed-size byte view for checking shared decoding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write)]
 pub(crate) struct View {
+    #[codec(encode_with = { buf.put_slice(value); })]
     pub(crate) bytes: Bytes,
+    #[codec(encode_with = {})]
     source: usize,
 }
 
@@ -25,12 +27,6 @@ impl View {
 
 impl FixedSize for View {
     const SIZE: usize = u64::SIZE;
-}
-
-impl Write for View {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.bytes);
-    }
 }
 
 impl Read for View {

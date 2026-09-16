@@ -1,11 +1,11 @@
 use crate::types::Height;
-use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{Codec, EncodeSize, Read, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 
 /// A mock block with no explicit consensus context.
 /// Its parent digest also serves as its certification context.
+#[derive(Write, Read, EncodeSize)]
 pub struct EmptyBlock<H: Hasher> {
     /// The parent block's digest.
     pub parent: H::Digest,
@@ -14,6 +14,11 @@ pub struct EmptyBlock<H: Hasher> {
     pub height: Height,
 
     /// The timestamp of the block (in milliseconds since the Unix epoch).
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read_cfg(buf, &())?.into()) }
+    )]
     pub timestamp: u64,
 }
 
@@ -57,36 +62,6 @@ impl<H: Hasher> PartialEq for EmptyBlock<H> {
 
 impl<H: Hasher> Eq for EmptyBlock<H> {}
 
-impl<H: Hasher> Write for EmptyBlock<H> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.parent.write(writer);
-        self.height.write(writer);
-        UInt(self.timestamp).write(writer);
-    }
-}
-
-impl<H: Hasher> Read for EmptyBlock<H> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let parent = H::Digest::read(reader)?;
-        let height = Height::read(reader)?;
-        let timestamp = UInt::read(reader)?.into();
-
-        Ok(Self {
-            parent,
-            height,
-            timestamp,
-        })
-    }
-}
-
-impl<H: Hasher> EncodeSize for EmptyBlock<H> {
-    fn encode_size(&self) -> usize {
-        self.parent.encode_size() + self.height.encode_size() + UInt(self.timestamp).encode_size()
-    }
-}
-
 impl<H: Hasher> Digestible for EmptyBlock<H> {
     type Digest = H::Digest;
 
@@ -122,7 +97,8 @@ impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
 /// A mock block type for testing that stores consensus context.
 ///
 /// The context type `C` should be the consensus context (e.g., `simplex::types::Context`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, Read, EncodeSize)]
+#[codec(read_bounds(C: Read<Cfg = ()>))]
 pub struct Block<D: Digest, C> {
     /// The consensus context that was used when this block was proposed.
     pub context: C,
@@ -134,6 +110,11 @@ pub struct Block<D: Digest, C> {
     pub height: Height,
 
     /// The timestamp of the block (in milliseconds since the Unix epoch).
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read_cfg(buf, &())?.into()) }
+    )]
     pub timestamp: u64,
 
     /// Pre-computed digest of the block.
@@ -169,46 +150,6 @@ impl<D: Digest, C: Codec> Block<D, C> {
             timestamp,
             digest,
         }
-    }
-}
-
-impl<D: Digest, C: Write> Write for Block<D, C> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.context.write(writer);
-        self.parent.write(writer);
-        self.height.write(writer);
-        UInt(self.timestamp).write(writer);
-        self.digest.write(writer);
-    }
-}
-
-impl<D: Digest, C: Read<Cfg = ()>> Read for Block<D, C> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
-        let context = C::read(reader)?;
-        let parent = D::read(reader)?;
-        let height = Height::read(reader)?;
-        let timestamp = UInt::read(reader)?.into();
-        let digest = D::read(reader)?;
-
-        Ok(Self {
-            context,
-            parent,
-            height,
-            timestamp,
-            digest,
-        })
-    }
-}
-
-impl<D: Digest, C: EncodeSize> EncodeSize for Block<D, C> {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + UInt(self.timestamp).encode_size()
-            + self.digest.encode_size()
     }
 }
 

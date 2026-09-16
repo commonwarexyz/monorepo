@@ -40,7 +40,7 @@ const CONTAINER_MASK: u64 = CONTAINER_SIZE - 1;
 /// A [`Bitmap`] paired with a "pruned-below" watermark.
 ///
 /// See the module-level documentation for semantics and granularity.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, EncodeSize)]
 pub struct Prunable {
     /// The underlying bitmap. Invariant: contains no values `< pruned_below`.
     bitmap: Bitmap,
@@ -205,12 +205,6 @@ impl Write for Prunable {
     fn write(&self, buf: &mut impl BufMut) {
         self.pruned_below.write(buf);
         self.bitmap.write(buf);
-    }
-}
-
-impl EncodeSize for Prunable {
-    fn encode_size(&self) -> usize {
-        self.pruned_below.encode_size() + self.bitmap.encode_size()
     }
 }
 

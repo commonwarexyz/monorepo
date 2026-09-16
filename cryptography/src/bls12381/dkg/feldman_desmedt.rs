@@ -354,9 +354,7 @@ use crate::{
     },
     transcript::{Summary, Transcript, Version},
 };
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
-};
+use commonware_codec::{Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, Write, mode, modes};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
     poly::{Interpolator, Poly},
@@ -565,12 +563,19 @@ pub enum FinalizeError<P> {
 }
 
 /// The output of a successful DKG.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Write, EncodeSize, Read)]
+#[read_cfg((NonZeroU32, ModeVersion))]
+#[codec(read_bounds(P: PublicKey))]
 pub struct Output<V: Variant, P> {
+    #[codec(cfg = &())]
     summary: Summary,
+    #[codec(cfg = cfg)]
     public: Sharing<V>,
+    #[codec(cfg = &(RangeCfg::new(1..=cfg.0.get() as usize), ()))]
     dealers: Set<P>,
+    #[codec(cfg = &(RangeCfg::new(1..=cfg.0.get() as usize), ()))]
     players: Set<P>,
+    #[codec(cfg = &(RangeCfg::new(0..=cfg.0.get() as usize), ()))]
     revealed: Set<P>,
 }
 
@@ -606,44 +611,6 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// These are players whose shares can be reconstructed from the selected dealer reveals.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
-    fn encode_size(&self) -> usize {
-        self.summary.encode_size()
-            + self.public.encode_size()
-            + self.dealers.encode_size()
-            + self.players.encode_size()
-            + self.revealed.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for Output<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.summary.write(buf);
-        self.public.write(buf);
-        self.dealers.write(buf);
-        self.players.write(buf);
-        self.revealed.write(buf);
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_participants, max_supported_mode): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let max_participants_usize = max_participants.get() as usize;
-        Ok(Self {
-            summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
-            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
-            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals
-        })
     }
 }
 
@@ -990,8 +957,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub struct DealerPubMsg<V: Variant> {
+    #[codec(cfg = &(RangeCfg::from(NZU32!(1)..=*cfg), ()))]
     commitment: Poly<V::Public>,
 }
 
@@ -1002,31 +971,6 @@ impl<V: Variant> PartialEq for DealerPubMsg<V> {
 }
 
 impl<V: Variant> Eq for DealerPubMsg<V> {}
-
-impl<V: Variant> EncodeSize for DealerPubMsg<V> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-    }
-}
-
-impl<V: Variant> Write for DealerPubMsg<V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-    }
-}
-
-impl<V: Variant> Read for DealerPubMsg<V> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        &max_size: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_size), ()))?,
-        })
-    }
-}
 
 #[cfg(feature = "arbitrary")]
 impl<V: Variant> arbitrary::Arbitrary<'_> for DealerPubMsg<V>
@@ -1039,8 +983,13 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub struct DealerPrivMsg {
+    #[codec(
+        encode_with = { value.expose(|share| share.write(buf)); },
+        encode_size = value.expose(|share| share.encode_size()),
+        read_with = |buf, _cfg| Ok(Secret::new(Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?))
+    )]
     share: Secret<Scalar>,
 }
 
@@ -1053,29 +1002,6 @@ impl DealerPrivMsg {
     }
 }
 
-impl EncodeSize for DealerPrivMsg {
-    fn encode_size(&self) -> usize {
-        self.share.expose(|share| share.encode_size())
-    }
-}
-
-impl Write for DealerPrivMsg {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.expose(|share| share.write(buf));
-    }
-}
-
-impl Read for DealerPrivMsg {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(Scalar::read_cfg(
-            buf,
-            &ScalarReadCfg::RejectZero,
-        )?))
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -1083,7 +1009,7 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -1091,28 +1017,6 @@ pub struct PlayerAck<P: PublicKey> {
 impl<P: PublicKey> PartialEq for PlayerAck<P> {
     fn eq(&self, other: &Self) -> bool {
         self.sig == other.sig
-    }
-}
-
-impl<P: PublicKey> EncodeSize for PlayerAck<P> {
-    fn encode_size(&self) -> usize {
-        self.sig.encode_size()
-    }
-}
-
-impl<P: PublicKey> Write for PlayerAck<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.sig.write(buf);
-    }
-}
-
-impl<P: PublicKey> Read for PlayerAck<P> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            sig: ReadExt::read(buf)?,
-        })
     }
 }
 
@@ -1127,9 +1031,11 @@ where
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Write, EncodeSize, Read)]
 enum AckOrReveal<P: PublicKey> {
+    #[codec(tag = 0)]
     Ack(PlayerAck<P>),
+    #[codec(tag = 1)]
     Reveal(DealerPrivMsg),
 }
 
@@ -1144,43 +1050,6 @@ impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
         match self {
             Self::Ack(x) => write!(f, "Ack({x:?})"),
             Self::Reveal(_) => write!(f, "Reveal(REDACTED)"),
-        }
-    }
-}
-
-impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Ack(x) => x.encode_size(),
-            Self::Reveal(x) => x.encode_size(),
-        }
-    }
-}
-
-impl<P: PublicKey> Write for AckOrReveal<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Ack(x) => {
-                0u8.write(buf);
-                x.write(buf);
-            }
-            Self::Reveal(x) => {
-                1u8.write(buf);
-                x.write(buf);
-            }
-        }
-    }
-}
-
-impl<P: PublicKey> Read for AckOrReveal<P> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Ack(ReadExt::read(buf)?)),
-            1 => Ok(Self::Reveal(ReadExt::read(buf)?)),
-            x => Err(commonware_codec::Error::InvalidEnum(x)),
         }
     }
 }
@@ -1207,9 +1076,12 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 enum DealerResult<P: PublicKey> {
-    Ok(Map<P, AckOrReveal<P>>),
+    #[codec(tag = 0)]
+    Ok(#[codec(cfg = &(RangeCfg::from(0..=cfg.get() as usize), (), ()))] Map<P, AckOrReveal<P>>),
+    #[codec(tag = 1)]
     TooManyReveals,
 }
 
@@ -1219,48 +1091,6 @@ impl<P: PublicKey> PartialEq for DealerResult<P> {
             (Self::Ok(x), Self::Ok(y)) => x == y,
             (Self::TooManyReveals, Self::TooManyReveals) => true,
             _ => false,
-        }
-    }
-}
-
-impl<P: PublicKey> EncodeSize for DealerResult<P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Ok(r) => r.encode_size(),
-            Self::TooManyReveals => 0,
-        }
-    }
-}
-
-impl<P: PublicKey> Write for DealerResult<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Ok(r) => {
-                0u8.write(buf);
-                r.write(buf);
-            }
-            Self::TooManyReveals => {
-                1u8.write(buf);
-            }
-        }
-    }
-}
-
-impl<P: PublicKey> Read for DealerResult<P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        &max_players: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Ok(Read::read_cfg(
-                buf,
-                &(RangeCfg::from(0..=max_players.get() as usize), (), ()),
-            )?)),
-            1 => Ok(Self::TooManyReveals),
-            x => Err(commonware_codec::Error::InvalidEnum(x)),
         }
     }
 }
@@ -1290,7 +1120,8 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: DealerResult<P>,
@@ -1299,30 +1130,6 @@ pub struct DealerLog<V: Variant, P: PublicKey> {
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
     fn eq(&self, other: &Self) -> bool {
         self.pub_msg == other.pub_msg && self.results == other.results
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for DealerLog<V, P> {
-    fn encode_size(&self) -> usize {
-        self.pub_msg.encode_size() + self.results.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.pub_msg.write(buf);
-        self.results.write(buf);
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            pub_msg: Read::read_cfg(buf, cfg)?,
-            results: Read::read_cfg(buf, cfg)?,
-        })
     }
 }
 
@@ -1422,10 +1229,13 @@ where
 ///
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write, EncodeSize, Read)]
+#[read_cfg(NonZeroU32)]
 pub struct SignedDealerLog<V: Variant, S: Signer> {
+    #[codec(cfg = &())]
     dealer: S::PublicKey,
     log: DealerLog<V, S::PublicKey>,
+    #[codec(cfg = &())]
     sig: S::Signature,
 }
 
@@ -1460,32 +1270,6 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
             return None;
         }
         Some((self.dealer, self.log))
-    }
-}
-
-impl<V: Variant, S: Signer> EncodeSize for SignedDealerLog<V, S> {
-    fn encode_size(&self) -> usize {
-        self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
-    }
-}
-
-impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.dealer.write(buf);
-        self.log.write(buf);
-        self.sig.write(buf);
-    }
-}
-
-impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            dealer: ReadExt::read(buf)?,
-            log: Read::read_cfg(buf, cfg)?,
-            sig: ReadExt::read(buf)?,
-        })
     }
 }
 
@@ -2245,6 +2029,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_codec::ReadExt;
     use commonware_utils::{Faults, N3f1, TestRng, TryCollect};
     use core::num::NonZeroI32;
     use std::collections::BTreeSet;

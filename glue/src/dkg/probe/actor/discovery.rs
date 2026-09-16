@@ -603,7 +603,7 @@ fn authenticate_boundary_block<V: Variant>(
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
-    use bytes::{BufMut, Bytes};
+    use bytes::Bytes;
     use commonware_codec::{EncodeSize, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
@@ -632,7 +632,7 @@ mod tests {
     type CodingContext =
         commonware_consensus::simplex::types::Context<TestCommitment, mocks::TestPublicKey>;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, Read, EncodeSize)]
     struct CodingBlock(mocks::MockBlock<mocks::TestDigest, CodingContext>);
 
     impl CodingBlock {
@@ -645,26 +645,6 @@ mod tests {
             Self(mocks::MockBlock::new::<H>(
                 context, parent, height, timestamp,
             ))
-        }
-    }
-
-    impl Write for CodingBlock {
-        fn write(&self, writer: &mut impl BufMut) {
-            self.0.write(writer);
-        }
-    }
-
-    impl Read for CodingBlock {
-        type Cfg = ();
-
-        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-            mocks::MockBlock::read_cfg(reader, cfg).map(Self)
-        }
-    }
-
-    impl EncodeSize for CodingBlock {
-        fn encode_size(&self) -> usize {
-            self.0.encode_size()
         }
     }
 

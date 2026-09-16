@@ -2,10 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
-    Write,
-};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_collector::{
     Handler, Monitor, Originator,
     p2p::{Config, Engine, Mailbox},
@@ -16,9 +13,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{
-    BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
-};
+use commonware_runtime::{Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
     TestRng,
     channel::{mpsc, oneshot},
@@ -42,32 +37,13 @@ enum RecipientsType {
     Some,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 struct FuzzRequest {
+    #[codec(cfg = &())]
     id: u64,
+    #[codec(cfg = &(*cfg, ()))]
     data: Vec<u8>,
-}
-
-impl Write for FuzzRequest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.id.write(buf);
-        self.data.write(buf);
-    }
-}
-
-impl Read for FuzzRequest {
-    type Cfg = RangeCfg<usize>;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let id = u64::read(buf)?;
-        let data = Vec::read_range(buf, *cfg)?;
-        Ok(Self { id, data })
-    }
-}
-
-impl EncodeSize for FuzzRequest {
-    fn encode_size(&self) -> usize {
-        u64::SIZE + self.data.encode_size()
-    }
 }
 
 impl Committable for FuzzRequest {
@@ -84,32 +60,13 @@ impl Digestible for FuzzRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary, Write, EncodeSize, Read)]
+#[read_cfg(RangeCfg<usize>)]
 struct FuzzResponse {
+    #[codec(cfg = &())]
     id: u64,
+    #[codec(cfg = &(*cfg, ()))]
     result: Vec<u8>,
-}
-
-impl Write for FuzzResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.id.write(buf);
-        self.result.write(buf);
-    }
-}
-
-impl Read for FuzzResponse {
-    type Cfg = RangeCfg<usize>;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let id = u64::read(buf)?;
-        let result = Vec::read_range(buf, *cfg)?;
-        Ok(Self { id, result })
-    }
-}
-
-impl EncodeSize for FuzzResponse {
-    fn encode_size(&self) -> usize {
-        u64::SIZE + self.result.encode_size()
-    }
 }
 
 impl Committable for FuzzResponse {

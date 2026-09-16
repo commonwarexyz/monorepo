@@ -1,41 +1,24 @@
 use crate::Channel;
-use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
-use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
+use commonware_runtime::{BufferPool, IoBuf, IoBufs};
 use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write, Read)]
+#[read_cfg(RangeCfg<usize>)]
 pub struct Data {
     /// A unique identifier for the channel the message is sent on.
     ///
     /// This is used to route the message to the correct handler.
+    #[codec(
+        encode_with = { UInt(*value).write(buf); },
+        encode_size = UInt(*value).encode_size(),
+        read_with = { Ok(UInt::read(buf)?.into()) }
+    )]
     pub channel: u64,
 
     /// The payload of the message.
     pub message: IoBuf,
-}
-
-impl EncodeSize for Data {
-    fn encode_size(&self) -> usize {
-        UInt(self.channel).encode_size() + self.message.encode_size()
-    }
-}
-
-impl Write for Data {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.channel).write(buf);
-        self.message.write(buf);
-    }
-}
-
-impl Read for Data {
-    type Cfg = RangeCfg<usize>;
-
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
-        let channel = UInt::read(buf)?.into();
-        let message = IoBuf::read_cfg(buf, range)?;
-        Ok(Self { channel, message })
-    }
 }
 
 /// Prefix byte identifying a data frame on the wire.

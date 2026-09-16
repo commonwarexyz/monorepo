@@ -36,7 +36,8 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 ///
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, EncodeSize)]
+#[encode_size(self.len().encode_size() + (self.chunks.len() * N))]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. Within each byte, lowest order bits are
     /// treated as coming before higher order bits in the bit ordering.
@@ -902,13 +903,6 @@ impl<const N: usize> Read for BitMap<N> {
         }
 
         Ok(result)
-    }
-}
-
-impl<const N: usize> EncodeSize for BitMap<N> {
-    fn encode_size(&self) -> usize {
-        // Size of length prefix + all chunks
-        self.len().encode_size() + (self.chunks.len() * N)
     }
 }
 

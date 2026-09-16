@@ -1,5 +1,4 @@
 use crate::Secret;
-use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -21,9 +20,11 @@ pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Write)]
 pub struct PrivateKeyInner {
+    #[codec(encode_with = { value.expose(|raw| raw.write(buf)); })]
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
+    #[codec(encode_with = {})]
     pub(crate) key: Secret<SigningKey>,
 }
 
@@ -53,12 +54,6 @@ impl PrivateKeyInner {
 impl Random for PrivateKeyInner {
     fn random(mut rng: impl CryptoRng) -> Self {
         Self::new(SigningKey::generate_from_rng(&mut rng))
-    }
-}
-
-impl Write for PrivateKeyInner {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|raw| raw.write(buf));
     }
 }
 
@@ -105,9 +100,10 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray, Write)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
+    #[codec(encode_with = {})]
     pub key: VerifyingKey,
 }
 
@@ -128,12 +124,6 @@ impl PublicKeyInner {
     pub fn to_uncompressed(&self) -> [u8; 65] {
         let encoded = self.key.to_sec1_point(false);
         encoded.as_bytes().try_into().unwrap()
-    }
-}
-
-impl Write for PublicKeyInner {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
     }
 }
 
@@ -216,24 +206,6 @@ macro_rules! impl_private_key_wrapper {
             }
         }
 
-        impl commonware_codec::Write for $name {
-            fn write(&self, buf: &mut impl bytes::BufMut) {
-                self.0.write(buf);
-            }
-        }
-
-        impl commonware_codec::Read for $name {
-            type Cfg = ();
-
-            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
-                PrivateKeyInner::read_cfg(buf, cfg).map(Self)
-            }
-        }
-
-        impl commonware_codec::FixedSize for $name {
-            const SIZE: usize = PRIVATE_KEY_LENGTH;
-        }
-
         impl From<p256::ecdsa::SigningKey> for $name {
             fn from(signer: p256::ecdsa::SigningKey) -> Self {
                 Self(PrivateKeyInner::from(signer))
@@ -258,24 +230,6 @@ macro_rules! impl_private_key_wrapper {
 macro_rules! impl_public_key_wrapper {
     ($name:ident) => {
         impl crate::PublicKey for $name {}
-
-        impl commonware_codec::Write for $name {
-            fn write(&self, buf: &mut impl bytes::BufMut) {
-                self.0.write(buf);
-            }
-        }
-
-        impl commonware_codec::Read for $name {
-            type Cfg = ();
-
-            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
-                PublicKeyInner::read_cfg(buf, cfg).map(Self)
-            }
-        }
-
-        impl commonware_codec::FixedSize for $name {
-            const SIZE: usize = PUBLIC_KEY_LENGTH;
-        }
 
         impl commonware_utils::Span for $name {}
 

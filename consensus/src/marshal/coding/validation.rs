@@ -145,8 +145,7 @@ mod tests {
         marshal::coding::types::coding_config_for_participants,
         types::{Epoch, FixedEpocher, Height, Round, View},
     };
-    use bytes::BufMut;
-    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_codec::{EncodeSize, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
@@ -155,52 +154,13 @@ mod tests {
 
     type TestCommitment = Commitment<TestBlock, ReedSolomon<Sha256>, Sha256>;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
     struct TestBlock {
         digest: Sha256Digest,
         parent: Sha256Digest,
         height: Height,
         context: Round,
         commitment: TestCommitment,
-    }
-
-    impl Write for TestBlock {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.digest.write(buf);
-            self.parent.write(buf);
-            self.height.write(buf);
-            self.context.write(buf);
-            self.commitment.write(buf);
-        }
-    }
-
-    impl EncodeSize for TestBlock {
-        fn encode_size(&self) -> usize {
-            self.digest.encode_size()
-                + self.parent.encode_size()
-                + self.height.encode_size()
-                + self.context.encode_size()
-                + self.commitment.encode_size()
-        }
-    }
-
-    impl Read for TestBlock {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-            let digest = Sha256Digest::read(buf)?;
-            let parent = Sha256Digest::read(buf)?;
-            let height = Height::read(buf)?;
-            let context = Round::read(buf)?;
-            let commitment = TestCommitment::read(buf)?;
-            Ok(Self {
-                digest,
-                parent,
-                height,
-                context,
-                commitment,
-            })
-        }
     }
 
     impl Digestible for TestBlock {

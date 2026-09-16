@@ -19,7 +19,7 @@ pub enum Error {
 ///
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize)]
 pub struct Prunable<const N: usize> {
     /// The underlying BitMap storing the actual bits.
     bitmap: BitMap<N>,
@@ -29,6 +29,7 @@ pub struct Prunable<const N: usize> {
     /// # Invariant
     ///
     /// Must satisfy: `pruned_chunks as u64 * CHUNK_SIZE_BITS + bitmap.len() <= u64::MAX`
+    #[codec(encode_size = (*value as u64).encode_size())]
     pruned_chunks: usize,
 }
 
@@ -441,12 +442,6 @@ impl<const N: usize> Read for Prunable<N> {
             bitmap,
             pruned_chunks,
         })
-    }
-}
-
-impl<const N: usize> EncodeSize for Prunable<N> {
-    fn encode_size(&self) -> usize {
-        (self.pruned_chunks as u64).encode_size() + self.bitmap.encode_size()
     }
 }
 

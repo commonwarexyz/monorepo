@@ -47,8 +47,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
@@ -301,16 +300,21 @@ impl<D: Digest> Tree<D> {
 /// The proof contains the leaf count and sibling digests required for verification.
 /// The leaf count is incorporated into the root hash during finalization, so
 /// modifying it will cause verification to fail (preventing malleability attacks).
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The read configuration limits the number of items being proven; at most
+/// `max_items * MAX_LEVELS` sibling digests are accepted.
+#[derive(Clone, Debug, Eq, PartialEq, Write, EncodeSize, Read)]
+#[read_cfg(usize)]
 pub struct Proof<D: Digest> {
     /// The number of leaves in the tree.
     ///
     /// This value is incorporated into the root hash during finalization,
     /// so modifying it will cause verification to fail (prevents malleability).
+    #[codec(cfg = &())]
     pub leaf_count: u32,
 
     /// The deduplicated sibling digests required to verify all elements,
     /// ordered by their position in the tree (level-major, then index within level).
+    #[codec(cfg = &((..=cfg.saturating_mul(MAX_LEVELS)).into(), ()))]
     pub siblings: Vec<D>,
 }
 
@@ -320,39 +324,6 @@ impl<D: Digest> Default for Proof<D> {
             leaf_count: 0,
             siblings: Vec::new(),
         }
-    }
-}
-
-impl<D: Digest> Write for Proof<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.leaf_count.write(writer);
-        self.siblings.write(writer);
-    }
-}
-
-impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of items being proven.
-    ///
-    /// The upper bound on sibling hashes is derived as `max_items * MAX_LEVELS`.
-    type Cfg = usize;
-
-    fn read_cfg(
-        reader: &mut impl Buf,
-        max_items: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let leaf_count = u32::read(reader)?;
-        let max_siblings = max_items.saturating_mul(MAX_LEVELS);
-        let siblings = Vec::<D>::read_range(reader, ..=max_siblings)?;
-        Ok(Self {
-            leaf_count,
-            siblings,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for Proof<D> {
-    fn encode_size(&self) -> usize {
-        self.leaf_count.encode_size() + self.siblings.encode_size()
     }
 }
 

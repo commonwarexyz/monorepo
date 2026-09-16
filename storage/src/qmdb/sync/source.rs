@@ -4,10 +4,8 @@ use crate::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{self, operation::Floored, sync::ServeError},
 };
-use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
-    Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -19,6 +17,7 @@ use commonware_utils::{
 use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 
 /// A request for operations from a source's log.
+#[derive(Write, EncodeSize)]
 pub enum Request<F: Family> {
     /// Fetch the operations in `[start, start + max_ops)`.
     Operations {
@@ -143,41 +142,6 @@ impl<F: Family> std::fmt::Display for Request<F> {
     }
 }
 
-impl<F: Family> Write for Request<F> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Operations {
-                size,
-                start,
-                max_ops,
-            } => {
-                0u8.write(buf);
-                size.write(buf);
-                start.write(buf);
-                max_ops.write(buf);
-            }
-            Self::Boundary { size, start } => {
-                1u8.write(buf);
-                size.write(buf);
-                start.write(buf);
-            }
-        }
-    }
-}
-
-impl<F: Family> EncodeSize for Request<F> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Operations {
-                size,
-                start,
-                max_ops,
-            } => size.encode_size() + start.encode_size() + max_ops.encode_size(),
-            Self::Boundary { size, start } => size.encode_size() + start.encode_size(),
-        }
-    }
-}
-
 impl<F: Family> Read for Request<F> {
     type Cfg = ();
 
@@ -227,21 +191,29 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
 /// In a [`Response::Boundary`], the proof, the operation, and the pinned nodes are verified as a
 /// unit. The pinned nodes are only believable because the proof folds them into digests it already
 /// commits to.
+#[derive(Write, EncodeSize, Read)]
+#[read_cfg((usize, Op::Cfg))]
+#[codec(read_bounds(Op: Read))]
 pub enum Response<F: Family, Op, D: Digest> {
     /// Answer to a [`Request::Operations`].
     Operations {
         /// Proof authenticating `operations` against the root at the requested size.
+        #[codec(cfg = &cfg.0.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT))]
         proof: Proof<F, D>,
         /// The operations that were fetched.
+        #[codec(cfg = &((..=cfg.0).into(), cfg.1.clone()))]
         operations: Vec<Op>,
     },
     /// Answer to a [`Request::Boundary`].
     Boundary {
         /// Proof authenticating `op` against the root at the requested size.
+        #[codec(cfg = &MAX_PROOF_DIGESTS_PER_ELEMENT)]
         proof: Proof<F, D>,
         /// The operation at the requested boundary.
+        #[codec(cfg = &cfg.1)]
         op: Op,
         /// Pinned nodes at the requested location.
+        #[codec(cfg = &((..=MAX_PINNED_NODES).into(), ()))]
         pinned_nodes: Vec<D>,
     },
 }
@@ -293,70 +265,6 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for Response<F, 
                 .field("op", op)
                 .field("pinned_nodes", pinned_nodes)
                 .finish(),
-        }
-    }
-}
-
-impl<F: Family, Op: Write, D: Digest> Write for Response<F, Op, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Operations { proof, operations } => {
-                0u8.write(buf);
-                proof.write(buf);
-                operations.write(buf);
-            }
-            Self::Boundary {
-                proof,
-                op,
-                pinned_nodes,
-            } => {
-                1u8.write(buf);
-                proof.write(buf);
-                op.write(buf);
-                pinned_nodes.write(buf);
-            }
-        }
-    }
-}
-
-impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Operations { proof, operations } => {
-                proof.encode_size() + operations.encode_size()
-            }
-            Self::Boundary {
-                proof,
-                op,
-                pinned_nodes,
-            } => proof.encode_size() + op.encode_size() + pinned_nodes.encode_size(),
-        }
-    }
-}
-
-impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
-    /// The `max_ops` the request asked for, and the configuration for decoding one operation.
-    type Cfg = (usize, Op::Cfg);
-
-    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => {
-                let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
-                let proof = Proof::<F, D>::read_cfg(buf, &max_proof_digests)?;
-                let operations = Vec::<Op>::read_cfg(buf, &((..=*max_ops).into(), op_cfg.clone()))?;
-                Ok(Self::Operations { proof, operations })
-            }
-            1 => {
-                let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
-                let op = Op::read_cfg(buf, op_cfg)?;
-                let pinned_nodes = Vec::<D>::read_range(buf, ..=MAX_PINNED_NODES)?;
-                Ok(Self::Boundary {
-                    proof,
-                    op,
-                    pinned_nodes,
-                })
-            }
-            d => Err(CodecError::InvalidEnum(d)),
         }
     }
 }

@@ -1,6 +1,5 @@
 use super::{Family, location::Location};
-use bytes::BufMut;
-use commonware_codec::{Buf, ReadExt, varint::UInt};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write, varint::UInt};
 use core::{
     fmt,
     marker::PhantomData,
@@ -16,7 +15,31 @@ use core::{
 /// index, valid indices are `0..MAX - 1`. As a node count or total size, the maximum is `MAX`
 /// itself. Use [Position::is_valid_size] to ask whether a count is a structurally valid size for
 /// the specific Merkle family.
-pub struct Position<F: Family>(u64, PhantomData<F>);
+#[derive(Write, EncodeSize, Read)]
+pub struct Position<F: Family>(
+    #[codec(
+        encode_with = { UInt(*value).write(buf) },
+        encode_size = UInt(*value).encode_size(),
+        read_with = {
+            let value = UInt::<u64>::read(buf)?.into();
+            if value <= F::MAX_NODES.as_u64() {
+                Ok(value)
+            } else {
+                Err(commonware_codec::Error::Invalid(
+                    "Position",
+                    "value exceeds MAX_NODES",
+                ))
+            }
+        }
+    )]
+    u64,
+    #[codec(
+        encode_with = {},
+        encode_size = 0,
+        read_with = { Ok(core::marker::PhantomData) }
+    )]
+    PhantomData<F>,
+);
 
 #[cfg(feature = "arbitrary")]
 impl<F: Family> arbitrary::Arbitrary<'_> for Position<F> {
@@ -320,38 +343,6 @@ impl<F: Family> SubAssign<u64> for Position<F> {
     }
 }
 
-// --- Codec implementations using varint encoding ---
-
-impl<F: Family> commonware_codec::Write for Position<F> {
-    #[inline]
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
-
-impl<F: Family> commonware_codec::EncodeSize for Position<F> {
-    #[inline]
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
-    }
-}
-
-impl<F: Family> commonware_codec::Read for Position<F> {
-    type Cfg = ();
-
-    #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let pos = Self::new(UInt::read(buf)?.into());
-        if pos.is_valid() {
-            Ok(pos)
-        } else {
-            Err(commonware_codec::Error::Invalid(
-                "Position",
-                "value exceeds MAX_NODES",
-            ))
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::{Location as GenericLocation, Position as GenericPosition};

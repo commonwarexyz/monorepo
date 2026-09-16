@@ -5,12 +5,12 @@ use crate::journal::{
     contiguous::{fixed, variable},
     segmented::{fixed as segmented_fixed, glob, oversized, variable as segmented_variable},
 };
-use commonware_codec::{Buf, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, RangeCfg, Read, Write};
 use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Supervisor as _,
+    BufferPooler, Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
 };
@@ -258,38 +258,11 @@ impl StorageWorkload for SegmentedVariableWorkload {
 }
 
 /// Test entry for SegmentedOversized conformance.
-#[derive(Clone)]
+#[derive(Clone, Write, Read, FixedSize)]
 struct TestEntry {
     id: u64,
     value_offset: u64,
     value_size: u32,
-}
-
-impl Write for TestEntry {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.id.write(buf);
-        self.value_offset.write(buf);
-        self.value_size.write(buf);
-    }
-}
-
-impl Read for TestEntry {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let id = u64::read(buf)?;
-        let value_offset = u64::read(buf)?;
-        let value_size = u32::read(buf)?;
-        Ok(Self {
-            id,
-            value_offset,
-            value_size,
-        })
-    }
-}
-
-impl FixedSize for TestEntry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl Record for TestEntry {

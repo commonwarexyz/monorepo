@@ -25,8 +25,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy};
+use commonware_codec::{EncodeSize, Error, Read, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant,
@@ -352,43 +351,25 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
 /// Certificate formed by an aggregated BLS12-381 signature plus the signers that
 /// contributed to it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, EncodeSize, Read)]
+#[read_cfg(usize)]
+#[codec(read_bounds())]
 pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
-    pub signers: Signers,
-    /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: Lazy<aggregate::Signature<V>>,
-}
-
-impl<V: Variant> Write for Certificate<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signers.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<V: Variant> EncodeSize for Certificate<V> {
-    fn encode_size(&self) -> usize {
-        self.signers.encode_size() + self.signature.encode_size()
-    }
-}
-
-impl<V: Variant> Read for Certificate<V> {
-    type Cfg = usize;
-
-    fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
-        let signers = Signers::read_cfg(reader, participants)?;
+    #[codec(read_with = {
+        let signers = Signers::read_cfg(buf, cfg)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
                 "cryptography::bls12381::certificate::multisig::Certificate",
                 "Certificate contains no signers",
             ));
         }
-
-        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
-
-        Ok(Self { signers, signature })
-    }
+        Ok(signers)
+    })]
+    pub signers: Signers,
+    /// Aggregated BLS signature covering all signatures in this certificate.
+    #[codec(cfg = &())]
+    pub signature: Lazy<aggregate::Signature<V>>,
 }
 
 #[cfg(feature = "arbitrary")]

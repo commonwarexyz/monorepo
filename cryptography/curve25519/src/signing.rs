@@ -30,7 +30,6 @@ use ::core::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -48,16 +47,19 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 /// Secret material is zeroized when the key is dropped.
 /// Serialization writes the raw secret seed, so callers must protect the encoded bytes as
 /// secret key material.
-#[derive(ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop, Write)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
     seed: [u8; 32],
     /// The private prefix we use to derive a deterministic nonce for each message.
+    #[codec(encode_with = {})]
     prefix: [u8; 32],
     /// The pruned secret scalar, reduced modulo the basepoint order.
+    #[codec(encode_with = {})]
     scalar: Scalar,
     /// The verifying key derived from the secret scalar.
     #[zeroize(skip)]
+    #[codec(encode_with = {})]
     verifying_key: VerifyingKey,
 }
 
@@ -176,12 +178,6 @@ impl Random for SigningKey {
     }
 }
 
-impl Write for SigningKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.seed.write(buf);
-    }
-}
-
 impl FixedSize for SigningKey {
     const SIZE: usize = 32;
 }
@@ -209,14 +205,21 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
 /// Encodings that do not represent a curve point can never verify a signature.
 /// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
 /// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
-#[derive(Clone)]
+#[derive(Clone, Read, Write)]
 pub struct VerifyingKey {
     /// The encoded point.
     ///
     /// When deserializing, we just have the bytes, deferring parsing of them until
     /// signature verification, so that we can more efficiently parse them in batch.
+    #[codec(
+        encode_with = { value.as_bytes().write(buf); },
+        read_with = {
+            Ok(core::VerifyingKeyBytes::new(<[u8; 32]>::read_cfg(buf, cfg)?))
+        }
+    )]
     bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
+    #[codec(encode_with = {}, read_with = { Ok(None) })]
     point: Option<G>,
 }
 
@@ -264,25 +267,8 @@ impl AsRef<[u8]> for VerifyingKey {
     }
 }
 
-impl Write for VerifyingKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.as_bytes().write(buf);
-    }
-}
-
 impl FixedSize for VerifyingKey {
     const SIZE: usize = 32;
-}
-
-impl Read for VerifyingKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
-            point: None,
-        })
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -357,7 +343,7 @@ impl VerifyingKey {
 ///
 /// Decoding accepts any 64 bytes. Point decoding and scalar canonicality are checked during
 /// verification. Equality, ordering, and hashing compare the original encoding.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, FixedSize, Read, Write)]
 pub struct Signature {
     bytes: [u8; 64],
 }
@@ -377,26 +363,6 @@ impl Display for Signature {
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
-    }
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.write(buf);
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = 64;
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
-        })
     }
 }
 

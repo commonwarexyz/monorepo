@@ -6,12 +6,10 @@ cfg_if::cfg_if! {
     }
 }
 use super::common::{
-    CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
-    impl_private_key_wrapper, impl_public_key_wrapper,
+    CURVE_NAME, PrivateKeyInner, PublicKeyInner, impl_private_key_wrapper, impl_public_key_wrapper,
 };
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
-use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{Array, Span, union_unique};
@@ -27,7 +25,7 @@ use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Write, Read, FixedSize)]
 pub struct PrivateKey(PrivateKeyInner);
 
 impl_private_key_wrapper!(PrivateKey);
@@ -64,7 +62,7 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray, Write, Read, FixedSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -101,19 +99,14 @@ impl PublicKey {
 }
 
 /// Secp256r1 Signature.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, PartialEq, FixedArray, Write)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
+    #[codec(encode_with = {})]
     signature: p256::ecdsa::Signature,
 }
 
 impl crate::Signature for Signature {}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
 
 impl Read for Signature {
     type Cfg = ();
@@ -216,7 +209,10 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Signer as _, Verifier as _, secp256r1::common::tests::*};
+    use crate::{
+        Signer as _, Verifier as _,
+        secp256r1::common::{PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, tests::*},
+    };
     use commonware_codec::{Copying, DecodeExt, Encode};
     use p256::elliptic_curve::scalar::IsHigh;
     use rstest::rstest;

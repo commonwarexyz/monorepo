@@ -13,7 +13,6 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_utils::{
     Participant,
@@ -267,7 +266,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, EncodeSize)]
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
@@ -286,19 +285,6 @@ impl arbitrary::Arbitrary<'_> for Certificate {
             signers,
             signatures,
         })
-    }
-}
-
-impl Write for Certificate {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signers.write(writer);
-        self.signatures.write(writer);
-    }
-}
-
-impl EncodeSize for Certificate {
-    fn encode_size(&self) -> usize {
-        self.signers.encode_size() + self.signatures.encode_size()
     }
 }
 

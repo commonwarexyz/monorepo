@@ -23,8 +23,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::BufMut;
-use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
+use commonware_codec::{FixedSize, Read, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Faults, Participant,
@@ -444,7 +443,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 }
 
 /// Certificate for BLS12-381 threshold signatures.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Write, Read)]
+#[encode_size(Self::SIZE)]
 pub struct Certificate<V: Variant> {
     /// The recovered threshold signature.
     pub signature: Lazy<V::Signature>,
@@ -466,21 +466,6 @@ impl<V: Variant> Certificate<V> {
     #[allow(clippy::missing_const_for_fn)]
     pub fn get(&self) -> Option<&V::Signature> {
         self.signature.get()
-    }
-}
-
-impl<V: Variant> Write for Certificate<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signature.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Certificate<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let signature = Lazy::<V::Signature>::read(reader)?;
-        Ok(Self { signature })
     }
 }
 

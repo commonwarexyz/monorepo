@@ -31,7 +31,8 @@ pub const BITS: u32 = WORDS as u32 * 64;
 ///
 /// Uses 8KB of memory regardless of cardinality. Efficient for dense data
 /// (cardinality > 4096).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, EncodeSize)]
+#[encode_size(ENCODED_BYTES)]
 pub struct Bitmap {
     /// Bit array storing 65536 bits.
     words: [u64; WORDS],
@@ -465,12 +466,6 @@ impl Write for Bitmap {
             dst.copy_from_slice(&word.to_be_bytes());
         }
         buf.put_slice(&bytes);
-    }
-}
-
-impl EncodeSize for Bitmap {
-    fn encode_size(&self) -> usize {
-        ENCODED_BYTES
     }
 }
 

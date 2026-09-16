@@ -1,7 +1,6 @@
 //! Compact encoding for ordered, extensible mode values.
 
 use crate::{Buf, EncodeSize, Error, Read, ReadExt, Write};
-use bytes::BufMut;
 
 // The high bit is packet framing rather than mode value data.
 const CONTINUATION_BIT: u8 = 1 << 7;
@@ -157,9 +156,12 @@ macro_rules! modes {
 ///
 /// let _ = Modes::<0>::new([]);
 /// ```
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Write, EncodeSize)]
+#[encode_size(self.len)]
 pub struct Modes<const N: usize> {
+    #[codec(encode_with = { buf.put_slice(&value[..self.len]); })]
     encoded: [u8; N],
+    #[codec(encode_with = {})]
     len: usize,
 }
 
@@ -183,18 +185,6 @@ impl<const N: usize> Modes<N> {
             encoded,
             len: last + 1,
         })
-    }
-}
-
-impl<const N: usize> Write for Modes<N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.encoded[..self.len]);
-    }
-}
-
-impl<const N: usize> EncodeSize for Modes<N> {
-    fn encode_size(&self) -> usize {
-        self.len
     }
 }
 

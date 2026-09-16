@@ -5,10 +5,8 @@ use crate::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
 };
-use commonware_codec::{
-    Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
-};
-use commonware_cryptography::{Crc32, Hasher, crc32};
+use commonware_codec::{Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_cryptography::{Crc32, Hasher};
 use commonware_runtime::{
     Blob, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
@@ -27,7 +25,7 @@ const RESIZE_THRESHOLD: u64 = 50;
 ///
 /// This can be used to directly access the data for a given
 /// key-value pair (rather than walking the journal chain).
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, FixedArray)]
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, FixedArray, Write, Read, FixedSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);
@@ -56,24 +54,6 @@ impl Cursor {
     fn size(&self) -> u32 {
         u32::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
     }
-}
-
-impl Read for Cursor {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
-    }
-}
-
-impl CodecWrite for Cursor {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl FixedSize for Cursor {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl Span for Cursor {}
@@ -121,7 +101,7 @@ impl std::fmt::Display for Cursor {
 ///
 /// This can be used to restore the [Freezer] to a consistent
 /// state after shutdown.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Write, Read, FixedSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Checkpoint {
     /// The epoch of the last committed operation.
@@ -151,40 +131,11 @@ impl Checkpoint {
     }
 }
 
-impl Read for Checkpoint {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let epoch = u64::read(buf)?;
-        let section = u64::read(buf)?;
-        let oversized_size = u64::read(buf)?;
-        let table_size = u32::read(buf)?;
-        Ok(Self {
-            epoch,
-            section,
-            oversized_size,
-            table_size,
-        })
-    }
-}
-
-impl CodecWrite for Checkpoint {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.section.write(buf);
-        self.oversized_size.write(buf);
-        self.table_size.write(buf);
-    }
-}
-
-impl FixedSize for Checkpoint {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
-}
-
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
 /// Single table entry stored in the table blob.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Write, Read, FixedSize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 struct Entry {
     // Epoch in which this slot was written
@@ -253,39 +204,6 @@ impl Entry {
     }
 }
 
-impl FixedSize for Entry {
-    const SIZE: usize = u64::SIZE + u64::SIZE + u64::SIZE + u8::SIZE + crc32::Digest::SIZE;
-}
-
-impl CodecWrite for Entry {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.section.write(buf);
-        self.position.write(buf);
-        self.added.write(buf);
-        self.crc.write(buf);
-    }
-}
-
-impl Read for Entry {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let epoch = u64::read(buf)?;
-        let section = u64::read(buf)?;
-        let position = u64::read(buf)?;
-        let added = u8::read(buf)?;
-        let crc = u32::read(buf)?;
-
-        Ok(Self {
-            epoch,
-            section,
-            position,
-            added,
-            crc,
-        })
-    }
-}
-
 /// Sentinel value indicating no next entry in the collision chain.
 const NO_NEXT_SECTION: u64 = u64::MAX;
 const NO_NEXT_POSITION: u64 = u64::MAX;
@@ -297,7 +215,7 @@ const NO_NEXT_POSITION: u64 = u64::MAX;
 ///
 /// The `next` pointer uses sentinel values (u64::MAX, u64::MAX) to indicate
 /// "no next entry" instead of Option, ensuring fixed-size encoding.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Write, Read, FixedSize)]
 struct Record<K: Array> {
     /// The key for this entry.
     key: K,
@@ -332,40 +250,6 @@ impl<K: Array> Record<K> {
             Some((self.next_section, self.next_position))
         }
     }
-}
-
-impl<K: Array> CodecWrite for Record<K> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.key.write(buf);
-        self.next_section.write(buf);
-        self.next_position.write(buf);
-        self.value_offset.write(buf);
-        self.value_size.write(buf);
-    }
-}
-
-impl<K: Array> Read for Record<K> {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let key = K::read(buf)?;
-        let next_section = u64::read(buf)?;
-        let next_position = u64::read(buf)?;
-        let value_offset = u64::read(buf)?;
-        let value_size = u32::read(buf)?;
-
-        Ok(Self {
-            key,
-            next_section,
-            next_position,
-            value_offset,
-            value_size,
-        })
-    }
-}
-
-impl<K: Array> FixedSize for Record<K> {
-    // key + next_section + next_position + value_offset + value_size
-    const SIZE: usize = K::SIZE + u64::SIZE + u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl<K: Array> OversizedRecord for Record<K> {

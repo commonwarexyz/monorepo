@@ -1,4 +1,7 @@
-//! Augment the development of [`commonware-codec`](https://docs.rs/commonware-codec) with procedural macros.
+//! Procedural macro implementations for `commonware-codec`.
+//!
+//! Import these derives from `commonware_codec`, which documents their attributes
+//! and provides compiling examples.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -18,7 +21,7 @@ use syn::{
 /// `commonware-codec` itself.
 fn codec_path() -> proc_macro2::TokenStream {
     match crate_name("commonware-codec") {
-        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Itself) => quote!(::commonware_codec),
         Ok(FoundCrate::Name(name)) => {
             let ident = Ident::new(&name, Span::call_site());
             quote!(::#ident)
@@ -36,25 +39,9 @@ fn where_clause_with(generics: &Generics, predicate: WherePredicate) -> WhereCla
         .expect("make_where_clause should create a where clause")
 }
 
-/// Derives byte-array conversion impls for a fixed-size type.
+/// Derives `commonware_codec::FixedArray`.
 ///
-/// Generates:
-/// - `TryFrom<[u8; SIZE]>` and `TryFrom<&[u8; SIZE]>`, or `From<[u8; SIZE]>` and
-///   `From<&[u8; SIZE]>` when `infallible` (decoding via `DecodeFixed`).
-/// - `TryFrom<&[u8]>`
-/// - `From<T> for [u8; SIZE]`
-/// - `From<&T> for [u8; SIZE]`
-///
-/// The type must implement `Read<Cfg = ()>` and `EncodeFixed`.
-///
-/// # Attributes
-///
-/// - `#[fixed_array(infallible)]`: emit `From<[u8; SIZE]>` instead of `TryFrom<[u8; SIZE]>`.
-///   The type's decode must never fail (any `[u8; SIZE]` is a valid value), since the generated
-///   `From` unwraps the `DecodeFixed` result.
-/// - `#[fixed_array(bytes([u8; N]))]`: required for any generic type (lifetime, type, or
-///   const). Stable Rust forbids a generic parameter inside the const expression
-///   `[u8; <T as FixedSize>::SIZE]`, so the byte array type must be named.
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.FixedArray.html) for examples and attributes.
 #[proc_macro_derive(FixedArray, attributes(fixed_array))]
 pub fn fixed_array(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -170,4 +157,94 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+mod derive;
+
+/// Derives `commonware_codec::Write`.
+///
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.Write.html) for examples and attributes.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[proc_macro_derive(Write, attributes(codec, read_cfg, encode_size))]
+pub fn write(input: TokenStream) -> TokenStream {
+    derive_tokens(input, derive::Kind::Write)
+}
+
+/// Derives `commonware_codec::Read`.
+///
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.Read.html) for examples and attributes.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[proc_macro_derive(Read, attributes(codec, read_cfg, encode_size))]
+pub fn read(input: TokenStream) -> TokenStream {
+    derive_tokens(input, derive::Kind::Read)
+}
+
+/// Derives `commonware_codec::EncodeSize`.
+///
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.EncodeSize.html) for examples and attributes.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[proc_macro_derive(EncodeSize, attributes(codec, read_cfg, encode_size))]
+pub fn encode_size(input: TokenStream) -> TokenStream {
+    derive_tokens(input, derive::Kind::EncodeSize)
+}
+
+/// Derives `commonware_codec::FixedSize`.
+///
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.FixedSize.html) for examples and attributes.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[proc_macro_derive(FixedSize, attributes(codec, read_cfg, encode_size))]
+pub fn fixed_size(input: TokenStream) -> TokenStream {
+    derive_tokens(input, derive::Kind::FixedSize)
+}
+
+/// Derives `commonware_codec::Encode`.
+///
+/// See the [codec documentation](https://docs.rs/commonware-codec/latest/commonware_codec/derive.Encode.html) for examples and attributes.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[proc_macro_derive(Encode, attributes(codec, read_cfg, encode_size))]
+pub fn encode(input: TokenStream) -> TokenStream {
+    derive_tokens(input, derive::Kind::Encode)
+}
+
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+fn derive_tokens(input: TokenStream, kind: derive::Kind) -> TokenStream {
+    derive::expand(parse_macro_input!(input as DeriveInput), kind)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }

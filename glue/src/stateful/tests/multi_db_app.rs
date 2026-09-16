@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -42,7 +42,7 @@ use commonware_cryptography::{
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     Context as StorageContext,
@@ -128,7 +128,7 @@ pub(super) fn qmdb_config(
 }
 
 /// A block carrying state from two QMDB databases.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Write, EncodeSize, Read)]
 pub(crate) struct Block {
     pub(super) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(super) parent: sha256::Digest,
@@ -137,46 +137,6 @@ pub(crate) struct Block {
     pub(super) range_a: NonEmptyRange<Location>,
     pub(super) root_b: sha256::Digest,
     pub(super) range_b: NonEmptyRange<Location>,
-}
-
-impl Write for Block {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.root_a.write(buf);
-        self.range_a.write(buf);
-        self.root_b.write(buf);
-        self.range_b.write(buf);
-    }
-}
-
-impl EncodeSize for Block {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.root_a.encode_size()
-            + self.range_a.encode_size()
-            + self.root_b.encode_size()
-            + self.range_b.encode_size()
-    }
-}
-
-impl Read for Block {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            root_a: sha256::Digest::read(buf)?,
-            range_a: NonEmptyRange::read(buf)?,
-            root_b: sha256::Digest::read(buf)?,
-            range_b: NonEmptyRange::read(buf)?,
-        })
-    }
 }
 
 impl Digestible for Block {
