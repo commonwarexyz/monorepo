@@ -1185,28 +1185,53 @@ pub trait Backing<E: Context>: Mutable {
         max_size: Option<u64>,
     ) -> impl core::future::Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
+    /// Open recovery storage reset to an empty journal at `size`, discarding stored items
+    /// without opening their blobs. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    fn clear(
+        context: E,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl core::future::Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Whether stored items may serve a sync range starting at `position`, judged from blob
+    /// names and the checkpoint without opening any data: the retained start is at or below
+    /// `position` and either some stored item may lie at or above it or the journal is empty
+    /// exactly at `position`. A staged clear counts as an empty journal at its target.
+    fn covers(
+        context: &E,
+        cfg: &Self::Config,
+        position: u64,
+    ) -> impl core::future::Future<Output = Result<bool, JournalError>> + Send;
+
     /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
+    type Config: Clone + Send + Sync;
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
-/// The context factory preserves the caller's metric prefix if recovery needs a second open.
 pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
-    context: impl Fn() -> E + Send,
+    context: E,
     cfg: J::Config,
     range: Range<u64>,
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
-    let pending = match J::recover(context(), cfg.clone(), Some(range.end)).await {
-        Ok(pending) => pending,
-        // A bound below the retained start cannot select a prefix. Open the reset owner.
-        Err(JournalError::ItemPruned(_)) => J::recover(context(), cfg, None).await?,
-        Err(err) => return Err(err),
-    };
+
+    // Stored items that cannot serve `range.start` are discarded without being opened.
+    if !J::covers(&context, &cfg, range.start).await? {
+        return J::clear(context, cfg, range.start)
+            .await?
+            .finish(range.start)
+            .await;
+    }
+    let pending = J::recover(context, cfg, Some(range.end)).await?;
     let bounds = pending.bounds();
     if bounds == (0..0) && range.start == 0 {
         return pending.finish(0).await;
     }
+
+    // `covers` judges the stored end only by the newest blob's capacity. When `range.start`
+    // falls inside that blob, or a gap in the stored blobs ends the recovered range early, the
+    // recovered size decides, so a journal ending at or below `range.start` is reset here after
+    // the open.
     if bounds.start > range.start || bounds.end <= range.start {
         return pending.reset(range.start).await?.finish(range.start).await;
     }
