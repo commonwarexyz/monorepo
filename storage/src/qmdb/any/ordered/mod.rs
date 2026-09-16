@@ -11,6 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::future::Future;
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -104,6 +105,56 @@ where
             .expect("a span that includes any given key should always exist if db is non-empty");
 
         Ok(Some(span))
+    }
+
+    /// Returns the smallest active key strictly greater than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the first key.
+    pub async fn get_next_key(&self, key: &K) -> Result<Option<K>, crate::qmdb::Error<F>> {
+        let Some((_, data)) = self.get_span(key).await? else {
+            return Ok(None);
+        };
+        Ok((data.next_key > *key).then_some(data.next_key))
+    }
+
+    /// Returns the largest active key strictly less than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the last key.
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get_prev_key(
+        &self,
+        key: &K,
+    ) -> impl Future<Output = Result<Option<K>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            if let Some(prev) = self
+                .find_prev_key(self.snapshot.get(key).copied(), key)
+                .await?
+            {
+                return Ok(Some(prev));
+            }
+
+            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+                return Ok(None);
+            };
+            self.find_prev_key(iter.copied(), key).await
+        }
+    }
+
+    /// Finds the largest key strictly less than `key` among conflicting snapshot entries.
+    async fn find_prev_key(
+        &self,
+        locs: impl Iterator<Item = Location<F>> + Send,
+        key: &K,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>> {
+        for loc in locs {
+            let data = Self::get_update_op(&self.log, loc).await?;
+            // Require a smaller key whose successor reaches the query or wraps around.
+            if data.key < *key && (data.next_key >= *key || data.next_key <= data.key) {
+                return Ok(Some(data.key));
+            }
+        }
+        Ok(None)
     }
 
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
@@ -313,14 +364,27 @@ mod test {
     use super::*;
     use crate::{
         merkle::Family,
-        qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
+        mmb, mmr,
+        qmdb::{
+            any::{
+                self,
+                traits::{DbAny, UnmerkleizedBatch as _},
+            },
+            current,
+        },
+        translator::OneCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
-    use commonware_runtime::{Supervisor as _, deterministic::Context};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        Runner as _, Supervisor as _,
+        deterministic::{self, Context},
+    };
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
-    use rand::RngExt as _;
+    use rand::{RngExt as _, seq::SliceRandom as _};
+    use std::{collections::BTreeSet, ops::Bound};
 
     #[test]
     fn span_contains_boundaries() {
@@ -670,5 +734,277 @@ mod test {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
+    }
+
+    fn neighbor_key(prefix: [u8; 3]) -> Digest {
+        let mut bytes = [0; 32];
+        bytes[..3].copy_from_slice(&prefix);
+        bytes.into()
+    }
+
+    fn require_send<F: Future + Send>(future: F) -> F {
+        future
+    }
+
+    macro_rules! test_neighbors {
+        ($name:ident, $db:ty, $config:path) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    type TestDb = $db;
+
+                    async fn assert_neighbors(
+                        db: &TestDb,
+                        active: &BTreeSet<Digest>,
+                        queries: &[Digest],
+                        phase: usize,
+                        stage: &str,
+                    ) {
+                        for query in queries {
+                            let prev = active.range(..*query).next_back().copied();
+                            let next = active
+                                .range((Bound::Excluded(*query), Bound::Unbounded))
+                                .next()
+                                .copied();
+                            assert_eq!(
+                                require_send(db.get_prev_key(query)).await.unwrap(),
+                                prev,
+                                "phase {phase}, {stage}, query {query:?}"
+                            );
+                            assert_eq!(
+                                require_send(db.get_next_key(query)).await.unwrap(),
+                                next,
+                                "phase {phase}, {stage}, query {query:?}"
+                            );
+                        }
+                    }
+
+                    let config = $config("neighbors", &context);
+                    let mut db = TestDb::init(context.child("db"), config.clone())
+                        .await
+                        .unwrap();
+                    let mut active = BTreeSet::new();
+                    let value = Sha256::fill(1);
+                    // Exercise conflicts within a translated key, neighboring index entries, and
+                    // distinct partitions. Insert out of order so conflict order cannot be assumed.
+                    let a = neighbor_key([0x20, 0x20, 0x20]);
+                    let b = neighbor_key([0x20, 0x20, 0x60]);
+                    let c = neighbor_key([0x20, 0x60, 0x20]);
+                    let d = neighbor_key([0x60, 0x20, 0x20]);
+                    let min = Sha256::fill(0);
+                    let max = Sha256::fill(0xFF);
+                    let mut phases = vec![
+                        vec![],
+                        vec![(b, Some(value))],
+                        vec![(d, Some(value)), (a, Some(value)), (c, Some(value))],
+                        vec![(b, None), (a, Some(Sha256::fill(2))), (d, None)],
+                        vec![(min, Some(value)), (max, Some(value)), (b, Some(value))],
+                        vec![(a, None), (b, None), (c, None), (min, None), (max, None)],
+                    ];
+                    let mut queries = vec![max];
+                    for i in [0, 0x20, 0x40, 0x60, 0xFF] {
+                        for j in [0, 0x20, 0x40, 0x60, 0xFF] {
+                            for k in [0, 0x20, 0x40, 0x60, 0xFF] {
+                                queries.push(neighbor_key([i, j, k]));
+                            }
+                        }
+                    }
+
+                    // Flood one translated key and force partitioned indices past their spill
+                    // threshold. Leave gaps between keys and scramble the conflict iteration order.
+                    let mut rng = test_rng();
+                    let mut crowded: Vec<Digest> = (0u16..520)
+                        .map(|i| {
+                            let mut bytes = [0x20; 32];
+                            bytes[30..].copy_from_slice(&(i * 2).to_be_bytes());
+                            bytes.into()
+                        })
+                        .collect();
+                    let probes: Vec<_> = crowded
+                        .iter()
+                        .step_by(31)
+                        .chain(crowded.last())
+                        .copied()
+                        .collect();
+                    for key in &probes {
+                        queries.push(*key);
+                        let mut gap: [u8; 32] = (*key).into();
+                        gap[31] += 1;
+                        queries.push(gap.into());
+                    }
+                    crowded.shuffle(&mut rng);
+                    phases.push(crowded.iter().map(|&key| (key, Some(value))).collect());
+                    phases.push(probes.iter().map(|&key| (key, None)).collect());
+                    phases.push(
+                        probes
+                            .iter()
+                            .rev()
+                            .map(|&key| (key, Some(Sha256::fill(2))))
+                            .collect(),
+                    );
+                    phases.push(crowded.into_iter().map(|key| (key, None)).collect());
+
+                    assert_neighbors(&db, &active, &queries, 0, "fresh").await;
+                    for (phase, writes) in phases.into_iter().enumerate() {
+                        let mut batch = db.new_batch();
+                        for (key, value) in writes {
+                            if value.is_some() {
+                                active.insert(key);
+                            } else {
+                                active.remove(&key);
+                            }
+                            batch = batch.write(key, value);
+                        }
+                        let batch = batch.merkleize(&db, None).await.unwrap();
+                        (db, _) = db.apply_batch(batch).await.unwrap();
+
+                        assert_neighbors(&db, &active, &queries, phase, "applied").await;
+                        db = db.commit().await.unwrap();
+                        assert_neighbors(&db, &active, &queries, phase, "committed").await;
+                        let boundary = db.sync_boundary();
+                        db = db.prune(boundary).await.unwrap();
+                        assert_neighbors(&db, &active, &queries, phase, "pruned").await;
+                        drop(db);
+                        db = TestDb::init(context.child("reopen"), config.clone())
+                            .await
+                            .unwrap();
+                        assert_neighbors(&db, &active, &queries, phase, "reopened").await;
+                    }
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    test_neighbors!(
+        test_neighbors_any_fixed,
+        any::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, Sequential>,
+        any::test::fixed_db_config::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_any_variable,
+        any::ordered::variable::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, Sequential>,
+        any::test::variable_db_config::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_any_fixed_partitioned,
+        any::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
+        any::test::fixed_db_config_partitioned::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_any_variable_partitioned,
+        any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
+        any::test::variable_db_config_partitioned::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_current_fixed,
+        current::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
+        current::tests::fixed_config::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_current_variable,
+        current::ordered::variable::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
+        current::tests::variable_config::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_current_fixed_partitioned,
+        current::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
+        current::tests::fixed_config_partitioned::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_current_variable_partitioned,
+        current::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
+        current::tests::variable_config_partitioned::<OneCap>
+    );
+    test_neighbors!(
+        test_neighbors_current_variable_partitioned_mmb_p2,
+        current::ordered::variable::partitioned::Db<mmb::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 2, 32, Sequential>,
+        current::tests::variable_config_partitioned::<OneCap>
+    );
+
+    #[test]
+    fn test_neighbors_variable_length_keys() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = current::ordered::variable::partitioned::Db<
+                mmb::Family,
+                deterministic::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                OneCap,
+                2,
+                32,
+                Sequential,
+            >;
+            let config =
+                current::tests::variable_config_partitioned::<OneCap>("neighbors", &context);
+            let config = current::VariableConfig {
+                journal_config: crate::journal::contiguous::variable::Config {
+                    codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
+                    partition: config.journal_config.partition,
+                    items_per_section: config.journal_config.items_per_section,
+                    compression: config.journal_config.compression,
+                    page_cache: config.journal_config.page_cache,
+                    write_buffer: config.journal_config.write_buffer,
+                    replay_buffer: config.journal_config.replay_buffer,
+                },
+                merkle_config: config.merkle_config,
+                grafted_metadata_partition: config.grafted_metadata_partition,
+                translator: config.translator,
+                init_cache: config.init_cache,
+                init_buffer: config.init_buffer,
+                init_concurrency: config.init_concurrency,
+            };
+            let mut db = TestDb::init(context.child("db"), config.clone())
+                .await
+                .unwrap();
+
+            // Include empty keys, keys shorter than the partition prefix, and keys differing only
+            // by trailing zeros. All must retain their full lexicographic ordering after translation.
+            let mut queries = vec![vec![]];
+            for a in [0, 1, 255] {
+                queries.push(vec![a]);
+                for b in [0, 1, 255] {
+                    queries.push(vec![a, b]);
+                    for c in [0, 1, 255] {
+                        queries.push(vec![a, b, c]);
+                    }
+                }
+            }
+            let active: BTreeSet<_> = queries.iter().step_by(2).cloned().collect();
+            let mut batch = db.new_batch();
+            for (i, key) in active.iter().rev().enumerate() {
+                batch = batch.write(key.clone(), Some(vec![1; i * 100]));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            for recovered in [false, true] {
+                if recovered {
+                    db = db.commit().await.unwrap();
+                    drop(db);
+                    db = TestDb::init(context.child("reopen"), config.clone())
+                        .await
+                        .unwrap();
+                }
+                for query in &queries {
+                    let prev = active.range(..query.clone()).next_back().cloned();
+                    let next = active
+                        .range((Bound::Excluded(query.clone()), Bound::Unbounded))
+                        .next()
+                        .cloned();
+                    assert_eq!(
+                        require_send(db.get_prev_key(query)).await.unwrap(),
+                        prev,
+                        "{query:?}"
+                    );
+                    assert_eq!(
+                        require_send(db.get_next_key(query)).await.unwrap(),
+                        next,
+                        "{query:?}"
+                    );
+                }
+            }
+            db.destroy().await.unwrap();
+        });
     }
 }
