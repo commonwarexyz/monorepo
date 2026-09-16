@@ -114,8 +114,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         deferred: Mutex<Vec<Receiver>>,
         /// Pause the next prepared deferred sync before it flushes the file.
         before_sync: Mutex<Option<MpscReceiver<()>>>,
-        /// Pause Tokio's blocking namespace task after sending or dropping its result and releasing
-        /// its namespace lock and directory hold, before the task returns.
+        /// Pause namespace dispatch after sending or dropping its result and releasing its lock
+        /// and directory hold, before returning to the caller.
         after_dispatch: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Fail header creation with `Error::Closed` after writing this many bytes, capped at the
         /// header length, and before syncing the file.
@@ -123,8 +123,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Report the current generation strong count after a liveness check, then pause while
         /// the registry remains locked.
         after_identity_observation: Mutex<Option<(MpscSender<usize>, MpscReceiver<()>)>>,
-        /// Pause a Tokio reopen after predecessor work completes but before reading the captured
-        /// file's length.
+        /// Pause reading the captured file's length on reopen, after predecessor work completes.
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Pause the next attachment before it locks the registry, letting predecessor work retire.
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
