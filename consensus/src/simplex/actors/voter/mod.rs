@@ -4313,8 +4313,9 @@ mod tests {
                 assert!(handle.await.is_err());
                 assert!(certified.send(true).is_err(), "old certification request must be dropped");
                 let restarted_responses: HandoffProposeResponses = Arc::new(Mutex::new(Vec::new()));
+                let restarted_context = context.child("restarted");
                 let (mut restarted, mut restarted_batcher, _, restarted_relay, _) = setup_voter(
-                    &context.child("restarted"), &oracle, &participants, &schemes, elector,
+                    &restarted_context, &oracle, &participants, &schemes, elector,
                     VoterOptions {
                         local_index,
                         leader_timeout: Duration::from_secs(10),
