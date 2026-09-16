@@ -684,7 +684,7 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
             context.child("preflight_withdrawal_validator"),
             crate::protocol::state_config(
                 "preflight-withdrawal-validator",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 protocol.strategy().clone(),
             ),
             &state.history,
@@ -811,7 +811,7 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 context.child("queued_zero_validator"),
                 crate::protocol::state_config(
                     "queued-zero-validator",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     protocol.strategy().clone(),
                 ),
                 &genesis.history,

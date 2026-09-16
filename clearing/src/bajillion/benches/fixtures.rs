@@ -288,7 +288,7 @@ pub(crate) fn state_config(context: &impl BufferPooler, prefix: &str) -> qmdb::C
 }
 
 pub(crate) fn accounts(live: usize) -> Vec<(VerifyingKey, SigningKey)> {
-    workload::keys(live).accounts
+    workload::keys(live, strategy()).accounts
 }
 
 pub(crate) fn logs_config(context: &impl BufferPooler, prefix: &str) -> logs::Config<Rayon> {

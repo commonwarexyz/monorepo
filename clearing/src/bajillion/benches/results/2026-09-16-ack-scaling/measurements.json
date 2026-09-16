@@ -1,0 +1,150 @@
+{
+  "activity": [
+    {
+      "absent_adjacent": {
+        "bytes": 464,
+        "mean_ns": 1326.0723333333333
+      },
+      "fixture": "standalone_rows_without_payment_entries",
+      "h": 0,
+      "n": 1000000,
+      "present": {
+        "bytes": 381,
+        "mean_ns": 1202.4966666666667
+      },
+      "r": 1000
+    },
+    {
+      "absent_adjacent": {
+        "bytes": 592,
+        "mean_ns": 1705.5363333333335
+      },
+      "fixture": "standalone_rows_without_payment_entries",
+      "h": 0,
+      "n": 1000000,
+      "present": {
+        "bytes": 509,
+        "mean_ns": 1562.2116666666668
+      },
+      "r": 10000
+    },
+    {
+      "absent_adjacent": {
+        "bytes": 689,
+        "mean_ns": 2013.817
+      },
+      "fixture": "standalone_rows_without_payment_entries",
+      "h": 0,
+      "n": 1000000,
+      "present": {
+        "bytes": 606,
+        "mean_ns": 1871.5653333333332
+      },
+      "r": 100000
+    },
+    {
+      "absent_adjacent": {
+        "bytes": 785,
+        "mean_ns": 2239.9633333333336
+      },
+      "fixture": "standalone_rows_without_payment_entries",
+      "h": 0,
+      "n": 1000000,
+      "present": {
+        "bytes": 702,
+        "mean_ns": 2142.812
+      },
+      "r": 1000000
+    }
+  ],
+  "environment": {
+    "filesystem": "ext4",
+    "instance_type": "c8a.4xlarge",
+    "log_operations_per_section": 33554432,
+    "merkle_nodes_per_blob": 67108864,
+    "page_cache_bytes": 1073741824,
+    "payout_private_write_buffer_bytes": 8388608,
+    "physical_page_bytes": 4096,
+    "ram_gib": 32,
+    "replay_buffer_bytes": 8388608,
+    "runtime_workers": 2,
+    "state_activity_write_buffer_bytes": 268435456,
+    "storage_gib": 160,
+    "storage_iops": 6000,
+    "storage_medium": "gp3",
+    "storage_throughput_mib_s": 250,
+    "strategy_workers": 16,
+    "vcpus": 16
+  },
+  "sampling": {
+    "ack_samples": 3,
+    "ack_warmup": 0,
+    "activity_iterations_per_sample": 1000,
+    "activity_samples": 3,
+    "prepare_samples": 3,
+    "prepare_warmup": 0
+  },
+  "schema_version": 1,
+  "workloads": [
+    {
+      "a": 1000,
+      "b": 512,
+      "challenge": {
+        "ack_fork_bytes": 417,
+        "debit_omitted_bytes": 657,
+        "debit_present_bytes": 622,
+        "entry_bytes": 673
+      },
+      "dealing_bytes": 102795,
+      "durable_vote_mean_ns": 14014318.666666666,
+      "k": 1,
+      "n": 1000000,
+      "prepare_mean_ns": 1151877.3333333333
+    },
+    {
+      "a": 10000,
+      "b": 512,
+      "challenge": {
+        "ack_fork_bytes": 417,
+        "debit_omitted_bytes": 786,
+        "debit_present_bytes": 751,
+        "entry_bytes": 802
+      },
+      "dealing_bytes": 1027491,
+      "durable_vote_mean_ns": 70710294.66666667,
+      "k": 1,
+      "n": 1000000,
+      "prepare_mean_ns": 12120703.333333334
+    },
+    {
+      "a": 100000,
+      "b": 512,
+      "challenge": {
+        "ack_fork_bytes": 417,
+        "debit_omitted_bytes": 882,
+        "debit_present_bytes": 847,
+        "entry_bytes": 898
+      },
+      "dealing_bytes": 10274964,
+      "durable_vote_mean_ns": 581484219.6666666,
+      "k": 1,
+      "n": 1000000,
+      "prepare_mean_ns": 140155164.66666666
+    },
+    {
+      "a": 1000000,
+      "b": 512,
+      "challenge": {
+        "ack_fork_bytes": 417,
+        "debit_omitted_bytes": 978,
+        "debit_present_bytes": 943,
+        "entry_bytes": 994
+      },
+      "dealing_bytes": 102750004,
+      "durable_vote_mean_ns": 6138513064.333333,
+      "k": 1,
+      "n": 1000000,
+      "prepare_mean_ns": 1595702055.0
+    }
+  ]
+}

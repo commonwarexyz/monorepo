@@ -1674,7 +1674,7 @@ mod tests {
                     context.child("generated_genesis"),
                     crate::protocol::state_config(
                         &format!("verify-{}", deployment.digest()),
-                        &context,
+                        crate::protocol::fixture_page_cache(&context),
                         commonware_parallel::Sequential,
                     ),
                     crate::protocol::genesis_balances(&deployment).unwrap(),

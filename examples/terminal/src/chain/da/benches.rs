@@ -9,7 +9,7 @@ use super::{
     persist_candidate, recover, replica_config,
 };
 use crate::{
-    chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
+    chain::validator::{IO_BUFFER_SIZE, PAGE_SIZE, PHYSICAL_PAGE_SIZE},
     protocol::{
         Account, Deployment, MAX_ACCEPTED_PAYMENTS, MAX_ACTIVITY_ROWS, MAX_GENESIS_ACCOUNTS,
         MAX_WITHDRAWALS, STATE_MERKLE_NODES_PER_BLOB, STATE_OPERATIONS_PER_BLOB, genesis_balances,
@@ -37,7 +37,9 @@ use commonware_cryptography::{
 };
 use commonware_cryptography_curve25519::signing::BatchVerifier;
 use commonware_parallel::Rayon;
-use commonware_runtime::{Runner as _, Spawner, Strategizer as _, Supervisor as _, tokio};
+use commonware_runtime::{
+    Runner as _, Spawner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, tokio,
+};
 use commonware_storage::Context as StorageContext;
 use rand_core::CryptoRng;
 use serde_json::{Value, json};
@@ -51,6 +53,15 @@ use std::{
 const PREFIX: &str = "ack-benchmark";
 const VALIDATORS: usize = 100;
 
+// Each state/activity writer holds a complete million-payer batch before its durable commit.
+const BATCH_WRITE_BUFFER: NonZeroUsize = NonZeroUsize::new(256 * 1024 * 1024).unwrap();
+
+// Physical-page budget for the million-account durability workloads.
+const PAGE_CACHE_BUDGET: usize = 1 << 30;
+const PAGE_CACHE_SIZE: NonZeroUsize =
+    NonZeroUsize::new(PAGE_CACHE_BUDGET / PHYSICAL_PAGE_SIZE as usize)
+        .expect("page-cache budget must hold at least one complete page");
+
 #[derive(Parser)]
 struct Options {
     /// Parent directory on the filesystem being measured.
@@ -58,7 +69,7 @@ struct Options {
     storage_directory: PathBuf,
     #[arg(long, default_value_t = 1_000_000)]
     accounts: usize,
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = 1_000)]
     senders: usize,
     #[arg(long, default_value_t = 512)]
     recipients: usize,
@@ -69,9 +80,9 @@ struct Options {
     /// Prior activity rows, produced by durable self-transfer epochs.
     #[arg(long, default_value_t = 0)]
     history: usize,
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 3)]
     samples: usize,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     warmup: usize,
     #[arg(long, default_value_t = 2)]
     runtime_workers: usize,
@@ -141,15 +152,20 @@ impl Options {
 }
 
 fn config(
-    context: &impl commonware_runtime::BufferPooler,
     deployment: &Digest,
+    page_cache: CacheRef,
     strategy: Rayon,
 ) -> commonware_clearing::bajillion::replica::Config<Rayon> {
-    replica_config(
+    let mut config = replica_config(
         &format!("{PREFIX}-replica-{deployment}-0"),
-        context,
+        page_cache,
         strategy,
-    )
+    );
+    config.state.journal_config.write_buffer = BATCH_WRITE_BUFFER;
+    config.state.merkle_config.write_buffer = BATCH_WRITE_BUFFER;
+    config.logs.activity.log.write_buffer = BATCH_WRITE_BUFFER;
+    config.logs.activity.merkle.write_buffer = BATCH_WRITE_BUFFER;
+    config
 }
 
 fn signer() -> bls12381::Scheme {
@@ -287,15 +303,21 @@ async fn measure<E: StorageContext + Spawner + CryptoRng>(
 async fn open<E: StorageContext + Spawner>(
     context: E,
     deployment: Deployment,
+    page_cache: CacheRef,
     strategy: Rayon,
 ) -> Result<Lane<E>> {
     let state = NativeReplica::open(
         context.child("replica"),
-        config(&context, deployment.digest(), strategy),
+        config(deployment.digest(), page_cache.clone(), strategy),
     )
     .await?;
-    let checkpoint =
-        checkpoint::Store::open(context.child("checkpoint"), PREFIX, deployment.digest()).await?;
+    let checkpoint = checkpoint::Store::open(
+        context.child("checkpoint"),
+        PREFIX,
+        deployment.digest(),
+        page_cache,
+    )
+    .await?;
     Ok(Lane {
         deployment,
         pending: None,
@@ -310,8 +332,9 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
     options: &Options,
     scheme: &bls12381::Scheme,
     strategy: &Rayon,
+    page_cache: CacheRef,
 ) -> Result<(Deployment, workload::Built)> {
-    let keys = workload::keys(options.accounts);
+    let keys = workload::keys(options.accounts, strategy);
     let digest = Sha256::hash(&[b"clearing-benchmark-deployment"]);
     let accounts = keys
         .accounts
@@ -329,7 +352,7 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
     );
     let replica = NativeReplica::open(
         context.child("bootstrap"),
-        config(&context, &digest, strategy.clone()),
+        config(&digest, page_cache.clone(), strategy.clone()),
     )
     .await?;
     let (state, logs) = replica.into_parts();
@@ -353,8 +376,13 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
         replica.state().root(),
         replica.state().head().operations(),
     )?;
-    let checkpoint =
-        checkpoint::Store::open(context.child("bootstrap_checkpoint"), PREFIX, &digest).await?;
+    let checkpoint = checkpoint::Store::open(
+        context.child("bootstrap_checkpoint"),
+        PREFIX,
+        &digest,
+        page_cache,
+    )
+    .await?;
     let (replica, checkpoint) = recover(replica, &deployment, checkpoint).await?;
     let mut lane = Lane {
         deployment: deployment.clone(),
@@ -509,7 +537,9 @@ pub fn run() -> Result<()> {
     let (setup_options, setup_scheme) = (&options, &scheme);
     let (deployment, input, strategy) = options.runner(&baseline).start(|context| async move {
         let strategy = context.strategy(setup_options.workers);
-        let (deployment, input) = setup(context, setup_options, setup_scheme, &strategy).await?;
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let (deployment, input) =
+            setup(context, setup_options, setup_scheme, &strategy, page_cache).await?;
         Ok::<_, anyhow::Error>((deployment, input, strategy))
     })?;
     let name = format!("{}::durable_ack/{}", module_path!(), options.case().label());
@@ -532,8 +562,15 @@ pub fn run() -> Result<()> {
             "payout_output_bytes": input.payout_output_bytes,
             "withdrawal_output_bytes": input.withdrawal_output_bytes,
             "encoded_dealing_bytes": input.encoded_dealing.len(), "encoded_dealing_sha256": Sha256::hash(&[&input.encoded_dealing]).to_string(),
-            "native_page_bytes": PAGE_SIZE.get(), "native_cache_pages_per_instance": PAGE_CACHE_SIZE.get(),
-            "native_cache_instances": 3, "log_and_private_io_buffer_bytes": IO_BUFFER_SIZE.get(),
+            "native_logical_page_bytes": PAGE_SIZE.get(),
+            "native_physical_page_bytes": PHYSICAL_PAGE_SIZE,
+            "native_cache_pages": PAGE_CACHE_SIZE.get(),
+            "native_cache_budget_bytes": PAGE_CACHE_BUDGET,
+            "native_cache_instances": 1,
+            "native_state_activity_write_buffer_bytes": BATCH_WRITE_BUFFER.get(),
+            "native_payout_write_buffer_bytes": IO_BUFFER_SIZE.get(),
+            "native_replay_buffer_bytes": IO_BUFFER_SIZE.get(),
+            "native_private_write_replay_buffer_bytes": IO_BUFFER_SIZE.get(),
             "native_log_operations_per_section": LOG_OPERATIONS_PER_SECTION.get(),
             "native_log_merkle_nodes_per_blob": LOG_MERKLE_NODES_PER_BLOB.get(),
             "native_state_operations_per_blob": STATE_OPERATIONS_PER_BLOB.get(),
@@ -549,9 +586,11 @@ pub fn run() -> Result<()> {
         copy_directory(&baseline, &directory)?;
         fs::File::open(&root)?.sync_all()?;
         let sample = options.runner(&directory).start(|mut context| async move {
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut lane = open(
                 context.child("sample"),
                 deployment.clone(),
+                page_cache.clone(),
                 strategy.clone(),
             )
             .await?;
@@ -563,6 +602,7 @@ pub fn run() -> Result<()> {
             let lane = open(
                 context.child("reopen"),
                 deployment.clone(),
+                page_cache,
                 strategy.clone(),
             )
             .await?;

@@ -754,9 +754,14 @@ impl Deployment {
     where
         E: commonware_storage::Context + commonware_runtime::Spawner,
     {
+        let page_cache = CacheRef::from_pooler(
+            &context,
+            crate::chain::validator::PAGE_SIZE,
+            TRANSIENT_PAGE_CACHE_SIZE,
+        );
         let config = state_config(
             &format!("setup-genesis-{}", self.digest),
-            &context,
+            page_cache,
             commonware_parallel::Sequential,
         );
         let state = State::<_, Sha256>::open(context, config).await?;
@@ -842,27 +847,36 @@ pub(crate) fn genesis_balances(
         .collect())
 }
 
-pub(crate) const STATE_OPERATIONS_PER_BLOB: NonZeroU64 = NZU64!(4096);
-pub(crate) const STATE_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(4096);
+// GiB-scale blobs amortize rollover. Small test blobs keep rollover and pruning reachable.
+pub(crate) const STATE_OPERATIONS_PER_BLOB: NonZeroU64 =
+    NZU64!(if cfg!(test) { 4_096 } else { 1 << 25 });
+pub(crate) const STATE_MERKLE_NODES_PER_BLOB: NonZeroU64 =
+    NZU64!(if cfg!(test) { 4_096 } else { 1 << 26 });
+const TRANSIENT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
+
+/// Production page geometry with bounded capacity for deterministic fixtures.
+#[cfg(test)]
+pub(crate) fn fixture_page_cache(pooler: &impl commonware_runtime::BufferPooler) -> CacheRef {
+    CacheRef::from_pooler(
+        pooler,
+        crate::chain::validator::PAGE_SIZE,
+        TRANSIENT_PAGE_CACHE_SIZE,
+    )
+}
 
 /// Partitions for the single account QMDB and its retained historical proofs.
 pub(crate) fn state_config<S: commonware_parallel::Strategy>(
     prefix: &str,
-    pooler: &impl commonware_runtime::BufferPooler,
+    page_cache: CacheRef,
     strategy: S,
 ) -> commonware_clearing::bajillion::qmdb::Config<S> {
-    let page_cache = CacheRef::from_pooler(
-        pooler,
-        crate::chain::validator::PAGE_SIZE,
-        crate::chain::validator::PAGE_CACHE_SIZE,
-    );
     FixedConfig {
         merkle_config: MerkleConfig {
             journal_partition: format!("{prefix}-merkle"),
             metadata_partition: format!("{prefix}-metadata"),
             items_per_blob: STATE_MERKLE_NODES_PER_BLOB,
-            write_buffer: NZUsize!(65536),
-            replay_buffer: NZUsize!(65536),
+            write_buffer: crate::chain::validator::IO_BUFFER_SIZE,
+            replay_buffer: crate::chain::validator::IO_BUFFER_SIZE,
             strategy,
             page_cache: page_cache.clone(),
         },
@@ -870,8 +884,8 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
             partition: format!("{prefix}-journal"),
             items_per_blob: STATE_OPERATIONS_PER_BLOB,
             page_cache,
-            write_buffer: NZUsize!(65536),
-            replay_buffer: NZUsize!(65536),
+            write_buffer: crate::chain::validator::IO_BUFFER_SIZE,
+            replay_buffer: crate::chain::validator::IO_BUFFER_SIZE,
         },
         grafted_metadata_partition: format!("{prefix}-grafted"),
         translator: EightCap,
@@ -892,7 +906,12 @@ where
     E: commonware_storage::Context + commonware_runtime::Spawner,
     S: commonware_parallel::Strategy,
 {
-    let config = crate::chain::da::replica_config(prefix, &context, strategy);
+    let page_cache = CacheRef::from_pooler(
+        &context,
+        crate::chain::validator::PAGE_SIZE,
+        TRANSIENT_PAGE_CACHE_SIZE,
+    );
+    let config = crate::chain::da::replica_config(prefix, page_cache, strategy);
     let state = State::init(context.child("state"), config.state, balances).await?;
     let logs = Logs::open(context.child("logs"), config.logs).await?;
     Ok(Replica::from_parts(state, logs))
@@ -965,9 +984,14 @@ pub(crate) async fn empty_genesis<E>(context: E) -> Result<ConfiguredGenesis<Dig
 where
     E: commonware_storage::Context + commonware_runtime::Spawner,
 {
+    let page_cache = CacheRef::from_pooler(
+        &context,
+        crate::chain::validator::PAGE_SIZE,
+        TRANSIENT_PAGE_CACHE_SIZE,
+    );
     let config = state_config(
         "setup-empty-genesis",
-        &context,
+        page_cache,
         commonware_parallel::Sequential,
     );
     let state = State::<_, Sha256>::open(context, config).await?;
@@ -1576,7 +1600,8 @@ async fn fixture_state<E>(
 where
     E: commonware_storage::Context + commonware_runtime::Spawner + commonware_runtime::BufferPooler,
 {
-    let config = crate::chain::da::replica_config("fixture-validator", &context, Sequential);
+    let page_cache = fixture_page_cache(&context);
+    let config = crate::chain::da::replica_config("fixture-validator", page_cache, Sequential);
     let logs = Logs::open(context.child("logs"), config.logs).await?;
     let mut state = State::<_, Sha256>::open(context.child("state"), config.state).await?;
     ensure!(

@@ -1027,7 +1027,7 @@ mod tests {
                 let deployment = deployments().remove(0);
                 let config = state_config(
                     "queue-withdrawal-codec",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     commonware_parallel::Sequential,
                 );
                 let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256>::init(

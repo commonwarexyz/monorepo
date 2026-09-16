@@ -353,9 +353,10 @@ async fn replay_state<S: Strategy>(
     config: commonware_clearing::bajillion::qmdb::Config<S>,
     history: &[(StateRoot<Digest>, Mutations, Option<SettlementResult>)],
 ) -> Replica<deterministic::Context, Sha256, Key, S> {
+    let page_cache = config.journal_config.page_cache.clone();
     let logs_config = da::replica_config(
         &config.journal_config.partition,
-        &context,
+        page_cache,
         config.merkle_config.strategy.clone(),
     )
     .logs;
@@ -426,7 +427,11 @@ impl TestState {
         context: deterministic::Context,
         history: Vec<(StateRoot<Digest>, Mutations, Option<SettlementResult>)>,
     ) -> Self {
-        let config = crate::protocol::state_config("checkpoint", &context, Sequential);
+        let config = crate::protocol::state_config(
+            "checkpoint",
+            crate::protocol::fixture_page_cache(&context),
+            Sequential,
+        );
         let state = replay_state(context, config, &history).await;
         let mut accounts = accounts();
         accounts.sort_by(|a, b| a.key.cmp(&b.key));
@@ -580,7 +585,11 @@ fn build_fixture(
     let owned = protocol.clone();
     let history = predecessor.history;
     let (prepared, successor) = deterministic::Runner::default().start(move |context| async move {
-        let config = crate::protocol::state_config("prepare", &context, owned.strategy().clone());
+        let config = crate::protocol::state_config(
+            "prepare",
+            crate::protocol::fixture_page_cache(&context),
+            owned.strategy().clone(),
+        );
         let state = replay_state(context.child("state"), config, &history).await;
         let prepared = owned.prepare(registration, Vec::new()).unwrap();
         let (result, candidate) = owned
@@ -629,7 +638,11 @@ fn close_fixture(
     let owned = protocol.clone();
     let history = predecessor.history;
     let result = deterministic::Runner::default().start(move |context| async move {
-        let config = crate::protocol::state_config("complete", &context, owned.strategy().clone());
+        let config = crate::protocol::state_config(
+            "complete",
+            crate::protocol::fixture_page_cache(&context),
+            owned.strategy().clone(),
+        );
         let state = replay_state(context, config, &history).await;
         owned
             .complete(build.prepared, &state, &mut TestRng::new(91))
@@ -1334,8 +1347,11 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
         .registration_at(0, deposits, withdrawals, 400, 11, 12)
         .unwrap();
     let result = deterministic::Runner::default().start(move |context| async move {
-        let config =
-            crate::protocol::state_config("withdrawal", &context, protocol.strategy().clone());
+        let config = crate::protocol::state_config(
+            "withdrawal",
+            crate::protocol::fixture_page_cache(&context),
+            protocol.strategy().clone(),
+        );
         let balances = replay_state(context, config, &state.history).await;
         let prepared = protocol.prepare(registration, Vec::new()).unwrap();
         let (result, candidate) = protocol
@@ -2311,8 +2327,11 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
             });
             let owned = protocol.clone();
             let result = deterministic::Runner::default().start(move |context| async move {
-                let config =
-                    crate::protocol::state_config("carrying", &context, owned.strategy().clone());
+                let config = crate::protocol::state_config(
+                    "carrying",
+                    crate::protocol::fixture_page_cache(&context),
+                    owned.strategy().clone(),
+                );
                 let balances = replay_state(context, config, &state.history).await;
                 let prepared = owned.prepare(registration, Vec::new()).unwrap();
                 owned
@@ -4202,7 +4221,7 @@ impl EngineDefinition for Distributed {
         } else {
             format!("validator-{index}")
         };
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = crate::protocol::fixture_page_cache(&context);
         let db_config = config(&partition_prefix, &context);
 
         let mut channels = channels.into_iter();
@@ -4517,6 +4536,7 @@ impl EngineDefinition for Distributed {
                 context.child("sealer"),
                 da::Config {
                     strategy: context.strategy(NZUsize!(1)),
+                    page_cache: page_cache.clone(),
                     retain_history: self.fetcher.is_some(),
                     scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
                         committee().unwrap(),
@@ -6027,7 +6047,7 @@ impl EngineDefinition for Walkthrough {
             || format!("validator-{index}"),
             |op| format!("operator-{op}"),
         );
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = crate::protocol::fixture_page_cache(&context);
         let db_config = config(&partition_prefix, &context);
 
         let mut channels = channels.into_iter();
@@ -6446,6 +6466,7 @@ impl EngineDefinition for Walkthrough {
             context.child("sealer"),
             da::Config {
                 strategy: context.strategy(NZUsize!(1)),
+                page_cache: page_cache.clone(),
                 retain_history: false,
                 scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
                     committee().unwrap(),

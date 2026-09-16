@@ -45,7 +45,9 @@ use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVe
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_parallel::Rayon;
-use commonware_runtime::{ContextCell, Handle, IoBuf, Metrics, Network, Spawner, spawn_cell};
+use commonware_runtime::{
+    ContextCell, Handle, IoBuf, Metrics, Network, Spawner, buffer::paged::CacheRef, spawn_cell,
+};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::channel::{fallible::OneshotExt as _, oneshot};
 pub(crate) use config::replica_config;
@@ -320,6 +322,7 @@ async fn discard<E: StorageContext + Spawner>(lane: &mut Lane<E>) -> Result<()> 
 
 pub(crate) struct Config<E: Spawner + StorageContext> {
     pub(crate) strategy: Rayon,
+    pub(crate) page_cache: CacheRef,
     pub(crate) scheme: bls12381::Scheme,
     pub(crate) registry: RegistryView,
     pub(crate) db: Database<E>,
@@ -398,6 +401,7 @@ impl Mailbox {
 pub(crate) struct Sealer<E: Spawner + Metrics + Network + StorageContext + CryptoRng> {
     context: ContextCell<E>,
     strategy: Rayon,
+    page_cache: CacheRef,
     scheme: bls12381::Scheme,
     registry: RegistryView,
     db: Database<E>,
@@ -415,6 +419,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             Self {
                 context: ContextCell::new(context),
                 strategy: config.strategy,
+                page_cache: config.page_cache,
                 scheme: config.scheme,
                 registry: config.registry,
                 db: config.db,
@@ -503,6 +508,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             self.context.child("checkpoint"),
             &self.partition,
             deployment.digest(),
+            self.page_cache.clone(),
         )
         .await?;
         if let Some(generation) = checkpoints.get().and_then(|manifest| manifest.garbage) {
@@ -545,7 +551,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
     ) -> commonware_clearing::bajillion::replica::Config<Rayon> {
         replica_config(
             &format!("{}-replica-{deployment}-{generation}", self.partition),
-            self.context.as_present(),
+            self.page_cache.clone(),
             self.strategy.clone(),
         )
     }

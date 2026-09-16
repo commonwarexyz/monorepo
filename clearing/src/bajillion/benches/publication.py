@@ -28,26 +28,23 @@ RESULTS_PREFIX = "clearing/src/bajillion/benches/results/"
 GIB = 1024**3
 
 DEFAULT_PROFILES = (
+    (1_000_000, 1_000, 512, 1),
+    (1_000_000, 10_000, 512, 1),
+    (1_000_000, 100_000, 512, 1),
     (1_000_000, 1_000_000, 512, 1),
-    (1_000_000, 1_024, 512, 1),
-    (1_000_000, 1_024, 512, 8),
-    (1_000_000, 1_024, 8, 8),
 )
 DEFAULT_ACTIVITY = (
-    (0, 0), (0, 1), (0, 2), (0, 128), (0, 1_024), (0, 1_000_000),
-    (1_024, 128), (65_536, 128), (1_000_000, 128),
+    (0, 1_000), (0, 10_000), (0, 100_000), (0, 1_000_000),
 )
 DEFAULT_PAYOUT = (
     (0, 0), (0, 1), (0, 1_024), (0, 500_000), (0, 1_000_000),
     (1_024, 1), (65_536, 1), (1_000_000, 1),
 )
 DEFAULT_ACK = (
+    (1_000_000, 1_000, 512, 1, 0, 0),
+    (1_000_000, 10_000, 512, 1, 0, 0),
+    (1_000_000, 100_000, 512, 1, 0, 0),
     (1_000_000, 1_000_000, 512, 1, 0, 0),
-    (1_000_000, 1_024, 512, 1, 0, 0),
-    (1_000_000, 1_024, 512, 8, 0, 0),
-    (1_000_000, 1_024, 8, 8, 0, 0),
-    (1_000_000, 128, 512, 1, 1_000_000, 0),
-    (1_000_000, 128, 512, 1, 0, 1_024),
 )
 
 
@@ -320,14 +317,19 @@ def validate_ack(path: Path, case: tuple[int, ...], samples: int, warmup: int,
         "runtime_workers": runtime_workers,
         "public_store_concurrency": 3,
         "private_control_after_public_commit": True,
-        "native_page_bytes": 1024,
-        "native_cache_pages_per_instance": 16,
-        "native_cache_instances": 3,
-        "log_and_private_io_buffer_bytes": 2048,
-        "native_log_operations_per_section": 128,
-        "native_log_merkle_nodes_per_blob": 1024,
-        "native_state_operations_per_blob": 4096,
-        "native_state_merkle_nodes_per_blob": 4096,
+        "native_logical_page_bytes": 4084,
+        "native_physical_page_bytes": 4096,
+        "native_cache_pages": 262144,
+        "native_cache_budget_bytes": 1073741824,
+        "native_cache_instances": 1,
+        "native_state_activity_write_buffer_bytes": 268435456,
+        "native_payout_write_buffer_bytes": 8388608,
+        "native_replay_buffer_bytes": 8388608,
+        "native_private_write_replay_buffer_bytes": 8388608,
+        "native_log_operations_per_section": 33554432,
+        "native_log_merkle_nodes_per_blob": 67108864,
+        "native_state_operations_per_blob": 33554432,
+        "native_state_merkle_nodes_per_blob": 67108864,
     }
     if any(meta.get(key) != value for key, value in required.items()):
         raise RuntimeError("ACK metadata contract mismatch")
@@ -383,7 +385,97 @@ def mean_per_iteration(times: list[float], iterations: list[float]) -> float:
     )
 
 
-def aggregate_checks(output: Path) -> dict[str, str]:
+def validate_raw_samples(
+    path: Path,
+    expected_kind: str,
+    expected_samples: int,
+    expected_boundary: str,
+    expected_dimensions: dict[str, int] | None = None,
+    expected_names: set[str] | None = None,
+) -> dict[str, list[dict[str, object]]]:
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    metadata = [record for record in records if record.get("record") == "raw_metadata"]
+    observed = [record for record in records if record.get("record") == "raw_sample"]
+    if not metadata or len(metadata) + len(observed) != len(records):
+        raise RuntimeError("raw output contains unknown records or no metadata")
+    by_name = {}
+    for meta in metadata:
+        name = meta.get("name")
+        if not isinstance(name, str) or not name or name in by_name:
+            raise RuntimeError("raw metadata names must be unique nonempty strings")
+        if (
+            meta.get("kind") != expected_kind
+            or meta.get("boundary") != expected_boundary
+            or type(meta.get("samples")) is not int
+            or meta.get("samples") != expected_samples
+            or type(meta.get("iterations_per_sample")) is not int
+            or meta["iterations_per_sample"] <= 0
+        ):
+            raise RuntimeError(f"raw metadata contract mismatch for {name}")
+        if expected_dimensions and any(
+            type(meta.get(key)) is not type(value) or meta.get(key) != value
+            for key, value in expected_dimensions.items()
+        ):
+            raise RuntimeError(f"raw metadata dimensions differ for {name}")
+        if expected_kind == "prepare" and not (
+            meta["iterations_per_sample"] == 1
+            and type(meta.get("expected_bytes")) is int
+            and meta["expected_bytes"] > 0
+        ):
+            raise RuntimeError(f"raw prepare encoding contract mismatch for {name}")
+        if expected_kind == "activity_verify" and not (
+            meta["iterations_per_sample"] == 1_000
+            and meta.get("fixture") == "standalone_rows_without_payment_entries"
+            and type(meta.get("lookup_bytes")) is int
+            and meta["lookup_bytes"] > 0
+            and type(meta.get("head_bytes")) is int
+            and meta["head_bytes"] > 0
+            and isinstance(meta.get("expected_present"), bool)
+        ):
+            raise RuntimeError(f"raw activity encoding contract mismatch for {name}")
+        samples = [record for record in observed if record.get("name") == name]
+        if len(samples) != expected_samples:
+            raise RuntimeError(f"raw sample count mismatch for {name}")
+        for index, sample in enumerate(samples):
+            if (
+                sample.get("kind") != expected_kind
+                or type(sample.get("sample")) is not int
+                or sample.get("sample") != index
+                or type(sample.get("iterations")) is not int
+                or sample.get("iterations") != meta["iterations_per_sample"]
+                or type(sample.get("total_ns")) is not int
+                or sample["total_ns"] <= 0
+                or sample.get("verified") is not True
+            ):
+                raise RuntimeError(f"raw sample contract mismatch for {name} sample {index}")
+        by_name[name] = samples
+    if any(record.get("name") not in by_name for record in observed):
+        raise RuntimeError("raw sample lacks matching metadata")
+    if expected_names is not None and set(by_name) != expected_names:
+        raise RuntimeError(
+            "raw benchmark inventory mismatch: "
+            f"missing={sorted(expected_names - set(by_name))} "
+            f"unexpected={sorted(set(by_name) - expected_names)}"
+        )
+    return by_name
+
+
+def activity_raw_names(history: int, rows: int) -> set[str]:
+    operations = history + rows + 2 + (1 if history > 0 else 0)
+    key = f"H={history} R={rows} operations={operations} floor=0"
+    if rows == 0:
+        cases = ("absence_empty",)
+    elif rows == 1:
+        cases = ("presence", "absence_left", "absence_right")
+    else:
+        cases = ("presence", "absence_left", "absence_adjacent", "absence_right")
+    return {
+        f"bajillion::native_proofs::activity_verify/{case}/{key}"
+        for case in cases
+    }
+
+
+def aggregate_checks(output: Path, ack_cases: tuple[tuple[int, ...], ...]) -> dict[str, str]:
     """Archive emitted check records and normalize every encoded byte field."""
     records = []
     rows = []
@@ -391,7 +483,7 @@ def aggregate_checks(output: Path) -> dict[str, str]:
     directories = sorted(
         path for path in output.iterdir()
         if path.is_dir() and any(marker in path.name for marker in
-                                 ("-check", "-sizes-", "-challenge-"))
+                                 ("-check", "-sizes-", "-challenge-", "-ack-N"))
     )
     for directory in directories:
         rows_before = len(rows)
@@ -474,12 +566,15 @@ def aggregate_checks(output: Path) -> dict[str, str]:
         if row["scope"] == "durable_ack metadata"
         and row["metric"] == "withdrawal_output" and row["bytes"] > 0
     }
-    if len(compact_outputs) != 1 or len(signed_outputs) != 1:
-        raise RuntimeError(
-            "expected one compact and one nonempty signed-pipeline output-frame size"
-        )
-    if compact_outputs == signed_outputs:
-        raise RuntimeError("compact and signed-pipeline output fixtures unexpectedly match")
+    if len(compact_outputs) > 1:
+        raise RuntimeError("compact withdrawal fixtures disagree on output-frame size")
+    if any(case[4] > 0 for case in ack_cases):
+        if len(signed_outputs) != 1:
+            raise RuntimeError("expected one nonempty signed-pipeline output-frame size")
+        if compact_outputs == signed_outputs:
+            raise RuntimeError("compact and signed-pipeline output fixtures unexpectedly match")
+    elif signed_outputs:
+        raise RuntimeError("check inventory unexpectedly contains a signed withdrawal output")
     bytes_path = output / "bytes.csv"
     with bytes_path.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=(
@@ -498,9 +593,9 @@ def aggregate_checks(output: Path) -> dict[str, str]:
     }
 
 
-def aggregate(output: Path, proof_samples: int, ack_samples: int,
+def aggregate(output: Path, proof_samples: int, raw_samples: int, ack_samples: int,
               ack_cases: tuple[tuple[int, ...], ...],
-              expected_criterion: set[str]) -> dict[str, str]:
+              expected_criterion: set[str], expected_raw: set[str]) -> dict[str, str]:
     timing_rows = []
     raw = []
     names = set()
@@ -542,6 +637,41 @@ def aggregate(output: Path, proof_samples: int, ack_samples: int,
         for report in sorted(criterion.glob("**/report"), reverse=True):
             if report.is_dir():
                 shutil.rmtree(report)
+    observed_raw = set()
+    boundaries = {
+        "prepare": "detached_inputs_to_prepared_dealing_return",
+        "activity_verify": "decoded_lookup_to_resolve_result",
+    }
+    for stdout in sorted(output.glob("*-raw/stdout.log")):
+        records = [json.loads(line) for line in stdout.read_text().splitlines() if line.strip()]
+        kinds = {record.get("kind") for record in records}
+        if len(kinds) != 1 or next(iter(kinds)) not in boundaries:
+            raise RuntimeError(f"raw output has unknown or mixed kinds: {stdout}")
+        kind = next(iter(kinds))
+        samples = validate_raw_samples(stdout, kind, raw_samples, boundaries[kind])
+        metadata = {
+            record["name"]: record
+            for record in records
+            if record.get("record") == "raw_metadata"
+        }
+        for name, values in samples.items():
+            if name in names:
+                raise RuntimeError(f"duplicate benchmark ID: {name}")
+            names.add(name)
+            observed_raw.add(name)
+            timing_rows.append({
+                "kind": f"raw_{kind}",
+                "name": name,
+                "mean_ns": statistics.fmean(
+                    record["total_ns"] / record["iterations"] for record in values
+                ),
+                "samples": len(values),
+            })
+            raw.append({
+                "kind": f"raw_{kind}",
+                "metadata": metadata[name],
+                "samples": values,
+            })
     for stdout in sorted(output.glob("*-ack-*-timed/stdout.log")):
         records = [json.loads(line) for line in stdout.read_text().splitlines() if line.strip()]
         metadata = next(record for record in records if record.get("record") == "ack_metadata")
@@ -565,7 +695,7 @@ def aggregate(output: Path, proof_samples: int, ack_samples: int,
         })
         raw.append({"kind": "durable_ack", "records": records})
     timings = output / "timings.csv"
-    if not any(row["kind"] == "criterion" for row in timing_rows):
+    if expected_criterion and not any(row["kind"] == "criterion" for row in timing_rows):
         raise RuntimeError("no Criterion timing records found")
     if not any(row["kind"] == "durable_ack" for row in timing_rows):
         raise RuntimeError("no durable ACK timing records found")
@@ -579,6 +709,12 @@ def aggregate(output: Path, proof_samples: int, ack_samples: int,
             "Criterion inventory mismatch: "
             f"missing={sorted(expected_criterion - observed_criterion)} "
             f"unexpected={sorted(observed_criterion - expected_criterion)}"
+        )
+    if observed_raw != expected_raw:
+        raise RuntimeError(
+            "raw sample inventory mismatch: "
+            f"missing={sorted(expected_raw - observed_raw)} "
+            f"unexpected={sorted(observed_raw - expected_raw)}"
         )
     with timings.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=(
@@ -660,6 +796,7 @@ class Runner:
         self.outputs: dict[str, str] = {}
         self.binaries: dict[str, Path] = {}
         self.expected_criterion: set[str] = set()
+        self.expected_raw: set[str] = set()
         self.manifest_path = output / "manifest.json"
 
     def save(self) -> None:
@@ -701,6 +838,7 @@ class Runner:
                 ],
             },
             "expected_criterion": sorted(self.expected_criterion),
+            "expected_raw": sorted(self.expected_raw),
             "commands": self.commands,
             "outputs": self.outputs,
         }
@@ -886,6 +1024,46 @@ class Runner:
         self.expected_criterion.update(observed)
         self.save()
 
+    def clearing_raw(self, selector: str, name: str, kind: str, boundary: str,
+                     profile=None, history=0, rows=0) -> None:
+        env = {
+            "COMMONWARE_CLEARING_BENCH": selector,
+            "COMMONWARE_CLEARING_ACCOUNTS": str(profile[0] if profile else self.args.accounts),
+            "COMMONWARE_CLEARING_HISTORY": str(history),
+            "COMMONWARE_CLEARING_ROWS": str(rows),
+            "COMMONWARE_CLEARING_PAYOUTS": "0",
+            "COMMONWARE_CLEARING_SAMPLES": str(self.args.raw_samples),
+        }
+        if profile:
+            env["COMMONWARE_CLEARING_PROFILE"] = (
+                f"N={profile[0]} A={profile[1]} B={profile[2]} K={profile[3]}"
+            )
+        expected_dimensions = (
+            {"n": profile[0], "a": profile[1], "b": profile[2], "k": profile[3]}
+            if profile else {"n": self.args.accounts, "h": history, "r": rows}
+        )
+        if profile:
+            expected_names = {
+                "bajillion::prepare/"
+                f"N={profile[0]} A={profile[1]} B={profile[2]} K={profile[3]} "
+                f"E={profile[1] * profile[3]}"
+            }
+        else:
+            expected_names = activity_raw_names(history, rows)
+        observed = set()
+        self.run(
+            name + "-raw", [str(self.binaries["clearing"]), "--test"], env,
+            validate=lambda path: observed.update(validate_raw_samples(
+                path, kind, self.args.raw_samples, boundary, expected_dimensions, expected_names,
+            )),
+            timeout_seconds=self.args.timing_timeout_seconds,
+        )
+        duplicates = self.expected_raw & observed
+        if duplicates:
+            raise RuntimeError(f"duplicate planned raw benchmark IDs: {sorted(duplicates)}")
+        self.expected_raw.update(expected_names)
+        self.save()
+
     def ack(self, case: tuple[int, ...], readiness: bool, trace: bool = False) -> None:
         n, a, b, k, w, h = case
         samples = 1 if readiness else self.args.ack_samples
@@ -930,8 +1108,8 @@ def make_plan(args: argparse.Namespace) -> argparse.Namespace:
     activity = tuple(args.activity_case or DEFAULT_ACTIVITY)
     payout = tuple(args.payout_case or DEFAULT_PAYOUT)
     ack = tuple(args.ack_case or DEFAULT_ACK)
-    if len(profiles) < 3:
-        raise SystemExit("at least three profiles are required by the fixed matrix selectors")
+    if args.mode in ("timings", "all") and len(profiles) < 3:
+        raise SystemExit("timings require three profiles for the claim and adjudication cases")
     for n, a, b, k in profiles:
         if n <= 0 or a > n or not 0 < b <= n or not 0 < k <= b:
             raise SystemExit(f"invalid profile: {(n, a, b, k)}")
@@ -945,6 +1123,7 @@ def make_plan(args: argparse.Namespace) -> argparse.Namespace:
             )
     positive = {
         "proof samples": args.proof_samples,
+        "raw samples": args.raw_samples,
         "ACK samples": args.ack_samples,
         "Criterion warmup": args.criterion_warmup,
         "Criterion measurement": args.criterion_measurement,
@@ -964,6 +1143,8 @@ def make_plan(args: argparse.Namespace) -> argparse.Namespace:
             raise SystemExit(f"{label} must be positive")
     if args.ack_warmup < 0:
         raise SystemExit("ACK warmup must be nonnegative")
+    if args.raw_samples > 100:
+        raise SystemExit("raw samples must not exceed 100")
     return argparse.Namespace(
         profiles=profiles,
         activity=activity,
@@ -971,6 +1152,7 @@ def make_plan(args: argparse.Namespace) -> argparse.Namespace:
         ack=ack,
         settings={
             "proof_samples": args.proof_samples,
+            "raw_samples": args.raw_samples,
             "accounts": args.accounts,
             "instance_type": args.instance_type,
             "storage_medium": args.storage_medium,
@@ -993,7 +1175,7 @@ def make_plan(args: argparse.Namespace) -> argparse.Namespace:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("plan", "checks", "timings", "all"))
+    parser.add_argument("mode", choices=("plan", "checks", "timings", "scaling", "all"))
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--storage-directory", type=Path)
@@ -1004,8 +1186,9 @@ def main() -> int:
     parser.add_argument("--payout-case", action="append", type=lambda value: parse_tuple(value, 2, "payout case"))
     parser.add_argument("--ack-case", action="append", type=lambda value: parse_tuple(value, 6, "ACK case"))
     parser.add_argument("--proof-samples", type=int, default=20)
-    parser.add_argument("--ack-samples", type=int, default=10)
-    parser.add_argument("--ack-warmup", type=int, default=1)
+    parser.add_argument("--raw-samples", type=int, default=3)
+    parser.add_argument("--ack-samples", type=int, default=3)
+    parser.add_argument("--ack-warmup", type=int, default=0)
     parser.add_argument("--criterion-warmup", type=float, default=0.25)
     parser.add_argument("--criterion-measurement", type=float, default=1.0)
     parser.add_argument("--runtime-workers", type=int, default=2)
@@ -1057,6 +1240,30 @@ def main() -> int:
     runner = Runner(args, args.output, source, paths, execution_root)
     runner.save()
     runner.build()
+    if args.mode == "scaling":
+        for case in reversed(args.plan.ack):
+            runner.ack(case, readiness=False)
+        for history, rows in args.plan.activity:
+            runner.clearing(
+                "native-activity-sizes", f"activity-H{history}-R{rows}-check",
+                history=history, rows=rows, payouts=0,
+            )
+        for profile in args.plan.profiles:
+            runner.clearing(
+                "challenge-sizes", "challenge-" + "-".join(map(str, profile)),
+                profile=profile,
+            )
+        for history, rows in args.plan.activity:
+            runner.clearing_raw(
+                "native-activity-proof-samples", f"activity-H{history}-R{rows}-timed",
+                "activity_verify", "decoded_lookup_to_resolve_result",
+                history=history, rows=rows,
+            )
+        for profile in args.plan.profiles:
+            runner.clearing_raw(
+                "prepare-samples", "prepare-" + "-".join(map(str, profile)),
+                "prepare", "detached_inputs_to_prepared_dealing_return", profile=profile,
+            )
     if args.mode in ("checks", "all"):
         for profile in args.plan.profiles:
             runner.clearing("sizes", "sizes-" + "-".join(map(str, profile)), profile=profile)
@@ -1066,21 +1273,26 @@ def main() -> int:
         for history, payouts in args.plan.payout:
             runner.clearing("native-payout-sizes", f"payout-H{history}-W{payouts}-check",
                             history=history, rows=0, payouts=payouts)
-        for profile in (args.plan.profiles[0], args.plan.profiles[2]):
+        for profile in args.plan.profiles:
             runner.clearing("challenge-sizes", "challenge-" + "-".join(map(str, profile)),
                             profile=profile)
         for index, case in enumerate(args.plan.ack):
             runner.ack(case, readiness=True, trace=index == 0)
     if args.mode in ("timings", "all"):
         for history, rows in args.plan.activity:
-            runner.clearing("native-activity-proofs", f"activity-H{history}-R{rows}-timed",
-                            history=history, rows=rows, payouts=0, timed=True)
+            runner.clearing_raw(
+                "native-activity-proof-samples", f"activity-H{history}-R{rows}-timed",
+                "activity_verify", "decoded_lookup_to_resolve_result",
+                history=history, rows=rows,
+            )
         for history, payouts in args.plan.payout:
             runner.clearing("native-payout-proofs", f"payout-H{history}-W{payouts}-timed",
                             history=history, rows=0, payouts=payouts, timed=True)
         for profile in args.plan.profiles:
-            runner.clearing("prepare", "prepare-" + "-".join(map(str, profile)),
-                            profile=profile, timed=True)
+            runner.clearing_raw(
+                "prepare-samples", "prepare-" + "-".join(map(str, profile)),
+                "prepare", "detached_inputs_to_prepared_dealing_return", profile=profile,
+            )
         runner.clearing("verify-claim", "verify-claim-current-N1000000", 
                         profile=args.plan.profiles[1], timed=True)
         for profile in (args.plan.profiles[0], args.plan.profiles[2]):
@@ -1090,12 +1302,12 @@ def main() -> int:
             runner.ack(case, readiness=False)
         for selector in ("sign-vote", "verify-certificate"):
             runner.clearing(selector, selector + "-n100", profile=args.plan.profiles[1], timed=True)
-    if args.mode in ("checks", "all"):
-        runner.outputs.update(aggregate_checks(args.output))
-    if args.mode in ("timings", "all"):
+    if args.mode in ("checks", "scaling", "all"):
+        runner.outputs.update(aggregate_checks(args.output, args.plan.ack))
+    if args.mode in ("timings", "scaling", "all"):
         runner.outputs.update(aggregate(
-            args.output, args.proof_samples, args.ack_samples, args.plan.ack,
-            runner.expected_criterion,
+            args.output, args.proof_samples, args.raw_samples, args.ack_samples,
+            args.plan.ack, runner.expected_criterion, runner.expected_raw,
         ))
     runner.commands.append({"finished_utc": dt.datetime.now(dt.timezone.utc).isoformat()})
     runner.save()

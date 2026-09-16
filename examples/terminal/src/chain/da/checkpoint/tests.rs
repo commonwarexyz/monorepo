@@ -40,9 +40,14 @@ fn ack_control_uses_native_qmdb_with_bounded_history() {
             (deployment, expected)
         });
     deterministic::Runner::from(crash).start(|context| async move {
-        let store = Store::open(context.child("reopen"), "ack_native", deployment.digest())
-            .await
-            .unwrap();
+        let store = Store::open(
+            context.child("reopen"),
+            "ack_native",
+            deployment.digest(),
+            crate::protocol::fixture_page_cache(&context),
+        )
+        .await
+        .unwrap();
         assert_eq!(store.get().unwrap().encode(), expected);
         assert!(store.get().unwrap().decision.is_some());
         assert!(store.get().unwrap().candidate.is_some());
@@ -54,5 +59,25 @@ fn ack_control_uses_native_qmdb_with_bounded_history() {
             .await
             .unwrap();
         assert!(blobs.len() <= 2);
+    });
+}
+
+#[test]
+fn ack_control_uses_the_supplied_cache() {
+    deterministic::Runner::default().start(|context| async move {
+        let cache = crate::protocol::fixture_page_cache(&context);
+        let before = cache.next_id();
+        let deployment = Digest::from([0u8; 32]);
+        let store = Store::open(
+            context.child("checkpoint"),
+            "shared-cache",
+            &deployment,
+            cache.clone(),
+        )
+        .await
+        .unwrap();
+        let after = cache.next_id();
+        assert!(after > before + 1);
+        drop(store);
     });
 }

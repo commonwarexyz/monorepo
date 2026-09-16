@@ -13,6 +13,7 @@ mod native_fixtures;
 mod native_proofs;
 mod native_transition;
 mod prepare;
+mod raw;
 mod receive_apply;
 mod seal;
 mod settlement;
@@ -49,10 +50,18 @@ fn main() {
         Ok(selected) if selected == "native-payout-sizes" => native_proofs::payout_sizes(),
         Ok(selected) if selected == "native-sizes" => native_proofs::sizes(),
         Ok(selected) if selected == "native-activity-proofs" => native_proofs::activity_benches(),
+        Ok(selected) if selected == "native-activity-proof-samples" => {
+            native_proofs::activity_samples();
+            return;
+        }
         Ok(selected) if selected == "native-payout-proofs" => native_proofs::payout_benches(),
         Ok(selected) if selected == "native-proofs" => native_proofs::benches(),
         Ok(selected) if selected == "native-transition" => native_transition::benches(),
         Ok(selected) if selected == "native-transition-check" => native_transition::check(),
+        Ok(selected) if selected == "prepare-samples" => {
+            prepare::samples();
+            return;
+        }
         Ok(selected) => benchmarks
             .iter()
             .find(|(name, _)| *name == selected)

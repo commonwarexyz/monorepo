@@ -1,10 +1,7 @@
 //! A private native QMDB owns the replica boundary and immutable signer decision.
 
 use super::{Ballot, NativeReplica, sync::Transfer};
-use crate::{
-    chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
-    protocol::Deployment,
-};
+use crate::{chain::validator::IO_BUFFER_SIZE, protocol::Deployment};
 use anyhow::{Context as _, Result, ensure};
 use bytes::BufMut;
 use commonware_clearing::bajillion::{qmdb::StateRoot, replica::ReplicaHead};
@@ -223,7 +220,12 @@ type Native<E> =
 
 pub(super) struct Store<E: Context>(Native<E>);
 impl<E: Context> Store<E> {
-    pub(super) async fn open(context: E, prefix: &str, deployment: &Digest) -> Result<Self> {
+    pub(super) async fn open(
+        context: E,
+        prefix: &str,
+        deployment: &Digest,
+        page_cache: CacheRef,
+    ) -> Result<Self> {
         let cfg = keyless::variable::CompactConfig {
             strategy: Sequential,
             witness: contiguous::variable::Config {
@@ -231,7 +233,7 @@ impl<E: Context> Store<E> {
                 items_per_section: NZU64!(16),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache,
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
             },

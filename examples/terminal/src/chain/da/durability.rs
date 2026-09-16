@@ -22,15 +22,16 @@ async fn drive<T>(gates: &[PendingSyncs; 3], future: impl Future<Output = T>) ->
     )
     .await
 }
-async fn controlled(
+pub(super) async fn controlled(
     context: &deterministic::Context,
     prefix: &str,
     deployment: &Deployment,
     gates: &[PendingSyncs; 3],
+    page_cache: CacheRef,
 ) -> NativeReplica<DelayedSyncContext<deterministic::Context>> {
     let config = replica_config(
         &format!("{prefix}-replica-{}-0", deployment.digest()),
-        context,
+        page_cache,
         context.strategy(NZUsize!(1)),
     );
     let state = qmdb::State::open(
@@ -68,16 +69,21 @@ pub(super) async fn reopen(
     prefix: &str,
     deployment: &Deployment,
 ) -> Lane<deterministic::Context> {
-    let checkpoints =
-        checkpoint::Store::open(context.child("checkpoint"), prefix, deployment.digest())
-            .await
-            .unwrap();
+    let page_cache = crate::protocol::fixture_page_cache(context);
+    let checkpoints = checkpoint::Store::open(
+        context.child("checkpoint"),
+        prefix,
+        deployment.digest(),
+        page_cache.clone(),
+    )
+    .await
+    .unwrap();
     let generation = checkpoints.get().unwrap().canonical.checkpoint.generation;
     let replica = NativeReplica::open(
         context.child("replica"),
         replica_config(
             &format!("{prefix}-replica-{}-{generation}", deployment.digest()),
-            context,
+            page_cache,
             context.strategy(NZUsize!(1)),
         ),
     )
@@ -97,8 +103,13 @@ async fn controlled_lane(
     deployment: &Deployment,
     gates: &[PendingSyncs; 3],
     checkpoint_gate: PendingSyncs,
+    page_cache: CacheRef,
 ) -> Lane<DelayedSyncContext<deterministic::Context>> {
-    let state = drive(gates, controlled(context, prefix, deployment, gates)).await;
+    let state = drive(
+        gates,
+        controlled(context, prefix, deployment, gates, page_cache.clone()),
+    )
+    .await;
     let checkpoints = checkpoint::Store::open(
         DelayedSyncContext {
             inner: context.child("controlled_checkpoint"),
@@ -106,6 +117,7 @@ async fn controlled_lane(
         },
         prefix,
         deployment.digest(),
+        page_cache,
     )
     .await
     .unwrap();
@@ -130,12 +142,18 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
                     .await;
                 let decision = ballot.encode();
                 let candidate = prepared.close().roots;
+                let page_cache = fixture.page_cache.clone();
                 drop(fixture);
                 let gates = std::array::from_fn(|_| PendingSyncs::default());
                 let metadata = PendingSyncs::default();
                 metadata.unblock();
                 let mut lane = controlled_lane(
-                    &context, "ack_barrier", &deployment, &gates, metadata.clone(),
+                    &context,
+                    "ack_barrier",
+                    &deployment,
+                    &gates,
+                    metadata.clone(),
+                    page_cache,
                 ).await;
                 for gate in &gates { gate.unblock(); }
                 metadata.arm();
@@ -163,7 +181,7 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
                 context.child("raw_ack_candidate"),
                 replica_config(
                     &format!("ack_barrier-replica-{}-0", deployment.digest()),
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     context.strategy(NZUsize!(1)),
                 ),
             )
@@ -195,11 +213,20 @@ fn incomplete_candidate_rewinds_all_three_without_a_body_journal() {
             let deployment = fixture.lane.deployment.clone();
             let target = fixture.lane.state.as_ref().unwrap().head();
             let (ballot, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
+            let page_cache = fixture.page_cache.clone();
             drop(fixture);
             let gates = std::array::from_fn(|_| PendingSyncs::default());
             let metadata = PendingSyncs::default();
             metadata.unblock();
-            let mut lane = controlled_lane(&context, "candidate_cut", &deployment, &gates, metadata.clone()).await;
+            let mut lane = controlled_lane(
+                &context,
+                "candidate_cut",
+                &deployment,
+                &gates,
+                metadata.clone(),
+                page_cache,
+            )
+            .await;
             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
             if role == 3 { metadata.arm(); }
             let gate = next_pending_sync(if role == 3 { &metadata } else { &gates[role] });
@@ -284,11 +311,12 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
             });
         let ((deployment, parent), crash) =
             deterministic::Runner::from(crash).start_and_recover(move |context| async move {
+                let page_cache = crate::protocol::fixture_page_cache(&context);
                 let replica = NativeReplica::open(
                     context.child("raw_ahead"),
                     replica_config(
                         &format!("ahead-replica-{}-0", deployment.digest()),
-                        &context,
+                        page_cache.clone(),
                         context.strategy(NZUsize!(1)),
                     ),
                 )
@@ -311,6 +339,7 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
                     context.child("checkpoint"),
                     "ahead",
                     deployment.digest(),
+                    page_cache,
                 )
                 .await
                 .unwrap();
@@ -400,10 +429,19 @@ fn candidate_disposal_selects_parent_before_each_native_rewind() {
             let (decision, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
             fixture.candidate(decision.clone(), prepared).await;
             let deployment = fixture.lane.deployment.clone();
+            let page_cache = fixture.page_cache.clone();
             drop(fixture);
             let gates = std::array::from_fn(|_| PendingSyncs::default());
             let metadata = PendingSyncs::default(); metadata.unblock();
-            let mut lane = controlled_lane(&context, "discard", &deployment, &gates, metadata).await;
+            let mut lane = controlled_lane(
+                &context,
+                "discard",
+                &deployment,
+                &gates,
+                metadata,
+                page_cache,
+            )
+            .await;
             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
             let gate = next_pending_sync(&gates[role]);
             let mut rollback = Box::pin(discard(&mut lane));
@@ -437,7 +475,17 @@ fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
             let (_, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
             drop(fixture.lane.state.unwrap().apply(prepared.into_parts().1).await.unwrap().sync().await.unwrap());
             let gates = std::array::from_fn(|_| PendingSyncs::default());
-            let replica = drive(&gates, controlled(&context, "rewind_barrier", &deployment, &gates)).await;
+            let replica = drive(
+                &gates,
+                controlled(
+                    &context,
+                    "rewind_barrier",
+                    &deployment,
+                    &gates,
+                    fixture.page_cache.clone(),
+                ),
+            )
+            .await;
             let (state, logs) = replica.into_parts();
             // Every native head can match while its rewind is still volatile. The aggregate
             // call must complete all durability barriers even on these native no-op paths.
@@ -460,7 +508,7 @@ fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
                 context.child("raw_reopen"),
                 replica_config(
                     &format!("rewind_barrier-replica-{}-0", deployment.digest()),
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     context.strategy(NZUsize!(1)),
                 ),
             )
@@ -555,7 +603,11 @@ fn native_source_serves_admitted_parent_while_every_donor_has_an_unadmitted_chil
             context.child("import"),
             authority,
             deployment.clone(),
-            replica_config("parent-import", &context, context.strategy(NZUsize!(1))),
+            replica_config(
+                "parent-import",
+                crate::protocol::fixture_page_cache(&context),
+                context.strategy(NZUsize!(1)),
+            ),
             fresh.lane.manifest().canonical.checkpoint.clone(),
             1,
             false,
@@ -670,7 +722,7 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
     deterministic::Runner::from(crash).start(|context| async move {
         let old_config = replica_config(
             &format!("loser-replica-{}-0", deployment.digest()),
-            &context,
+            crate::protocol::fixture_page_cache(&context),
             context.strategy(NZUsize!(1)),
         );
         let old_partitions = [
@@ -909,7 +961,11 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
                     context.child("pruned_import"),
                     authority,
                     deployment.clone(),
-                    replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
+                    replica_config(
+                        "fresh-after-prune",
+                        crate::protocol::fixture_page_cache(&context),
+                        context.strategy(NZUsize!(1)),
+                    ),
                     fresh.lane.manifest().canonical.checkpoint.clone(),
                     1,
                     false,
@@ -958,7 +1014,11 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
         deterministic::Runner::from(crash).start(|context| async move {
             let imported = NativeReplica::open(
                 context.child("imported_reopen"),
-                replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
+                replica_config(
+                    "fresh-after-prune",
+                    crate::protocol::fixture_page_cache(&context),
+                    context.strategy(NZUsize!(1)),
+                ),
             )
             .await
             .unwrap();
@@ -1037,11 +1097,14 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    let ((deployment, expected), crash) =
-        deterministic::Runner::default().start_and_recover(|context| async move {
+    let ((deployment, expected, finalized), crash) = deterministic::Runner::default()
+        .start_and_recover(|context| async move {
             let mut fixture = Fixture::new(&context, "maintenance", 70).await;
+            // Advance the four-epoch retention window beyond a complete native section so
+            // maintenance must remove physical history while the other lane stays busy.
+            let finalized = config::LOG_OPERATIONS_PER_SECTION.get().div_ceil(71) as usize + 4;
             let mut ballots: Vec<Ballot> = Vec::new();
-            for epoch in 0..12 {
+            for epoch in 0..finalized + 4 {
                 let floors = if epoch >= 4 {
                     let roots = ballots[epoch - 4].roots;
                     Floors {
@@ -1098,12 +1161,12 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
             });
             context.sleep(Duration::from_millis(5)).await;
             let mut batch = db.new_batches().await;
-            for (epoch, ballot) in ballots.iter().enumerate().skip(8) {
+            for (epoch, ballot) in ballots.iter().enumerate().skip(finalized) {
                 let admitted = AdmittedRootsResponse::new(
                     ballot.header.batch_id::<Sha256>(),
                     ballot.roots,
                     ballot.context.predecessor_logs().activity.operations,
-                    epoch == 8,
+                    epoch == finalized,
                 );
                 batch = batch.write(
                     admitted_key(deployment.digest(), epoch as u64),
@@ -1113,11 +1176,11 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
             batch = batch.write(
                 status_key(deployment.digest()),
                 Some(Record::Status(StatusRecord {
-                    height: 300,
-                    timestamp: 300,
+                    height: ballots[finalized].context.challenge_deadline() + 1,
+                    timestamp: ballots[finalized].context.challenge_deadline() + 1,
                     deployment: *deployment.digest(),
-                    state_root: ballots[8].roots.successor,
-                    last_finalized: Some(8),
+                    state_root: ballots[finalized].roots.successor,
+                    last_finalized: Some(finalized as u64),
                     custody: 0,
                     claimable: 0,
                     hard_faulted: false,
@@ -1132,12 +1195,15 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
             );
             actor.abort();
             busy.abort();
-            (deployment, expected)
+            (deployment, expected, finalized)
         });
     deterministic::Runner::from(crash).start(|context| async move {
         let lane = reopen(&context, "maintenance", &deployment).await;
         assert_eq!(lane.state.as_ref().unwrap().head(), expected);
-        assert_eq!(lane.manifest().canonical.checkpoint.retained.epoch, 8);
+        assert_eq!(
+            lane.manifest().canonical.checkpoint.retained.epoch,
+            finalized as u64
+        );
         assert!(
             lane.state
                 .as_ref()
@@ -1145,7 +1211,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
                 .logs()
                 .retained_starts()
                 .activity
-                >= 128
+                >= config::LOG_OPERATIONS_PER_SECTION.get()
         );
         assert!(
             lane.state
@@ -1154,7 +1220,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
                 .logs()
                 .retained_starts()
                 .payouts
-                >= 128
+                >= config::LOG_OPERATIONS_PER_SECTION.get()
         );
     });
 }

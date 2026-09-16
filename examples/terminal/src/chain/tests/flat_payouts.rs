@@ -89,7 +89,7 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
             context.child("replica"),
             crate::protocol::state_config(
                 "flat-payout-replica",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 protocol.strategy().clone(),
             ),
             &genesis.history,
@@ -620,7 +620,7 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
             context.child("payout_status_validator"),
             crate::protocol::state_config(
                 "payout_status_validator",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 protocol.strategy().clone(),
             ),
             &state.history,

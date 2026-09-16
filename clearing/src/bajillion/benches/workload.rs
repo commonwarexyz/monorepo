@@ -63,15 +63,13 @@ pub struct Keys {
     pub operator_bls: OperatorKey,
 }
 
-pub fn keys(n: usize) -> Keys {
+pub fn keys<S: Strategy>(n: usize, strategy: &S) -> Keys {
     assert!(n > 0, "N must be positive");
-    let mut accounts = (0..n)
-        .map(|index| {
-            let private = SigningKey::from_seed(ACCOUNT_SEED_START + index as u64);
-            (private.public_key(), private)
-        })
-        .collect::<Vec<_>>();
-    accounts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut accounts = strategy.map_collect_vec(0..n, |index| {
+        let private = SigningKey::from_seed(ACCOUNT_SEED_START + index as u64);
+        (private.public_key(), private)
+    });
+    strategy.sort_by(&mut accounts, |a, b| a.0.cmp(&b.0));
     Keys {
         accounts,
         operator: SigningKey::from_seed(OPERATOR_SEED),
@@ -126,21 +124,19 @@ where
         .checked_add(1)
         .expect("benchmark challenge deadline fits u64");
     let deposits = DepositBatch::empty();
-    let withdrawals = WithdrawalBatch::new(
-        keys.accounts[..case.w]
-            .iter()
-            .map(|(_, signer)| {
-                SignedWithdrawal::sign(
-                    deployment,
-                    replica.state().root().digest,
-                    Bytes::from_static(WITHDRAWAL_DESTINATION),
-                    WithdrawalAction::Close,
-                    challenge_deadline,
-                    signer,
-                )
-            })
-            .collect(),
-    )
+    let withdrawals = WithdrawalBatch::new(strategy.map_collect_vec(
+        keys.accounts[..case.w].iter(),
+        |(_, signer)| {
+            SignedWithdrawal::sign(
+                deployment,
+                replica.state().root().digest,
+                Bytes::from_static(WITHDRAWAL_DESTINATION),
+                WithdrawalAction::Close,
+                challenge_deadline,
+                signer,
+            )
+        },
+    ))
     .expect("canonical benchmark withdrawals");
     let context = EpochContext::new::<Sha256>(
         deployment,
@@ -168,7 +164,7 @@ where
         },
     )
     .expect("bound benchmark context");
-    let terminals = terminals(case, keys, &context);
+    let terminals = terminals(case, keys, &context, strategy);
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         replica,
         &context,
@@ -239,15 +235,15 @@ where
     built
 }
 
-fn terminals(
+fn terminals<S: Strategy>(
     case: Case,
     keys: &Keys,
     context: &CloseContext<VerifyingKey, Digest>,
+    strategy: &S,
 ) -> Vec<Terminal<VerifyingKey, Digest>> {
-    keys.accounts[..case.a]
-        .iter()
-        .enumerate()
-        .map(|(index, account)| {
+    strategy.map_collect_vec(
+        keys.accounts[..case.a].iter().enumerate(),
+        |(index, account)| {
             let entries = (0..case.k)
                 .map(|offset| OutEntry {
                     recipient: keys.accounts[(index + offset) % case.b].0.clone(),
@@ -256,8 +252,8 @@ fn terminals(
                 })
                 .collect::<Vec<_>>();
             terminal(account, context, &keys.operator, entries)
-        })
-        .collect()
+        },
+    )
 }
 
 fn terminal(
@@ -292,5 +288,37 @@ fn terminal(
             VECTOR_ACK_AGGREGATE_NAMESPACE,
             ack.body().encode().as_ref(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_parallel::Rayon;
+    use std::num::NonZeroUsize;
+
+    fn encoded_key_fixture(keys: &Keys) -> Vec<(Bytes, Bytes)> {
+        keys.accounts
+            .iter()
+            .map(|(public, private)| {
+                (
+                    public.encode(),
+                    private
+                        .sign(b"_COMMONWARE_CLEARING_BENCH_WORKLOAD_TEST", b"fixture")
+                        .encode(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parallel_keys_match_serial_encoded_fixture() {
+        let serial = keys(128, &commonware_parallel::Sequential);
+        let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+        let parallel = keys(128, &strategy);
+
+        assert_eq!(encoded_key_fixture(&serial), encoded_key_fixture(&parallel));
+        assert_eq!(serial.operator.public_key(), parallel.operator.public_key());
+        assert_eq!(serial.operator_bls, parallel.operator_bls);
     }
 }

@@ -2,11 +2,7 @@
 
 use super::*;
 use crate::{
-    chain::{
-        native::RegistryEntry,
-        types::Database,
-        validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
-    },
+    chain::{native::RegistryEntry, types::Database, validator::db_config},
     protocol::{clearing_private, committee, genesis_balances},
 };
 use commonware_cryptography::Signer as _;
@@ -22,6 +18,7 @@ async fn delayed_sealer(
     context: &deterministic::Context,
     prefix: &str,
     deployment: &Deployment,
+    page_cache: CacheRef,
 ) -> Sealer<DelayedContext> {
     let strategy = context.strategy(NZUsize!(1));
     let pending = PendingSyncs::default();
@@ -32,16 +29,14 @@ async fn delayed_sealer(
     };
     let db = <Database<DelayedContext> as DatabaseSet<_>>::init(
         context.child("settlement"),
-        db_config(
-            &format!("{prefix}-settlement"),
-            CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        ),
+        db_config(&format!("{prefix}-settlement"), page_cache.clone()),
     )
     .await;
     Sealer::new(
         context.child("sealer"),
         Config {
             strategy,
+            page_cache,
             scheme: bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap())
                 .unwrap(),
             registry: RegistryView::new(vec![RegistryEntry {
@@ -63,15 +58,16 @@ async fn replacement(
     context: &deterministic::Context,
     prefix: &str,
     deployment: &Deployment,
-    prepared: PreparedReplica<Key, Digest, Rayon>,
+    prepared: Vec<PreparedReplica<Key, Digest, Rayon>>,
+    page_cache: CacheRef,
 ) -> NativeReplica<DelayedContext> {
     let pending = PendingSyncs::default();
     let config = replica_config(
         &format!("{prefix}-replica-{}-1", deployment.digest()),
-        context,
+        page_cache,
         context.strategy(NZUsize!(1)),
     );
-    let replica = drive_pending_syncs(
+    let mut replica = drive_pending_syncs(
         &pending,
         Box::pin(tests::init_config(
             DelayedSyncContext {
@@ -83,45 +79,75 @@ async fn replacement(
         )),
     )
     .await
-    .unwrap()
-    .apply(prepared)
-    .await
     .unwrap();
+    for prepared in prepared {
+        replica = drive_pending_syncs(&pending, replica.apply(prepared))
+            .await
+            .unwrap();
+    }
     drive_pending_syncs(&pending, replica.sync()).await.unwrap()
 }
 
 #[test]
-fn imported_retirement_waits_for_commit_optional_rollover_io() {
+fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
     for fail in [false, true] {
         let prefix = if fail {
             "retirement_error"
         } else {
             "retirement_success"
         };
-        let ((deployment, offset_partition), crash) = deterministic::Runner::default()
+        let ((deployment, merkle_partition), crash) = deterministic::Runner::default()
             .start_and_recover(move |context| async move {
-                let fixture = Fixture::new(&context, prefix, 126).await;
+                let mut fixture = Fixture::new(&context, prefix, 511).await;
                 let deployment = fixture.lane.deployment.clone();
+                let mut replacement_prepared = Vec::new();
+                for outgoing in [510, 510] {
+                    let (history_ballot, _, old_history) = fixture
+                        .prepare(
+                            outgoing,
+                            0,
+                            Floors {
+                                activity: 0,
+                                payouts: 0,
+                            },
+                        )
+                        .await;
+                    let (_, _, replacement_history) = fixture
+                        .prepare(
+                            outgoing,
+                            0,
+                            Floors {
+                                activity: 0,
+                                payouts: 0,
+                            },
+                        )
+                        .await;
+                    replacement_prepared.push(replacement_history.into_parts().1);
+                    fixture.candidate(history_ballot, old_history).await;
+                    fixture.promote().await;
+                }
                 let (ballot, _, old_prepared) = fixture
                     .prepare(
+                        1,
                         0,
-                        126,
                         Floors {
                             activity: 0,
                             payouts: 0,
                         },
                     )
                     .await;
-                let (_, _, replacement_prepared) = fixture
+                let (_, _, replacement_candidate) = fixture
                     .prepare(
+                        1,
                         0,
-                        126,
                         Floors {
                             activity: 0,
                             payouts: 0,
                         },
                     )
                     .await;
+                replacement_prepared.push(replacement_candidate.into_parts().1);
+                let page_cache = fixture.page_cache.clone();
                 drop(fixture);
 
                 let gates = std::array::from_fn(|_| PendingSyncs::default());
@@ -133,41 +159,44 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                     &deployment,
                     &gates,
                     checkpoint_gate,
+                    page_cache.clone(),
                 )
                 .await;
                 gates[0].unblock();
-                gates[1].unblock();
+                gates[2].unblock();
 
                 let replacement = replacement(
                     &context,
                     prefix,
                     &deployment,
-                    replacement_prepared.into_parts().1,
+                    replacement_prepared,
+                    page_cache.clone(),
                 )
                 .await;
                 let mut checkpoint = lane.manifest().canonical.checkpoint.clone();
                 checkpoint.generation = 1;
-                checkpoint.next = 1;
+                checkpoint.next = ballot.epoch.checked_add(1).unwrap();
                 checkpoint.batch = Some(ballot.header.batch_id::<Sha256>().into_digest());
                 checkpoint.head = replacement.head();
                 let transfer = sync::Transfer::capture(&replacement, checkpoint)
                     .await
                     .unwrap();
 
-                let payout_gate = &gates[2];
-                let starts = payout_gate.starts();
-                let entered = payout_gate.entered();
-                let completions = payout_gate.completions();
-                // At the exact variable-journal boundary, the offsets fixed journal seals first,
-                // followed by the authoritative data journal. Commit then syncs the new data tail
-                // and joins only the latter two completions.
+                let activity_gate = &gates[1];
+                let starts = activity_gate.starts();
+                let entered = activity_gate.entered();
+                let completions = activity_gate.completions();
+                // Two valid 511-row, 510-entry closes leave 2,045 activity leaves. The final
+                // two-row, one-entry close reaches 2,049 leaves and exactly 4,096 MMR nodes.
+                // Commit starts the authoritative data-tail sync first, then flushing those nodes
+                // starts an optional Merkle rollover that publication does not join.
                 let mut publication = Box::pin(persist_candidate(
                     &mut lane,
                     old_prepared.into_parts().1,
                     ballot.clone(),
                 ));
                 loop {
-                    if payout_gate.starts() >= starts + 3 {
+                    if activity_gate.starts() >= starts + 2 {
                         break;
                     }
                     select! {
@@ -175,17 +204,17 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                         _ = commonware_runtime::reschedule() => {},
                     }
                 }
-                assert_eq!(payout_gate.starts(), starts + 3);
-                assert_eq!(payout_gate.entered(), entered + 2);
-                assert_eq!(payout_gate.completions(), completions);
-                assert_eq!(payout_gate.lock().len(), 3);
-                let optional = next_pending_sync(payout_gate);
-                assert_eq!(payout_gate.lock().len(), 2);
-                release_next_pending_syncs(payout_gate, 2);
+                assert_eq!(activity_gate.starts(), starts + 2);
+                assert_eq!(activity_gate.entered(), entered + 1);
+                assert_eq!(activity_gate.completions(), completions);
+                assert_eq!(activity_gate.lock().len(), 2);
+                release_next_pending_syncs(activity_gate, 1);
                 publication.await.unwrap();
-                assert_eq!(payout_gate.starts(), starts + 3);
-                assert_eq!(payout_gate.entered(), entered + 2);
-                assert_eq!(payout_gate.completions(), completions + 2);
+                assert_eq!(activity_gate.starts(), starts + 2);
+                assert_eq!(activity_gate.entered(), entered + 1);
+                assert_eq!(activity_gate.completions(), completions + 1);
+                assert_eq!(activity_gate.lock().len(), 1);
+                let optional = next_pending_sync(activity_gate);
                 assert_eq!(lane.state.as_ref().unwrap().head(), replacement.head());
                 assert_eq!(
                     lane.state
@@ -193,9 +222,9 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                         .unwrap()
                         .logs()
                         .head()
-                        .payouts
+                        .activity
                         .operations,
-                    128
+                    2049
                 );
                 assert_eq!(
                     lane.manifest().candidate.as_ref().unwrap().checkpoint.head,
@@ -209,14 +238,15 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
 
                 let old_config = replica_config(
                     &format!("{prefix}-replica-{}-0", deployment.digest()),
-                    &context,
+                    page_cache.clone(),
                     context.strategy(NZUsize!(1)),
                 );
-                let offset_partition =
-                    format!("{}_offsets-blobs", old_config.logs.payouts.log.partition);
-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
+                let merkle_partition =
+                    format!("{}-blobs", old_config.logs.activity.merkle.journal_partition);
+                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
 
-                let mut sealer = delayed_sealer(&context, prefix, &deployment).await;
+                let mut sealer =
+                    delayed_sealer(&context, prefix, &deployment, page_cache.clone()).await;
                 let operator = ed25519::PrivateKey::from_seed(88).public_key();
                 let validator = ed25519::PrivateKey::from_seed(100).public_key();
                 let (_, (mut sender, _)) =
@@ -239,13 +269,14 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                 ));
                 select! {
                     _ = &mut optional_blocked => {},
-                    result = &mut retirement => panic!("retirement bypassed pending offset sync: {result:?}"),
+                    result = &mut retirement => panic!("retirement bypassed pending Merkle sync: {result:?}"),
                 }
 
                 let checkpoint = checkpoint::Store::open(
                     context.child("pending_marker"),
                     prefix,
                     deployment.digest(),
+                    page_cache,
                 )
                 .await
                 .unwrap();
@@ -255,7 +286,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                     1
                 );
                 assert!(checkpoint.stage(2).await.is_err());
-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
+                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
 
                 release.send_lossy(if fail {
                     Err(commonware_runtime::Error::Closed)
@@ -265,21 +296,21 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                 let result = retirement.await;
                 if fail {
                     assert!(result.is_err());
-                    assert_eq!(payout_gate.completions(), completions + 2);
+                    assert_eq!(activity_gate.completions(), completions + 1);
                     assert_eq!(lanes[0].manifest().garbage, Some(0));
-                    assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
+                    assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
                 } else {
                     result.unwrap();
-                    assert_eq!(payout_gate.completions(), completions + 3);
+                    assert_eq!(activity_gate.completions(), completions + 2);
                     assert!(lanes[0].manifest().garbage.is_none());
                     assert!(matches!(
-                        context.scan(&offset_partition).await,
+                        context.scan(&merkle_partition).await,
                         Err(commonware_runtime::Error::PartitionMissing(_))
                     ));
                 }
                 drop(lanes);
                 drop(sealer);
-                (deployment, offset_partition)
+                (deployment, merkle_partition)
             });
 
         deterministic::Runner::from(crash).start(|context| async move {
@@ -295,7 +326,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
                 assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
             }
             assert!(matches!(
-                context.scan(&offset_partition).await,
+                context.scan(&merkle_partition).await,
                 Err(commonware_runtime::Error::PartitionMissing(_))
             ));
         });

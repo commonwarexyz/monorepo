@@ -171,6 +171,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
         context.child("initial_sealer"),
         da::Config {
             strategy: strategy.clone(),
+            page_cache: crate::protocol::fixture_page_cache(&context),
             retain_history: true,
             scheme: clearing.clone(),
             registry: fixture.registry.clone(),
@@ -550,6 +551,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
         context.child("restarted_sealer"),
         da::Config {
             strategy: context.strategy(NZUsize!(1)),
+            page_cache: crate::protocol::fixture_page_cache(&context),
             retain_history: true,
             scheme: clearing,
             registry: fixture.registry.clone(),

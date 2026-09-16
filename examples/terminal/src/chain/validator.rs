@@ -50,13 +50,15 @@ use commonware_macros::boxed;
 use commonware_p2p::{Manager, TrackedPeers, authenticated::discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Handle, Quota, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, tokio,
+    Handle, Quota, Strategizer as _, Supervisor as _,
+    buffer::paged::{CacheRef, page_size},
+    tokio,
 };
 use commonware_storage::{
     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
     merkle::full::Config as MerkleConfig, translator::TwoCap,
 };
-use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, ordered::Set};
+use commonware_utils::{NZU32, NZU64, NZUsize, ordered::Set};
 use std::{
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     path::PathBuf,
@@ -114,14 +116,22 @@ pub(crate) const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// Maximum P2P message size in bytes.
 pub(crate) const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024;
 
-/// Page size for storage page caches.
-pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+/// Physical bytes occupied by each checksum-bearing storage page.
+pub(crate) const PHYSICAL_PAGE_SIZE: u32 = 4_096;
 
-/// Number of pages held by each page cache.
-pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
+/// Logical payload bytes in each aligned storage page.
+pub(crate) const PAGE_SIZE: NonZeroU16 = page_size(PHYSICAL_PAGE_SIZE);
+
+/// Physical-page budget for the validator's shared cache.
+pub(crate) const PAGE_CACHE_BUDGET: usize = 16 << 20;
+
+/// Number of physical pages held by the validator's shared cache.
+pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize =
+    NonZeroUsize::new(PAGE_CACHE_BUDGET / PHYSICAL_PAGE_SIZE as usize)
+        .expect("page-cache budget must hold at least one complete page");
 
 /// Buffer size for journal replay and writes.
-pub(crate) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
+pub(crate) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(8_388_608);
 
 /// Maximum transactions retained in each deployment's ingress class.
 pub(crate) const INGRESS_CAPACITY: NonZeroUsize = NZUsize!(64);
@@ -481,6 +491,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         context.child("sealer"),
         da::Config {
             strategy: context.strategy(args.workers),
+            page_cache: page_cache.clone(),
             retain_history: args.retain_native_history,
             scheme: clearing,
             registry,

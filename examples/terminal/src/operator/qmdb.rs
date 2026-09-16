@@ -5,7 +5,10 @@ use super::{
     store::EpochReader,
 };
 use crate::{
-    chain::da::replica_config,
+    chain::{
+        da::replica_config,
+        validator::{PAGE_CACHE_SIZE, PAGE_SIZE},
+    },
     protocol::{Account, Key, Protocol},
 };
 use anyhow::{Context as _, Result, ensure};
@@ -21,7 +24,7 @@ use commonware_clearing::bajillion::{
 use commonware_codec::{DecodeExt as _, Encode, FixedSize as _};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Rayon;
-use commonware_runtime::{Runner as _, Spawner, tokio};
+use commonware_runtime::{Runner as _, Spawner, buffer::paged::CacheRef, tokio};
 use commonware_storage::Context;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use std::{
@@ -239,7 +242,8 @@ async fn run(
     let mut recovery = Recovery::default();
     let initialized: Result<_> = Box::pin(async {
         initialize_checkpoints(&connection)?;
-        let config = replica_config("operator-proof", &context, protocol.strategy().clone());
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let config = replica_config("operator-proof", page_cache, protocol.strategy().clone());
         let state = Box::pin(recover(
             context,
             config,
@@ -860,7 +864,7 @@ mod tests {
             deterministic::Runner::default().start(|context| async move {
                 let mut config = replica_config(
                     "bootstrap-cut",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     Rayon::new(NonZeroUsize::MIN).unwrap(),
                 );
                 if cut == RecoveryCut::Applied {
@@ -931,7 +935,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = replica_config(
                 "unauthorized-head",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 Rayon::new(NonZeroUsize::MIN).unwrap(),
             );
             let connection = checkpoints();
@@ -1049,7 +1053,11 @@ mod tests {
             let genesis = genesis.clone();
             let results = results.clone();
             deterministic::Runner::default().start(|context| async move {
-                let mut config = replica_config("suffix", &context, protocol.strategy().clone());
+                let mut config = replica_config(
+                    "suffix",
+                    crate::protocol::fixture_page_cache(&context),
+                    protocol.strategy().clone(),
+                );
                 if cut == RecoveryCut::Applied {
                     config.state.journal_config.items_per_blob = NonZeroU64::MIN;
                     config.state.merkle_config.items_per_blob = NonZeroU64::MIN;
@@ -1191,7 +1199,7 @@ mod tests {
             deterministic::Runner::default().start(|context| async move {
                 let config = replica_config(
                     "configured",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     Rayon::new(NonZeroUsize::MIN).unwrap(),
                 );
                 let state = OperatorReplica::open(context.child("derive"), config.clone())
@@ -1252,7 +1260,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = replica_config(
                 "historical",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 Rayon::new(NonZeroUsize::MIN).unwrap(),
             );
             let account = wallets().remove(0).public_key();
@@ -1336,7 +1344,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = replica_config(
                 "payout-proofs",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 Rayon::new(NonZeroUsize::MIN).unwrap(),
             );
             let mut replica = OperatorReplica::open(context.child("replica"), config)

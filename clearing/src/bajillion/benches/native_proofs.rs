@@ -1,4 +1,4 @@
-use super::{fixtures, native_fixtures};
+use super::{fixtures, native_fixtures, raw};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, ChangeAbsence, ChangeOpening},
@@ -14,7 +14,7 @@ use commonware_parallel::Rayon;
 use commonware_runtime::{Runner as _, deterministic};
 use commonware_storage::{merkle::Location, mmr, qmdb};
 use criterion::{Criterion, criterion_group};
-use std::{hint::black_box, num::NonZeroU64};
+use std::{hint::black_box, num::NonZeroU64, time::Instant};
 
 type NativeLogs = Logs<deterministic::Context, Sha256, VerifyingKey, Rayon>;
 const FLOORS: Floors = Floors {
@@ -163,12 +163,14 @@ async fn activity_cases(
             present: false,
         });
     }
-    for case in &cases {
+    for case in &mut cases {
         case.verify();
         let encoded = case.lookup.encode();
         let decoded = AccountLookup::<VerifyingKey, Digest>::decode(encoded.clone()).unwrap();
         assert_eq!(decoded, case.lookup);
         assert_eq!(decoded.encode(), encoded);
+        case.lookup = decoded;
+        case.verify();
     }
     cases
 }
@@ -406,6 +408,46 @@ fn bench_activity(c: &mut Criterion) {
                 })
             },
         );
+    }
+}
+
+const ACTIVITY_ITERATIONS: usize = 1_000;
+
+pub(crate) fn activity_samples() {
+    let histories = native_fixtures::histories();
+    let rows = native_fixtures::rows();
+    let accounts = native_fixtures::accounts();
+    let [history] = histories.as_slice() else {
+        panic!("activity proof samples require exactly one H");
+    };
+    let [rows] = rows.as_slice() else {
+        panic!("activity proof samples require exactly one R");
+    };
+    let samples = raw::samples();
+    let cases = fixtures::runner().start(|runtime| activity_cases(runtime, *history, *rows));
+    for case in cases {
+        let name = format!("{}::activity_verify/{}", module_path!(), case.label);
+        let lookup_bytes = case.lookup.encode().len();
+        println!(
+            "{{\"record\":\"raw_metadata\",\"kind\":\"activity_verify\",\"name\":\"{name}\",\"boundary\":\"decoded_lookup_to_resolve_result\",\"fixture\":\"standalone_rows_without_payment_entries\",\"samples\":{samples},\"iterations_per_sample\":{ACTIVITY_ITERATIONS},\"n\":{accounts},\"h\":{history},\"r\":{rows},\"lookup_bytes\":{lookup_bytes},\"head_bytes\":{},\"expected_present\":{}}}",
+            case.range.head.encode().len(),
+            case.present,
+        );
+        for sample in 0..samples {
+            let start = Instant::now();
+            for _ in 0..ACTIVITY_ITERATIONS {
+                let _ = black_box(
+                    black_box(&case.lookup)
+                        .resolve::<Sha256>(black_box(&case.range), black_box(&case.account)),
+                );
+            }
+            let elapsed = start.elapsed();
+            case.verify();
+            println!(
+                "{{\"record\":\"raw_sample\",\"kind\":\"activity_verify\",\"name\":\"{name}\",\"sample\":{sample},\"iterations\":{ACTIVITY_ITERATIONS},\"total_ns\":{},\"verified\":true}}",
+                elapsed.as_nanos(),
+            );
+        }
     }
 }
 

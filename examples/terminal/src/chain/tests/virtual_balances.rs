@@ -88,7 +88,7 @@ fn first_credit(invalidated: bool) {
         let db = open(context.child("virtual_credit"), "virtual-credit").await;
         let config = crate::protocol::state_config(
             "virtual-balances",
-            &context,
+            crate::protocol::fixture_page_cache(&context),
             protocol.strategy().clone(),
         );
         let mut balances = replay_state(context.child("balances"), config, &genesis.history).await;

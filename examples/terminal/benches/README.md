@@ -10,7 +10,7 @@ Run the emitted `durable_ack` executable directly. For example:
 
 ```sh
 durable_ack --storage-directory /opt/bajillion-db \
-  --accounts 1000000 --senders 1024 --recipients 512 --out-degree 1 \
+  --accounts 1000000 --senders 1000 --recipients 512 --out-degree 1 \
   --withdrawals 0 --history 0 --samples 3 --warmup 0 \
   --runtime-workers 2 --workers 16 --benchmark-limits
 ```
@@ -21,6 +21,14 @@ directories, and the containing sample directory are synchronized before measure
 predecessor is durable and remains page-cached. Initialization,
 history, copies, and recovery checks are outside the timed interval. The private signer
 decision is never reset to reuse an existing validator instance.
+
+The adapter defaults to three samples without warmup. It uses one shared 1 GiB native cache,
+4,096-byte physical pages, and 256 MiB state/activity write buffers to hold the largest
+million-payer batch. Payout/private write buffers and all replay buffers are 8 MiB. The logical
+page payload comes from `page_size(4096)`. Normal terminal stores use a shared 16 MiB cache and
+8 MiB buffers. Public journals hold 33,554,432 operations per section and 67,108,864 Merkle
+nodes per blob, about 2 GiB for the measured workload. Variable section bytes depend on record
+sizes. All capacities are emitted in the metadata. Changing them requires fresh storage.
 
 One monotonic wall interval starts with encoded posted-Dealing bytes and a prepared registered
 context. It includes production decoding, validation, native batch preparation, signing,

@@ -46,7 +46,7 @@ The interrupted fourth preparation profile, verify-claim, adjudication, sign-vot
 
 Measurements ran serially on an AWS c8a.4xlarge with 16 AMD EPYC 9R45 vCPUs, 32 GiB RAM, Ubuntu 24.04.4, and rustc 1.98.1. The ext4 volume was a 160 GiB gp3 device provisioned for 6,000 IOPS and 250 MiB/s.
 
-The ACK records retain the actual storage geometry: 128 activity/payout log operations per section, 1,024 log Merkle nodes per blob, 4,096 Current operations per blob, 4,096 Current Merkle nodes per blob, 1,024-byte native pages, 16 cache pages for each of three native stores, and 2,048-byte log and private I/O buffers. They used one adaptive 16-worker Rayon pool, two Tokio I/O workers, and three concurrent public stores.
+The ACK records retain the actual storage geometry: 128 activity/payout log operations per section, 1,024 log Merkle nodes per blob, 4,096 Current operations per blob, 4,096 Current Merkle nodes per blob, 1,024-byte native pages, 16 pages in each of three native caches (state, the two logs together, and the private checkpoint), and 2,048-byte log and private I/O buffers. They used one adaptive 16-worker Rayon pool, two Tokio I/O workers, and three concurrent public stores.
 
 ## Provenance and retained evidence
 

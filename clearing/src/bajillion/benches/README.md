@@ -143,7 +143,7 @@ zero-net presence, adjacent interior absence, left/right edge absence, and an
 empty range. Absence proves one epoch's range, even when the account appears in
 prior history. Payout cases include first/middle/last new outputs, an old
 historical output at its old and current heads, and an issued output refreshed
-after later appends and a signed floor advance. The latter retains retained native rows
+after later appends and a signed floor advance. The latter retains native rows
 and Merkle nodes; it does not claim that a pruned validator can serve old proofs.
 W=0 measures the native Commit proof, not a payout claim. The proof fixture's
 H outputs/rows occupy one prior epoch when H is nonzero. Native operation counts
@@ -176,7 +176,9 @@ journal processing; it is not a durable SSD measurement.
 
 ## Publication runner
 
-`publication.py plan` prints the full million-account matrix without building.
+`publication.py plan` prints the million-account matrix without building. The
+main sweep uses 1,000, 10,000, 100,000, and 1,000,000 active payers with a fixed
+512-account recipient pool and one recipient per payer.
 Execution requires explicit output and real-filesystem storage directories plus
 `--execute`. Material scale is supplied through `--accounts`, repeatable exact
 profiles, activity/payout cases, and durable-ACK cases; the runner records the
@@ -185,13 +187,16 @@ Rayon pool shared by sealing and the three public stores, with `--workers 16` by
 default, while `--runtime-workers 2` controls Tokio I/O workers. Concurrent
 polling does not imply that every small CPU job is offloaded.
 
-The durable ACK metadata reports the production storage geometry used by the
-example. Activity and payout logs hold 128 operations per section and 1,024
-Merkle nodes per blob; Current holds 4,096 operations and 4,096 Merkle nodes per
-blob. Native pages are 1,024 bytes, each of the three native cache instances has
-16 pages, and log/private I/O buffers are 2,048 bytes. The publication runner
-requires these emitted values and does not replace them with benchmark-only
-storage tuning.
+The durable ACK metadata reports the native storage configuration, including
+the operation and Merkle-node capacities for state and logs. The adapter uses
+one shared 1 GiB page cache and 4,096-byte physical pages. State/activity write
+buffers are 256 MiB to hold the largest million-payer batch. Payout/private write
+buffers and all replay buffers are 8 MiB. Logical page payloads come from
+`page_size(4096)`. Public sections hold 33,554,432 operations or 67,108,864 Merkle
+nodes, about 2 GiB for the measured workload. Variable section bytes depend on
+record sizes. Normal terminal stores use a shared 16 MiB cache and 8 MiB buffers.
+Changing journal capacities requires fresh storage because they determine each
+item's physical location.
 
 Million-account activity and withdrawal limits are explicit fixture settings;
 raw ACK metadata retains the exact emitted `context_limits`, and this local
@@ -200,14 +205,31 @@ admission limits.
 
 The runner snapshots source and Cargo.lock, rejects source drift, builds one
 optimized binary per benchmark target, runs selectors serially, and requires an
-exact Criterion/ACK inventory. It enforces configurable RSS, free-disk, and case
-timeout gates. The first ACK readiness run is traced separately for actual
-`fsync`/`fdatasync` calls; tracing is never enabled for timed samples. Every ACK
+exact sample inventory. It enforces configurable RSS, free-disk, and case timeout
+gates. The `scaling` mode collects three preparation samples and three batches of
+1,000 decoded activity-proof verifications. Durable ACKs default to three samples
+without warmup. These selectors do not use Criterion. The `checks` and `all` modes
+also trace the first ACK readiness run for actual `fsync`/`fdatasync` calls.
+Tracing is disabled for timed samples. Every ACK
 sample starts from an isolated, durably copied four-owner predecessor and stops
 only after all three authoritative public-store commits and the following private
 control-store checkpoint and Ballot barrier. Full native sync of derived recovery
 metadata is outside the timed ACK contract; native reopen reconstructs that
 metadata and must recover the exact public heads.
+
+Run the main scaling sweep with:
+
+```sh
+python3 clearing/src/bajillion/benches/publication.py scaling --execute \
+  --output /opt/bajillion-results/scaling --storage-directory /opt/bajillion-db
+```
+
+The `prepare-samples` and `native-activity-proof-samples` selectors emit individual
+JSONL timing records. `COMMONWARE_CLEARING_SAMPLES` controls their sample count,
+from 1 to 100. Fixture construction and output checks run outside their timers.
+Preparation starts with detached inputs and ends with the encoded dealing.
+Activity verification starts with a decoded lookup and ends with its resolved
+result. These activity fixtures contain Rows without payment Entries.
 
 Check aggregation also requires the canonical encoded size rows to agree across
 all signed profiles: 184-byte `RootBundle`, 192-byte roots-plus-withdrawal-total

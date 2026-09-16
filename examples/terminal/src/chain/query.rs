@@ -1262,7 +1262,11 @@ mod tests {
     #[test]
     fn balance_evidence_codec_preserves_membership_absence_and_bounds() {
         deterministic::Runner::default().start(|context| async move {
-            let config = state_config("query-proofs", &context, Sequential);
+            let config = state_config(
+                "query-proofs",
+                crate::protocol::fixture_page_cache(&context),
+                Sequential,
+            );
             let state = State::<_, Sha256>::init(
                 context,
                 config,

@@ -5,6 +5,7 @@ use crate::{
     chain::tx::{RegisterEpochRequest, SettlementTx},
     protocol::{
         Account, MAX_GENESIS_ACCOUNTS, Protocol, Wallet, clearing_private, committee, deployments,
+        fixture_page_cache,
     },
 };
 use commonware_clearing::bajillion::{
@@ -44,6 +45,7 @@ pub(crate) async fn init_config<E: StorageContext + Spawner>(
 
 pub(super) struct Fixture {
     pub(super) lane: Lane<deterministic::Context>,
+    pub(super) page_cache: CacheRef,
     strategy: Rayon,
     liability: u64,
     wallets: Vec<Wallet>,
@@ -72,11 +74,12 @@ impl Fixture {
             total.checked_add(account.balance).unwrap()
         });
         let strategy = context.strategy(NZUsize!(1));
+        let page_cache = fixture_page_cache(context);
         let state = Box::pin(init_config(
             context.child("fixture"),
             replica_config(
                 &format!("{prefix}-replica-{}-0", deployment.digest()),
-                context,
+                page_cache.clone(),
                 strategy.clone(),
             ),
             genesis_balances(&deployment).unwrap(),
@@ -93,10 +96,14 @@ impl Fixture {
             state.state().head().operations(),
         )
         .unwrap();
-        let checkpoints =
-            checkpoint::Store::open(context.child("checkpoint"), prefix, deployment.digest())
-                .await
-                .unwrap();
+        let checkpoints = checkpoint::Store::open(
+            context.child("checkpoint"),
+            prefix,
+            deployment.digest(),
+            page_cache.clone(),
+        )
+        .await
+        .unwrap();
         let (state, checkpoints) = recover(state, &deployment, checkpoints).await.unwrap();
         Self {
             lane: Lane {
@@ -105,6 +112,7 @@ impl Fixture {
                 state: Some(state),
                 checkpoint: Some(checkpoints),
             },
+            page_cache,
             strategy,
             liability,
             wallets,
@@ -291,9 +299,10 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
     deployment.generate(context.child("genesis")).await.unwrap();
     let protocol = Protocol::new(NZUsize!(1)).unwrap();
     let strategy = context.strategy(NZUsize!(1));
+    let page_cache = fixture_page_cache(context);
     let state = init_config(
         context.child("operator"),
-        replica_config(&format!("{prefix}-operator"), context, strategy.clone()),
+        replica_config(&format!("{prefix}-operator"), page_cache, strategy.clone()),
         genesis_balances(&deployment).unwrap(),
     )
     .await
@@ -424,7 +433,7 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
         for restart in 0..2 {
             let run = context.child(if restart == 0 { "vote_initial" } else { "vote_restart" });
             let ((mut sender, mut receiver), channel) = network(&run, &operator, &validator, true, true).await;
-            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { strategy: run.strategy(NZUsize!(1)), scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
+            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { strategy: run.strategy(NZUsize!(1)), page_cache: initial.page_cache.clone(), scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
             let handle = actor.start(channel);
             let mut other = dealing.clone();
             other.bytes = if restart == 0 { Bytes::from_static(&[0]) } else { alternate.bytes.clone() };
@@ -451,7 +460,14 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
             handle.abort();
             let _ = handle.await;
         }
-        let saved = checkpoint::Store::open(context.child("inspect"), "saved-vote", deployment.digest()).await.unwrap();
+        let saved = checkpoint::Store::open(
+            context.child("inspect"),
+            "saved-vote",
+            deployment.digest(),
+            initial.page_cache.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(saved.get().unwrap().canonical.checkpoint.next, 1);
         assert!(saved.get().unwrap().candidate.is_none());
         assert!(saved.get().unwrap().decision.is_none());
@@ -469,6 +485,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
             let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
             let (actor, _mailbox) = Sealer::new(context.child("initial_owner"), Config {
                 strategy: context.strategy(NZUsize!(1)),
+                page_cache: initial.page_cache.clone(),
                 scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
                 partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
             });
@@ -529,6 +546,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
         let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
         let (actor, mailbox) = Sealer::new(context.child("restarted_owner"), Config {
             strategy: context.strategy(NZUsize!(1)),
+            page_cache: initial.page_cache.clone(),
             scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
             partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
         });
@@ -542,7 +560,14 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
         assert_eq!(metric(&context, "restarted_owner_replica_state_balances_apply_batch_calls_total"), 0);
         handle.abort();
         let _ = handle.await;
-        let control = checkpoint::Store::open(context.child("inspect"), "discarded-vote", deployment.digest()).await.unwrap();
+        let control = checkpoint::Store::open(
+            context.child("inspect"),
+            "discarded-vote",
+            deployment.digest(),
+            initial.page_cache.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(control.get().unwrap().decision.as_ref().unwrap().encode(), saved);
         assert!(control.get().unwrap().candidate.is_none());
     });
@@ -614,24 +639,19 @@ pub(super) async fn sealer(
     prefix: &str,
     deployment: &Deployment,
 ) -> (Sealer<deterministic::Context>, Mailbox) {
-    use crate::chain::{
-        native::RegistryEntry,
-        validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
-    };
+    use crate::chain::{native::RegistryEntry, validator::db_config};
     use commonware_glue::stateful::db::DatabaseSet;
-    use commonware_runtime::buffer::paged::CacheRef;
+    let page_cache = fixture_page_cache(context);
     let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("settlement"),
-        db_config(
-            &format!("{prefix}-settlement"),
-            CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        ),
+        db_config(&format!("{prefix}-settlement"), page_cache.clone()),
     )
     .await;
     Sealer::new(
         context.child("sealer"),
         Config {
             strategy: context.strategy(NZUsize!(1)),
+            page_cache,
             scheme: bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap())
                 .unwrap(),
             registry: RegistryView::new(vec![RegistryEntry {
@@ -646,4 +666,29 @@ pub(super) async fn sealer(
             retain_history: false,
         },
     )
+}
+
+#[test]
+fn sealer_reuses_one_cache_across_replica_generations() {
+    deterministic::Runner::default().start(|context| async move {
+        let deployment = deployments().remove(0);
+        let (sealer, _) = sealer(&context, "cache-owner", &deployment).await;
+        let mut previous = sealer.page_cache.next_id();
+        for generation in [0, 1] {
+            let config = sealer.config(deployment.digest(), generation);
+            let caches = [
+                &config.state.merkle_config.page_cache,
+                &config.state.journal_config.page_cache,
+                &config.logs.activity.merkle.page_cache,
+                &config.logs.activity.log.page_cache,
+                &config.logs.payouts.merkle.page_cache,
+                &config.logs.payouts.log.page_cache,
+            ];
+            for cache in caches {
+                let current = cache.next_id();
+                assert_eq!(current, previous + 1);
+                previous = current;
+            }
+        }
+    });
 }
