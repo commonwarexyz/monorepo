@@ -169,8 +169,12 @@ impl IoBufs {
 
     /// Whether all buffers are empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+    pub const fn is_empty(&self) -> bool {
+        // Only Single can be empty. All other variants contain readable bytes.
+        match &self.inner {
+            IoBufsInner::Single(buf) => buf.is_empty(),
+            IoBufsInner::Pair(_) | IoBufsInner::Triple(_) | IoBufsInner::Chunked(_) => false,
+        }
     }
 
     /// Whether this contains a single contiguous buffer.
@@ -472,6 +476,11 @@ impl IoBufs {
 impl Buf for IoBufs {}
 
 impl bytes::Buf for IoBufs {
+    #[inline]
+    fn has_remaining(&self) -> bool {
+        !self.is_empty()
+    }
+
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
@@ -844,7 +853,12 @@ impl IoBufsMut {
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.is_empty(),
+            IoBufsMutInner::Pair([a, b]) => a.is_empty() && b.is_empty(),
+            IoBufsMutInner::Triple([a, b, c]) => a.is_empty() && b.is_empty() && c.is_empty(),
+            IoBufsMutInner::Chunked(bufs) => bufs.iter().all(IoBufMut::is_empty),
+        }
     }
 
     /// Whether this contains a single contiguous buffer.
@@ -1032,6 +1046,11 @@ impl From<IoBufsMut> for IoBufs {
 }
 
 impl bytes::Buf for IoBufsMut {
+    #[inline]
+    fn has_remaining(&self) -> bool {
+        !self.is_empty()
+    }
+
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
@@ -1671,6 +1690,66 @@ mod tests {
         let mut pooled_bytes = vec![0u8; pooled.remaining()];
         pooled.copy_to_slice(&mut pooled_bytes);
         assert_eq!(pooled_bytes, baseline.as_ref());
+    }
+
+    #[test]
+    fn test_iobufs_emptiness_after_consumption() {
+        fn assert_state(bufs: &IoBufs, expected: &[u8]) {
+            assert_eq!(bufs.remaining(), expected.len());
+            assert_eq!(bufs.is_empty(), expected.is_empty());
+            assert_eq!(bufs.has_remaining(), !expected.is_empty());
+            let mut actual = Vec::new();
+            bufs.for_each_chunk(|chunk| actual.extend_from_slice(chunk));
+            assert_eq!(actual, expected);
+        }
+
+        let data = b"abcdefgh";
+        let source = IoBufs::from(vec![
+            IoBuf::default(),
+            IoBuf::from(b"ab"),
+            IoBuf::default(),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::default(),
+            IoBuf::from(b"gh"),
+            IoBuf::default(),
+        ]);
+
+        // Prefixes exercise every representation, including an empty Single.
+        for end in 0..=data.len() {
+            let mut suffix = source.clone();
+            let prefix = suffix.split_to(end);
+            assert_state(&prefix, &data[..end]);
+            assert_state(&suffix, &data[end..]);
+
+            for step in [1, 2, 3, data.len()] {
+                let mut advanced = prefix.clone();
+                let mut copied = prefix.clone();
+                let mut offset = 0;
+                while offset < end {
+                    let count = step.min(end - offset);
+                    advanced.advance(count);
+                    assert_eq!(copied.copy_to_bytes(count), &data[offset..offset + count]);
+                    offset += count;
+                    assert_state(&advanced, &data[offset..end]);
+                    assert_state(&copied, &data[offset..end]);
+                }
+
+                // Empty inputs preserve emptiness; new bytes make a drained buffer readable.
+                advanced.append(IoBuf::default());
+                advanced.prepend(IoBuf::default());
+                assert_state(&advanced, b"");
+                advanced.append(IoBuf::from(b"z"));
+                advanced.prepend(IoBuf::from(b"y"));
+                assert_state(&advanced, b"yz");
+            }
+
+            let mut input = prefix;
+            let mut output = IoBufMut::with_capacity(data.len());
+            output.put(&mut input);
+            assert_eq!(output.as_ref(), &data[..end]);
+            assert_state(&input, b"");
+        }
     }
 
     #[test]
@@ -2504,6 +2583,35 @@ mod tests {
         bufs.advance(2);
         assert!(bufs.is_single());
         assert_eq!(bufs.chunk(), b"cd");
+    }
+
+    #[test]
+    fn test_iobufsmut_emptiness_with_reserved_capacity() {
+        for count in 0..=8 {
+            for readable in 0..=count {
+                let mut chunks = Vec::new();
+                for index in 0..count {
+                    let mut chunk = IoBufMut::with_capacity(4);
+                    if index == readable {
+                        chunk.put_u8(7);
+                    }
+                    chunks.push(chunk);
+                }
+                let mut bufs = IoBufsMut::from(chunks);
+                assert_eq!(bufs.is_empty(), readable == count);
+                assert_eq!(bufs.has_remaining(), readable != count);
+                if readable != count {
+                    bufs.advance(1);
+                    assert!(bufs.is_empty());
+                    assert!(!bufs.has_remaining());
+                }
+                if bufs.remaining_mut() > 0 {
+                    bufs.put_slice(&[9]);
+                    assert!(!bufs.is_empty());
+                    assert!(bufs.has_remaining());
+                }
+            }
+        }
     }
 
     #[test]
