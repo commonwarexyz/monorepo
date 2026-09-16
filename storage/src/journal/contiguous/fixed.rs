@@ -4716,6 +4716,7 @@ mod tests {
         // and the fifth stays buffered, so the old pages behind them are never rewritten.
         const PAGE_SIZE: NonZeroU16 = NZU16!(64);
         const BOUND: u64 = 4;
+
         fn cfg(pooler: &impl BufferPooler) -> Config {
             Config {
                 partition: "init-at-most-truncation-crash".into(),
@@ -4796,6 +4797,7 @@ mod tests {
         // pages and the fifth stays buffered, so the old pages behind them are never rewritten.
         const PAGE_SIZE: NonZeroU16 = NZU16!(64);
         const REPAIRED: u64 = 4;
+
         fn cfg(pooler: &impl BufferPooler) -> Config {
             Config {
                 partition: "repair-truncation-crash".into(),

@@ -181,19 +181,24 @@ impl Write for Entry {
         self.2.write(buf);
     }
 }
+
 impl Read for Entry {
     type Cfg = ();
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(u64::read(buf)?, u64::read(buf)?, u32::read(buf)?))
     }
 }
+
 impl FixedSize for Entry {
     const SIZE: usize = 20;
 }
+
 impl Record for Entry {
     fn value_location(&self) -> (u64, u32) {
         (self.1, self.2)
     }
+
     fn with_location(self, offset: u64, size: u32) -> Self {
         Self(self.0, offset, size)
     }

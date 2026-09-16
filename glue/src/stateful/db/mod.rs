@@ -2669,13 +2669,17 @@ mod tests {
             }
             Ok(Self(selected))
         }
+
         fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
+
         fn matches_sync_target(_batch: &Self::Merkleized, _target: &u64) -> bool {
             true
         }
+
         ready_apply!();
+
         fn sync_target(&self) -> u64 {
             self.0
         }

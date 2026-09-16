@@ -1978,6 +1978,7 @@ mod tests {
     /// of the new branch, never B's operations or B's Merkle nodes.
     fn init_at_most_equal_length_branch_crash_inner<F: Family + PartialEq>() {
         const A: u64 = 4;
+
         fn is_commit<F: Family>(op: &TestOp<F>) -> bool {
             op.is_commit()
         }
@@ -2008,6 +2009,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
             }
         }
+
         fn branch<F: Family + PartialEq>(first: u8, len: u64) -> Vec<TestOp<F>> {
             let mut ops: Vec<TestOp<F>> = (0..len - 1)
                 .map(|i| create_operation::<F>(first + i as u8))

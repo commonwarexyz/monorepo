@@ -6594,6 +6594,7 @@ mod tests {
         // old pages behind them are never rewritten.
         const PAGE_SIZE: NonZeroU16 = NZU16!(36);
         const BOUND: u64 = 8;
+
         fn cfg(pooler: &impl BufferPooler) -> Config<()> {
             Config {
                 partition: "variable-init-at-most-truncation-crash".into(),

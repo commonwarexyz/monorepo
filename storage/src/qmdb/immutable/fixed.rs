@@ -612,6 +612,7 @@ mod tests {
         fn key(i: u8) -> Digest {
             Digest::from([i; 32])
         }
+
         fn value(branch: u8, i: u8) -> Digest {
             let mut bytes = [branch; 32];
             bytes[31] = i;

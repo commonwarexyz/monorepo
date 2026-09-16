@@ -1704,6 +1704,7 @@ mod tests {
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both histories' writes overlapping.
         type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
+
         fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
             let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash", pooler);
@@ -1713,6 +1714,7 @@ mod tests {
             config.merkle_config.items_per_blob = NZU64!(1000);
             config
         }
+
         fn batch_for(i: u8) -> (Digest, Digest, Digest) {
             (
                 Sha256::hash(&[b"key", &[i]]),
