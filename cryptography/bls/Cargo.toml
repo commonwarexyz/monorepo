@@ -1,0 +1,80 @@
+[package]
+name = "commonware-cryptography-bls"
+edition.workspace = true
+publish = true
+version.workspace = true
+license = "Apache-2.0"
+description = "Perform BLS12-381 and Banderwagon arithmetic, pairings, and BLS signatures."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography/bls"
+documentation = "https://docs.rs/commonware-cryptography-bls"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitrary = { workspace = true, optional = true, features = [ "derive" ] }
+blst = { workspace = true, optional = true, features = [ "no-threads" ] }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography = { workspace = true, optional = true }
+commonware-cryptography-vroom.workspace = true
+commonware-macros.workspace = true
+commonware-utils = { workspace = true, optional = true }
+rand_core.workspace = true
+sha2 = { workspace = true, features = [ "zeroize" ] }
+subtle.workspace = true
+thiserror.workspace = true
+zeroize = { workspace = true, features = [ "zeroize_derive" ] }
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = [ "derive" ] }
+ark-ec = { workspace = true, features = [ "std" ] }
+ark-ed-on-bls12-381-bandersnatch = { workspace = true, features = [ "std" ] }
+ark-ff = { workspace = true, features = [ "std" ] }
+blst = { workspace = true, features = [ "no-threads" ] }
+commonware-conformance.workspace = true
+commonware-cryptography = { workspace = true, features = [ "std" ] }
+commonware-formatting.workspace = true
+commonware-invariants.workspace = true
+commonware-math.workspace = true
+commonware-parallel.workspace = true
+commonware-utils = { workspace = true, features = [ "std" ] }
+criterion.workspace = true
+num-bigint.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "bls"
+harness = false
+path = "src/benches/bench.rs"
+
+[features]
+default = [ "std" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography?/arbitrary",
+	"commonware-utils?/arbitrary",
+	"dep:arbitrary",
+]
+fuzz = [
+	"arbitrary",
+	"dep:blst",
+	"dep:commonware-cryptography",
+	"dep:commonware-utils",
+	"std",
+]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-cryptography-vroom/std",
+	"commonware-cryptography?/std",
+	"commonware-macros/std",
+	"commonware-utils?/std",
+	"subtle/std",
+	"thiserror/std",
+	"zeroize/std",
+]

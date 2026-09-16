@@ -92,6 +92,16 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish cryptography-vroom
+      run: cargo publish --manifest-path cryptography/vroom/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish cryptography-bls
+      run: cargo publish --manifest-path cryptography/bls/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish runtime-macros
       run: cargo publish --manifest-path runtime/macros/Cargo.toml
       continue-on-error: true

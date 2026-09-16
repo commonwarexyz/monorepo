@@ -1,0 +1,197 @@
+{
+  "base_redundancy": 40,
+  "combined_max": 6894400,
+  "fields": {
+    "bander_scalar": {
+      "bits": 50,
+      "bounds": {
+        "MN_over_combined_p2": 5628115419345648750300705854797693017394168545536568274367577195667522146269885107,
+        "M_over_p": 196983448409059955952082405820229394131238081,
+        "N_over_p": 196983448409120140970165191353273717344399941,
+        "canonical_acc_bits": 307,
+        "canonical_acc_over_p_bits": 54,
+        "expand": {
+          "high_acc_bits": 52,
+          "k_max": 10375039237473780,
+          "k_raw_bits": 118,
+          "low_acc_bits": 56,
+          "total_acc_bits": 104
+        },
+        "lane_product_high_acc_bits": 60,
+        "lane_product_low_acc_bits": 62,
+        "max_expand": 9223372036854775807,
+        "ready_m_multiple": 4,
+        "reduce": {
+          "high_acc_bits": 60,
+          "k_max": 17467777691714895,
+          "k_raw_bits": 118,
+          "low_acc_bits": 62,
+          "total_acc_bits": 112
+        },
+        "to_rns": {
+          "high_acc_bits": 51,
+          "k_max": 2630742893238297,
+          "k_raw_bits": 116,
+          "low_acc_bits": 56,
+          "total_acc_bits": 103
+        }
+      },
+      "canonical_digits": 6,
+      "lanes": 8,
+      "model": {
+        "decode_cases": 10,
+        "expand_domain_cases": 111,
+        "multiply_cases": 105,
+        "multiply_chain": 100,
+        "reduce_domain_cases": 112,
+        "to_rns_cases": 103
+      },
+      "no_k": false,
+      "word": 52
+    },
+    "bls12381": {
+      "bits": 50,
+      "bounds": {
+        "MN_over_combined_p2": 60374,
+        "M_over_p": 645173,
+        "N_over_p": 645173,
+        "canonical_acc_bits": 435,
+        "canonical_acc_over_p_bits": 54,
+        "expand": {
+          "high_acc_bits": 52,
+          "k_max": 10375039237473780,
+          "k_raw_bits": 118,
+          "low_acc_bits": 56,
+          "total_acc_bits": 104
+        },
+        "lane_product_high_acc_bits": 60,
+        "lane_product_low_acc_bits": 62,
+        "max_expand": 8064,
+        "ready_m_multiple": 2,
+        "reduce": {
+          "high_acc_bits": 60,
+          "k_max": 15,
+          "k_raw_bits": 68,
+          "low_acc_bits": 62,
+          "total_acc_bits": 112
+        },
+        "to_rns": {
+          "high_acc_bits": 52,
+          "k_max": 4343590859915784,
+          "k_raw_bits": 116,
+          "low_acc_bits": 56,
+          "total_acc_bits": 104
+        }
+      },
+      "canonical_digits": 8,
+      "lanes": 8,
+      "model": {
+        "decode_cases": 10,
+        "expand_domain_cases": 111,
+        "multiply_cases": 105,
+        "multiply_chain": 100,
+        "reduce_domain_cases": 111,
+        "to_rns_cases": 103
+      },
+      "no_k": true,
+      "word": 52
+    },
+    "bls_scalar": {
+      "bits": 50,
+      "bounds": {
+        "MN_over_combined_p2": 351757213709103046893794115924855813581045322996567160078854363198578319812054604,
+        "M_over_p": 49245862102264988988020601455057348532383206,
+        "N_over_p": 49245862102280035242541297838318429335673671,
+        "canonical_acc_bits": 309,
+        "canonical_acc_over_p_bits": 54,
+        "expand": {
+          "high_acc_bits": 52,
+          "k_max": 10375039237473780,
+          "k_raw_bits": 118,
+          "low_acc_bits": 56,
+          "total_acc_bits": 104
+        },
+        "lane_product_high_acc_bits": 60,
+        "lane_product_low_acc_bits": 62,
+        "max_expand": 9223372036854775807,
+        "ready_m_multiple": 4,
+        "reduce": {
+          "high_acc_bits": 60,
+          "k_max": 14566697761796543,
+          "k_raw_bits": 118,
+          "low_acc_bits": 62,
+          "total_acc_bits": 112
+        },
+        "to_rns": {
+          "high_acc_bits": 51,
+          "k_max": 3474700165380671,
+          "k_raw_bits": 116,
+          "low_acc_bits": 56,
+          "total_acc_bits": 103
+        }
+      },
+      "canonical_digits": 6,
+      "lanes": 8,
+      "model": {
+        "decode_cases": 10,
+        "expand_domain_cases": 111,
+        "multiply_cases": 105,
+        "multiply_chain": 100,
+        "reduce_domain_cases": 111,
+        "to_rns_cases": 103
+      },
+      "no_k": false,
+      "word": 52
+    },
+    "curve25519": {
+      "bits": 50,
+      "bounds": {
+        "MN_over_combined_p2": 288537500817781783757208553799144042190730432041285846222571027580708611461552901,
+        "M_over_p": 44601490397042865349368130374168772253289220,
+        "N_over_p": 44601490397056492593320580888406781048385142,
+        "canonical_acc_bits": 309,
+        "canonical_acc_over_p_bits": 54,
+        "expand": {
+          "high_acc_bits": 52,
+          "k_max": 10375039237473780,
+          "k_raw_bits": 118,
+          "low_acc_bits": 56,
+          "total_acc_bits": 104
+        },
+        "lane_product_high_acc_bits": 60,
+        "lane_product_low_acc_bits": 62,
+        "max_expand": 9223372036854775807,
+        "ready_m_multiple": 4,
+        "reduce": {
+          "high_acc_bits": 60,
+          "k_max": 18967936440280547,
+          "k_raw_bits": 119,
+          "low_acc_bits": 62,
+          "total_acc_bits": 112
+        },
+        "to_rns": {
+          "high_acc_bits": 51,
+          "k_max": 3473698246914222,
+          "k_raw_bits": 116,
+          "low_acc_bits": 56,
+          "total_acc_bits": 103
+        }
+      },
+      "canonical_digits": 6,
+      "lanes": 8,
+      "model": {
+        "decode_cases": 10,
+        "expand_domain_cases": 111,
+        "multiply_cases": 105,
+        "multiply_chain": 100,
+        "reduce_domain_cases": 111,
+        "to_rns_cases": 103
+      },
+      "no_k": false,
+      "word": 52
+    }
+  },
+  "max_add": 800,
+  "reference_commit": "013169524f701ec62f95048c427ccf9065da1abe",
+  "reference_header_sha256": "27cc87f2350bb87ec75ded2ba962fff073f61a871194f6536e159928524bb14f"
+}

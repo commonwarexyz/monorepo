@@ -5,7 +5,9 @@ no_std_packages=(
   commonware-codec
   commonware-utils
   commonware-cryptography
+  commonware-cryptography-bls
   commonware-cryptography-curve25519
+  commonware-cryptography-vroom
   commonware-math
   commonware-storage
   commonware-parallel

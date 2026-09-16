@@ -1,0 +1,23 @@
+["commonware_cryptography_bls::banderwagon::tests::conformance::CodecConformance<G>"]
+n_cases = 1024
+hash = "ad3764b081e212e8d578ea65935d4c37715e98c2cc12a1a89595bf5eabd70309"
+
+["commonware_cryptography_bls::banderwagon::tests::conformance::CodecConformance<Scalar>"]
+n_cases = 1024
+hash = "cf6f712f0f70e062c8c4c2963b0a341e546bd17258becbb6d36912f7cf2c3265"
+
+["commonware_cryptography_bls::bls12381::group::tests::conformance::CodecConformance<G1>"]
+n_cases = 32
+hash = "d26260995da32b6abb7da51d4a9be4ffad2233e8e41976c59316e5485b45addc"
+
+["commonware_cryptography_bls::bls12381::group::tests::conformance::CodecConformance<G2>"]
+n_cases = 32
+hash = "fc59019326731f829e861cf552599c0ba544683550725d2227265e0a0d211b78"
+
+["commonware_cryptography_bls::bls12381::scalar::tests::conformance::CodecConformance<Scalar>"]
+n_cases = 1024
+hash = "9e69c695bcd8ba848727a7680d140803ff2be4e312b3618b3c6976ff1a59d835"
+
+["commonware_cryptography_bls::bls12381::signing::tests::conformance::CodecConformance<SigningKey>"]
+n_cases = 1024
+hash = "021d24a6a329ab0e672ee73196ba7f6ef155e2aa52be1ac9649a638820174ff0"
