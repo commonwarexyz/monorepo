@@ -139,6 +139,8 @@ impl SyncState {
     /// Resize the blob and require a later sync.
     async fn resize(&mut self, blob: &impl crate::Blob, len: u64) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
+
+        // A failed resize may still have changed the length, so it dirties the blob either way.
         self.mark_dirty();
         blob.resize(len).await?;
         Ok(())
