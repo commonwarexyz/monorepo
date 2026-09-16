@@ -372,14 +372,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// requesting that ordinary path again. Consensus controls whether a ready
         /// candidate may be published before parent certification.
         ///
-        /// Resolve this decision promptly: parent certification does not bypass a pending
-        /// policy, so it can consume the proposal opportunity. This future may be dropped
-        /// when its request is abandoned; cancellation must leave application state valid.
-        fn handoff_policy(
-            &mut self,
-            _context: (E, Self::Context),
-        ) -> impl Future<Output = HandoffPolicy> + Send {
-            async move { HandoffPolicy::AwaitCertification }
+        /// Make this decision from information already available to the application. If
+        /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
+        fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+            HandoffPolicy::AwaitCertification
         }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

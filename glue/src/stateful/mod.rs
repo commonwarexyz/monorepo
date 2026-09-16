@@ -216,13 +216,11 @@ where
 
     /// Decide whether to build on a parent that has not yet been certified.
     ///
-    /// Resolve this decision promptly. The request may be cancelled when consensus
-    /// abandons the proposal context, and cancellation must leave application state valid.
-    fn handoff_policy(
-        &mut self,
-        _context: (E, Self::Context),
-    ) -> impl Future<Output = HandoffPolicy> + Send {
-        async move { HandoffPolicy::AwaitCertification }
+    /// Make this decision from information already available to the application. If
+    /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`]. Mutable
+    /// readiness information must be shared across application clones.
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+        HandoffPolicy::AwaitCertification
     }
 
     /// Build a new block on top of the provided parent ancestry.

@@ -30,7 +30,7 @@ impl crate::Application<Runtime> for PipelineApp {
     type SigningScheme = S;
     type Input = ();
 
-    async fn handoff_policy(&mut self, _: (Runtime, Ctx)) -> HandoffPolicy {
+    fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
         HandoffPolicy::Build
     }

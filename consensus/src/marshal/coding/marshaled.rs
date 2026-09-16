@@ -1135,27 +1135,20 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
-        let mut handoff = self.clone();
         let (mut tx, rx) = oneshot::channel();
+        let decision = self.application.handoff_policy(&consensus_context);
+        if decision == HandoffPolicy::AwaitCertification {
+            tx.send_lossy(HandoffProposal::AwaitCertification);
+            return rx;
+        }
+        let mut handoff = self.clone();
         let context = self
             .context
             .lock()
             .await
             .child("propose_handoff")
             .with_attribute("round", consensus_context.round);
-        context.spawn(move |runtime_context| async move {
-            let decision = handoff.application.handoff_policy((
-                runtime_context.child("app_handoff_policy"),
-                consensus_context.clone(),
-            ));
-            let decision = select! {
-                _ = tx.closed() => return,
-                decision = decision => decision,
-            };
-            if decision == HandoffPolicy::AwaitCertification {
-                tx.send_lossy(HandoffProposal::AwaitCertification);
-                return;
-            }
+        context.spawn(move |_| async move {
             let proposal = Automaton::propose(&mut handoff, consensus_context).await;
             select! {
                 _ = tx.closed() => {},

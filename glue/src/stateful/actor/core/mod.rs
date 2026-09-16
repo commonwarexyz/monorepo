@@ -187,7 +187,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                application: config.application,
+                application: config.application.clone(),
                 provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
@@ -196,7 +196,7 @@ where
                 sync_config: config.sync_config,
                 pruning,
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.application),
         )
     }
 
@@ -319,11 +319,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::poll;
-    use std::{
-        convert::Infallible,
-        sync::{Arc, atomic::Ordering},
-        time::Duration,
-    };
+    use std::{convert::Infallible, sync::Arc, time::Duration};
 
     /// Blocks startup before the actor begins polling its mailbox.
     struct StartupGate {
@@ -435,10 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn forwards_handoff_policy_and_cancels_abandoned_request() {
+    fn forwards_handoff_policy_and_reuses_recovered_proposal() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (application, started, _release, cancelled) =
-                TestApp::gated_handoff_policy(HandoffPolicy::Build);
+            let application = TestApp::with_handoff_policy(HandoffPolicy::Build);
             let (mailbox, marshal, _marshal, actor) =
                 spawn_test_stateful(&context, "stateful-handoff-policy", application).await;
             let _databases = mailbox.subscribe_databases().await;
@@ -448,17 +443,6 @@ mod tests {
                 marshal.clone(),
                 FixedEpocher::new(NZU64!(10)),
             );
-
-            let response = deferred
-                .propose_handoff(TestBlock::new(1, 1).context())
-                .await;
-            started
-                .await
-                .expect("custom handoff policy should be forwarded");
-            drop(response);
-            while !cancelled.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
 
             // Build must reach Marshal's ordinary path, including recovered-candidate reuse.
             let block = TestBlock::new(1, 1);

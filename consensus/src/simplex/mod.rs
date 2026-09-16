@@ -245,26 +245,39 @@
 //!
 //! ### Pipelined Handoff
 //!
-//! A term's first proposal waits for certified ancestry from the prior term. This delays proposal
-//! distribution by one network trip at every term boundary. An elector that can name a term's
-//! leader before the term starts (see
-//! [`elector::Elector::elect_without_certificate`]) can offer a pipelined handoff to the
-//! application. The incoming leader may prebuild on the outgoing term's final view, or defer
-//! until that view certifies. With [`Config::pipelined_handoff`] set to false, consensus
-//! retains the same build and publishes it only after its exact parent certifies or finalizes.
-//! Setting it to true permits early relay and notarize votes. Pending policy decisions and
-//! builds survive parent certification; invalid ancestry or an exited view discards them.
-//! Preparation is volatile across restart. If the outgoing proposal never arrives, the
-//! incoming leader builds on ordinary certified ancestry. Non-leader validators keep the
-//! same behavior: they buffer votes for the next term start and verify the early proposal
-//! against explicitly certified ancestry once the outgoing view certifies.
+//! A **handoff request** asks the incoming leader for a term-start candidate before its parent
+//! certifies. **Prebuilding** starts construction in response to that request. **Holding** keeps
+//! the candidate unpublished until its exact parent certifies or finalizes. **Pipelining** permits
+//! publication and the proposer's notarize vote before parent certification.
+//!
+//! Handoff requests require an elector that can select the incoming leader without a certificate
+//! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
+//! the leader uses the ordinary proposal path. Applications decide whether to prebuild;
+//! [`Config::pipelined_handoff`] separately controls early publication.
+//!
+//! | Handoff response | `pipelined_handoff = false` | `pipelined_handoff = true` |
+//! | --- | --- | --- |
+//! | [`crate::HandoffProposal::AwaitCertification`] | Request an ordinary proposal after parent certification | Same |
+//! | [`crate::HandoffProposal::Proposed`] | Hold until the exact parent certifies or finalizes | Permit early relay and own notarize vote |
+//! | Closed response | Abandon the local proposal opportunity | Same |
+//!
+//! Publication always passes the ordinary proposal eligibility checks. Parent certification
+//! preserves unfinished builds and completed candidates. View exit or replacement of invalid
+//! ancestry discards them; preparation is volatile across restart. Other validators still require
+//! explicitly certified ancestry before verifying a term-start proposal or voting for it.
+//!
+//! Marshal applications use [`crate::Application::handoff_policy`] to choose
+//! [`crate::HandoffPolicy::Build`] or the default [`crate::HandoffPolicy::AwaitCertification`].
+//! Stateful Glue exposes the same policy. The decision is synchronous and uses available
+//! information. `Build` with pipelining disabled overlaps construction with certification while
+//! withholding publication. It uses the ordinary construction path, which may reuse an existing
+//! block without calling the application builder.
 //!
 //! With early publication enabled, the gain is largest with rotating leaders, where every
-//! view is a term boundary. Each
-//! proposal is distributed in parallel with its parent's votes, so sustained view time drops
-//! from two network trips to one. With stable leaders, optimistic validation pipelines every
-//! view except the term start, so the handoff only moves each term's first view one network
-//! trip earlier.
+//! view is a term boundary. Each proposal is distributed in parallel with its parent's votes,
+//! allowing network-bound view time to drop from two network trips to one. With stable leaders,
+//! optimistic validation pipelines every view except the term start, so the handoff only moves
+//! each term's first view one network trip earlier.
 //!
 //! Pipelining the handoff trusts the outgoing leader not to equivocate. If the outgoing tip never
 //! notarizes, validators cannot use the pipelined proposal built on it. The usual timeout path

@@ -2,9 +2,7 @@ use crate::stateful::{
     Application,
     actor::{
         core::{
-            mailbox::Message,
-            processing::{Processing, spawn_handoff_policy},
-            verifications::Request as VerificationRequest,
+            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, PendingSyncTargets, Processor, Pruning},
@@ -150,14 +148,6 @@ where
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
                         response.send_lossy(None);
                     });
-                }
-                Message::HandoffPolicy { context, response } => {
-                    spawn_handoff_policy(
-                        self.context.as_present(),
-                        self.application.clone(),
-                        context,
-                        response,
-                    );
                 }
                 Message::Verify {
                     span,
@@ -591,7 +581,7 @@ mod tests {
             };
             (
                 harness,
-                StatefulMailbox::new(mailbox_sender),
+                StatefulMailbox::new(mailbox_sender, TestApp::default()),
                 syncer_receiver,
                 sync_complete,
             )

@@ -3224,7 +3224,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                let proposal_rx = wrapper.propose(non_boundary_context.clone()).await;
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -3235,6 +3235,21 @@ mod tests {
                         .contains("wrapper_under_test_build_duration_count 0"),
                     "{kind:?}: failed application builds should not be timed"
                 );
+
+                // Dropping a handoff response must cancel the ordinary build it forwards.
+                let (gated_app, started, _release, dropped) = MockVerifyingApp::new()
+                    .with_handoff_policy(HandoffPolicy::Build)
+                    .with_proposal_gate();
+                let mut gated = Wrapper::new(
+                    kind,
+                    context.child("cancelled_handoff"),
+                    gated_app,
+                    marshal.clone(),
+                );
+                let response = gated.propose_handoff(non_boundary_context.clone()).await;
+                started.await.expect("handoff build should start");
+                drop(response);
+                dropped.await.expect("handoff build should be cancelled");
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);

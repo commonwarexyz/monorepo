@@ -88,12 +88,6 @@ where
         response: oneshot::Sender<Option<A::Block>>,
     },
 
-    /// A request for the application's handoff construction policy.
-    HandoffPolicy {
-        context: (E, A::Context),
-        response: oneshot::Sender<HandoffPolicy>,
-    },
-
     /// A request to verify a block.
     Verify {
         span: Span,
@@ -127,7 +121,6 @@ where
     fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
-            Self::HandoffPolicy { response, .. } => response.is_closed(),
             Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -196,8 +189,11 @@ where
 
 /// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits by forwarding
-/// each call to the actor via a message and awaiting the response.
+/// Implements the consensus application and verifying traits. Proposal,
+/// verification, and reporting calls are forwarded to the actor.
+/// Handoff policy is evaluated on an application clone retained by the mailbox,
+/// independently of the actor lifecycle, including after actor shutdown. A
+/// [`HandoffPolicy::Build`] decision does not guarantee proposal availability.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -205,6 +201,7 @@ where
 {
     sender: Sender<Message<E, A>>,
     retry_mailbox: RetryMailbox<E, A>,
+    application: A,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -216,6 +213,7 @@ where
         Self {
             sender: self.sender.clone(),
             retry_mailbox: self.retry_mailbox.clone(),
+            application: self.application.clone(),
         }
     }
 }
@@ -226,7 +224,7 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>, application: A) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -234,6 +232,7 @@ where
         Self {
             sender,
             retry_mailbox,
+            application,
         }
     }
 }
@@ -300,12 +299,8 @@ where
         receiver.await.ok().flatten()
     }
 
-    async fn handoff_policy(&mut self, context: (E, Self::Context)) -> HandoffPolicy {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::HandoffPolicy { context, response });
-        receiver.await.unwrap_or(HandoffPolicy::AwaitCertification)
+    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
+        self.application.handoff_policy(context)
     }
 
     async fn verify(
