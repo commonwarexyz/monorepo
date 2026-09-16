@@ -24,11 +24,7 @@ pub(crate) const fn one() -> Standard {
     result
 }
 
-#[cfg_attr(all(not(debug_assertions), target_arch = "aarch64"), inline(never))]
-#[cfg_attr(
-    all(not(debug_assertions), not(target_arch = "aarch64")),
-    inline(always)
-)]
+#[cfg_attr(not(debug_assertions), inline(always))]
 pub(crate) fn mul<const N1: i64, const N2: i64, B: Backend>(
     x: &Fp12<N1>,
     y: &Fp12<N2>,
@@ -485,11 +481,7 @@ const NEG_TWO_THIRDS_FP: Fp = Fp::from_raw(&[
 ])
 .expect("canonical negative two-thirds coefficient");
 
-#[cfg_attr(all(not(debug_assertions), target_arch = "aarch64"), inline(never))]
-#[cfg_attr(
-    all(not(debug_assertions), not(target_arch = "aarch64")),
-    inline(always)
-)]
+#[cfg_attr(not(debug_assertions), inline(always))]
 pub(crate) fn cyclotomic_square<const N: i64, B: Backend>(
     x: &Fp12<N>,
     ring: &Ring<Bls12381, B>,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify the architecture-specific VROOM parameter tables."""
+"""Generate and verify the VROOM parameter tables."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ FIELDS = (
     Field("curve25519", (1 << 255) - 19),
 )
 
-X86_M = (
+MODULI_M = (
     1125899906842615,
     1125899906842609,
     1125899906842591,
@@ -124,7 +124,7 @@ X86_M = (
     1125899906842541,
     1125899906842511,
 )
-X86_N = (
+MODULI_N = (
     1125899906842623,
     1125899906842621,
     1125899906842619,
@@ -134,47 +134,7 @@ X86_N = (
     1125899906842597,
     1125899906842589,
 )
-ARM_OFFSETS = (
-    1,
-    3,
-    5,
-    9,
-    11,
-    15,
-    17,
-    21,
-    23,
-    27,
-    33,
-    35,
-    41,
-    45,
-    51,
-    57,
-    63,
-    65,
-    71,
-    83,
-    87,
-    93,
-    101,
-    107,
-    111,
-    113,
-    117,
-    125,
-    131,
-    135,
-    143,
-    153,
-)
-ARM_M = tuple((1 << 26) - offset for offset in ARM_OFFSETS[:16])
-ARM_N = tuple((1 << 26) - offset for offset in ARM_OFFSETS[16:])
-
-GEOMETRIES = (
-    Geometry("x86", 8, 50, 52, X86_M, X86_N),
-    Geometry("arm", 16, 26, 32, ARM_M, ARM_N),
-)
+GEOMETRY = Geometry("common", 8, 50, 52, MODULI_M, MODULI_N)
 
 BLS_QR = int(
     "1764464526391023609719698959639504118661371030573300677125606932387184635588659624517358062862068369090674362610896848484"
@@ -295,7 +255,7 @@ def build(field: Field, geometry: Geometry) -> Tables:
     inverse_m_n = pow(big_m, -1, big_n)
     inverse_radix_m = pow(radix, -1, big_m)
     inverse_radix_n = pow(radix, -1, big_n)
-    no_k = geometry.name == "x86" and field.name == "bls12381"
+    no_k = field.name == "bls12381"
 
     if no_k:
         m_opt = crt([big_m // modulus for modulus in m], m)
@@ -469,13 +429,24 @@ def validate_model(tables: Tables) -> dict[str, int]:
             assert 0 <= lift <= maximum_lift
         return lift
 
-    ready_m = 2 if tables.no_k else (4 if g.name == "x86" else 64)
+    ready_m = 2 if tables.no_k else 4
     reduce_maxima = tuple(ready_m * modulus for modulus in m)
+    # Floor-fixed-point error is below sum(inputs)/2^64 before truncation.
+    # The integer quotient can be one low, leaving a lift below M*(1 + error).
+    maximum_reduce_lift = (
+        tables.big_m * ((1 << FRACTION_BITS) + sum(reduce_maxima)) - 1
+    ) >> FRACTION_BITS
     reduce_cases = [
         (0,) * g.lanes,
         reduce_maxima,
         tuple(maximum - 1 for maximum in reduce_maxima),
     ]
+    if tables.field.name == "bander_scalar":
+        # These lanes make the truncated quotient one below the exact quotient.
+        reduce_cases.append((
+            3225816174379553, 1394404701136032, 3080861030622247, 2388520409860024,
+            2406492425972459, 2617473385578477, 3731496983267384, 3482812340681864,
+        ))
     reduce_cases.extend(
         tuple(maximum if lane == selected else 0 for lane, maximum in enumerate(reduce_maxima))
         for selected in range(g.lanes)
@@ -493,7 +464,7 @@ def validate_model(tables: Tables) -> dict[str, int]:
             reduce_post,
             tables.reduce,
             correction=not tables.no_k,
-            maximum_lift=tables.big_m if not tables.no_k else None,
+            maximum_lift=maximum_reduce_lift if not tables.no_k else None,
         )
         if not tables.no_k and values == reduce_maxima:
             # The inclusive endpoint is the reference's redundant encoding of
@@ -698,7 +669,7 @@ def validate_bounds(tables: Tables) -> dict[str, object]:
     assert lane_low <= U64_MAX
     assert lane_high <= U64_MAX
 
-    ready_m = 2 if tables.no_k else (4 if g.name == "x86" else 64)
+    ready_m = 2 if tables.no_k else 4
     reduce_bounds = conversion_bounds(
         "reduce",
         tables.reduce,
@@ -742,8 +713,7 @@ def validate_bounds(tables: Tables) -> dict[str, object]:
     assert sum(
         word << (64 * limb) for limb, word in enumerate(tables.canonical_correction)
     ) < p
-    canonical_limit_bits = 55 if g.name == "x86" else 32
-    assert canonical_max < (1 << canonical_limit_bits) * p
+    assert canonical_max < (1 << 55) * p
     assert 1 < p < (1 << 381) and p & 1
     # Ceil-fixed-point error is strictly below sum(inputs)/2^64 < 1/2.
     assert sum(2 * modulus for modulus in n) < 1 << 63
@@ -804,7 +774,7 @@ def parse_reference_array(source: str, name: str) -> list[int]:
 
 
 def validate_bls_reference(tables: Tables, reference_header: Path | None) -> None:
-    assert tables.field.name == "bls12381" and tables.geometry.name == "x86"
+    assert tables.field.name == "bls12381"
     mask = (1 << tables.geometry.word) - 1
     from_matrix = [
         (coefficient >> (tables.geometry.word * digit)) & mask
@@ -930,33 +900,7 @@ pub(crate) const PARAMETERS: Parameters = Parameters {{
 def emit_wrapper() -> str:
     module_blocks = []
     for field in sorted(FIELDS, key=lambda value: value.name):
-        arm_attribute = (
-            f'#[cfg_attr(not(target_arch = "x86_64"), '
-            f'path = "parameters/arm/{field.name}.rs")]'
-        )
-        if len(arm_attribute) > 82:
-            arm_attribute = (
-                '#[cfg_attr(\n'
-                '    not(target_arch = "x86_64"),\n'
-                f'    path = "parameters/arm/{field.name}.rs"\n'
-                ')]'
-            )
-        x86_attribute = (
-            f'#[cfg_attr(target_arch = "x86_64", '
-            f'path = "parameters/x86/{field.name}.rs")]'
-        )
-        if len(x86_attribute) > 82:
-            x86_attribute = (
-                '#[cfg_attr(\n'
-                '    target_arch = "x86_64",\n'
-                f'    path = "parameters/x86/{field.name}.rs"\n'
-                ')]'
-            )
-        module_blocks.append(
-            f'''{arm_attribute}
-{x86_attribute}
-mod {field.name};'''
-        )
+        module_blocks.append(f"mod {field.name};")
     modules = "\n".join(module_blocks)
     invocations = "\n".join(
         (
@@ -1021,30 +965,29 @@ def generate(reference_header: Path | None = None) -> tuple[dict[Path, str], str
         "combined_max": COMBINED_MAX,
         "fields": {},
     }
-    for geometry in GEOMETRIES:
-        assert len(geometry.moduli_m) == geometry.lanes
-        assert len(geometry.moduli_n) == geometry.lanes
-        assert all(modulus & 1 and modulus < 1 << geometry.bits for modulus in geometry.moduli_m + geometry.moduli_n)
-        for index, left in enumerate(geometry.moduli_m + geometry.moduli_n):
-            assert all(math.gcd(left, right) == 1 for right in (geometry.moduli_m + geometry.moduli_n)[index + 1 :])
-        for field in FIELDS:
-            assert is_probable_prime(field.modulus)
-            tables = build(field, geometry)
-            validate_widths(tables)
-            model = validate_model(tables)
-            if geometry.name == "x86" and field.name == "bls12381":
-                validate_bls_reference(tables, reference_header)
-            key = f"{geometry.name}/{field.name}"
-            validation["fields"][key] = {
-                "no_k": tables.no_k,
-                "lanes": geometry.lanes,
-                "bits": geometry.bits,
-                "word": geometry.word,
-                "canonical_digits": (field.modulus.bit_length() + geometry.bits - 1) // geometry.bits,
-                "model": model,
-                "bounds": validate_bounds(tables),
-            }
-            outputs[OUTPUT / geometry.name / f"{field.name}.rs"] = emit(tables)
+    geometry = GEOMETRY
+    assert len(geometry.moduli_m) == geometry.lanes
+    assert len(geometry.moduli_n) == geometry.lanes
+    assert all(modulus & 1 and modulus < 1 << geometry.bits for modulus in geometry.moduli_m + geometry.moduli_n)
+    for index, left in enumerate(geometry.moduli_m + geometry.moduli_n):
+        assert all(math.gcd(left, right) == 1 for right in (geometry.moduli_m + geometry.moduli_n)[index + 1 :])
+    for field in FIELDS:
+        assert is_probable_prime(field.modulus)
+        tables = build(field, geometry)
+        validate_widths(tables)
+        model = validate_model(tables)
+        if field.name == "bls12381":
+            validate_bls_reference(tables, reference_header)
+        validation["fields"][field.name] = {
+            "no_k": tables.no_k,
+            "lanes": geometry.lanes,
+            "bits": geometry.bits,
+            "word": geometry.word,
+            "canonical_digits": (field.modulus.bit_length() + geometry.bits - 1) // geometry.bits,
+            "model": model,
+            "bounds": validate_bounds(tables),
+        }
+        outputs[OUTPUT / f"{field.name}.rs"] = emit(tables)
     outputs[WRAPPER] = emit_wrapper()
     return outputs, json.dumps(validation, indent=2, sort_keys=True) + "\n"
 

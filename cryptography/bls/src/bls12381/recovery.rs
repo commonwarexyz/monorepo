@@ -8,8 +8,11 @@ use crate::bls12381::{
     scalar::Scalar,
 };
 use alloc::{vec, vec::Vec};
-use cfg_if::cfg_if;
-use commonware_cryptography_vroom::BlsScalar;
+use commonware_cryptography_vroom::{
+    Backend, BlsScalar, WithBackend,
+    rns::{Ring, Standard},
+    with_backend,
+};
 use thiserror::Error;
 
 /// An error constructing or applying a recovery plan.
@@ -43,154 +46,88 @@ pub struct RecoveryPlan {
     coefficients: Vec<Scalar>,
 }
 
-cfg_if! {
-    if #[cfg(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ))] {
-        use commonware_cryptography_vroom::word::Word;
+struct Construct<'a>(&'a [Scalar]);
 
-        // Evaluation points have passed the public constructor's nonempty and zero checks.
-        fn construct_word(points: &[Scalar]) -> Result<RecoveryPlan, RecoveryError> {
-            // The input vector keeps canonical conversion outside the quadratic loop.
-            let points: Vec<Word<BlsScalar>> = points
-                .iter()
-                .map(|point| Word::from_element(point.0))
-                .collect();
-            let one = Word::one();
+impl WithBackend for Construct<'_> {
+    type Output = Result<RecoveryPlan, RecoveryError>;
 
-            // lambda_i(0) = W / (x_i * product_{j != i}(x_j - x_i)), where W = product_j x_j.
-            let mut total = one;
-            let mut denominators = Vec::with_capacity(points.len());
-            for (i, point_i) in points.iter().enumerate() {
-                total = total.mul(point_i);
-                let mut denominator = *point_i;
-                for (j, point_j) in points.iter().enumerate() {
-                    if i != j {
-                        denominator = denominator.mul(&point_j.sub(point_i));
-                    }
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        let points = self.0;
+        let ring = Ring::<BlsScalar, B>::new(backend);
+
+        // lambda_i(0) = W / (x_i * product_{j != i}(x_j - x_i)), where W = product_j x_j.
+        let mut total = Standard::ONE;
+        let mut denominators = Vec::with_capacity(points.len());
+
+        // Two independent rows share matrix coefficients in each base change.
+        for (pair_index, pair) in points.as_chunks::<2>().0.iter().enumerate() {
+            let i = pair_index * 2;
+            let first = Standard::from(pair[0].0);
+            let second = Standard::from(pair[1].0);
+            total = ring.mul(total, first);
+            total = ring.mul(total, second);
+            let mut pair_denominators = [first, second];
+            for (j, point_j) in points.iter().enumerate() {
+                let point_j = Standard::from(point_j.0);
+                if j == i {
+                    let product = ring.prep_left(point_j + ring.standard_negate(second))
+                        * pair_denominators[1];
+                    pair_denominators[1] =
+                        ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
+                } else if j == i + 1 {
+                    let product = ring.prep_left(point_j + ring.standard_negate(first))
+                        * pair_denominators[0];
+                    pair_denominators[0] =
+                        ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
+                } else {
+                    let first_product = ring.prep_left(point_j + ring.standard_negate(first))
+                        * pair_denominators[0];
+                    let second_product = ring.prep_left(point_j + ring.standard_negate(second))
+                        * pair_denominators[1];
+                    pair_denominators = ring.batch_reduce_expand(&[
+                        ring.ready::<800>(first_product),
+                        ring.ready::<800>(second_product),
+                    ]);
                 }
-                denominators.push(denominator);
             }
+            denominators.push(pair_denominators[0]);
+            denominators.push(pair_denominators[1]);
+        }
+        for (i, point_i) in points.iter().enumerate().skip(denominators.len()) {
+            let point_i = Standard::from(point_i.0);
+            total = ring.mul(total, point_i);
+            let mut denominator = point_i;
+            for (j, point_j) in points.iter().enumerate() {
+                if i != j {
+                    let point_j = Standard::from(point_j.0);
+                    let product =
+                        ring.prep_left(point_j + ring.standard_negate(point_i)) * denominator;
+                    denominator = ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
+                }
+            }
+            denominators.push(denominator);
+        }
 
-            // Montgomery's trick computes every W / denominator_i with one inversion.
-            let mut prefixes = Vec::with_capacity(denominators.len() + 1);
-            let mut prefix = one;
+        // Montgomery's trick computes every W / denominator_i with one inversion.
+        let mut prefixes = Vec::with_capacity(denominators.len() + 1);
+        let mut prefix = Standard::ONE;
+        prefixes.push(prefix);
+        for denominator in &denominators {
+            prefix = ring.mul(prefix, *denominator);
             prefixes.push(prefix);
-            for denominator in &denominators {
-                prefix = prefix.mul(denominator);
-                prefixes.push(prefix);
-            }
-            let mut inverse = total.mul(
-                &prefixes[denominators.len()]
-                    .invert()
-                    .ok_or(RecoveryError::DuplicateEvaluationPoint)?,
-            );
-            let mut coefficients = vec![Scalar::ZERO; denominators.len()];
-            for i in (0..denominators.len()).rev() {
-                coefficients[i] = Scalar(inverse.mul(&prefixes[i]).to_element());
-                inverse = inverse.mul(&denominators[i]);
-            }
-            Ok(RecoveryPlan { coefficients })
         }
-    } else {
-        use commonware_cryptography_vroom::{
-            Backend, WithBackend,
-            rns::{Ring, Standard},
-            with_backend,
-        };
-
-        struct Construct<'a>(&'a [Scalar]);
-
-        impl WithBackend for Construct<'_> {
-            type Output = Result<RecoveryPlan, RecoveryError>;
-
-            #[inline(always)]
-            fn call<B: Backend>(self, backend: B) -> Self::Output {
-                let points = self.0;
-                let ring = Ring::<BlsScalar, B>::new(backend);
-
-                // lambda_i(0) = W / (x_i * product_{j != i}(x_j - x_i)), where W = product_j x_j.
-                let mut total = Standard::ONE;
-                let mut denominators = Vec::with_capacity(points.len());
-
-                // Two independent rows share matrix coefficients in each base change.
-                cfg_if! {
-                    if #[cfg(target_arch = "x86_64")] {
-                        for (pair_index, pair) in points.chunks_exact(2).enumerate() {
-                            let i = pair_index * 2;
-                            let first = Standard::from(pair[0].0);
-                            let second = Standard::from(pair[1].0);
-                            total = ring.mul(total, first);
-                            total = ring.mul(total, second);
-                            let mut pair_denominators = [first, second];
-                            for (j, point_j) in points.iter().enumerate() {
-                                let point_j = Standard::from(point_j.0);
-                                if j == i {
-                                    let product = ring.prep_left(point_j + ring.standard_negate(second))
-                                        * pair_denominators[1];
-                                    pair_denominators[1] =
-                                        ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
-                                } else if j == i + 1 {
-                                    let product = ring.prep_left(point_j + ring.standard_negate(first))
-                                        * pair_denominators[0];
-                                    pair_denominators[0] =
-                                        ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
-                                } else {
-                                    let first_product = ring.prep_left(point_j + ring.standard_negate(first))
-                                        * pair_denominators[0];
-                                    let second_product = ring.prep_left(point_j + ring.standard_negate(second))
-                                        * pair_denominators[1];
-                                    pair_denominators = ring.batch_reduce_expand(&[
-                                        ring.ready::<800>(first_product),
-                                        ring.ready::<800>(second_product),
-                                    ]);
-                                }
-                            }
-                            denominators.push(pair_denominators[0]);
-                            denominators.push(pair_denominators[1]);
-                        }
-                    }
-                }
-                for (i, point_i) in points.iter().enumerate().skip(denominators.len()) {
-                    let point_i = Standard::from(point_i.0);
-                    total = ring.mul(total, point_i);
-                    let mut denominator = point_i;
-                    for (j, point_j) in points.iter().enumerate() {
-                        if i != j {
-                            let point_j = Standard::from(point_j.0);
-                            let product =
-                                ring.prep_left(point_j + ring.standard_negate(point_i)) * denominator;
-                            denominator = ring.batch_reduce_expand(&[ring.ready::<800>(product)])[0];
-                        }
-                    }
-                    denominators.push(denominator);
-                }
-
-                // Montgomery's trick computes every W / denominator_i with one inversion.
-                let mut prefixes = Vec::with_capacity(denominators.len() + 1);
-                let mut prefix = Standard::ONE;
-                prefixes.push(prefix);
-                for denominator in &denominators {
-                    prefix = ring.mul(prefix, *denominator);
-                    prefixes.push(prefix);
-                }
-                let mut inverse = ring.mul(
-                    total,
-                    ring.invert(prefixes[denominators.len()])
-                        .ok_or(RecoveryError::DuplicateEvaluationPoint)?,
-                );
-                let mut coefficients = vec![Scalar::ZERO; denominators.len()];
-                for i in (0..denominators.len()).rev() {
-                    coefficients[i] = Scalar(ring.mul(inverse, prefixes[i]).into());
-                    inverse = ring.mul(inverse, denominators[i]);
-                }
-                Ok(RecoveryPlan { coefficients })
-            }
+        let mut inverse = ring.mul(
+            total,
+            ring.invert(prefixes[denominators.len()])
+                .ok_or(RecoveryError::DuplicateEvaluationPoint)?,
+        );
+        let mut coefficients = vec![Scalar::ZERO; denominators.len()];
+        for i in (0..denominators.len()).rev() {
+            coefficients[i] = Scalar(ring.mul(inverse, prefixes[i]).into());
+            inverse = ring.mul(inverse, denominators[i]);
         }
+        Ok(RecoveryPlan { coefficients })
     }
 }
 
@@ -204,19 +141,7 @@ impl RecoveryPlan {
             return Err(RecoveryError::ZeroEvaluationPoint);
         }
 
-        cfg_if! {
-            if #[cfg(all(
-                target_arch = "aarch64",
-                target_os = "linux",
-                target_endian = "little",
-                target_pointer_width = "64",
-                not(miri)
-            ))] {
-                construct_word(points)
-            } else {
-                with_backend(Construct(points))
-            }
-        }
+        with_backend(Construct(points))
     }
 
     /// Recovers a G1 value from partial evaluations aligned with this plan's points.

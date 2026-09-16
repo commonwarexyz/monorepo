@@ -5,9 +5,7 @@
 
 Perform vectorized prime-field arithmetic using VROOM's residue number system.
 
-Sealed modulus types provide validated parameters for the BLS12-381 coordinate and scalar fields, Bandersnatch scalar field, and Curve25519 coordinate field. The `rns` module provides bounded arithmetic with delayed reduction and expansion through portable, ARM NEON, and AVX-512 IFMA kernels.
-
-The crate also supplies six-limb Montgomery arithmetic for BLS12-381 group arithmetic, scalar multiplication, MSM, pairings, recovery coefficient construction, and hash-to-curve reciprocal roots on little-endian 64-bit Linux AArch64.
+Sealed modulus types provide validated parameters for the BLS12-381 coordinate and scalar fields, Bandersnatch scalar field, and Curve25519 coordinate field. The `rns` module provides bounded arithmetic with delayed reduction and expansion through portable and AVX-512 IFMA kernels.
 
 ## Status
 

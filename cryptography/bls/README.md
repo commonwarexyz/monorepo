@@ -5,9 +5,7 @@
 
 Perform BLS12-381 and Banderwagon arithmetic, pairings, and BLS signatures.
 
-The curve families share [VROOM field arithmetic](../vroom), with portable, ARM NEON, and AVX-512 IFMA kernels. The `bls12381` module provides G1/G2, pairings, and MinPk/MinSig signing; `banderwagon` provides the quotient group and its scalar field.
-
-On little-endian 64-bit Linux AArch64, BLS12-381 points use six-limb Montgomery coordinates for group arithmetic, scalar multiplication, MSM, and pairings. Recovery coefficient construction and reciprocal roots in hash-to-curve use the same backend; the remaining hash-to-curve field arithmetic uses VROOM residues.
+The curve families share [VROOM field arithmetic](../vroom), with portable and AVX-512 IFMA kernels. The `bls12381` module provides G1/G2, pairings, and MinPk/MinSig signing; `banderwagon` provides the quotient group and its scalar field.
 
 ## Status
 

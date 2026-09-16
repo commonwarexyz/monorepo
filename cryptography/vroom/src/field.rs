@@ -18,25 +18,6 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroize;
 
 mod inverse;
-#[cfg(all(
-    target_arch = "aarch64",
-    target_os = "linux",
-    target_endian = "little",
-    target_pointer_width = "64",
-    not(miri)
-))]
-pub mod word;
-
-// SAFETY: The private AAPCS64 routines are called only through the typed word
-// wrappers, which own their ranges, buffer sizes, and non-overlapping outputs.
-#[cfg(all(
-    target_arch = "aarch64",
-    target_os = "linux",
-    target_endian = "little",
-    target_pointer_width = "64",
-    not(miri)
-))]
-core::arch::global_asm!(include_str!("field/word/armv8.S"), options(raw));
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -580,7 +561,7 @@ pub(crate) const fn from_canonical<P: Modulus>(words: &[u64; 6]) -> Standard<P> 
 /// Returns the canonical little-endian radix-2^64 words for a trusted standard value.
 pub(crate) fn canonical<P: Modulus>(value: &Standard<P>) -> [u64; 6] {
     // Project the N-basis expansion into radix form modulo p. The seven-word
-    // accumulator is below 2^55*p on 8x50 and below 2^32*p on 16x26.
+    // accumulator is below 2^55*p.
     let n = &value.halves[1];
     let mut accumulator = [0u64; 7];
     for (&digit, coefficient) in n.iter().zip(&P::PARAMETERS.to_canonical) {

@@ -20,50 +20,19 @@ use crate::bls12381::{
     },
     scalar::X_SQUARED,
 };
-use cfg_if::cfg_if;
 use commonware_cryptography_vroom::{
     Backend, Bls12381, WithBackend,
     rns::{Ring, Standard},
 };
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
-#[cfg(any(
-    test,
-    not(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ))
-))]
 pub(super) struct Add<'a, G>(pub &'a G, pub &'a G);
 pub(super) struct Equal<'a, P>(pub &'a P, pub &'a P);
 pub(super) struct InSubgroup<'a, P>(pub &'a P);
-#[cfg(any(
-    test,
-    not(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ))
-))]
 pub(super) struct Msm<'a, G, S>(pub &'a [G], pub &'a [S]);
 
 const G1_HASH_COFACTOR: [u64; 1] = [0xd201_0000_0001_0001];
 
-#[cfg(any(
-    test,
-    not(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ))
-))]
 impl WithBackend for Msm<'_, G1, msm::EncodedScalar> {
     type Output = G1;
 
@@ -80,7 +49,7 @@ impl WithBackend for Msm<'_, G1, msm::EncodedScalar> {
 }
 
 macro_rules! point {
-    ($name:ident, $group:ident, $raw:ident, $words:ident, $field:ty, $standard:ty,
+    ($name:ident, $group:ident, $words:ident, $field:ty, $standard:ty,
      words[$($words_cfg:meta),*],
      $base:ident, $ring:ident = $ring_value:expr, $value:ident => $mul_3b:expr) => {
         #[derive(Clone, Copy)]
@@ -118,71 +87,37 @@ macro_rules! point {
                 }
             }
 
-            #[cfg(any(test, not(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))))]
             #[cfg_attr(not(debug_assertions), inline(always))]
             pub(super) fn from_jacobian<B: Backend>(
                 point: &$group,
                 $base: &Ring<Bls12381, B>,
             ) -> Self {
-                cfg_if! {
-                    if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                        let _ = $base;
-                        point.0.to_rns()
-                    } else {
-                        let $ring = $ring_value;
-                        let x: $standard = point.x.into();
-                        let y: $standard = point.y.into();
-                        let z: $standard = point.z.into();
-                        let zl = $ring.prep_left(z);
-                        let [xz, zz] = $ring
-                            .batch_reduce_expand(&[$ring.ready::<800>(zl * x), $ring.ready::<800>(zl * z)]);
-                        let [zzz] = $ring.batch_reduce_expand(&[$ring.ready::<800>(zl * zz)]);
-                        let result = Self { x: xz, y, z: zzz };
-                        Self::select(&result, &Self::identity(), $ring.is_zero(z))
-                    }
-                }
-            }
-
-            #[cfg(any(test, not(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))))]
-            #[cfg_attr(not(debug_assertions), inline(always))]
-            pub(super) fn to_jacobian<B: Backend>(self, $base: &Ring<Bls12381, B>) -> $group {
-                cfg_if! {
-                    if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                        let _ = $base;
-                        $group(super::word::$name::from_rns(self))
-                    } else {
-                        let $ring = $ring_value;
-                        let zl = $ring.prep_left(self.z);
-                        let [zz] = $ring.batch_reduce_expand(&[$ring.ready::<800>(zl * self.z)]);
-                        let [x, y] = $ring.batch_reduce_expand(&[
-                            $ring.ready::<800>(zl * self.x),
-                            $ring.ready::<800>($ring.prep_left(self.y) * zz),
-                        ]);
-                        $group {
-                            x: x.into(),
-                            y: y.into(),
-                            z: self.z.into(),
-                        }
-                    }
-                }
-            }
-
-            #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))]
-            #[cfg_attr(not(debug_assertions), inline(always))]
-            pub(super) fn from_raw_jacobian<B: Backend>(
-                point: &crate::bls12381::hash::$raw,
-                $base: &Ring<Bls12381, B>,
-            ) -> Self {
                 let $ring = $ring_value;
-                let x = point.x;
-                let y = point.y;
-                let z = point.z;
+                let x: $standard = point.x.into();
+                let y: $standard = point.y.into();
+                let z: $standard = point.z.into();
                 let zl = $ring.prep_left(z);
                 let [xz, zz] = $ring
                     .batch_reduce_expand(&[$ring.ready::<800>(zl * x), $ring.ready::<800>(zl * z)]);
                 let [zzz] = $ring.batch_reduce_expand(&[$ring.ready::<800>(zl * zz)]);
                 let result = Self { x: xz, y, z: zzz };
                 Self::select(&result, &Self::identity(), $ring.is_zero(z))
+            }
+
+            #[cfg_attr(not(debug_assertions), inline(always))]
+            pub(super) fn to_jacobian<B: Backend>(self, $base: &Ring<Bls12381, B>) -> $group {
+                let $ring = $ring_value;
+                let zl = $ring.prep_left(self.z);
+                let [zz] = $ring.batch_reduce_expand(&[$ring.ready::<800>(zl * self.z)]);
+                let [x, y] = $ring.batch_reduce_expand(&[
+                    $ring.ready::<800>(zl * self.x),
+                    $ring.ready::<800>($ring.prep_left(self.y) * zz),
+                ]);
+                $group {
+                    x: x.into(),
+                    y: y.into(),
+                    z: self.z.into(),
+                }
             }
 
             // VROOM PointAdd, ec.hpp:176-225 (RCB Algorithm 7).
@@ -277,16 +212,6 @@ macro_rules! point {
                 }
             }
 
-            #[cfg(any(
-                test,
-                not(all(
-                    target_arch = "aarch64",
-                    target_os = "linux",
-                    target_endian = "little",
-                    target_pointer_width = "64",
-                    not(miri)
-                ))
-            ))]
             #[inline(always)]
             pub(super) fn gather_window<B: Backend>(
                 table: &[Self; 16],
@@ -341,7 +266,6 @@ macro_rules! point {
             }
         }
 
-        #[cfg(any(test, not(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))))]
         impl WithBackend for Add<'_, $group> {
             type Output = $group;
 
@@ -378,16 +302,6 @@ macro_rules! point {
             }
         }
 
-        #[cfg(any(
-            test,
-            not(all(
-                target_arch = "aarch64",
-                target_os = "linux",
-                target_endian = "little",
-                target_pointer_width = "64",
-                not(miri)
-            ))
-        ))]
         impl WithBackend for Msm<'_, $group, super::Scalar> {
             type Output = $group;
 
@@ -420,12 +334,12 @@ macro_rules! point {
 }
 
 point!(
-    G1Point, G1, RnsG1, G1Words, Fp, Standard<Bls12381>,
+    G1Point, G1, G1Words, Fp, Standard<Bls12381>,
     words[],
     base, ring = base, value => value.scale::<12>()
 );
 point!(
-    G2Point, G2, RnsG2, G2Words, Fp2, Fp2Standard,
+    G2Point, G2, G2Words, Fp2, Fp2Standard,
     words[cfg(test)],
     base, ring = Fp2Ring::new(base), value => ring.mul_3b(value)
 );
@@ -526,28 +440,15 @@ impl G1 {
         points: &[crate::bls12381::hash::RnsG1; 2],
         ring: &Ring<Bls12381, B>,
     ) -> Self {
-        cfg_if! {
-            if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                let point = G1Point::from_raw_jacobian(&points[0], ring)
-                    .add(&G1Point::from_raw_jacobian(&points[1], ring), ring);
-            } else {
-                let points = points.map(|point| Self {
-                    x: point.x.into(),
-                    y: point.y.into(),
-                    z: point.z.into(),
-                });
-                let point = G1Point::from_jacobian(&points[0], ring)
-                    .add(&G1Point::from_jacobian(&points[1], ring), ring);
-            }
-        }
+        let points = points.map(|point| Self {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        });
+        let point = G1Point::from_jacobian(&points[0], ring)
+            .add(&G1Point::from_jacobian(&points[1], ring), ring);
         let result = point.mul_words(&G1_HASH_COFACTOR, ring);
-        cfg_if! {
-            if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                Self(super::word::G1Point::from_rns(result))
-            } else {
-                result.to_jacobian(ring)
-            }
-        }
+        result.to_jacobian(ring)
     }
 }
 
@@ -559,20 +460,13 @@ impl G2 {
         points: &[crate::bls12381::hash::RnsG2; 2],
         ring: &Ring<Bls12381, B>,
     ) -> Self {
-        cfg_if! {
-            if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                let point = G2Point::from_raw_jacobian(&points[0], ring)
-                    .add(&G2Point::from_raw_jacobian(&points[1], ring), ring);
-            } else {
-                let points = points.map(|point| Self {
-                    x: point.x.into(),
-                    y: point.y.into(),
-                    z: point.z.into(),
-                });
-                let point = G2Point::from_jacobian(&points[0], ring)
-                    .add(&G2Point::from_jacobian(&points[1], ring), ring);
-            }
-        }
+        let points = points.map(|point| Self {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        });
+        let point = G2Point::from_jacobian(&points[0], ring)
+            .add(&G2Point::from_jacobian(&points[1], ring), ring);
         let mut result = point.double(ring).psi2(ring);
         let negated = point.neg(ring);
         let negated_psi = point.psi(ring).neg(ring);
@@ -584,76 +478,60 @@ impl G2 {
             .add(&point, ring)
             .add(&negated_psi, ring);
         let result = result.add(&term.mul_by_x(ring).neg(ring), ring);
-        cfg_if! {
-            if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                Self(super::word::G2Point::from_rns(result))
-            } else {
-                result.to_jacobian(ring)
-            }
-        }
+        result.to_jacobian(ring)
     }
 }
 
-cfg_if! {
-    if #[cfg(not(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    )))] {
-        pub(super) struct G1Mul<'a>(pub &'a G1, pub &'a super::Scalar);
+pub(super) struct G1Mul<'a>(pub &'a G1, pub &'a super::Scalar);
 
-        impl WithBackend for G1Mul<'_> {
-            type Output = G1;
+impl WithBackend for G1Mul<'_> {
+    type Output = G1;
 
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> G1 {
+        let ring = Ring::<Bls12381, B>::new(backend);
+        super::multiply_glv(
             #[inline(always)]
-            fn call<B: Backend>(self, backend: B) -> G1 {
-                let ring = Ring::<Bls12381, B>::new(backend);
-                super::multiply_glv(
-                    #[inline(always)]
-                    || G1Point::from_jacobian(self.0, &ring),
-                    self.1,
-                    &ring,
-                    G1Point::identity(),
-                    #[inline(always)]
-                    |point| point.endomorphism(&ring),
-                    #[inline(always)]
-                    |table, digit| G1Point::gather_window(table, digit, &ring),
-                )
-                .to_jacobian(&ring)
-            }
-        }
-
-        pub(super) struct G2Mul<'a>(pub &'a G2, pub &'a super::Scalar);
-
-        impl WithBackend for G2Mul<'_> {
-            type Output = G2;
-
+            || G1Point::from_jacobian(self.0, &ring),
+            self.1,
+            &ring,
+            G1Point::identity(),
             #[inline(always)]
-            fn call<B: Backend>(self, backend: B) -> G2 {
-                let ring = Ring::<Bls12381, B>::new(backend);
-                super::multiply_gls(
-                    #[inline(always)]
-                    || G2Point::from_jacobian(self.0, &ring),
-                    self.1,
-                    &ring,
-                    G2Point::identity(),
-                    #[inline(always)]
-                    |table, i, digit| {
-                        let point = G2Point::gather_window(table, digit, &ring);
-                        match i {
-                            0 => point,
-                            1 => point.psi(&ring).neg(&ring),
-                            2 => point.psi2(&ring),
-                            3 => point.psi2(&ring).psi(&ring).neg(&ring),
-                            _ => unreachable!(),
-                        }
-                    },
-                )
-                .to_jacobian(&ring)
-            }
-        }
+            |point| point.endomorphism(&ring),
+            #[inline(always)]
+            |table, digit| G1Point::gather_window(table, digit, &ring),
+        )
+        .to_jacobian(&ring)
+    }
+}
+
+pub(super) struct G2Mul<'a>(pub &'a G2, pub &'a super::Scalar);
+
+impl WithBackend for G2Mul<'_> {
+    type Output = G2;
+
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> G2 {
+        let ring = Ring::<Bls12381, B>::new(backend);
+        super::multiply_gls(
+            #[inline(always)]
+            || G2Point::from_jacobian(self.0, &ring),
+            self.1,
+            &ring,
+            G2Point::identity(),
+            #[inline(always)]
+            |table, i, digit| {
+                let point = G2Point::gather_window(table, digit, &ring);
+                match i {
+                    0 => point,
+                    1 => point.psi(&ring).neg(&ring),
+                    2 => point.psi2(&ring),
+                    3 => point.psi2(&ring).psi(&ring).neg(&ring),
+                    _ => unreachable!(),
+                }
+            },
+        )
+        .to_jacobian(&ring)
     }
 }
 
@@ -845,7 +723,11 @@ mod tests {
                     }
                     for x in [<$field>::ZERO, <$field>::ONE, scale] {
                         for y in [<$field>::ZERO, <$field>::ONE, scale] {
-                            points.push($group::from_jacobian_coordinates(x, y, <$field>::ZERO));
+                            points.push($group {
+                                x,
+                                y,
+                                z: <$field>::ZERO,
+                            });
                         }
                     }
 
@@ -867,19 +749,19 @@ mod tests {
 
                             for point in self.0 {
                                 for point in [*point, {
-                                    let (x, y, z) = point.jacobian_coordinates();
-                                    $group::from_jacobian_coordinates(
-                                        x.mul(scale.square()),
-                                        y.mul(scale.square().mul(scale)),
-                                        z.mul(scale),
-                                    )
+                                    let (x, y, z) = (point.x, point.y, point.z);
+                                    $group {
+                                        x: x.mul(scale.square()),
+                                        y: y.mul(scale.square().mul(scale)),
+                                        z: z.mul(scale),
+                                    }
                                 }] {
                                     let h = $point::from_jacobian(&point, &ring);
                                     assert!(valid(h));
                                     assert_eq!(h.to_jacobian(&ring), point);
                                     let doubled = h.double(&ring);
                                     assert!(valid(doubled));
-                                    assert_eq!(doubled.to_jacobian(&ring), point.double_jacobian());
+                                    assert_eq!(doubled.to_jacobian(&ring), point.double());
 
                                     for q in [generator, point, point.neg(), $group::IDENTITY] {
                                         let qh = $point::from_jacobian(&q, &ring);
@@ -990,7 +872,7 @@ mod tests {
                     (&[][..], G1::IDENTITY),
                     (&[0][..], G1::IDENTITY),
                     (&ORDER[..], torsion),
-                    (&order_plus_one[..], torsion.double_jacobian()),
+                    (&order_plus_one[..], torsion.double()),
                     (&[0, 0, 0, 0, 1][..], torsion),
                 ] {
                     assert_eq!(torsion.mul_words_jacobian(words), expected);
@@ -1038,12 +920,12 @@ mod tests {
                 };
                 for point in self.0 {
                     for point in [*point, {
-                        let (x, y, z) = point.jacobian_coordinates();
-                        G2::from_jacobian_coordinates(
-                            x.mul(scale.square()),
-                            y.mul(scale.square().mul(scale)),
-                            z.mul(scale),
-                        )
+                        let (x, y, z) = (point.x, point.y, point.z);
+                        G2 {
+                            x: x.mul(scale.square()),
+                            y: y.mul(scale.square().mul(scale)),
+                            z: z.mul(scale),
+                        }
                     }] {
                         let homogeneous = G2Point::from_jacobian(&point, &ring);
                         assert_eq!(homogeneous.psi(&ring).to_jacobian(&ring), point.psi());

@@ -17,8 +17,6 @@
 mod avx512;
 pub mod bounds;
 pub(crate) mod kernel;
-#[cfg(target_arch = "aarch64")]
-mod neon;
 pub(crate) mod parameters;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
@@ -40,17 +38,9 @@ pub use parameters::Parameters;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroize;
 
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "x86_64")] {
-        pub(crate) const LANES: usize = 8;
-        pub(crate) const BITS: u32 = 50;
-        pub(crate) const WORD: u32 = 52;
-    } else {
-        pub(crate) const LANES: usize = 16;
-        pub(crate) const BITS: u32 = 26;
-        pub(crate) const WORD: u32 = 32;
-    }
-}
+pub(crate) const LANES: usize = 8;
+pub(crate) const BITS: u32 = 50;
+pub(crate) const WORD: u32 = 52;
 pub(crate) const MASK: u64 = (1 << WORD) - 1;
 pub(crate) const MULT_OK: i64 = 1 << (WORD - BITS);
 /// The preparation limit shared by the reference formula schedules.
@@ -76,14 +66,7 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
         // SAFETY: the private token is constructed only after both feature checks.
         return unsafe { backend.call(f) };
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        f.call(neon::Backend::new())
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        f.call(kernel::Portable)
-    }
+    f.call(kernel::Portable)
 }
 
 /// The context for a sequence of bounded field operations.

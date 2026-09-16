@@ -1,12 +1,8 @@
 //! Native BLS12-381 and Banderwagon arithmetic, pairings, and BLS signatures.
 //!
 //! Both curve families use the shared [VROOM](commonware_cryptography_vroom) field core,
-//! with portable, ARM NEON, and AVX-512 IFMA kernels. Banderwagon coordinates use the
+//! with portable and AVX-512 IFMA kernels. Banderwagon coordinates use the
 //! BLS12-381 scalar field; Banderwagon scalars have their own distinct modulus.
-//! On little-endian 64-bit Linux AArch64, BLS12-381 points use six-limb Montgomery
-//! coordinates for group arithmetic, scalar multiplication, MSM, and pairings.
-//! Recovery coefficient construction and reciprocal roots in hash-to-curve use the
-//! same backend; the remaining hash-to-curve field arithmetic uses VROOM residues.
 //!
 //! # Randomness
 //!

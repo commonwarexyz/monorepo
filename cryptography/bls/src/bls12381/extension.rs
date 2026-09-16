@@ -9,21 +9,6 @@
 //! The tower `Fp2 = Fp[u]/(u^2 + 1)`, `Fp6 = Fp2[v]/(v^3 - u - 1)`,
 //! and `Fp12 = Fp6[w]/(w^2 - v)`.
 
-#![cfg_attr(
-    all(
-        not(test),
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ),
-    expect(
-        dead_code,
-        reason = "The shared RNS extension field also supplies the differential pairing reference."
-    )
-)]
-
 use crate::bls12381::Fp;
 use commonware_cryptography_vroom::{Backend, Bls12381, WithBackend, rns::Ring, with_backend};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
@@ -66,16 +51,6 @@ impl Fp2 {
         }
     }
 
-    #[cfg(any(
-        test,
-        not(all(
-            target_arch = "aarch64",
-            target_os = "linux",
-            target_endian = "little",
-            target_pointer_width = "64",
-            not(miri)
-        ))
-    ))]
     pub(crate) fn sub(self, rhs: Self) -> Self {
         Self {
             c0: self.c0.sub(rhs.c0),

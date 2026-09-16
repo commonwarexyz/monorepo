@@ -3,7 +3,6 @@ use super::{
     bounds::Bound,
     parameters::{Conversion, LaneParameters},
 };
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
 use core::array;
 
 pub(crate) type Lanes = [u64; LANES];
@@ -35,10 +34,8 @@ pub(crate) trait Kernel: Copy + core::fmt::Debug + Send + Sync + 'static {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
 pub(crate) struct Portable;
 
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
 impl Kernel for Portable {
     #[inline(always)]
     fn madd(self, accumulator: RawWide, a: &Lanes, b: &Lanes) -> RawWide {

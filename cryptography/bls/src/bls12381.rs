@@ -23,21 +23,4 @@ pub mod recovery;
 pub mod scalar;
 pub mod signing;
 
-#[cfg(all(
-    target_arch = "aarch64",
-    target_os = "linux",
-    target_endian = "little",
-    target_pointer_width = "64",
-    not(miri)
-))]
-mod word;
-#[cfg(all(
-    target_arch = "aarch64",
-    target_os = "linux",
-    target_endian = "little",
-    target_pointer_width = "64",
-    not(miri)
-))]
-mod word_pairing;
-
 type Fp = Element<Bls12381>;

@@ -20,7 +20,6 @@ use crate::{
     },
     hash::expand_message_xmd,
 };
-use cfg_if::cfg_if;
 use commonware_cryptography_vroom::{
     Backend, Bls12381, WithBackend,
     rns::{Ring, Standard},
@@ -194,88 +193,50 @@ macro_rules! reciprocal_sqrt_chain {
     }};
 }
 
-cfg_if! {
-    if #[cfg(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        target_endian = "little",
-        target_pointer_width = "64",
-        not(miri)
-    ))] {
-        use crate::bls12381::word::Fp as WordFp;
-
-        #[cfg_attr(not(debug_assertions), inline(always))]
-        fn reciprocal_sqrt_fp<B: Backend>(input: RnsFp, _ring: &Ring<Bls12381, B>) -> (bool, RnsFp) {
-            macro_rules! product {
-                ($left:expr, $right:expr) => {
-                    ($left).mul(&($right))
-                };
-            }
-            macro_rules! square {
-                ($value:expr) => {
-                    ($value).square()
-                };
-            }
-            let input = WordFp::from_element(input.into());
-            let result = reciprocal_sqrt_chain!(input, WordFp::ONE, product, square);
-            let check = result.mul(&input);
-            (check.square() == input, result.to_element().into())
-        }
-
-        #[cfg_attr(not(debug_assertions), inline(always))]
-        fn reciprocal_sqrt_fp_pair<B: Backend>(
-            input: [RnsFp; 2],
-            ring: &Ring<Bls12381, B>,
-        ) -> [(bool, RnsFp); 2] {
-            input.map(|input| reciprocal_sqrt_fp(input, ring))
-        }
-    } else {
-        #[cfg_attr(not(debug_assertions), inline(always))]
-        fn reciprocal_sqrt_fp<B: Backend>(input: RnsFp, ring: &Ring<Bls12381, B>) -> (bool, RnsFp) {
-            macro_rules! product {
-                ($left:expr, $right:expr) => {
-                    ring.mul($left, $right)
-                };
-            }
-            macro_rules! square {
-                ($value:expr) => {
-                    product!($value, $value)
-                };
-            }
-            let result = reciprocal_sqrt_chain!(input, RnsFp::ONE, product, square);
-            let check = ring.mul(result, input);
-            (fp_eq(ring.mul(check, check), input, ring), result)
-        }
-
-        #[cfg_attr(not(debug_assertions), inline(always))]
-        fn reciprocal_sqrt_fp_pair<B: Backend>(
-            input: [RnsFp; 2],
-            ring: &Ring<Bls12381, B>,
-        ) -> [(bool, RnsFp); 2] {
-            macro_rules! product {
-                ($left:expr, $right:expr) => {{
-                    let left = $left;
-                    let right = $right;
-                    ring.batch_reduce_expand(&[
-                        ring.ready::<800>(ring.prep_left(left[0]) * right[0]),
-                        ring.ready::<800>(ring.prep_left(left[1]) * right[1]),
-                    ])
-                }};
-            }
-            macro_rules! square {
-                ($value:expr) => {
-                    product!($value, $value)
-                };
-            }
-            let result = reciprocal_sqrt_chain!(input, [RnsFp::ONE; 2], product, square);
-            let check = product!(result, input);
-            let square = product!(check, check);
-            [
-                (fp_eq(square[0], input[0], ring), result[0]),
-                (fp_eq(square[1], input[1], ring), result[1]),
-            ]
-        }
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn reciprocal_sqrt_fp<B: Backend>(input: RnsFp, ring: &Ring<Bls12381, B>) -> (bool, RnsFp) {
+    macro_rules! product {
+        ($left:expr, $right:expr) => {
+            ring.mul($left, $right)
+        };
     }
+    macro_rules! square {
+        ($value:expr) => {
+            product!($value, $value)
+        };
+    }
+    let result = reciprocal_sqrt_chain!(input, RnsFp::ONE, product, square);
+    let check = ring.mul(result, input);
+    (fp_eq(ring.mul(check, check), input, ring), result)
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn reciprocal_sqrt_fp_pair<B: Backend>(
+    input: [RnsFp; 2],
+    ring: &Ring<Bls12381, B>,
+) -> [(bool, RnsFp); 2] {
+    macro_rules! product {
+        ($left:expr, $right:expr) => {{
+            let left = $left;
+            let right = $right;
+            ring.batch_reduce_expand(&[
+                ring.ready::<800>(ring.prep_left(left[0]) * right[0]),
+                ring.ready::<800>(ring.prep_left(left[1]) * right[1]),
+            ])
+        }};
+    }
+    macro_rules! square {
+        ($value:expr) => {
+            product!($value, $value)
+        };
+    }
+    let result = reciprocal_sqrt_chain!(input, [RnsFp::ONE; 2], product, square);
+    let check = product!(result, input);
+    let square = product!(check, check);
+    [
+        (fp_eq(square[0], input[0], ring), result[0]),
+        (fp_eq(square[1], input[1], ring), result[1]),
+    ]
 }
 
 // Hash-to-curve inputs are public, so square-class and rotation branches do not
@@ -689,7 +650,11 @@ impl WithBackend for MapSingleG1 {
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         let ring = Ring::<Bls12381, B>::new(backend);
         let point = map_to_g1(self.0.into(), &ring);
-        G1::from_jacobian_coordinates(point.x.into(), point.y.into(), point.z.into())
+        G1 {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        }
     }
 }
 
@@ -709,7 +674,11 @@ impl WithBackend for MapSingleG2 {
         let ring = Ring::<Bls12381, B>::new(backend);
         let fp2 = Fp2Ring::new(&ring);
         let point = map_to_g2(self.0.into(), &ring, &fp2);
-        G2::from_jacobian_coordinates(point.x.into(), point.y.into(), point.z.into())
+        G2 {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
+        }
     }
 }
 
@@ -752,7 +721,7 @@ mod tests {
     use crate::bls12381::scalar::ORDER;
 
     fn raw_g1(point: G1) -> RnsG1 {
-        let (x, y, z) = point.jacobian_coordinates();
+        let (x, y, z) = (point.x, point.y, point.z);
         RnsG1 {
             x: x.into(),
             y: y.into(),
@@ -772,8 +741,10 @@ mod tests {
     }
 
     fn assert_sum_and_clear_g1(points: [RnsG1; 2]) {
-        let expected = points.map(|point| {
-            G1::from_jacobian_coordinates(point.x.into(), point.y.into(), point.z.into())
+        let expected = points.map(|point| G1 {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
         });
         let expected = expected[0]
             .add_jacobian(&expected[1])
@@ -784,7 +755,7 @@ mod tests {
     }
 
     fn raw_g2(point: G2) -> RnsG2 {
-        let (x, y, z) = point.jacobian_coordinates();
+        let (x, y, z) = (point.x, point.y, point.z);
         RnsG2 {
             x: x.into(),
             y: y.into(),
@@ -804,8 +775,10 @@ mod tests {
     }
 
     fn assert_sum_and_clear_g2(points: [RnsG2; 2]) {
-        let expected = points.map(|point| {
-            G2::from_jacobian_coordinates(point.x.into(), point.y.into(), point.z.into())
+        let expected = points.map(|point| G2 {
+            x: point.x.into(),
+            y: point.y.into(),
+            z: point.z.into(),
         });
         let expected = expected[0]
             .add_jacobian(&expected[1])
@@ -1011,7 +984,7 @@ mod tests {
         let g1_torsion = G1::from_affine(Fp::ZERO, Fp::from_u64(2));
         let g1_mixed = G1::generator().add_jacobian(&g1_torsion);
         let g1_scale = Fp::from_u64(7);
-        let (x, y, z) = g1_mixed.jacobian_coordinates();
+        let (x, y, z) = (g1_mixed.x, g1_mixed.y, g1_mixed.z);
         let g1_mixed_scaled = RnsG1 {
             x: x.mul(g1_scale.square()).into(),
             y: y.mul(g1_scale.square().mul(g1_scale)).into(),
@@ -1039,7 +1012,7 @@ mod tests {
             c0: Fp::from_u64(7),
             c1: Fp::ONE,
         };
-        let (x, y, z) = g2_point.jacobian_coordinates();
+        let (x, y, z) = (g2_point.x, g2_point.y, g2_point.z);
         let g2_scaled = RnsG2 {
             x: x.mul(g2_scale.square()).into(),
             y: y.mul(g2_scale.square().mul(g2_scale)).into(),
@@ -1228,8 +1201,8 @@ mod tests {
         let actual = with_backend(case);
         let expected = with_backend(MapG1(&values));
         assert_eq!(
-            actual.output.jacobian_coordinates(),
-            expected.jacobian_coordinates(),
+            (actual.output.x, actual.output.y, actual.output.z),
+            (expected.x, expected.y, expected.z),
             "{name} complete public output"
         );
         assert_eq!(

@@ -10,8 +10,7 @@ LICENSE-VROOM. The Rust arithmetic, parameter generator, and SIMD kernels
 in this crate are native implementations.
 
 src/field/inverse.rs adapts binary-GCD batching and packed transformation
-coefficients from blst 0.3.16. src/field/word/armv8.S contains its AArch64
-field-arithmetic routines with private symbol names.
+coefficients from blst 0.3.16.
 Copyright Supranational LLC.
 
 https://github.com/supranational/blst

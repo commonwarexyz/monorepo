@@ -2,195 +2,7 @@
   "base_redundancy": 40,
   "combined_max": 6894400,
   "fields": {
-    "arm/bander_scalar": {
-      "bits": 26,
-      "bounds": {
-        "MN_over_combined_p2": 24171818138290413054728589773828981670219251349794138516725154424814887155248769601896007513,
-        "M_over_p": 12909431482683798251861989940443091567328413740853,
-        "N_over_p": 12909180640229385789288260714742955021327566573425,
-        "canonical_acc_bits": 284,
-        "canonical_acc_over_p_bits": 31,
-        "expand": {
-          "high_acc_bits": 27,
-          "k_max": 1298210152,
-          "k_raw_bits": 95,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        },
-        "lane_product_high_acc_bits": 32,
-        "lane_product_low_acc_bits": 42,
-        "max_expand": 9223372036854775807,
-        "ready_m_multiple": 64,
-        "reduce": {
-          "high_acc_bits": 32,
-          "k_max": 33271407039,
-          "k_raw_bits": 99,
-          "low_acc_bits": 42,
-          "total_acc_bits": 64
-        },
-        "to_rns": {
-          "high_acc_bits": 26,
-          "k_max": 280637780,
-          "k_raw_bits": 93,
-          "low_acc_bits": 37,
-          "total_acc_bits": 58
-        }
-      },
-      "canonical_digits": 10,
-      "lanes": 16,
-      "model": {
-        "decode_cases": 10,
-        "expand_domain_cases": 119,
-        "multiply_cases": 105,
-        "multiply_chain": 100,
-        "reduce_domain_cases": 119,
-        "to_rns_cases": 103
-      },
-      "no_k": false,
-      "word": 32
-    },
-    "arm/bls12381": {
-      "bits": 26,
-      "bounds": {
-        "MN_over_combined_p2": 259300481919640,
-        "M_over_p": 42281863491,
-        "N_over_p": 42281041915,
-        "canonical_acc_bits": 412,
-        "canonical_acc_over_p_bits": 32,
-        "expand": {
-          "high_acc_bits": 27,
-          "k_max": 1298210152,
-          "k_raw_bits": 95,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        },
-        "lane_product_high_acc_bits": 32,
-        "lane_product_low_acc_bits": 42,
-        "max_expand": 528513023,
-        "ready_m_multiple": 64,
-        "reduce": {
-          "high_acc_bits": 32,
-          "k_max": 37877221375,
-          "k_raw_bits": 100,
-          "low_acc_bits": 42,
-          "total_acc_bits": 64
-        },
-        "to_rns": {
-          "high_acc_bits": 27,
-          "k_max": 461144429,
-          "k_raw_bits": 93,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        }
-      },
-      "canonical_digits": 15,
-      "lanes": 16,
-      "model": {
-        "decode_cases": 10,
-        "expand_domain_cases": 119,
-        "multiply_cases": 105,
-        "multiply_chain": 100,
-        "reduce_domain_cases": 119,
-        "to_rns_cases": 103
-      },
-      "no_k": false,
-      "word": 32
-    },
-    "arm/bls_scalar": {
-      "bits": 26,
-      "bounds": {
-        "MN_over_combined_p2": 1510738633643150815920536860864311354362546767258239787089635247852698266646942636598085693,
-        "M_over_p": 3227357870670949562965497485110772891804164717882,
-        "N_over_p": 3227295160057346447322065178685738755303953468901,
-        "canonical_acc_bits": 286,
-        "canonical_acc_over_p_bits": 31,
-        "expand": {
-          "high_acc_bits": 27,
-          "k_max": 1298210152,
-          "k_raw_bits": 95,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        },
-        "lane_product_high_acc_bits": 32,
-        "lane_product_low_acc_bits": 42,
-        "max_expand": 9223372036854775807,
-        "ready_m_multiple": 64,
-        "reduce": {
-          "high_acc_bits": 32,
-          "k_max": 41280250239,
-          "k_raw_bits": 100,
-          "low_acc_bits": 42,
-          "total_acc_bits": 64
-        },
-        "to_rns": {
-          "high_acc_bits": 27,
-          "k_max": 265344238,
-          "k_raw_bits": 92,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        }
-      },
-      "canonical_digits": 10,
-      "lanes": 16,
-      "model": {
-        "decode_cases": 10,
-        "expand_domain_cases": 119,
-        "multiply_cases": 105,
-        "multiply_chain": 100,
-        "reduce_domain_cases": 119,
-        "to_rns_cases": 103
-      },
-      "no_k": false,
-      "word": 32
-    },
-    "arm/curve25519": {
-      "bits": 26,
-      "bounds": {
-        "MN_over_combined_p2": 1239220498547474367972761771201699981294080669211125689839962464707044310975599533830444740,
-        "M_over_p": 2922986113587207062879849951089176393731587975438,
-        "N_over_p": 2922929317204505837209342093362161686037849768998,
-        "canonical_acc_bits": 286,
-        "canonical_acc_over_p_bits": 31,
-        "expand": {
-          "high_acc_bits": 27,
-          "k_max": 1298210152,
-          "k_raw_bits": 95,
-          "low_acc_bits": 37,
-          "total_acc_bits": 59
-        },
-        "lane_product_high_acc_bits": 32,
-        "lane_product_low_acc_bits": 42,
-        "max_expand": 9223372036854775807,
-        "ready_m_multiple": 64,
-        "reduce": {
-          "high_acc_bits": 32,
-          "k_max": 39717896767,
-          "k_raw_bits": 100,
-          "low_acc_bits": 42,
-          "total_acc_bits": 64
-        },
-        "to_rns": {
-          "high_acc_bits": 26,
-          "k_max": 356887701,
-          "k_raw_bits": 93,
-          "low_acc_bits": 37,
-          "total_acc_bits": 58
-        }
-      },
-      "canonical_digits": 10,
-      "lanes": 16,
-      "model": {
-        "decode_cases": 10,
-        "expand_domain_cases": 119,
-        "multiply_cases": 105,
-        "multiply_chain": 100,
-        "reduce_domain_cases": 119,
-        "to_rns_cases": 103
-      },
-      "no_k": false,
-      "word": 32
-    },
-    "x86/bander_scalar": {
+    "bander_scalar": {
       "bits": 50,
       "bounds": {
         "MN_over_combined_p2": 5628115419345648750300705854797693017394168545536568274367577195667522146269885107,
@@ -231,13 +43,13 @@
         "expand_domain_cases": 111,
         "multiply_cases": 105,
         "multiply_chain": 100,
-        "reduce_domain_cases": 111,
+        "reduce_domain_cases": 112,
         "to_rns_cases": 103
       },
       "no_k": false,
       "word": 52
     },
-    "x86/bls12381": {
+    "bls12381": {
       "bits": 50,
       "bounds": {
         "MN_over_combined_p2": 60374,
@@ -284,7 +96,7 @@
       "no_k": true,
       "word": 52
     },
-    "x86/bls_scalar": {
+    "bls_scalar": {
       "bits": 50,
       "bounds": {
         "MN_over_combined_p2": 351757213709103046893794115924855813581045322996567160078854363198578319812054604,
@@ -331,7 +143,7 @@
       "no_k": false,
       "word": 52
     },
-    "x86/curve25519": {
+    "curve25519": {
       "bits": 50,
       "bounds": {
         "MN_over_combined_p2": 288537500817781783757208553799144042190730432041285846222571027580708611461552901,

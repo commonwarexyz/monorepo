@@ -10,7 +10,6 @@
 
 use crate::bls12381::{Fp, extension::Fp2, scalar::Scalar};
 use bytes::BufMut;
-use cfg_if::cfg_if;
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_cryptography_vroom::with_backend;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
@@ -19,14 +18,6 @@ use zeroize::Zeroizing;
 mod homogeneous;
 mod msm;
 pub(super) use msm::EncodedScalar;
-#[cfg(all(
-    target_arch = "aarch64",
-    target_os = "linux",
-    target_endian = "little",
-    target_pointer_width = "64",
-    not(miri)
-))]
-mod word;
 
 // Thirteen windows cover a u64; twenty-six cover a u128. The final partial
 // window absorbs the carry without exceeding the table's magnitude bound of 16.
@@ -129,193 +120,107 @@ fn multiply_gls<P: msm::Point<C>, C>(
 }
 
 macro_rules! group {
-    ($name:ident, $words:ident, $word_point:ident, $field:ty, $size:literal, $description:literal) => {
-        cfg_if! {
-            if #[cfg(all(target_arch = "aarch64", target_os = "linux", target_endian = "little", target_pointer_width = "64", not(miri)))] {
-                #[doc = $description]
-                #[derive(Clone, Copy, Debug)]
-                pub struct $name(pub(super) word::$word_point);
+    ($name:ident, $words:ident, $field:ty, $size:literal, $description:literal) => {
+        #[doc = $description]
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name {
+            pub(crate) x: $field,
+            pub(crate) y: $field,
+            pub(crate) z: $field,
+        }
 
-                impl $name {
-                    /// The additive identity.
-                    pub const IDENTITY: Self = Self(word::$word_point::IDENTITY);
+        impl $name {
+            /// The additive identity.
+            pub const IDENTITY: Self = Self {
+                x: <$field>::ZERO,
+                y: <$field>::ONE,
+                z: <$field>::ZERO,
+            };
 
-                    /// Returns whether this point is the identity.
-                    pub fn is_identity(&self) -> bool {
-                        self.0.is_identity()
-                    }
+            /// Returns whether this point is the identity.
+            pub fn is_identity(&self) -> bool {
+                bool::from(self.z.ct_eq(&<$field>::ZERO))
+            }
 
-                    /// Adds two points, including equal, opposite, and identity operands.
-                    pub fn add(&self, rhs: &Self) -> Self {
-                        Self(msm::Point::add(&self.0, &rhs.0, &()))
-                    }
+            /// Adds two points, including equal, opposite, and identity operands.
+            pub fn add(&self, rhs: &Self) -> Self {
+                with_backend(homogeneous::Add(self, rhs))
+            }
 
-                    /// Returns twice this point.
-                    pub fn double(&self) -> Self {
-                        Self(msm::Point::double(&self.0, &()))
-                    }
-
-                    /// Returns the additive inverse.
-                    pub fn neg(&self) -> Self {
-                        Self(msm::Point::neg(&self.0, &()))
-                    }
-
-                    // Callers establish curve and subgroup membership before public use.
-                    pub(crate) fn from_affine(x: $field, y: $field) -> Self {
-                        Self(word::$word_point::from_affine(x, y))
-                    }
-
-                    pub(crate) fn to_affine(self) -> Option<($field, $field)> {
-                        self.0.to_affine()
-                    }
-
-                    // Raw Jacobian fixtures normalize infinity before entering homogeneous storage.
-                    #[cfg(test)]
-                    pub(super) fn from_jacobian_coordinates(x: $field, y: $field, z: $field) -> Self {
-                        if z.is_zero() {
-                            return Self::IDENTITY;
-                        }
-                        Self(word::$word_point::from_rns(homogeneous::$word_point {
-                            x: x.mul(z).into(),
-                            y: y.into(),
-                            z: z.square().mul(z).into(),
-                        }))
-                    }
-
-                    #[cfg(test)]
-                    pub(super) fn jacobian_coordinates(&self) -> ($field, $field, $field) {
-                        let point = self.0.to_rns();
-                        let x = <$field>::from(point.x);
-                        let y = <$field>::from(point.y);
-                        let z = <$field>::from(point.z);
-                        (x.mul(z), y.mul(z.square()), z)
-                    }
+            /// Returns twice this point.
+            pub fn double(&self) -> Self {
+                let xx = self.x.square();
+                let yy = self.y.square();
+                let yyyy = yy.square();
+                let d = self.x.add(yy).square().sub(xx).sub(yyyy);
+                let d = d.add(d);
+                let e = xx.add(xx).add(xx);
+                let x = e.square().sub(d.add(d));
+                let eight_yyyy = yyyy.add(yyyy);
+                let eight_yyyy = eight_yyyy.add(eight_yyyy);
+                let eight_yyyy = eight_yyyy.add(eight_yyyy);
+                let y = e.mul(d.sub(x)).sub(eight_yyyy);
+                let yz = self.y.mul(self.z);
+                Self {
+                    x,
+                    y,
+                    z: yz.add(yz),
                 }
+            }
 
-                impl ConstantTimeEq for $name {
-                    fn ct_eq(&self, other: &Self) -> Choice {
-                        self.0.ct_eq(&other.0)
-                    }
+            /// Returns the additive inverse.
+            pub fn neg(&self) -> Self {
+                Self {
+                    x: self.x,
+                    y: self.y.neg(),
+                    z: self.z,
                 }
+            }
 
-                impl ConditionallySelectable for $name {
-                    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-                        Self(word::$word_point::conditional_select(&a.0, &b.0, choice))
-                    }
+            // Coordinates represent (X/Z^2, Y/Z^3), with every Z = 0 representing infinity.
+            // Callers supply on-curve coordinates and establish subgroup membership before
+            // exposing a point outside the crate.
+            pub(crate) const fn from_affine(x: $field, y: $field) -> Self {
+                Self {
+                    x,
+                    y,
+                    z: <$field>::ONE,
                 }
-            } else {
-                #[doc = $description]
-                #[derive(Clone, Copy, Debug)]
-                pub struct $name {
-                    pub(crate) x: $field,
-                    pub(crate) y: $field,
-                    pub(crate) z: $field,
-                }
+            }
 
-                impl $name {
-                    /// The additive identity.
-                    pub const IDENTITY: Self = Self {
-                        x: <$field>::ZERO,
-                        y: <$field>::ONE,
-                        z: <$field>::ZERO,
-                    };
+            pub(crate) fn to_affine(self) -> Option<($field, $field)> {
+                let inverse = self.z.invert()?;
+                let inverse_squared = inverse.square();
+                Some((
+                    self.x.mul(inverse_squared),
+                    self.y.mul(inverse_squared).mul(inverse),
+                ))
+            }
+        }
 
-                    /// Returns whether this point is the identity.
-                    pub fn is_identity(&self) -> bool {
-                        bool::from(self.z.ct_eq(&<$field>::ZERO))
-                    }
+        impl ConstantTimeEq for $name {
+            fn ct_eq(&self, other: &Self) -> Choice {
+                let self_identity = self.z.ct_eq(&<$field>::ZERO);
+                let other_identity = other.z.ct_eq(&<$field>::ZERO);
+                let self_zz = self.z.square();
+                let other_zz = other.z.square();
+                let x_equal = self.x.mul(other_zz).ct_eq(&other.x.mul(self_zz));
+                let y_equal = self
+                    .y
+                    .mul(other_zz)
+                    .mul(other.z)
+                    .ct_eq(&other.y.mul(self_zz).mul(self.z));
+                (self_identity & other_identity)
+                    | (!self_identity & !other_identity & x_equal & y_equal)
+            }
+        }
 
-                    /// Adds two points, including equal, opposite, and identity operands.
-                    pub fn add(&self, rhs: &Self) -> Self {
-                        with_backend(homogeneous::Add(self, rhs))
-                    }
-
-                    /// Returns twice this point.
-                    pub fn double(&self) -> Self {
-                        let xx = self.x.square();
-                        let yy = self.y.square();
-                        let yyyy = yy.square();
-                        let d = self.x.add(yy).square().sub(xx).sub(yyyy);
-                        let d = d.add(d);
-                        let e = xx.add(xx).add(xx);
-                        let x = e.square().sub(d.add(d));
-                        let eight_yyyy = yyyy.add(yyyy);
-                        let eight_yyyy = eight_yyyy.add(eight_yyyy);
-                        let eight_yyyy = eight_yyyy.add(eight_yyyy);
-                        let y = e.mul(d.sub(x)).sub(eight_yyyy);
-                        let yz = self.y.mul(self.z);
-                        Self {
-                            x,
-                            y,
-                            z: yz.add(yz),
-                        }
-                    }
-
-                    /// Returns the additive inverse.
-                    pub fn neg(&self) -> Self {
-                        Self {
-                            x: self.x,
-                            y: self.y.neg(),
-                            z: self.z,
-                        }
-                    }
-
-                    // Coordinates represent (X/Z^2, Y/Z^3), with every Z = 0 representing infinity.
-                    // Callers supply on-curve coordinates and establish subgroup membership before
-                    // exposing a point outside the crate.
-                    pub(crate) const fn from_affine(x: $field, y: $field) -> Self {
-                        Self {
-                            x,
-                            y,
-                            z: <$field>::ONE,
-                        }
-                    }
-
-                    pub(crate) fn to_affine(self) -> Option<($field, $field)> {
-                        let inverse = self.z.invert()?;
-                        let inverse_squared = inverse.square();
-                        Some((
-                            self.x.mul(inverse_squared),
-                            self.y.mul(inverse_squared).mul(inverse),
-                        ))
-                    }
-
-                    #[cfg(test)]
-                    pub(super) const fn from_jacobian_coordinates(x: $field, y: $field, z: $field) -> Self {
-                        Self { x, y, z }
-                    }
-
-                    #[cfg(test)]
-                    pub(super) const fn jacobian_coordinates(&self) -> ($field, $field, $field) {
-                        (self.x, self.y, self.z)
-                    }
-                }
-
-                impl ConstantTimeEq for $name {
-                    fn ct_eq(&self, other: &Self) -> Choice {
-                        let self_identity = self.z.ct_eq(&<$field>::ZERO);
-                        let other_identity = other.z.ct_eq(&<$field>::ZERO);
-                        let self_zz = self.z.square();
-                        let other_zz = other.z.square();
-                        let x_equal = self.x.mul(other_zz).ct_eq(&other.x.mul(self_zz));
-                        let y_equal = self
-                            .y
-                            .mul(other_zz)
-                            .mul(other.z)
-                            .ct_eq(&other.y.mul(self_zz).mul(self.z));
-                        (self_identity & other_identity)
-                            | (!self_identity & !other_identity & x_equal & y_equal)
-                    }
-                }
-
-                impl ConditionallySelectable for $name {
-                    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-                        Self {
-                            x: <$field>::conditional_select(&a.x, &b.x, choice),
-                            y: <$field>::conditional_select(&a.y, &b.y, choice),
-                            z: <$field>::conditional_select(&a.z, &b.z, choice),
-                        }
-                    }
+        impl ConditionallySelectable for $name {
+            fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+                Self {
+                    x: <$field>::conditional_select(&a.x, &b.x, choice),
+                    y: <$field>::conditional_select(&a.y, &b.y, choice),
+                    z: <$field>::conditional_select(&a.z, &b.z, choice),
                 }
             }
         }
@@ -341,32 +246,15 @@ macro_rules! group {
                 if let [point] = points {
                     return Some(point.mul(&scalars[0]));
                 }
-                cfg_if! {
-                    if #[cfg(all(
-                        target_arch = "aarch64",
-                        target_os = "linux",
-                        target_endian = "little",
-                        target_pointer_width = "64",
-                        not(miri)
-                    ))] {
-                        let identity = word::$word_point::identity();
-                        let (terms, bits) = msm::prepare_terms!(
-                            points, scalars, scalar => EncodedScalar::new(scalar),
-                            point => point.0
-                        );
-                        Some(Self(msm::compute(terms, bits, &(), identity)))
-                    } else {
-                        Some(with_backend(homogeneous::Msm(points, scalars)))
-                    }
-                }
+                Some(with_backend(homogeneous::Msm(points, scalars)))
             }
 
             #[cfg(test)]
             pub(super) fn add_jacobian(&self, rhs: &Self) -> Self {
                 // Unified Jacobian addition from blst's POINT_DADD_IMPL (a = 0). Equal
                 // affine coordinates select the doubling slope; inverses yield Z = 0.
-                let (x1, y1, z1) = self.jacobian_coordinates();
-                let (x2, y2, z2) = rhs.jacobian_coordinates();
+                let (x1, y1, z1) = (self.x, self.y, self.z);
+                let (x2, y2, z2) = (rhs.x, rhs.y, rhs.z);
                 let z1z1 = z1.square();
                 let z2z2 = z2.square();
                 let u1 = x1.mul(z2z2);
@@ -387,7 +275,7 @@ macro_rules! group {
                 let hhh = hh.mul(h);
                 let x = r.square().sub(hh.mul(sx));
                 let y = r.mul(hh.mul(u).sub(x)).sub(hhh.mul(s));
-                let result = Self::from_jacobian_coordinates(x, y, h.mul(zz));
+                let result = Self { x, y, z: h.mul(zz) };
                 let result = Self::conditional_select(&result, self, z2.ct_eq(&<$field>::ZERO));
                 Self::conditional_select(&result, rhs, z1.ct_eq(&<$field>::ZERO))
             }
@@ -397,7 +285,7 @@ macro_rules! group {
                 let mut result = Self::IDENTITY;
                 for word in words.iter().rev() {
                     for bit in (0..64).rev() {
-                        result = result.double_jacobian();
+                        result = result.double();
                         if (word >> bit) & 1 != 0 {
                             result = result.add_jacobian(self);
                         }
@@ -416,24 +304,6 @@ macro_rules! group {
             #[cfg(test)]
             pub(crate) fn mul_words(&self, words: &[u64]) -> Self {
                 with_backend(homogeneous::$words(self, words))
-            }
-
-            #[cfg(test)]
-            pub(super) fn double_jacobian(&self) -> Self {
-                let (x, y, z) = self.jacobian_coordinates();
-                let xx = x.square();
-                let yy = y.square();
-                let yyyy = yy.square();
-                let d = x.add(yy).square().sub(xx).sub(yyyy);
-                let d = d.add(d);
-                let e = xx.add(xx).add(xx);
-                let result_x = e.square().sub(d.add(d));
-                let eight_yyyy = yyyy.add(yyyy);
-                let eight_yyyy = eight_yyyy.add(eight_yyyy);
-                let eight_yyyy = eight_yyyy.add(eight_yyyy);
-                let result_y = e.mul(d.sub(result_x)).sub(eight_yyyy);
-                let yz = y.mul(z);
-                Self::from_jacobian_coordinates(result_x, result_y, yz.add(yz))
             }
         }
 
@@ -480,7 +350,6 @@ macro_rules! group {
 group!(
     G1,
     G1Words,
-    G1Point,
     Fp,
     48,
     "A point in the prime-order subgroup of y^2 = x^3 + 4 over Fp."
@@ -488,7 +357,6 @@ group!(
 group!(
     G2,
     G2Words,
-    G2Point,
     Fp2,
     96,
     "A point in the prime-order subgroup of y^2 = x^3 + 4(1 + u) over Fp2."
@@ -511,48 +379,23 @@ impl G1 {
         if points.len() != scalars.len() {
             return None;
         }
-        cfg_if! {
-            if #[cfg(all(
-                target_arch = "aarch64",
-                target_os = "linux",
-                target_endian = "little",
-                target_pointer_width = "64",
-                not(miri)
-            ))] {
-                let identity = word::G1Point::identity();
-                let (terms, bits) = msm::prepare_terms!(
-                    points, scalars, scalar => *scalar,
-                    point => point.0
-                );
-                Some(Self(msm::compute(terms, bits, &(), identity)))
-            } else {
-                Some(with_backend(homogeneous::Msm(points, scalars)))
-            }
-        }
+        Some(with_backend(homogeneous::Msm(points, scalars)))
     }
 
     /// Multiplies by a scalar with a fixed schedule and constant-time selections.
     pub fn mul(&self, scalar: &Scalar) -> Self {
-        cfg_if! {
-            if #[cfg(all(
-                target_arch = "aarch64",
-                target_os = "linux",
-                target_endian = "little",
-                target_pointer_width = "64",
-                not(miri)
-            ))] {
-                Self(word::mul_g1(&self.0, scalar))
-            } else {
-                with_backend(homogeneous::G1Mul(self, scalar))
-            }
-        }
+        with_backend(homogeneous::G1Mul(self, scalar))
     }
 
     // On G1, -phi^2 has eigenvalue |x|^2, where phi multiplies X by beta.
     #[cfg(test)]
     pub(super) fn endomorphism(&self) -> Self {
-        let (x, y, z) = self.jacobian_coordinates();
-        Self::from_jacobian_coordinates(x.mul(BETA_SQUARED), y.neg(), z)
+        let (x, y, z) = (self.x, self.y, self.z);
+        Self {
+            x: x.mul(BETA_SQUARED),
+            y: y.neg(),
+            z,
+        }
     }
 
     /// Hashes a public message to G1 using RFC 9380 and the supplied ciphersuite tag.
@@ -603,40 +446,32 @@ impl G1 {
 impl G2 {
     /// Multiplies by a scalar with a fixed schedule and constant-time selections.
     pub fn mul(&self, scalar: &Scalar) -> Self {
-        cfg_if! {
-            if #[cfg(all(
-                target_arch = "aarch64",
-                target_os = "linux",
-                target_endian = "little",
-                target_pointer_width = "64",
-                not(miri)
-            ))] {
-                Self(word::mul_g2(&self.0, scalar))
-            } else {
-                with_backend(homogeneous::G2Mul(self, scalar))
-            }
-        }
+        with_backend(homogeneous::G2Mul(self, scalar))
     }
 
     // Frobenius transported through the sextic twist. These maps are defined on the
     // full curve; their scalar eigenvalues apply only inside the prime-order subgroup.
     #[cfg(test)]
     pub(crate) fn psi(&self) -> Self {
-        let (x, y, z) = self.jacobian_coordinates();
-        Self::from_jacobian_coordinates(
-            Fp2 {
+        let (x, y, z) = (self.x, self.y, self.z);
+        Self {
+            x: Fp2 {
                 c0: x.c1.mul(PSI_X),
                 c1: x.c0.mul(PSI_X),
             },
-            y.conjugate().mul(PSI_Y),
-            z.conjugate(),
-        )
+            y: y.conjugate().mul(PSI_Y),
+            z: z.conjugate(),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn psi2(&self) -> Self {
-        let (x, y, z) = self.jacobian_coordinates();
-        Self::from_jacobian_coordinates(x.mul_by_fp(PSI2_X), y.neg(), z)
+        let (x, y, z) = (self.x, self.y, self.z);
+        Self {
+            x: x.mul_by_fp(PSI2_X),
+            y: y.neg(),
+            z,
+        }
     }
 
     // The BLS parameter is negative. This integer chain is valid before cofactor
@@ -835,12 +670,12 @@ mod tests {
         let scale = Fp::from_u64(7);
         while points.len() < 65 {
             points.push({
-                let (x, y, z) = point.jacobian_coordinates();
-                G1::from_jacobian_coordinates(
-                    x.mul(scale.square()),
-                    y.mul(scale.square().mul(scale)),
-                    z.mul(scale),
-                )
+                let (x, y, z) = (point.x, point.y, point.z);
+                G1 {
+                    x: x.mul(scale.square()),
+                    y: y.mul(scale.square().mul(scale)),
+                    z: z.mul(scale),
+                }
             });
             point = point.add_jacobian(&generator);
         }
@@ -929,7 +764,11 @@ mod tests {
 
         let mut points = alloc::vec![
             G2::IDENTITY,
-            G2::from_jacobian_coordinates(Fp2::ONE, Fp2::ZERO, Fp2::ZERO),
+            G2 {
+                x: Fp2::ONE,
+                y: Fp2::ZERO,
+                z: Fp2::ZERO
+            },
             G2::generator(),
             G2::generator().neg(),
         ];
@@ -949,12 +788,12 @@ mod tests {
         };
         for point in points {
             for point in [point, {
-                let (x, y, z) = point.jacobian_coordinates();
-                G2::from_jacobian_coordinates(
-                    x.mul(scale.square()),
-                    y.mul(scale.square().mul(scale)),
-                    z.mul(scale),
-                )
+                let (x, y, z) = (point.x, point.y, point.z);
+                G2 {
+                    x: x.mul(scale.square()),
+                    y: y.mul(scale.square().mul(scale)),
+                    z: z.mul(scale),
+                }
             }] {
                 assert_eq!(point.psi2(), point.psi().psi());
                 assert_eq!(
@@ -965,7 +804,7 @@ mod tests {
                     if image.is_identity() {
                         assert!(point.is_identity());
                     } else {
-                        let (x, y, z) = image.jacobian_coordinates();
+                        let (x, y, z) = (image.x, image.y, image.z);
                         let z2 = z.square();
                         assert_eq!(
                             y.square(),
@@ -1127,8 +966,8 @@ mod tests {
                     let generator = $group::generator();
                     let scale = <$field>::from_u64(7);
                     let scaled = {
-                        let (x, y, _) = generator.jacobian_coordinates();
-                        $group::from_jacobian_coordinates(x.mul(scale.square()), y.mul(scale.square()).mul(scale), scale)
+                        let (x, y, _) = (generator.x, generator.y, generator.z);
+                        $group { x: x.mul(scale.square()), y: y.mul(scale.square()).mul(scale), z: scale }
                     };
                     assert_eq!(scaled, generator);
                     assert_eq!(scaled.to_bytes(), generator.to_bytes());
@@ -1139,7 +978,7 @@ mod tests {
                     assert_eq!(scaled.mul(&scalar), generator.mul(&scalar));
                     for identity in [
                         $group::IDENTITY,
-                        $group::from_jacobian_coordinates(<$field>::ONE, <$field>::ZERO, <$field>::ZERO),
+                        $group { x: <$field>::ONE, y: <$field>::ZERO, z: <$field>::ZERO },
                         generator.sub(&generator),
                     ] {
                         assert_eq!(identity, $group::IDENTITY);
@@ -1222,8 +1061,8 @@ mod tests {
                                 bytes[31] = i as u8 + 1;
                                 let scalar = Scalar::from_bytes(&bytes).unwrap();
                                 let projective = {
-                                    let (x, y, z) = point.jacobian_coordinates();
-                                    $group::from_jacobian_coordinates(x.mul(scale.square()), y.mul(scale.square().mul(scale)), z.mul(scale))
+                                    let (x, y, z) = (point.x, point.y, point.z);
+                                    $group { x: x.mul(scale.square()), y: y.mul(scale.square().mul(scale)), z: z.mul(scale) }
                                 };
                                 points.extend([projective, projective.neg()]);
                                 coefficients.extend([scalar, Scalar::ZERO]);
@@ -1257,8 +1096,8 @@ mod tests {
                     let point = $group::generator();
                     let scale = <$field>::from_u64(7);
                     let point = {
-                        let (x, y, z) = point.jacobian_coordinates();
-                        $group::from_jacobian_coordinates(x.mul(scale.square()), y.mul(scale.square().mul(scale)), z.mul(scale))
+                        let (x, y, z) = (point.x, point.y, point.z);
+                        $group { x: x.mul(scale.square()), y: y.mul(scale.square().mul(scale)), z: z.mul(scale) }
                     };
                     let raw = oracle_point(&point.to_bytes());
                     for scalar in scalars() {

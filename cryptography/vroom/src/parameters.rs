@@ -5,17 +5,9 @@ use crate::{
     rns,
 };
 
-#[cfg_attr(not(target_arch = "x86_64"), path = "parameters/arm/bander_scalar.rs")]
-#[cfg_attr(target_arch = "x86_64", path = "parameters/x86/bander_scalar.rs")]
 mod bander_scalar;
-#[cfg_attr(not(target_arch = "x86_64"), path = "parameters/arm/bls12381.rs")]
-#[cfg_attr(target_arch = "x86_64", path = "parameters/x86/bls12381.rs")]
 mod bls12381;
-#[cfg_attr(not(target_arch = "x86_64"), path = "parameters/arm/bls_scalar.rs")]
-#[cfg_attr(target_arch = "x86_64", path = "parameters/x86/bls_scalar.rs")]
 mod bls_scalar;
-#[cfg_attr(not(target_arch = "x86_64"), path = "parameters/arm/curve25519.rs")]
-#[cfg_attr(target_arch = "x86_64", path = "parameters/x86/curve25519.rs")]
 mod curve25519;
 
 macro_rules! modulus {
