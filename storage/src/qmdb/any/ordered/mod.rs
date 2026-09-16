@@ -785,6 +785,7 @@ mod test {
                         .unwrap();
                     let mut active = BTreeSet::new();
                     let value = Sha256::fill(1);
+
                     // Exercise conflicts within a translated key, neighboring index entries, and
                     // distinct partitions. Insert out of order so conflict order cannot be assumed.
                     let a = neighbor_key([0x20, 0x20, 0x20]);
