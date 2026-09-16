@@ -32,7 +32,7 @@ To get there, we need to rethink the responsibilities of validators and wallets.
 1. **Succinct validator state.** Validator storage may grow with the number of accounts, but not with the number of transactions, and processing a transaction takes a constant amount of work regardless of how many accounts exist.
 2. **Offline wallets.** Wallets can go offline for arbitrarily long periods and, upon returning, send and receive payments without replaying intervening chain history, much like traditional payments. The work a wallet does depends only on the transactions it participates in.
 
-We are excited to share [Bonsai](/artifacts/bonsai.pdf), a private payment scheme that addresses both verification cost and state growth:
+We are excited to share [Bonsai](https://eprint.iacr.org/2026/1987), a private payment scheme that addresses both verification cost and state growth:
 
 - each operation has a **256-byte payload** and the prototype verifies **over a million operations per second** on an M5 MacBook Pro (18 cores)
 - validators store a **single 32-byte commitment per account** and a small number of hashes
@@ -86,7 +86,7 @@ To claim a receipt, $\mathsf{Rec}$ shows that:
 
 Fees can be supported in both send and receive by revealing $v_{\mathsf{fee}}$ in the statement and proving that the new committed balance is reduced by an additional $v_{\mathsf{fee}}$.
 
-Balances and amounts are now hidden from the ledger, but it still reveals whether an account sent or received funds. We can also hide the operation type by proving a strict disjunction of the send and receive relations. This strengthens the privacy guarantees (see Section 6.1 of the [Bonsai paper](/artifacts/bonsai.pdf) for a detailed discussion).
+Balances and amounts are now hidden from the ledger, but it still reveals whether an account sent or received funds. We can also hide the operation type by proving a strict disjunction of the send and receive relations. This strengthens the privacy guarantees (see Section 6.1 of the [Bonsai paper](https://eprint.iacr.org/2026/1987) for a detailed discussion).
 
 In the operation-hiding variant, both send and receive publish the same 256-byte payload $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root, and a 128-byte proof. Every operation appends a receipt to the MMR: a real one for a send and an unspendable dummy for a receive.
 
