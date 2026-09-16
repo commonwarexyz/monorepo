@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 870" role="img" aria-labelledby="title description">
+  <title id="title">Collecting a fee in one signed batch</title>
+  <desc id="description">In an independent fresh-epoch example, payer a signs one batch that pays 20 to b, 7 to c, and 2 to the operator's designated fee account, for a total debit of 29. The fee of 2 is an example operator quote, not a protocol constant. The operator checks that the ordinary fee increment satisfies its policy, then countersigns the same payer state once. One acknowledgment binds the entire batch. Validators net all three entries as ordinary payments, with no fee-specific protocol machinery.</desc>
+  <rect width="1080" height="870" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 14px; fill: #666; }
+    .eyebrow { font-size: 16px; font-weight: 700; fill: #666; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
+    .center { text-anchor: middle; }
+    .right { text-anchor: end; }
+    .blue { fill: #2424d4; }
+    .green { fill: #14733b; }
+    .quote { fill: #f4f4ff; stroke: #b8b8ed; stroke-width: 1.5; }
+    .step { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .record { fill: #fff; stroke: #bcbcbc; stroke-width: 1.5; }
+    .selected { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
+    .accepted { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
+    .number { fill: #2424d4; }
+    .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
+    .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
+    .thin-flow { fill: none; stroke: #777; stroke-width: 1.5; marker-end: url(#gray-arrow); }
+    .rule { stroke: #d6d6d6; stroke-width: 1.5; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2424d4"/>
+    </marker>
+    <marker id="gray-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#777"/>
+    </marker>
+  </defs>
+
+  <text class="title" x="36" y="46">Collecting Fees in a Batch</text>
+  <text class="subtitle" x="36" y="78">The payer authorizes the fee with every other payment.</text>
+
+  <rect class="quote" x="36" y="106" width="1008" height="72" rx="6"/>
+  <text class="eyebrow blue" x="60" y="150">FRESH-EPOCH EXAMPLE</text>
+  <rect class="selected" x="310" y="121" width="184" height="42" rx="4"/>
+  <text class="label center blue" x="402" y="149">fee quote = 2</text>
+  <text class="note right" x="1020" y="149">Operator policy · not a protocol constant</text>
+
+  <rect class="step" x="90" y="206" width="900" height="210" rx="6"/>
+  <circle class="number" cx="126" cy="241" r="18"/>
+  <text class="number-text" x="126" y="248">1</text>
+  <text class="heading" x="162" y="248">Payer a signs one batch</text>
+  <text class="note" x="162" y="281">The payer authorizes the fee with both payments.</text>
+  <rect class="selected" x="140" y="304" width="800" height="84" rx="5"/>
+  <text class="eyebrow blue" x="162" y="335">ONE SIGNATURE</text>
+  <text class="label" x="162" y="367">a · debit 29</text>
+  <path class="rule" d="M342 320 V372"/>
+  <rect class="record" x="370" y="319" width="150" height="54" rx="4"/>
+  <text class="label center" x="445" y="353">to b · 20</text>
+  <rect class="record" x="536" y="319" width="150" height="54" rx="4"/>
+  <text class="label center" x="611" y="353">to c · 7</text>
+  <rect class="record" x="702" y="319" width="214" height="54" rx="4"/>
+  <text class="label center" x="809" y="353">to fee acct · 2</text>
+
+  <path class="flow" d="M540 428 V468"/>
+
+  <rect class="step" x="90" y="480" width="900" height="140" rx="6"/>
+  <circle class="number" cx="126" cy="515" r="18"/>
+  <text class="number-text" x="126" y="522">2</text>
+  <text class="heading" x="162" y="522">Operator applies its policy</text>
+  <rect class="accepted" x="350" y="538" width="252" height="58" rx="5"/>
+  <text class="label center green" x="476" y="562">fee increment 2</text>
+  <text class="note center green" x="476" y="587">meets quote</text>
+  <path class="thin-flow" d="M622 567 H681"/>
+  <rect class="selected" x="700" y="538" width="250" height="58" rx="5"/>
+  <text class="label center blue" x="825" y="562">COUNTERSIGN ONCE</text>
+  <text class="note center" x="825" y="587">same payer state</text>
+
+  <path class="flow" d="M540 632 V672"/>
+
+  <rect class="step" x="90" y="684" width="900" height="154" rx="6"/>
+  <circle class="number" cx="126" cy="719" r="18"/>
+  <text class="number-text" x="126" y="726">3</text>
+  <text class="heading" x="162" y="726">One acknowledgment binds the entire batch</text>
+  <rect class="selected" x="166" y="753" width="260" height="60" rx="5"/>
+  <text class="label center blue" x="296" y="778">ONE ACK</text>
+  <text class="note center" x="296" y="804">b:20 · c:7 · fee:2</text>
+  <path class="thin-flow" d="M446 783 H511"/>
+  <rect class="record" x="530" y="753" width="400" height="60" rx="5"/>
+  <text class="eyebrow center" x="730" y="778">VALIDATORS NET ALL THREE</text>
+  <text class="note center" x="730" y="804">fee is an ordinary payment</text>
+</svg>
