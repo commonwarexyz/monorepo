@@ -490,6 +490,8 @@ impl<I: Impl> Transform<I> {
 
     /// Inverse transform `work` in place at `shift`.
     ///
+    /// `work.count` must be a power of two, `nonzero <= work.count`, and
+    /// `shift + work.count <= I::ORDER` so all twiddle indices fit in the field tables.
     /// Shards at or past `nonzero` must be zero.
     pub fn ifft(&self, work: &mut Shards, nonzero: usize, shift: usize) {
         let m = work.count;
@@ -536,6 +538,8 @@ impl<I: Impl> Transform<I> {
 
     /// Forward transform `work` in place, at position 0.
     ///
+    /// `work.count` must be a power of two not exceeding `I::ORDER`, and
+    /// `needed <= work.count`.
     /// Only the first `needed` outputs are guaranteed to be computed.
     pub fn fft(&self, work: &mut Shards, needed: usize) {
         let m = work.count;

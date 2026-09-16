@@ -241,6 +241,11 @@ impl<K: Kernel> GF16Vec<K> {
     }
 
     /// Load matching non-empty prefixes of the low and high byte planes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the plane lengths differ, are zero, exceed [`Kernel::LANES`],
+    /// or are not multiples of [`Kernel::PARTIAL_GRANULARITY`].
     #[inline(always)]
     pub fn load_partial_planes(kernel: K, lo: &[u8], hi: &[u8]) -> Self {
         assert_eq!(lo.len(), hi.len(), "plane lengths differ");
@@ -279,6 +284,11 @@ impl<K: Kernel> GF16Vec<K> {
     }
 
     /// Store matching non-empty prefixes of the low and high byte planes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the plane lengths differ, are zero, exceed [`Kernel::LANES`],
+    /// or are not multiples of [`Kernel::PARTIAL_GRANULARITY`].
     #[inline(always)]
     pub fn store_partial_planes(self, lo: &mut [u8], hi: &mut [u8]) {
         assert_eq!(lo.len(), hi.len(), "plane lengths differ");

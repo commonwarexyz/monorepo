@@ -50,6 +50,10 @@ macro_rules! ocelot {
             /// Shards are checked independently through Merkle inclusion proofs. Decoding
             /// reconstructs the canonical codeword and verifies its commitment before
             /// returning the payload, rejecting inconsistent encodings.
+            /// Successful shard checks do not establish codeword validity or guarantee
+            /// reconstruction from enough checked shards. This type does not implement
+            /// [`crate::ValidatingScheme`].
+            ///
             /// Shard digests reduce consecutive 1 KiB chunks to hashes until at most
             /// 1 KiB remains, then hash the `UInt`-encoded original shard length
             /// followed by that buffer. Hash digests must contain 1 to 512 bytes.
@@ -197,7 +201,10 @@ macro_rules! ocelot_hinted {
         mod $module {
             use super::*;
 
-            #[doc = concat!("Reed-Solomon coding over ", $field, ", with commitments using `H`.")]
+            #[doc = concat!("Reed-Solomon coding over ", $field, ", with Merkle commitments using `H` and checksum hints.")]
+            ///
+            /// The public commitment is a transcript [`Summary`] binding the Merkle root,
+            /// configuration, payload length, systematic range proof, namespace, and checksums.
             ///
             /// The original count plus the extra count rounded up to a power of two must
             #[doc = concat!("not exceed ", $order, ".")]
@@ -236,9 +243,9 @@ macro_rules! ocelot_hinted {
             /// shard hashing through that strategy. Hashing also partitions work within
             /// each shard when there are too few shards to occupy the workers.
             ///
-            /// A successful shard check does not prove that the entire encoding is
-            /// available. Availability is established only when decoding succeeds from
-            /// enough checked shards, so this type does not implement `ValidatingScheme`.
+            /// Successful shard checks do not establish codeword validity or guarantee
+            /// reconstruction from enough checked shards. This type does not implement
+            /// [`crate::ValidatingScheme`].
             pub struct $name<H> {
                 _marker: PhantomData<H>,
             }
