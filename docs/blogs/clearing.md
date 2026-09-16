@@ -47,6 +47,10 @@ Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator 
   }
   .clearing-benchmark-table table {
     min-width: 760px;
+    table-layout: fixed;
+  }
+  .clearing-benchmark-table th[rowspan] {
+    width: 32%;
   }
   .clearing-calculator {
     border: 1px solid #d6d6d6;
@@ -350,7 +354,7 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
       <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th>
       <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th>
       <th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 8, <em>K</em> = 8</th>
-      <th style="text-align:right;"><em>A</em> = 1M<br><em>B</em> = 512, <em>K</em> = 1</th>
+      <th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th>
     </tr>
   </thead>
   <tbody>
@@ -384,8 +388,8 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
 <div class="clearing-benchmark-table">
 <table>
   <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">CPU preparation</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1M<br><em>B</em> = 512, <em>K</em> = 1</th></tr>
+    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
+    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th></tr>
   </thead>
   <tbody>
     <tr><td>Operator: prepare</td><td style="text-align:right;">1.16 ms</td><td style="text-align:right;">3.30 ms</td><td style="text-align:right;">1.61 s</td></tr>
@@ -398,20 +402,20 @@ We benchmarked the Commonware Library's [reference implementation](https://githu
 <div class="clearing-benchmark-table">
 <table>
   <thead>
-    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Durable acknowledgment</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
+    <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
     <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 8, <em>K</em> = 8</th></tr>
   </thead>
   <tbody>
-    <tr><td>Validator: durable ACK</td><td style="text-align:right;">276 ms</td><td style="text-align:right;">1.152 s</td><td style="text-align:right;">1.153 s</td></tr>
+    <tr><td>Validator: durable vote</td><td style="text-align:right;">276 ms</td><td style="text-align:right;">1.15 s</td><td style="text-align:right;">1.15 s</td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 8: Encoded payload sizes (decimal KB and MB) and arithmetic-mean processing times. Preparation averages 20 CPU samples. Durable acknowledgment averages three runs per workload, with no warmup. It includes sealing, signing, validation, parallel durable commits of the three public databases, then the private checkpoint and signing decision. Setup and reopen checks run outside the timer, and all nine runs reopened successfully.
+Figure 8: Encoded payload sizes (decimal KB and MB) and arithmetic-mean processing times. Preparation averages 20 CPU samples. Local durable votes average three runs per workload, with no warmup. Each run starts from an open, durable predecessor and includes sealing, signing, validation, parallel durable commits of the three public databases, then the private checkpoint and signing decision. Setup and reopen checks run outside the timer, and all nine runs reopened successfully.
 
-The host was an AWS c8a.4xlarge with 16 AMD EPYC vCPUs and 32 GiB RAM. Storage was a network-attached 160 GiB gp3 EBS SSD, provisioned for 6,000 IOPS and 250 MiB/s, with ext4. Validation and the public databases shared a 16-thread Rayon pool, with two runtime I/O workers and a 16 KiB native cache per public database. The fixtures fit in RAM. Each acknowledgment waited for the filesystem durability barriers to the EBS volume. These local measurements exclude networking and use benchmark limits for large dealings.
+The host was an AWS c8a.4xlarge with 16 AMD EPYC vCPUs and 32 GiB RAM. Storage was a network-attached 160 GiB gp3 EBS SSD, provisioned for 6,000 IOPS and 250 MiB/s, with ext4. Validation and the public databases shared a 16-thread Rayon pool, with two runtime I/O workers and a 16 KiB native cache per public database. The fixtures fit in RAM. Each vote waited for the filesystem durability barriers to the EBS volume. These local measurements exclude networking and use benchmark limits for large dealings.
 :::
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
@@ -426,7 +430,7 @@ Figure 9: Every account repeatedly pays one unit to its next neighbor. More paym
 
 ### Proof Sizes and Verification
 
-Proof sizes below are encoded bytes. Verification times beneath them are arithmetic means of 20 CPU samples, starting from decoded inputs. These are sampled proof positions, not size bounds.
+Proof sizes below are encoded bytes. Where shown, verification times beneath them are arithmetic means of 20 CPU samples, starting from decoded inputs. These are sampled proof positions, not size bounds.
 
 An activity proof checks whether an account appears in a close's certified, sorted account range. Presence opens one Row, while absence between two accounts opens the neighboring Rows. First, we vary the number of accounts in the first close.
 
@@ -484,7 +488,7 @@ A complete challenge also carries the signed receipt and, when needed, a payer-v
 <table>
   <thead>
     <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Complete challenge</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1M<br><em>K</em> = 1</th></tr>
+    <tr><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 1</th><th style="text-align:right;"><em>A</em> = 1,024<br><em>B</em> = 512, <em>K</em> = 8</th><th style="text-align:right;"><em>A</em> = 1,000,000<br><em>B</em> = 512, <em>K</em> = 1</th></tr>
   </thead>
   <tbody>
     <tr><td>Debit mismatch</td><td style="text-align:right;">654 B <small>present</small><br>657 B <small>omitted</small></td><td style="text-align:right;">718 B <small>present</small><br>753 B <small>omitted</small></td><td style="text-align:right;">943 B <small>present</small><br>978 B <small>omitted</small></td></tr>
@@ -496,7 +500,7 @@ A complete challenge also carries the signed receipt and, when needed, a payer-v
 ```
 
 ::: {.image-caption}
-Figure 10: Activity lookups and complete challenges. The activity fixtures contain account Rows without payment Entries. Lookup sizes include the Row or neighboring Rows and MMR opening. The certified 48-byte log header and account range are separate. Challenges use a 512-account recipient pool. Omitted payer is the absence case of debit mismatch.
+Figure 10: Activity lookups and complete challenges. The activity fixtures contain account Rows without payment Entries. Lookup sizes include the Row or neighboring Rows and MMR opening. The certified 48-byte log header and account range are separate. Omitted payer is the absence case of debit mismatch.
 
 An empty close proves absence in 4 B (8.03 ns). The smallest presence and interior-absence cases use one and two accounts: 124 B (427 ns) and 239 B (679 ns), respectively.
 :::
@@ -532,7 +536,7 @@ Next, a new close appends one payout after an earlier close. We prove both the n
 <table>
   <thead>
     <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Payout claim</th>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Payout proof</th>
       <th colspan="3" style="text-align:center;">Payouts in the earlier close</th>
     </tr>
     <tr>
@@ -560,7 +564,7 @@ QMDB proofs authenticate balances for forced withdrawal intake and recovery. A r
 <table>
   <thead>
     <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">QMDB proof payload</th><th colspan="3" style="text-align:center;">One million live accounts</th></tr>
-    <tr><th style="text-align:right;">Before close</th><th style="text-align:right;">1,024 updated</th><th style="text-align:right;">1M updated</th></tr>
+    <tr><th style="text-align:right;">Before close</th><th style="text-align:right;">1,024 updated</th><th style="text-align:right;">1,000,000 updated</th></tr>
   </thead>
   <tbody>
     <tr><td>Account present</td><td style="text-align:right;">819 B</td><td style="text-align:right;">819 B</td><td style="text-align:right;">853 B</td></tr>
