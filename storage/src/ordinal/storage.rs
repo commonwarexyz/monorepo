@@ -8,8 +8,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
+use commonware_utils::{bitmap::BitMap, futures::try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
