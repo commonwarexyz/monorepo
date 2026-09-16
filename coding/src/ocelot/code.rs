@@ -42,7 +42,7 @@ use super::transform::{Shards, Tables, Transform};
 use commonware_math::algebra::{Additive, Field};
 use commonware_parallel::Strategy;
 use commonware_utils::Cached;
-use std::{ops::Range, sync::Arc};
+use std::{cell::RefCell, ops::Range, sync::Arc, thread::LocalKey};
 use thiserror::Error;
 
 commonware_utils::thread_local_cache!(static ENCODE_ACC: Shards);
@@ -61,6 +61,22 @@ const ENCODE_WORK_BYTES: usize = 512 * 1024;
 
 /// Target total size of the decoder's transform buffer per worker.
 const DECODE_WORK_BYTES: usize = 512 * 1024;
+
+fn workspace(
+    cache: &'static LocalKey<RefCell<(bool, Option<Shards>)>>,
+    count: usize,
+    len: usize,
+) -> Cached<Shards> {
+    Cached::take(
+        cache,
+        || Ok::<_, ()>(Shards::new(count, len)),
+        |work| {
+            work.reset(count, len);
+            Ok(())
+        },
+    )
+    .expect("infallible workspace reset")
+}
 
 pub fn stripe_bytes<I: Impl>() -> usize {
     const {
@@ -143,10 +159,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
     const NAMESPACE: &'static [u8];
 
     /// Return the field tables used by this implementation.
-    fn tables() -> Arc<Tables<Self::Element>>
-    where
-        Self: Sized,
-    {
+    fn tables() -> Arc<Tables<Self::Element>> {
         Arc::new(Tables::new::<Self>())
     }
 
@@ -302,6 +315,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
             self.ifft_butterfly(x1, x3, c2);
         }
     }
+
     /// Compute the contribution of `range` to the randomized checksums of `shard`.
     ///
     /// `coefficients` is uniformly sampled random input. Implementations should
@@ -371,6 +385,14 @@ impl<I: Impl> Encoder<I> {
     }
 
     /// Fill caller-owned recovery shards using `strategy`.
+    ///
+    /// # Panics
+    ///
+    /// - There are no original shards.
+    /// - Original or recovery shard lengths differ.
+    /// - Shard lengths are not a multiple of [`Impl::ALIGN`].
+    /// - The total shard count exceeds [`Impl::ORDER`] after rounding the
+    ///   recovery count up to a power of two.
     pub fn encode_into<T: AsMut<[u8]>>(
         &self,
         original: &[&[u8]],
@@ -427,26 +449,8 @@ impl<I: Impl> Encoder<I> {
             columns.chunks_mut(recovery).enumerate(),
             work_bytes.saturating_mul(k + m),
             |(stripe, column)| {
-                let mut acc = Cached::take(
-                    &ENCODE_ACC,
-                    || Ok::<_, ()>(Shards::new(m, work_bytes)),
-                    |work| {
-                        work.reset(m, work_bytes);
-                        Ok(())
-                    },
-                )
-                .expect("infallible workspace reset");
-                let mut tmp = (k > m).then(|| {
-                    Cached::take(
-                        &ENCODE_TMP,
-                        || Ok::<_, ()>(Shards::new(m, work_bytes)),
-                        |work| {
-                            work.reset(m, work_bytes);
-                            Ok(())
-                        },
-                    )
-                    .expect("infallible workspace reset")
-                });
+                let mut acc = workspace(&ENCODE_ACC, m, work_bytes);
+                let mut tmp = (k > m).then(|| workspace(&ENCODE_TMP, m, work_bytes));
                 let width = column[0].len();
                 let start = stripe * stripe_bytes;
                 let end = start + width;
@@ -686,6 +690,8 @@ impl<I: Impl> Decoder<I> {
         }
 
         let n = (m + k).next_power_of_two();
+        // Keep every offset into the logical shard matrix representable, even
+        // though the decoder materializes it one stripe at a time.
         n.checked_mul(len).ok_or(Error::InvalidShardLength)?;
         let erased: Vec<_> = recovery
             .iter()
@@ -739,15 +745,7 @@ impl<I: Impl> Decoder<I> {
             columns.chunks_mut(inverses.len()).enumerate(),
             n * work_bytes,
             |(stripe, column)| {
-                let mut work = Cached::take(
-                    &DECODE_WORK,
-                    || Ok::<_, ()>(Shards::new(n, work_bytes)),
-                    |work| {
-                        work.reset(n, work_bytes);
-                        Ok(())
-                    },
-                )
-                .expect("infallible workspace reset");
+                let mut work = workspace(&DECODE_WORK, n, work_bytes);
                 let width = column[0].len();
                 let start = stripe * stripe_bytes;
                 let end = start + width;
@@ -837,11 +835,11 @@ pub mod test_suites {
     //! then compare dispatched implementations with that reference. Encoding and
     //! decoding properties only need the portable implementations.
 
-    use super::{Decoder, Encoder, Error, Impl};
+    use super::{Decoder, Encoder, Error, Impl, Tables};
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{Additive, Field, Ring};
     use commonware_parallel::Sequential;
-    use std::ops::Range;
+    use std::{ops::Range, sync::Arc};
 
     /// One independently fuzzed part of Ocelot's shard arithmetic contract.
     #[derive(Arbitrary, Clone, Copy, Debug)]
@@ -893,7 +891,7 @@ pub mod test_suites {
         ];
     }
 
-    /// An adapter that deliberately inherits every default [`Impl`] method.
+    /// An adapter that deliberately inherits the arithmetic default [`Impl`] methods.
     #[derive(Clone, Copy)]
     pub struct DefaultImpl<I>(pub I);
 
@@ -903,6 +901,10 @@ pub mod test_suites {
         const BITS: usize = I::BITS;
         const STRIPE_ALIGN: usize = I::STRIPE_ALIGN;
         const NAMESPACE: &'static [u8] = I::NAMESPACE;
+
+        fn tables() -> Arc<Tables<Self::Element>> {
+            I::tables()
+        }
 
         fn basis() -> &'static [Self::Element] {
             I::basis()
@@ -1728,7 +1730,6 @@ pub mod test_suites {
     }
 }
 
-/// Fuzz plans for Ocelot's internal coding machinery.
 /// Fuzz plans for internal coding operations.
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {

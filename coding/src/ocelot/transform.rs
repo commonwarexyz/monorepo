@@ -322,14 +322,14 @@ impl<E: Field + Copy + 'static> Tables<E> {
         // the identity. Each layer, s_(j+1)(X) = s_j(X) * s_j(X - v_j), and
         // since s_j is linear with s_j(v_j) = 1, this is s_j(X)^2 - s_j(X).
         let mut subspace = basis.to_vec();
-        let mut skews = vec![I::Element::zero(); I::ORDER];
+        let mut skews = vec![E::zero(); I::ORDER];
         for j in 0..I::BITS {
             // Fill every position whose lowest set bit is j. By linearity,
             // s_j(w_b) is the sum of s_j(v_i) over the bits i of b, and bits
             // below j contribute nothing, so we build the table one bit at a
             // time, from the entries already filled with smaller bits.
             let low = 1 << j;
-            skews[low] = I::Element::zero();
+            skews[low] = E::zero();
             for (i, s) in subspace.iter().enumerate().skip(j + 1) {
                 let bit = 1 << i;
                 for b in (0..bit).step_by(low << 1) {

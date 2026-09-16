@@ -14,18 +14,20 @@ const CHUNK_SIZE: usize = 1024;
 const TILE_BYTES: usize = 64 * 1024;
 
 /// Hash equally sized shards, partitioning work across rows and within each row.
+///
+/// Each digest is independent of `strategy` and identical to the serial implementation.
 pub fn shards<H: Hasher>(
     data: &[impl AsRef<[u8]> + Sync],
     strategy: &impl Strategy,
 ) -> Vec<H::Digest> {
-    const {
-        assert!(H::Digest::SIZE > 0 && H::Digest::SIZE <= CHUNK_SIZE / 2);
-    }
     let Some(first) = data.first() else {
         return Vec::new();
     };
     let len = first.as_ref().len();
-    assert!(data.iter().all(|shard| shard.as_ref().len() == len));
+    assert!(
+        data.iter().all(|shard| shard.as_ref().len() == len),
+        "shard lengths differ"
+    );
     strategy.run(
         len.saturating_mul(data.len()),
         || {
@@ -107,10 +109,6 @@ fn reduce<H: Hasher>(data: &[&[u8]], strategy: &Manual<impl Strategy>) -> Vec<u8
 /// The original length fixes every reduction's shape and separates raw input
 /// from buffers of child digests. Final chunks are not padded.
 fn serial<H: Hasher>(data: &[u8]) -> H::Digest {
-    const {
-        assert!(H::Digest::SIZE > 0 && H::Digest::SIZE <= CHUNK_SIZE / 2);
-    }
-
     if data.len() <= CHUNK_SIZE {
         return root::<H>(data.len(), data);
     }
@@ -139,6 +137,11 @@ fn finish<H: Hasher>(original_len: usize, level: &mut [u8]) -> H::Digest {
 }
 
 fn root<H: Hasher>(original_len: usize, data: &[u8]) -> H::Digest {
+    // Capping digests at half a chunk makes every in-place reduction shrink,
+    // so `finish` cannot overwrite unread input and must terminate.
+    const {
+        assert!(H::Digest::SIZE > 0 && H::Digest::SIZE <= CHUNK_SIZE / 2);
+    }
     let length = UInt(original_len as u64);
     let mut prefix = [0; MAX_U64_VARINT_SIZE];
     length.write(&mut &mut prefix[..]);

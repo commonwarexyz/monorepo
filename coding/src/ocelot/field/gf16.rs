@@ -31,6 +31,15 @@ impl GF16 {
         (GF8(self.0 as u8), GF8((self.0 >> 8) as u8))
     }
 
+    /// Return this element in the GF(2^8) subfield, if it belongs to it.
+    pub(crate) const fn subfield(self) -> Option<GF8> {
+        if self.0 <= u8::MAX as u16 {
+            Some(GF8(self.0 as u8))
+        } else {
+            None
+        }
+    }
+
     const fn add_inner(self, rhs: Self) -> Self {
         Self(self.0 ^ rhs.0)
     }
