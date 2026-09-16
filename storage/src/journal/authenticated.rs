@@ -68,9 +68,18 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strateg
 
 type MerkleizedBatchArc<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest, Item, S>>;
 
+/// Result of a merkleize job: the merkleized batch and its root digest.
+type MerkleizeResult<F, H, Item, S> =
+    Result<(MerkleizedBatchArc<F, H, Item, S>, <H as Hasher>::Digest), merkle::Error<F>>;
+
 impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     UnmerkleizedBatch<F, H, Item, S>
 {
+    /// The batch's parent, if it has one (the committed journal otherwise).
+    pub(crate) const fn parent(&self) -> Option<&MerkleizedParent<F, H, Item, S>> {
+        self.parent.as_ref()
+    }
+
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
@@ -341,18 +350,31 @@ where
     where
         C::Item: 'static,
     {
+        self.merkleize_start(batch, items, inactive_peaks).await
+    }
+
+    /// Submit the merkleize job (see [Self::merkleize]) and return its un-awaited result
+    /// future, so a caller can run independent work on its own task while the job's leaf
+    /// and node hashing proceeds on the strategy.
+    pub(crate) fn merkleize_start(
+        &self,
+        batch: UnmerkleizedBatch<F, H, C::Item, S>,
+        items: Vec<C::Item>,
+        inactive_peaks: usize,
+    ) -> impl Future<Output = MerkleizeResult<F, H, C::Item, S>> + Send + 'static + use<F, E, C, H, S>
+    where
+        C::Item: 'static,
+    {
         let ancestors = batch.inner.retain_ancestors();
         let mem = self.merkle.snapshot();
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
-        strategy
-            .spawn(items.len(), move |_| {
-                let merkleized = batch.add_many(items).merkleize(&mem);
-                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
-                drop(ancestors);
-                Ok((merkleized, root))
-            })
-            .await
+        strategy.spawn(items.len(), move |_| {
+            let merkleized = batch.add_many(items).merkleize(&mem);
+            let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+            drop(ancestors);
+            Ok((merkleized, root))
+        })
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
