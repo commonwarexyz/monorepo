@@ -146,7 +146,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 #[commonware_macros::stability(ALPHA)]
 use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
@@ -570,7 +570,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             // Bytes this blob must retain: the watermark's in-blob prefix in the blob
             // containing it, and nothing above.
             let acknowledged = if blob == floor_blob {
-                Self::items_to_bytes(floor.saturating_sub(first_in_blob(
+                Self::items_to_bytes(floor.saturating_sub(super::first_in_blob(
                     pruning_boundary,
                     blob,
                     items_per_blob,
@@ -6405,6 +6405,7 @@ mod tests {
                 items_per_blob: NZU64!(25),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -6499,6 +6500,7 @@ mod tests {
                 items_per_blob: NZU64!(25),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
                 write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
             };
             // Start mid-blob: position 7 with 25 items per blob.
             let mut journal =

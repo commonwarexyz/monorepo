@@ -268,7 +268,7 @@ impl<E: Context> Writable<E> {
     #[commonware_macros::stability(ALPHA)]
     pub(super) const fn prefetch_budget(&self) -> u64 {
         let cache = self.tail.cache_ref();
-        cache.capacity() as u64 * cache.page_size() / 4
+        cache.capacity() as u64 * cache.page_size().get() as u64 / 4
     }
 
     /// Bounds of the sealed history: the first sealed blob's index and the sealed count.
