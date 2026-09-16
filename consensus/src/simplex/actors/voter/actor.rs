@@ -118,6 +118,8 @@ enum ProposalReceiver<D> {
     Regular(oneshot::Receiver<D>),
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
     /// A volatile build result awaiting durable parent certification.
+    /// Readiness changes only through events that wake the actor loop, so this
+    /// variant does not register a waker.
     Held {
         payload: D,
         ready: bool,

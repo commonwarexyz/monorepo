@@ -11,7 +11,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Heightable,
+    HandoffPolicy, Heightable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
@@ -22,7 +22,9 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
+    Acknowledgement as _,
+    acknowledgement::Exact,
+    channel::{fallible::OneshotExt, oneshot},
 };
 use futures::{
     FutureExt as _,
@@ -36,7 +38,7 @@ pub(super) fn spawn_handoff_policy<E, A>(
     context: &E,
     mut application: A,
     request: (E, A::Context),
-    mut response: commonware_utils::channel::oneshot::Sender<commonware_consensus::HandoffPolicy>,
+    mut response: oneshot::Sender<HandoffPolicy>,
 ) where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
