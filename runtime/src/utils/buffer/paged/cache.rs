@@ -304,6 +304,7 @@ impl CacheRef {
         mut offset: u64,
     ) -> Result<(), Error> {
         while !buf.is_empty() {
+            // Resolve the missing page, rechecking for a concurrent fill before fetching.
             let count = self
                 .read_after_page_fault(blob, blob_id, buf, offset)
                 .await?;
@@ -313,6 +314,7 @@ impl CacheRef {
                 break;
             }
 
+            // Copy the following cached pages under one read lock, stopping at the next miss.
             let cached = self.read_cached(blob_id, buf, offset);
             offset += cached as u64;
             buf = &mut buf[cached..];
