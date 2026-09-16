@@ -1,5 +1,6 @@
 mod code;
 mod field;
+mod hash;
 mod impl16;
 mod kernel;
 mod scheme;
@@ -38,9 +39,14 @@ macro_rules! ocelot {
             /// Shards are checked independently through Merkle inclusion proofs. Decoding
             /// reconstructs the canonical codeword and verifies its commitment before
             /// returning the payload, rejecting inconsistent encodings.
+            /// Shard digests reduce consecutive 1 KiB chunks to hashes until at most
+            /// 1 KiB remains, then hash the `UInt`-encoded original shard length
+            /// followed by that buffer. Hash digests must contain 1 to 512 bytes.
             ///
             /// Arithmetic kernels are selected internally for the current CPU. Large
             /// shards are processed in independent byte stripes using the supplied strategy.
+            /// Hashing partitions work across shards and across byte ranges within
+            /// a shard, including when checking a single shard.
             pub struct $name<H> {
                 _marker: PhantomData<H>,
             }
@@ -189,11 +195,15 @@ macro_rules! ocelot_hinted {
             /// them locally and use the resulting checksum
             /// codeword alongside Merkle proofs to check forwarded shards.
             #[doc = concat!("Each original shard contributes ", stringify!($checksum_bytes), " bytes of checksums.")]
+            /// Shard digests reduce consecutive 1 KiB chunks to hashes until at most
+            /// 1 KiB remains, then hash the `UInt`-encoded original shard length
+            /// followed by that buffer. Hash digests must contain 1 to 512 bytes.
             ///
             /// Encoding and decoding process large shards in independent byte stripes
             /// using the supplied strategy. Checksums use tiles spanning shards and column
             /// ranges, including when checking a single shard. Encoding also parallelizes
-            /// shard hashing through that strategy.
+            /// shard hashing through that strategy. Hashing also partitions work within
+            /// each shard when there are too few shards to occupy the workers.
             ///
             /// A successful shard check does not prove that the entire encoding is
             /// available. Availability is established only when decoding succeeds from

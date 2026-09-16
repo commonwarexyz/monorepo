@@ -1,6 +1,9 @@
 //! Coding schemes over generic shard arithmetic.
 
-use super::code::{Decoder, Encoder, Impl, stripe_bytes};
+use super::{
+    code::{Decoder, Encoder, Impl, stripe_bytes},
+    hash,
+};
 use crate::{CodecConfig, Config};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
@@ -332,8 +335,7 @@ fn encode_codeword<I: Impl, H: Hasher>(
         )
         .collect();
 
-    let digests = strategy
-        .map_collect_vec_with_multiplier(&shard_bytes, shard_len, |shard| H::hash(&[shard]));
+    let digests = hash::shards::<H>(&shard_bytes, strategy);
     let mut builder = Builder::<H>::new(total);
     for digest in &digests {
         builder.add(digest);
@@ -390,8 +392,9 @@ fn verify_shard_proof<H: Hasher>(
     root: &H::Digest,
     index: u16,
     shard: &WeakShard<H::Digest>,
+    strategy: &impl Strategy,
 ) -> Result<H::Digest, Error> {
-    let digest = H::hash(&[&shard.shard]);
+    let digest = hash::shard::<H>(&shard.shard, strategy);
     shard
         .proof
         .verify_element_inclusion::<H>(&digest, u32::from(index), root)
@@ -405,9 +408,10 @@ fn verify_shard<I: Impl, H: Hasher>(
     index: u16,
     shard: &WeakShard<H::Digest>,
     expected_shard_len: Option<usize>,
+    strategy: &impl Strategy,
 ) -> Result<H::Digest, Error> {
     validate_shard::<I, _>(config, index, shard, expected_shard_len)?;
-    verify_shard_proof::<H>(root, index, shard)
+    verify_shard_proof::<H>(root, index, shard, strategy)
 }
 
 fn select_shards<'a, I: Impl, T, M>(
@@ -601,7 +605,6 @@ fn extract_data<I: Impl>(
 
 fn verify_codeword<H: Hasher>(
     root: &H::Digest,
-    shard_len: usize,
     mut digests: Vec<Option<H::Digest>>,
     originals: &[&[u8]],
     recovery: &[&[u8]],
@@ -622,10 +625,10 @@ fn verify_codeword<H: Hasher>(
             ))
         })
         .collect();
-    for (index, digest) in
-        strategy.map_collect_vec_with_multiplier(missing, shard_len, |(index, shard)| {
-            (index, H::hash(&[shard]))
-        })
+    let shards: Vec<_> = missing.iter().map(|(_, shard)| *shard).collect();
+    for ((index, _), digest) in missing
+        .into_iter()
+        .zip(hash::shards::<H>(&shards, strategy))
     {
         digests[index] = Some(digest);
     }
@@ -674,9 +677,9 @@ impl<I: Impl, H: Hasher> OcelotX<I, H> {
         commitment: &H::Digest,
         index: u16,
         shard: &Shard<H::Digest>,
-        _strategy: &impl Strategy,
+        strategy: &impl Strategy,
     ) -> Result<BasicCheckedShard<H::Digest>, Error> {
-        let digest = verify_shard::<I, H>(config, commitment, index, shard, None)?;
+        let digest = verify_shard::<I, H>(config, commitment, index, shard, None, strategy)?;
         Ok(BasicCheckedShard {
             namespace: I::NAMESPACE,
             config: *config,
@@ -737,7 +740,6 @@ impl<I: Impl, H: Hasher> OcelotX<I, H> {
         };
         verify_codeword::<H>(
             commitment,
-            recovered.shard_len,
             recovered.metadata,
             &originals,
             &recovery,
@@ -909,7 +911,7 @@ impl<I: Impl, H: Hasher, const CHECKSUM_BYTES: usize> OcelotHintedX<I, H, CHECKS
         if checksum != checking_data.encoded_checksum[usize::from(index)] {
             return Err(Error::InvalidWeakShard);
         }
-        verify_shard_proof::<H>(&checking_data.root, index, &weak)?;
+        verify_shard_proof::<H>(&checking_data.root, index, &weak, strategy)?;
         Ok(CheckedShard {
             commitment: *commitment,
             index,
@@ -1107,7 +1109,7 @@ pub mod fuzz {
     ) {
         let mut builder = Builder::<Sha256>::new(codeword.len());
         for shard in &codeword {
-            builder.add(&Sha256::hash(&[shard]));
+            builder.add(&hash::shard::<Sha256>(shard, &STRATEGY));
         }
         let tree = builder.build();
         let root = tree.root();
@@ -1774,6 +1776,31 @@ pub mod fuzz {
     }
 
     #[test]
+    fn basic_parallel_hashing_with_few_shards() {
+        let scheme = Basic::new(Impl8::new(Portable));
+        let config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+        let data: Vec<_> = (0..2 * 1024 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let (expected, _) = scheme.encode(&config, data.as_slice(), &STRATEGY).unwrap();
+        let (root, shards) = scheme.encode(&config, data.as_slice(), &strategy).unwrap();
+        assert_eq!(root, expected);
+        for index in [0, 2] {
+            let checked = scheme
+                .check(&config, &root, index as u16, &shards[index], &strategy)
+                .unwrap();
+            assert_eq!(
+                scheme
+                    .decode(&config, &root, [&checked].into_iter(), &strategy)
+                    .unwrap(),
+                data
+            );
+        }
+    }
+
+    #[test]
     fn hinted16_parallel_roundtrip_crosses_layout_and_stripe_boundaries() {
         let imp = Impl16::new(Portable);
         let scheme = Hinted16::new(imp);
@@ -1865,7 +1892,7 @@ pub mod fuzz {
             .collect();
         let mut builder = Builder::<Sha256>::new(shards.len());
         for shard in &shards {
-            builder.add(&Sha256::hash(&[shard]));
+            builder.add(&hash::shard::<Sha256>(shard, &STRATEGY));
         }
         let tree = builder.build();
         let root = tree.root();

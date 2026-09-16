@@ -657,6 +657,22 @@ mod test {
         }
 
         #[test]
+        fn roundtrip_ocelot_recursive_shard_hashes() {
+            let config = Config {
+                minimum_shards: NZU16!(3),
+                extra_shards: NZU16!(4),
+            };
+            // Every shard crosses the second reduction boundary, with a short tail.
+            let data: Vec<_> = (0..3 * 32770 - 4).map(|i| (i % 251) as u8).collect();
+            for selected in [[0, 1, 2], [3, 4, 5]] {
+                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+            }
+        }
+
+        #[test]
         fn minifuzz_roundtrip_reed_solomon() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
