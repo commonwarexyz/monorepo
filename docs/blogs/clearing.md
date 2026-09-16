@@ -107,7 +107,7 @@ $$
 
 For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
-The wallet durably saves each request before sending it, retries the same bytes after response loss, and retains the verified acknowledgment and openings. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
+The wallet durably saves each request before sending it, retries the same bytes after response loss, and retains the verified acknowledgment and openings. One signature can also advance several recipients in a batch that the operator either rejects in full or accepts with one acknowledgment containing an opening for each advanced entry.
 
 ## Collecting Fees
 
