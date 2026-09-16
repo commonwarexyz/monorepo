@@ -672,14 +672,9 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
-    /// The same holds for a blob reopened within a run. A blob has one open at
-    /// a time, see [`Storage::open_versioned`]. Dropping its last handle closes it
-    /// without I/O. A later open of that blob waits for every operation issued
-    /// through the dropped handles to finish, including cancelled ones, and then
-    /// either makes durable every write and resize that no completed sync covered
-    /// before it returns, or does not expose them through the new handle. If making
-    /// them durable fails, that open fails and so does every later open of the blob
-    /// until it is removed.
+    /// A blob reopened within a run has the same durability guarantee. Opening
+    /// waits for outstanding operations from the previous open to finish and
+    /// ensures that any data exposed by the new handle is crash-durable.
     ///
     /// # Cancellation
     ///
@@ -878,19 +873,15 @@ stability_scope!(BETA {
     /// blob was removed since, see [`Storage::open_versioned`]. Use clones to
     /// share access to a blob.
     ///
-    /// Dropping a blob performs no I/O. Writes and resizes that no completed
-    /// [`Blob::sync`] covered are made durable, or discarded, by the next
-    /// [`Storage::open_versioned`] of the same blob, and a failure to make them
-    /// durable fails that open and every later one until the blob is removed.
-    /// Call `sync` before dropping to make changes durable when you need them
-    /// and to observe the error yourself.
+    /// When a blob is dropped, any unsynced changes may be discarded. Dropping
+    /// does not synchronize the blob. Call [`Blob::sync`] before dropping to
+    /// ensure all changes are durably persisted.
     ///
     /// # Durability
     ///
     /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged. A blob reopened within a run after every clone was dropped reads only
-    /// bytes a sync covered, see the `Storage` durability notes.
+    /// unchanged.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
@@ -935,11 +926,6 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Make every write and resize that completed before this call durable.
-        ///
-        /// A write still in flight on another clone is covered by its own
-        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. A runtime may
-        /// return at once when every completed mutation is already covered, so
-        /// callers may sync freely.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that every write and resize that completed before this call is
