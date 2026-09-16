@@ -2193,6 +2193,7 @@ mod tests {
         });
     }
 
+    /// Config with two records per section.
     fn small_cfg() -> Config {
         Config {
             partition: "test-ordinal".into(),
@@ -2284,7 +2285,8 @@ mod tests {
             .await
             .expect("Failed to initialize store");
 
-            // Recovery retains the intact section and removes the torn section unopened.
+            // Section 0 is retained as stored, so the only durability work possible would be
+            // repairing the torn section the bits discard. It must be removed without being opened.
             assert_eq!(pending.calls(), 0);
             assert!(store.has(0));
             assert!(store.has(1));
@@ -2309,7 +2311,8 @@ mod tests {
             seed_two_sections(&context, &cfg).await;
             tear_tail(&context, &cfg, 1).await;
 
-            // Fail any attempt to sync while removing the uncovered section.
+            // Repairing the discarded section would need a sync on the index partition, which
+            // this context refuses. The retained section needs none, so init must succeed.
             let faulty = SyncFaultContext {
                 inner: context,
                 fail_partition: cfg.partition.clone(),

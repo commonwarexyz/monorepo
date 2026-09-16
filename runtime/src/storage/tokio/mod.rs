@@ -107,6 +107,7 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
+        // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
@@ -128,9 +129,11 @@ impl crate::Storage for Storage {
                     None => return Err(Error::PartitionCreationFailed(partition)),
                 };
 
+                // Create the partition directory, if it does not exist
                 fs::create_dir_all(parent)
                     .map_err(|_| Error::PartitionCreationFailed(partition.clone()))?;
 
+                // Open the file, creating it if it doesn't exist
                 let mut file = fs::OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -746,8 +749,9 @@ mod tests {
         }
     }
 
-    /// Blob creation continues under the filesystem lock after its open future is dropped.
-    /// A retry serializes behind creation and observes the completed blob.
+    /// Dropping an open future at any await point must leave the blob openable: creation
+    /// runs to completion on a task that owns the filesystem lock, so a retry serializes
+    /// behind it and never observes (or clobbers) a half-created blob.
     #[tokio::test]
     async fn test_open_dropped_mid_creation() {
         /// Polls the wrapped future normally, but drops it after a fixed number of polls.

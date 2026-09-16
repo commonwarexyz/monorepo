@@ -107,8 +107,8 @@ pub struct Recovering;
 
 /// Exclusive initialization owner for a paged blob's retained prefix.
 ///
-/// All previous writers and disk-backed readers must close before recovery opens. Only recovery
-/// may shorten the retained prefix.
+/// All previous writers and disk-backed readers must close before recovery opens.
+/// Only recovery may shorten the retained logical prefix.
 pub type Recovery<B> = Writer<B, Recovering>;
 
 /// Unique writer to a cache-wrapped [Blob].
@@ -289,6 +289,7 @@ impl<B: Blob> Recovery<B> {
         // Partial-page truncation requires a durable source page.
         self.sync().await?;
 
+        // Calculate the physical size needed for the new size.
         let full_pages = target_size / page_size;
         let partial_bytes = target_size % page_size;
         let physical_pages = full_pages
@@ -343,7 +344,8 @@ impl<B: Blob> Recovery<B> {
         page_size: u64,
         tail_offset: u64,
     ) -> Result<(), Error> {
-        // The buffer owns the retained tail while its shorter checksum is published.
+        // Update blob state and buffer based on the desired size. The page data is
+        // read with CRC validation, then durably rewritten below with a shorter CRC.
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
 
@@ -357,6 +359,7 @@ impl<B: Blob> Recovery<B> {
         )
         .await?;
 
+        // Ensure the validated data covers what we need.
         if (page_data.len() as u64) < partial_bytes {
             return Err(Error::InvalidChecksum);
         }
@@ -653,8 +656,8 @@ impl<B: Blob> Writer<B> {
     /// Consume the write handle, flushing buffered bytes and beginning a sync of the blob.
     ///
     /// Returns an immutable [`Sealed`] read handle plus a completion handle for the started sync.
-    /// Reads through the [`Sealed`] handle observe flushed bytes immediately. Durability isn't
-    /// guaranteed until the sync handle completes.
+    /// Reads through the [`Sealed`] handle observe flushed bytes immediately.
+    /// Durability isn't guaranteed until the sync handle completes.
     pub async fn seal(mut self) -> Result<(Sealed<B>, Handle<()>), Error> {
         self.sync_state.wait_for_pending().await?;
         self.flush_internal(true, false).await?;

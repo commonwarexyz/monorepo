@@ -668,8 +668,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
             .truncate_pending_section(section, index_size)
             .await?;
 
+        // Derive value size from last entry (section may not exist if empty)
         let value_size = self.retained_value_end(section, index_size).await?;
 
+        // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;
         Ok(self)
     }
@@ -1815,6 +1817,7 @@ mod tests {
                 assert_eq!(value, [i; 16]);
             }
 
+            // Entry at position 3 should fail (index was truncated)
             let result = oversized.get(1, 3).await;
             assert!(result.is_err());
 
@@ -4082,7 +4085,7 @@ mod tests {
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
-            // Recovery truncates index section 1 to zero entries.
+            // Recovery warns and truncates index section 1 to zero entries.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -4207,6 +4210,7 @@ mod tests {
                 assert_eq!(entry.id, i as u64);
             }
 
+            // Entries 3-7 should be gone (unsynced, index truncated)
             assert!(oversized.get(1, 3).await.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
@@ -4602,11 +4606,13 @@ mod tests {
                     .await
                     .expect("Failed to reinit");
 
+            // First 2 entries should be valid (index truncated to match glob)
             for i in 0..2u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
+            // Entries 2-4 should be gone (index truncated during recovery)
             assert!(oversized.get(1, 2).await.is_err());
 
             // Should be able to append after recovery
@@ -5386,6 +5392,7 @@ mod tests {
                     .await
                     .expect("Failed to reinit");
 
+            // The corrupted entry should have been truncated (invalid)
             assert!(oversized.get(1, 0).await.is_err());
 
             // Should be able to append after recovery
@@ -5623,6 +5630,7 @@ mod tests {
                 .expect("Failed to get last section");
             assert_eq!(entry.id, large_sections[2]);
 
+            // Middle section should have been truncated (no entries)
             assert!(oversized.get(middle_section, 0).await.is_err());
 
             // Verify we can still append to these large sections
@@ -5698,6 +5706,7 @@ mod tests {
                     .await
                     .expect("Failed to reinit after nested crash");
 
+            // Only first 3 entries should be valid (recovery should truncate again)
             for i in 0..3u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
@@ -5710,6 +5719,7 @@ mod tests {
                 assert_eq!(value, [i; 16]);
             }
 
+            // Entry 3 should not exist (index was truncated to match glob)
             assert!(oversized.get(1, 3).await.is_err());
 
             // Verify append works after nested crash recovery

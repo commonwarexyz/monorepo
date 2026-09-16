@@ -116,15 +116,20 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         let (blob, mut logical_len, blob_version, wait) = {
+            // Acquire the filesystem lock
             let _guard = self.lock.lock();
+
+            // Construct the full path
             let path = self.storage_directory.join(partition).join(hex(name));
             let parent = path
                 .parent()
                 .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
+            // Create the partition directory if it does not exist
             fs::create_dir_all(parent)
                 .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
+            // Open the file, creating it if it doesn't exist
             let mut file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)

@@ -2919,6 +2919,7 @@ mod tests {
                 assert!(size > 0, "section {section} should have data");
             }
 
+            // Truncate to section 5 (should remove sections 6-10)
             let size = journal.size(5).unwrap();
             journal = journal.test_reopen_at_most(5, size).await.unwrap();
 

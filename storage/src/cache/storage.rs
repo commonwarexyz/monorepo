@@ -342,7 +342,9 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
     /// Store an item in the [Cache].
     ///
-    /// If the index already exists or falls below the prune floor, nothing is stored.
+    /// If the index already exists, put does nothing and returns. A put below the prune
+    /// floor is satisfied without storing: pruning declared that range obsolete, so nothing
+    /// is mutated and nothing below the floor is ever readable.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
         self.0 = self.0.put(index, value).await?;
         Ok(self)

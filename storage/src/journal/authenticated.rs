@@ -642,7 +642,8 @@ where
     /// Align the Merkle structure with the journal.
     ///
     /// The Merkle structure must not extend past the journal end. Missing leaves are added in
-    /// batches of `apply_batch_size` to bound peak memory use during hashing.
+    /// batches of `apply_batch_size` to bound peak memory use. Each batch's items are buffered
+    /// in memory so their leaves can be hashed across the strategy.
     async fn align(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,

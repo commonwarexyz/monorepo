@@ -275,8 +275,8 @@ impl Request {
                 )
             }
             Self::WriteAt(r) => {
-                // Only plain writes remain in `Writing`. Other successful states are durable.
-                // Settle tracking even when the observer stopped waiting.
+                // Only plain writes stay in `Writing`. Settle here so a caller that stopped
+                // waiting still leaves the open's debt correct.
                 r.file
                     .wrote(r.state != WriteAtState::Writing, result.is_ok());
                 (

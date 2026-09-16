@@ -673,7 +673,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
     }
 
-    /// Truncate the unpublished section and remove later sections.
+    /// Truncate the unpublished section and remove later sections during paired initialization.
     pub(crate) async fn truncate_pending_tail(
         mut self,
         section: u64,
@@ -2141,6 +2141,7 @@ mod tests {
                 assert!(size > 0, "section {section} should have data");
             }
 
+            // Truncate to section 1 (should remove sections 2, 3)
             let size = journal.size(1).expect("failed to get size");
             journal = journal
                 .test_reopen_at_most(1, size)
@@ -2214,6 +2215,7 @@ mod tests {
             }
             journal = journal.sync_all().await.expect("failed to sync");
 
+            // Truncate to section 5 (should remove sections 6-10)
             let size = journal.size(5).expect("failed to get size");
             journal = journal
                 .test_reopen_at_most(5, size)

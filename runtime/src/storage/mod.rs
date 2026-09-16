@@ -352,8 +352,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     /// Run a Tokio blob's final sync on the blocking pool, or inline outside a runtime.
-    /// A shutting-down pool may discard queued work. The next startup flush then ensures
-    /// durability.
+    ///
+    /// A shutting-down pool may discard queued work. The next startup flush then owns durability.
     pub(crate) fn defer_sync(
         pending: Arc<Pending>,
         key: (String, Vec<u8>),

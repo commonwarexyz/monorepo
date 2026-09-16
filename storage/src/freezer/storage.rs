@@ -494,7 +494,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns the maximum valid epoch, its section, and the number of entries eligible for resizing.
+    /// Returns (max_epoch, max_section, resizable) where:
+    /// - max_epoch: the maximum valid epoch found
+    /// - max_section: the section corresponding to `max_epoch`
+    /// - resizable: the number of entries that can be resized
     async fn recover_table(
         pooler: &impl BufferPooler,
         blob: &E::Blob,

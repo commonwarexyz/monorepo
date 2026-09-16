@@ -1951,9 +1951,9 @@ mod tests {
                     .merkleize(&db, Some(meta.clone()), Location::new(0))
                     .await;
                 let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
 
-                // Persist recovery metadata with the committed witness.
+                // Commit persists witness data. Sync must also persist recovery metadata.
+                let db = db.commit().await.unwrap();
                 let db = db.sync().await.unwrap();
                 db.root()
             };

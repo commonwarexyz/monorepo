@@ -2837,8 +2837,7 @@ mod tests {
                 let cfg = test_config(&context);
                 drop(seed_recovery_tree::<F>(&context, cfg.clone(), 4).await);
 
-                // Persist the state at the interruption point between sync metadata and
-                // reset intent.
+                // Persist state at the interruption point between sync metadata and reset intent.
                 let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
                     context.child("metadata"),
                     MConfig {
