@@ -40,6 +40,7 @@ use commonware_utils::{
     FuzzRng, NZU16, NZU64, NZUsize, NonZeroDuration, ordered::Set, probability, sequence::U64,
 };
 use futures::future::join_all;
+use rand_core::Rng as _;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -70,6 +71,9 @@ const REPORTER_POLL_MS: u64 = 100;
 const UNKNOWN_PEER_SEEDS: [u64; 4] = [0xA660_0000, 0xA660_0001, 0xA660_0002, 0xA660_0003];
 const OUT_OF_BOUNDS_EPOCH_DELTA: u64 = 5;
 const INVALID_SIGNATURE_ID: u64 = u64::MAX;
+/// Bytes of the stream the configuration is sampled from. Every field sampled
+/// from it consumes at most two bytes, so this covers the whole `FuzzInput`.
+const CONFIG_STREAM_BYTES: usize = 64;
 
 type Registrations = BTreeMap<
     PublicKey,
@@ -107,15 +111,23 @@ pub enum FaultyStrategy {
 }
 
 impl Arbitrary<'_> for FuzzInput {
-    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let scenario = u.int_in_range(0..=99)?;
-        let max_raw_prefix = u.len().min(MAX_RAW_BYTES);
-        let mut raw_bytes = if max_raw_prefix == 0 {
-            vec![0]
-        } else {
-            let raw_len = u.int_in_range(1..=max_raw_prefix)?.min(u.len());
-            u.bytes(raw_len)?.to_vec()
+    fn arbitrary(input: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        // The whole input seeds the runtime RNG. The configuration is sampled
+        // from the input padded to a fixed-size stream with [`FuzzRng`] output
+        // so every field varies even for the few-byte inputs libFuzzer keeps
+        // this target at (nearly every run reports new features, so its length
+        // control never grows).
+        let raw_bytes = match input.len().min(MAX_RAW_BYTES) {
+            0 => vec![0],
+            len => input.bytes(len)?.to_vec(),
         };
+        let mut stream = [0u8; CONFIG_STREAM_BYTES];
+        let literal = raw_bytes.len().min(CONFIG_STREAM_BYTES);
+        stream[..literal].copy_from_slice(&raw_bytes[..literal]);
+        FuzzRng::new(raw_bytes.clone()).fill_bytes(&mut stream[literal..]);
+        let u = &mut Unstructured::new(&stream);
+
+        let scenario = u.int_in_range(0..=99)?;
         let live = scenario <= 19;
         let incorrect_fault = (20..=39).contains(&scenario);
         let target_height = if live {
@@ -169,11 +181,6 @@ impl Arbitrary<'_> for FuzzInput {
         let epoch_transition = !live_config && ((40..=59).contains(&scenario) || u.arbitrary()?);
         let restart = scenario == 0 || (60..=79).contains(&scenario) || u.arbitrary()?;
         let inject_bad_ack = !live_config && ((20..=59).contains(&scenario) || u.arbitrary()?);
-
-        let remaining = u.len().min(MAX_RAW_BYTES.saturating_sub(raw_bytes.len()));
-        if remaining > 0 {
-            raw_bytes.extend_from_slice(u.bytes(remaining)?);
-        }
 
         Ok(Self {
             raw_bytes,
@@ -465,6 +472,32 @@ fn max_peers_per_set(participants: &[PublicKey], inject_bad_ack: bool) -> NonZer
     NZUsize!(peer_count)
 }
 
+fn spawn_tip_watcher<S>(
+    context: &deterministic::Context,
+    mailbox: &ReporterMailbox<S, Sha256Digest>,
+    target_height: Height,
+    target_epoch: Epoch,
+) -> commonware_runtime::Handle<bool>
+where
+    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+{
+    context.child("reporter_watcher").spawn({
+        let mut mailbox = mailbox.clone();
+        move |context| async move {
+            loop {
+                let (height, epoch) = mailbox
+                    .get_tip()
+                    .await
+                    .unwrap_or((Height::zero(), Epoch::zero()));
+                if height >= target_height && epoch >= target_epoch {
+                    return true;
+                }
+                context.sleep(Duration::from_millis(REPORTER_POLL_MS)).await;
+            }
+        }
+    })
+}
+
 fn spawn_target_watchers<S>(
     context: deterministic::Context,
     reporters: &BTreeMap<PublicKey, ReporterMailbox<S, Sha256Digest>>,
@@ -474,26 +507,10 @@ fn spawn_target_watchers<S>(
 where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
 {
-    let mut handles = Vec::new();
-    for mailbox in reporters.values() {
-        let handle = context.child("reporter_watcher").spawn({
-            let mut mailbox = mailbox.clone();
-            move |context| async move {
-                loop {
-                    let (height, epoch) = mailbox
-                        .get_tip()
-                        .await
-                        .unwrap_or((Height::zero(), Epoch::zero()));
-                    if height >= target_height && epoch >= target_epoch {
-                        return true;
-                    }
-                    context.sleep(Duration::from_millis(REPORTER_POLL_MS)).await;
-                }
-            }
-        });
-        handles.push(handle);
-    }
-    handles
+    reporters
+        .values()
+        .map(|mailbox| spawn_tip_watcher(&context, mailbox, target_height, target_epoch))
+        .collect()
 }
 
 pub fn fuzz(input: FuzzInput) {
@@ -587,7 +604,7 @@ pub fn fuzz(input: FuzzInput) {
             _ = context.sleep(MAX_SLEEP_DURATION) => false,
         };
 
-        check_no_conflicting_certs(&spawned.reporters).await;
+        check_no_conflicting_certs(&spawned.reporters, true).await;
 
         if input.partition.is_connected()
             && input.success_rate_percent == MAX_SUCCESS_PERCENT
@@ -614,6 +631,14 @@ pub fn fuzz(input: FuzzInput) {
         // replays the journaled acks/certs/tips. Runs after the liveness
         // assertion, so it cannot affect it.
         if input.restart {
+            // Replay restores at least the tip each reporter had before the
+            // restart, so waiting for it bounds the post-restart run.
+            let mut tips = BTreeMap::new();
+            for (participant, mailbox) in &spawned.reporters {
+                if let Some((tip, _)) = mailbox.clone().get_tip().await {
+                    tips.insert(participant.clone(), tip);
+                }
+            }
             // Re-registering closes the old channel receivers before restart.
             let mut registrations = register_participants(&mut oracle, &fixture.participants).await;
             context.sleep(Duration::from_millis(REPORTER_POLL_MS)).await;
@@ -631,8 +656,20 @@ pub fn fuzz(input: FuzzInput) {
                 epoch,
                 None,
             );
-            context.sleep(MAX_SLEEP_DURATION).await;
-            check_no_conflicting_certs(&restarted.reporters).await;
+            let watcher_context = context.child("reporter_restart");
+            let watchers = restarted
+                .reporters
+                .iter()
+                .filter_map(|(participant, mailbox)| {
+                    let tip = *tips.get(participant)?;
+                    Some(spawn_tip_watcher(&watcher_context, mailbox, tip, epoch))
+                })
+                .collect::<Vec<_>>();
+            select! {
+                _ = join_all(watchers) => {},
+                _ = context.sleep(MAX_SLEEP_DURATION) => {},
+            }
+            check_no_conflicting_certs(&restarted.reporters, !input.epoch_transition).await;
         }
     });
 }
@@ -647,8 +684,13 @@ fn bad_item_digest(height: Height) -> Sha256Digest {
     Sha256::hash(&[payload.as_bytes()])
 }
 
+/// Asserts that every delivered certificate carries the application's digest
+/// and that reporters agree on it. The mock reporter tags each certificate
+/// with the epoch of the last ack it saw, so `check_epochs` must be off once
+/// an epoch transition may have reached some reporters but not others.
 async fn check_no_conflicting_certs<S>(
     reporters: &BTreeMap<PublicKey, ReporterMailbox<S, Sha256Digest>>,
+    check_epochs: bool,
 ) where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
 {
@@ -675,10 +717,12 @@ async fn check_no_conflicting_certs<S>(
                         existing_digest, &digest,
                         "conflicting cert digests at height {h}",
                     );
-                    assert_eq!(
-                        existing_epoch, &epoch,
-                        "conflicting cert epochs at height {h}",
-                    );
+                    if check_epochs {
+                        assert_eq!(
+                            existing_epoch, &epoch,
+                            "conflicting cert epochs at height {h}",
+                        );
+                    }
                 } else {
                     canonical.insert(height, (digest, epoch));
                 }

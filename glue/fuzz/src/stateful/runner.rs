@@ -10,14 +10,21 @@
 //! including nothing.
 
 use super::{
-    Databases, NAMESPACE, NUM_IDENTITIES, PublicKey, RESTART_DOWNTIME, Scheme,
+    NAMESPACE, NUM_IDENTITIES, PublicKey, RESTART_DOWNTIME, Scheme,
     app::{Block, CorrectApp},
-    invariants::{self, Counts, EngineObservations},
-    stack::{ElectorConfig, EngineConfig, register_channels, spawn_engine},
+    backend::Backend,
+    invariants::{self, Counts, EngineObservations, RetentionWindow},
+    marshal::Marshal,
+    stack::{
+        ElectorConfig, EngineConfig, MAX_PENDING_ACKS, SYNC_CONFIG, register_channels, spawn_engine,
+    },
 };
-use commonware_consensus::types::View;
+use commonware_consensus::{
+    marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
+    types::View,
+};
 use commonware_cryptography::Digestible;
-use commonware_glue::stateful::db::DatabaseSet;
+use commonware_glue::stateful::{PruneConfig, db::SyncEngineConfig};
 use commonware_p2p::simulated::{
     Config as NetworkConfig, Link, Network as SimulatedNetwork, Oracle,
 };
@@ -27,7 +34,7 @@ use commonware_utils::{
     sync::{Mutex, Once},
 };
 use rand::RngExt as _;
-use std::{collections::BTreeSet, fmt, panic, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt, marker::PhantomData, panic, sync::Arc, time::Duration};
 
 /// Environment variable enabling the per-run report.
 const REPORT_ENV: &str = "GLUE_FUZZ_LOG";
@@ -67,6 +74,10 @@ impl fmt::Display for Outcome {
 pub struct RunReport {
     /// The driver that produced this run.
     pub target: &'static str,
+    /// The database backend every node ran.
+    pub database: &'static str,
+    /// The marshal variant every node ran.
+    pub marshal: &'static str,
     /// Why the run stopped.
     pub outcome: Outcome,
     /// How much each check compared.
@@ -74,15 +85,27 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    pub(super) const fn skipped(target: &'static str, outcome: Outcome) -> Self {
+    pub(super) const fn skipped(
+        target: &'static str,
+        database: &'static str,
+        marshal: &'static str,
+        outcome: Outcome,
+    ) -> Self {
         Self {
             target,
+            database,
+            marshal,
             outcome,
             counts: Counts {
                 correct_nodes: 0,
                 chain_heights: 0,
+                unlinked_anchors: 0,
                 state_comparisons: 0,
                 verdict_comparisons: 0,
+                retention_checks: 0,
+                prunes: 0,
+                sync_starts: 0,
+                synced_nodes: 0,
                 restarts: 0,
             },
         }
@@ -98,14 +121,22 @@ impl fmt::Display for RunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] outcome={} correct_nodes={} chain_heights={} state_comparisons={} \
-             verdict_comparisons={} restarts={}{}",
+            "[{}] database={} marshal={} outcome={} correct_nodes={} chain_heights={} \
+             unlinked_anchors={} state_comparisons={} verdict_comparisons={} retention_checks={} \
+             prunes={} sync_starts={} synced_nodes={} restarts={}{}",
             self.target,
+            self.database,
+            self.marshal,
             self.outcome,
             self.counts.correct_nodes,
             self.counts.chain_heights,
+            self.counts.unlinked_anchors,
             self.counts.state_comparisons,
             self.counts.verdict_comparisons,
+            self.counts.retention_checks,
+            self.counts.prunes,
+            self.counts.sync_starts,
+            self.counts.synced_nodes,
             self.counts.restarts,
             if self.measured() {
                 ""
@@ -138,31 +169,51 @@ fn install_input_panic_hook() {
     });
 }
 
+/// A run report every driver produces: printable, and able to say whether the
+/// run checked anything.
+pub(super) trait Reportable: fmt::Display {
+    /// Whether the run's checks compared something.
+    fn measured(&self) -> bool;
+
+    /// Whether the run must be reported even when nobody asked for reports.
+    fn unexpected(&self) -> bool {
+        !self.measured()
+    }
+}
+
+impl Reportable for RunReport {
+    fn measured(&self) -> bool {
+        Self::measured(self)
+    }
+}
+
 /// Announce the run in flight and report the result the way a fuzz target does.
-pub(super) fn report(raw_bytes: &[u8], run: impl FnOnce() -> RunReport) {
+pub(super) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
     install_input_panic_hook();
     IN_FLIGHT.lock().clear();
     IN_FLIGHT.lock().extend_from_slice(raw_bytes);
     let report = run();
 
-    // A run that measured nothing is always reported, so it is never silently
-    // counted as a run that found nothing.
-    if !report.measured() || std::env::var_os(REPORT_ENV).is_some() {
+    // A run that measured nothing it should have is always reported, so it is
+    // never silently counted as a run that found nothing.
+    if report.unexpected() || std::env::var_os(REPORT_ENV).is_some() {
         eprintln!("{report}");
     }
 }
 
 /// The identities, network, and genesis block every driver starts from.
-pub(super) struct Cluster {
+pub(super) struct Cluster<M: Marshal> {
     pub(super) participants: Arc<[PublicKey]>,
     pub(super) schemes: Vec<Scheme>,
     pub(super) oracle: Oracle<PublicKey, deterministic::Context>,
-    pub(super) genesis: Block,
+    pub(super) genesis: Block<M>,
 }
 
 /// Derive the identities and their mock schemes, start the simulated network
 /// with every directed link up, and build the shared genesis block.
-pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
+pub(super) async fn setup<B: Backend, M: Marshal>(
+    context: &mut deterministic::Context,
+) -> Cluster<M> {
     let fixture = commonware_consensus::simplex::mocks::scheme::fixture_with::<false, true, true, _>(
         context,
         NAMESPACE,
@@ -195,8 +246,7 @@ pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
     }
 
     // Every engine starts from the same block with no finalized floor.
-    let initial = <Databases as DatabaseSet<deterministic::Context>>::initial_sync_targets();
-    let genesis = Block::genesis(participants[0].clone(), initial.root, initial.range);
+    let genesis = Block::genesis(participants[0].clone(), B::initial());
     Cluster {
         participants,
         schemes: fixture.schemes,
@@ -205,38 +255,70 @@ pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
     }
 }
 
+/// What a correct node runs with, kept across its restarts.
+#[derive(Clone)]
+pub(super) struct NodeConfig<EC> {
+    pub(super) elector: EC,
+    /// Periodic marshal and database pruning, or none.
+    pub(super) prune: Option<PruneConfig>,
+    /// Sync engine tuning.
+    pub(super) sync: SyncEngineConfig,
+    /// Request peer state sync at every start. The startup plan honours the
+    /// request only until a sync completes.
+    pub(super) state_sync: bool,
+}
+
+impl<EC> NodeConfig<EC> {
+    /// A node that never state syncs, with pruning `prune`.
+    pub(super) const fn new(elector: EC, prune: Option<PruneConfig>) -> Self {
+        Self {
+            elector,
+            prune,
+            sync: SYNC_CONFIG,
+            state_sync: false,
+        }
+    }
+}
+
 /// One correct identity's engine, retained so a restart can rebuild it on the
 /// same storage partitions under the same key.
-pub(super) struct CorrectEngine<EC> {
+pub(super) struct CorrectEngine<B: Backend, M: Marshal, EC> {
     pub(super) engine: usize,
     identity: PublicKey,
     scheme: Scheme,
-    elector: EC,
     partition: String,
+    config: NodeConfig<EC>,
     pub(super) observations: EngineObservations,
     handle: Handle<()>,
+    backend: PhantomData<(B, M)>,
 }
 
-impl<EC: ElectorConfig> CorrectEngine<EC> {
+impl<B, M, EC> CorrectEngine<B, M, EC>
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+    EC: ElectorConfig,
+{
     /// Start one correct identity's engine.
     pub(super) async fn start(
         context: &deterministic::Context,
-        cluster: &Cluster,
+        cluster: &Cluster<M>,
         engine: usize,
-        elector: EC,
+        config: NodeConfig<EC>,
         observations: EngineObservations,
     ) -> Self {
         let identity = cluster.participants[engine].clone();
         let scheme = cluster.schemes[engine].clone();
         let partition = format!("engine-{engine}");
-        let handle = spawn(
+        let handle = spawn::<B, M, EC>(
             context,
             cluster,
             engine,
             &identity,
             &scheme,
-            &elector,
             &partition,
+            &config,
             &observations,
         )
         .await;
@@ -244,10 +326,11 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
             engine,
             identity,
             scheme,
-            elector,
             partition,
+            config,
             observations,
             handle,
+            backend: PhantomData,
         }
     }
 
@@ -260,19 +343,19 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
     pub(super) async fn restart(
         &mut self,
         context: &deterministic::Context,
-        cluster: &Cluster,
+        cluster: &Cluster<M>,
         downtime: Duration,
     ) {
         self.handle.abort();
         commonware_runtime::Clock::sleep(context, downtime).await;
-        self.handle = spawn(
+        self.handle = spawn::<B, M, EC>(
             context,
             cluster,
             self.engine,
             &self.identity,
             &self.scheme,
-            &self.elector,
             &self.partition,
+            &self.config,
             &self.observations,
         )
         .await;
@@ -281,31 +364,54 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spawn<EC: ElectorConfig>(
+async fn spawn<B, M, EC>(
     context: &deterministic::Context,
-    cluster: &Cluster,
+    cluster: &Cluster<M>,
     engine: usize,
     identity: &PublicKey,
     scheme: &Scheme,
-    elector: &EC,
     partition: &str,
+    config: &NodeConfig<EC>,
     observations: &EngineObservations,
-) -> Handle<()> {
+) -> Handle<()>
+where
+    B: Backend,
+    M: Marshal,
+    MarshalMailbox<Scheme, M::Variant>: BlockProvider<Block = Block<M>>,
+    EC: ElectorConfig,
+{
     let channels = register_channels(&cluster.oracle, identity).await.whole();
-    spawn_engine(
+    spawn_engine::<B, M, _, _, _, _, _, _, _>(
         context.child("correct").with_attribute("index", engine),
         cluster.oracle.clone(),
         EngineConfig {
             identity: identity.clone(),
             scheme: scheme.clone(),
-            elector: elector.clone(),
+            elector: config.elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: partition.to_string(),
-            application: CorrectApp::new(cluster.genesis.clone(), observations.clone()),
+            application: CorrectApp::<B, M>::new(cluster.genesis.clone(), observations.clone()),
             observations: observations.clone(),
+            prune: config.prune,
+            sync: config.sync,
+            state_sync: config.state_sync,
         },
         channels,
     )
+}
+
+/// The retention window a run's pruning configuration commits to, judged
+/// against the genesis commitment's floor for the heights below it.
+pub(super) fn retention_window<B: Backend, M: Marshal>(
+    prune: Option<PruneConfig>,
+    genesis: &Block<M>,
+) -> RetentionWindow {
+    RetentionWindow {
+        heights: prune.map_or(u64::MAX, |config| {
+            (MAX_PENDING_ACKS.get() + config.retained_qmdb_blocks) as u64
+        }),
+        initial_floor: B::prune_floor(&genesis.commitment),
+    }
 }
 
 /// Draw a restart schedule from the tape.
@@ -338,9 +444,9 @@ pub(super) fn restart_schedule(
 /// would otherwise be free to satisfy a one-height requirement in the first
 /// view and never reach the second or third. A driver that scripts nothing
 /// passes `View::zero()`, and then every applied height counts.
-pub(super) fn waiters<EC>(
+pub(super) fn waiters<B: Backend, M: Marshal, EC>(
     context: &deterministic::Context,
-    nodes: &[CorrectEngine<EC>],
+    nodes: &[CorrectEngine<B, M, EC>],
     required: usize,
     scripted_through: View,
 ) -> Vec<Handle<()>> {
@@ -369,26 +475,39 @@ pub(super) fn waiters<EC>(
 }
 
 /// Check the invariants over the correct nodes and report what was compared.
-pub(super) fn measure<EC>(
+pub(super) fn measure<B: Backend, M: Marshal, EC>(
     target: &'static str,
     outcome: Outcome,
-    nodes: &[CorrectEngine<EC>],
+    nodes: &[CorrectEngine<B, M, EC>],
     observations: &[EngineObservations],
-    genesis: &Block,
+    genesis: &Block<M>,
+    prune: Option<PruneConfig>,
 ) -> RunReport {
     let correct: Vec<(usize, &EngineObservations)> = nodes
         .iter()
         .map(|node| (node.engine, &node.observations))
         .collect();
+    let (retention_checks, prunes) =
+        invariants::check_retention(&correct, retention_window::<B, M>(prune, genesis));
+    let (sync_starts, synced_nodes) = invariants::check_state_sync(&correct);
+    let (chain_heights, unlinked_anchors) =
+        invariants::check_chain_of_blocks(&correct, genesis.digest());
     let counts = Counts {
         correct_nodes: correct.len(),
-        chain_heights: invariants::check_chain_of_blocks(&correct, genesis.digest()),
+        chain_heights,
+        unlinked_anchors,
         state_comparisons: invariants::check_state_agreement(&correct),
         verdict_comparisons: invariants::check_verdict_agreement(&correct),
+        retention_checks,
+        prunes,
+        sync_starts,
+        synced_nodes,
         restarts: observations.iter().map(EngineObservations::restarts).sum(),
     };
     RunReport {
         target,
+        database: B::NAME,
+        marshal: M::NAME,
         outcome,
         counts,
     }

@@ -8,12 +8,15 @@
 //! pending map, forcing lazy recovery on its next proposal or verification.
 //!
 //! Because every node here is correct, the invariants are checked over all four.
+//! Every node runs the standard marshal.
 
 use super::{
     NUM_IDENTITIES, RUN_TIMEOUT,
-    input::StatefulRestartsFuzzInput,
+    backend::{Any, Backend},
+    input::{PruneControls, StatefulRestartsFuzzInput},
     invariants::EngineObservations,
-    runner::{self, CorrectEngine, Outcome, RunReport},
+    marshal::Standard,
+    runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
     stack::round_robin,
 };
 use commonware_consensus::types::View;
@@ -35,18 +38,33 @@ pub fn fuzz_stateful_cert_mock_restarts(input: StatefulRestartsFuzzInput) {
 ///
 /// A run is fully determined by its input bytes.
 pub fn run_stateful_restarts(input: StatefulRestartsFuzzInput) -> RunReport {
-    let entropy = input.raw_bytes.clone();
-    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
-    deterministic::Runner::new(config).start(|context| run(context, input, entropy))
+    execute::<Any>(TARGET, input)
 }
 
-async fn run(
+/// Run one restart schedule over the cluster of four correct nodes, every one
+/// of them managing a database of backend `B`.
+///
+/// The database-adapter driver shares this with the restart driver: only the
+/// backend differs, and with it the database factory, the valid workload, and
+/// the commitment conversion. A run is fully determined by its input bytes.
+pub(super) fn execute<B: Backend>(
+    target: &'static str,
+    input: StatefulRestartsFuzzInput,
+) -> RunReport {
+    let entropy = input.raw_bytes.clone();
+    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
+    deterministic::Runner::new(config).start(|context| run::<B>(context, target, input, entropy))
+}
+
+async fn run<B: Backend>(
     mut context: deterministic::Context,
+    target: &'static str,
     input: StatefulRestartsFuzzInput,
     entropy: Vec<u8>,
 ) -> RunReport {
-    let cluster = runner::setup(&mut context).await;
+    let cluster = runner::setup::<B, Standard>(&mut context).await;
     let elector = round_robin(input.term_length);
+    let prune = input.prune.map(PruneControls::config);
 
     let observations: Vec<EngineObservations> = (0..NUM_IDENTITIES as usize)
         .map(|_| EngineObservations::new())
@@ -54,7 +72,14 @@ async fn run(
     let mut correct = Vec::with_capacity(observations.len());
     for (index, node) in observations.iter().enumerate() {
         correct.push(
-            CorrectEngine::start(&context, &cluster, index, elector.clone(), node.clone()).await,
+            CorrectEngine::<B, Standard, _>::start(
+                &context,
+                &cluster,
+                index,
+                NodeConfig::new(elector.clone(), prune),
+                node.clone(),
+            )
+            .await,
         );
     }
 
@@ -86,7 +111,14 @@ async fn run(
         }
     };
 
-    runner::measure(TARGET, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(
+        target,
+        outcome,
+        &correct,
+        &observations,
+        &cluster.genesis,
+        prune,
+    )
 }
 
 #[cfg(test)]
@@ -101,6 +133,14 @@ mod tests {
             .collect()
     }
 
+    /// Prune every height, retaining nothing beyond the acknowledgement
+    /// window, so pruning runs as early and as often as the actor allows.
+    const AGGRESSIVE_PRUNE: PruneControls = PruneControls {
+        maintenance_interval: 1,
+        retained_marshal_blocks: 0,
+        retained_qmdb_blocks: 0,
+    };
+
     fn input(
         required_heights: u8,
         term_length: u32,
@@ -111,6 +151,7 @@ mod tests {
             required_heights,
             term_length: TermLength::new(NZU32!(term_length)),
             restarts,
+            prune: Some(AGGRESSIVE_PRUNE),
             raw_bytes: tape(seed),
         }
     }
@@ -152,6 +193,28 @@ mod tests {
     #[test]
     fn deeper_suffix_holds_invariants() {
         measured(input(6, 2, 2, 13));
+    }
+
+    /// Pruning visibly runs under the aggressive configuration and stays
+    /// inside the retention window across restarts (I9).
+    #[test]
+    fn pruning_runs_within_the_retention_window() {
+        let report = measured(input(8, 1, 2, 17));
+        assert!(
+            report.counts.prunes > 0,
+            "pruning never ran under the aggressive configuration: {report}"
+        );
+    }
+
+    /// A run with pruning disabled checks retention against an unbounded
+    /// window and observes no prune.
+    #[test]
+    fn disabled_pruning_retains_everything() {
+        let mut input = input(4, 1, 1, 19);
+        input.prune = None;
+        let report = measured(input);
+        assert_eq!(report.counts.prunes, 0, "{report}");
+        assert!(report.counts.retention_checks > 0, "{report}");
     }
 
     /// I6: a replayed input fails, or passes, identically.
