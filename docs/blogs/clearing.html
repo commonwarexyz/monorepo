@@ -247,13 +247,12 @@ O’Grady</a></div>
         <p>For this payment, <span class="math inline">n_a=1</span>,
         <span class="math inline">D_a=20</span>, and <span
         class="math inline">V_a=\{b:(20,1)\}</span>.</p>
-        <p>The wallet keeps one unacknowledged request in flight,
-        retries it unchanged after response loss, and durably saves the
-        verified acknowledgment and openings before signing the next
-        payer state. One signature can also advance several recipients
-        in a batch. The operator accepts or rejects the whole batch and
-        returns one acknowledgment with an opening for each advanced
-        entry.</p>
+        <p>The wallet durably saves each request before sending it,
+        retries the same bytes after response loss, and retains the
+        verified acknowledgment and openings. One signature can also
+        advance several recipients in a batch. The operator accepts or
+        rejects the whole batch and returns one acknowledgment with an
+        opening for each advanced entry.</p>
         <h2 id="collecting-fees">Collecting Fees</h2>
         <p>An operator can require the payer to include a payment to a
         designated fee recipient, such as the operator’s own account, in

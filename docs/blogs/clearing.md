@@ -107,7 +107,7 @@ $$
 
 For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
-The wallet keeps one unacknowledged request in flight, retries it unchanged after response loss, and durably saves the verified acknowledgment and openings before signing the next payer state. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
+The wallet durably saves each request before sending it, retries the same bytes after response loss, and retains the verified acknowledgment and openings. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
 ## Collecting Fees
 
