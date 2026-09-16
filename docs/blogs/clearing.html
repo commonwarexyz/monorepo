@@ -372,8 +372,9 @@ O’Grady</a></div>
         class="math inline">b</span> and <span
         class="math inline">c</span> retained in the close.</p>
         </div>
-        <p>QMDB, an authenticated key-value store, keeps each live
-        account’s balance under its public key, committed by <span
+        <p>QMDB’s Current Ordered variant, an authenticated key-value
+        store, keeps each live account’s balance under its public key,
+        committed by <span
         class="math inline">\mathsf{StateRoot}</span>. Deposits and
         payments can add accounts, and a zero balance removes the
         record. Payment totals and counts belong to the epoch’s
@@ -405,9 +406,9 @@ O’Grady</a></div>
         <li>The <strong>payout root</strong> commits the cumulative log
         of external payout outputs.</li>
         </ul>
-        <p>The activity and payout databases are keyless logs backed by
-        flat Merkle mountain ranges (MMRs). Each log commits its
-        cumulative records under one root.</p>
+        <p>Activity and payouts use Keyless QMDBs backed by flat Merkle
+        mountain ranges (MMRs). Each log commits its cumulative records
+        under one root.</p>
         <p>Each close appends its sorted account Rows, then its payment
         Entries grouped by payer. A Row records the account’s final
         debit, sequence number, and outgoing-payment binary Merkle tree
@@ -423,7 +424,7 @@ O’Grady</a></div>
         <p>Tree construction belongs to validators. The operator
         collects signed activity and proposes the dealing. It can also
         run QMDB replicas to serve best-effort queries.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. The activity and payout logs use flat MMRs. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances. This close creates no payouts.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="A close commitment binds three validator-derived QMDB roots: state, activity, and payout. State uses Current Ordered QMDB, while activity and payouts use Keyless QMDB. The activity strip shows earlier closes followed by this close's four sorted Rows and payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and the outgoing-payment BMT root signed by c. Its two leaves pay 4 to b and 7 to d, one payment each. The state database retains the resulting balances. This close creates no payouts.">
         <div class="image-caption">
         <p>Figure 4: The close binds three validator-derived roots. The
         activity log appends this close’s Rows and original Entries
@@ -451,12 +452,12 @@ O’Grady</a></div>
         ranges, and the outflow totals. This lets the operator check
         that a certificate belongs to its proposal without rebuilding
         the validators’ logs.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the state root, activity root, and payout root and bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
         <div class="image-caption">
-        <p>Figure 5: Every validator derives the same state, activity,
-        and payout roots before signing one close commitment. Before its
-        vote leaves, it durably commits the three public candidates and
-        then its private checkpoint and signing decision.</p>
+        <p>Figure 5: Every validator derives the same three QMDB roots
+        before signing one close commitment. Before its vote leaves, it
+        durably commits the three public candidates and then its private
+        checkpoint and signing decision.</p>
         </div>
         <p>The certificate is one 48-byte aggregate signature plus a
         <span class="math inline">\lceil n/8\rceil</span>-byte signer

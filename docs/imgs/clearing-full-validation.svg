@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
   <title id="title">Every Validator Checks the Same Close</title>
-  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the state root, activity root, and payout root and bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.</desc>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -177,13 +177,13 @@
   <path d="M724 515 H1262" stroke="#c7dfce"/>
   <rect x="724" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
   <text class="label center green" x="806" y="568">State root</text>
-  <text class="note center" x="806" y="594">QMDB</text>
+  <text class="note center" x="806" y="594">Current Ordered</text>
   <rect x="911" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
   <text class="label center green" x="993" y="568">Activity root</text>
-  <text class="note center" x="993" y="594">MMR</text>
+  <text class="note center" x="993" y="594">Keyless</text>
   <rect x="1098" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
   <text class="label center green" x="1180" y="568">Payout root</text>
-  <text class="note center" x="1180" y="594">MMR</text>
+  <text class="note center" x="1180" y="594">Keyless</text>
   <path class="binding" d="M806 611 V629 H1180 V611 M993 611 V642"/>
   <rect x="724" y="642" width="538" height="40" rx="4" fill="#fff" stroke="#c7dfce" stroke-width="1.5"/>
   <text class="note center" x="993" y="668">Certified close context</text>
