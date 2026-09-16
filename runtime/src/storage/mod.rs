@@ -101,16 +101,32 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         test: TestState,
     }
 
+    /// Counters and hooks for controlling storage lifecycle tests.
+    ///
+    /// Each optional hook is consumed by the next matching operation. Paired channels announce
+    /// arrival, then wait for a release message or for the release sender to be dropped.
     #[cfg(test)]
     #[derive(Default)]
     struct TestState {
+        /// Number of deferred sync jobs that finished successfully.
         finished: AtomicU64,
+        /// Completion receivers for every prepared deferred sync, including completed jobs.
         deferred: Mutex<Vec<Receiver>>,
+        /// Pause the next prepared deferred sync before it flushes the file.
         before_sync: Mutex<Option<MpscReceiver<()>>>,
+        /// Pause Tokio's blocking namespace task after sending or dropping its result and releasing
+        /// its namespace lock and directory hold, before the task returns.
         after_dispatch: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+        /// Fail header creation with `Error::Closed` after writing this many bytes, capped at the
+        /// header length, and before syncing the file.
         fail_creation_after: Mutex<Option<usize>>,
+        /// Report the current generation strong count after a liveness check, then pause while
+        /// the registry remains locked.
         after_identity_observation: Mutex<Option<(MpscSender<usize>, MpscReceiver<()>)>>,
+        /// Pause a Tokio reopen after predecessor work completes but before reading the captured
+        /// file's length.
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+        /// Pause the next attachment before it locks the registry, letting predecessor work retire.
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
