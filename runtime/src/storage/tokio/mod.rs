@@ -75,7 +75,7 @@ impl Storage {
         let hold = self.hold.clone();
         let (sender, receiver) = oneshot::channel();
         #[cfg(test)]
-        let after_dispatch = self.pending.after_dispatch.lock().take();
+        let after_dispatch = self.pending.test.after_dispatch.lock().take();
         let task = tokio::task::spawn_blocking(move || {
             {
                 let _hold = hold;
@@ -179,7 +179,7 @@ impl crate::Storage for Storage {
                         file.seek(SeekFrom::Start(0))
                             .map_err(|_| Error::WriteFailed)?;
                         #[cfg(test)]
-                        if let Some(len) = pending.fail_creation_after.lock().take() {
+                        if let Some(len) = pending.test.fail_creation_after.lock().take() {
                             file.write_all(&region[..len.min(region.len())])
                                 .map_err(|_| Error::WriteFailed)?;
                             return Err(Error::Closed);
@@ -689,7 +689,7 @@ mod tests {
                 }
                 let (entered, entering) = ::tokio::sync::oneshot::channel();
                 let (release, released) = std::sync::mpsc::channel();
-                *storage.pending.after_dispatch.lock() = Some((entered, released));
+                *storage.pending.test.after_dispatch.lock() = Some((entered, released));
                 let mut first = Box::pin(storage.open("partition", b"blob"));
                 assert!(futures::poll!(&mut first).is_pending());
                 ::tokio::time::timeout(std::time::Duration::from_secs(5), entering)

@@ -176,7 +176,7 @@ impl crate::Storage for Storage {
                     file.seek(SeekFrom::Start(0))
                         .map_err(|_| Error::WriteFailed)?;
                     #[cfg(test)]
-                    if let Some(len) = self.pending.fail_creation_after.lock().take() {
+                    if let Some(len) = self.pending.test.fail_creation_after.lock().take() {
                         file.write_all(&region[..len.min(region.len())])
                             .map_err(|_| Error::WriteFailed)?;
                         return Err(Error::Closed);

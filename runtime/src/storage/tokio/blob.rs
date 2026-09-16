@@ -159,7 +159,7 @@ impl Blob {
         task::spawn_blocking(move || {
             #[cfg(test)]
             {
-                let hook = file.pending.before_metadata.lock().take();
+                let hook = file.pending.test.before_metadata.lock().take();
                 if let Some((entered, release)) = hook {
                     let _ = entered.send(());
                     let _ = release.recv();
@@ -623,7 +623,7 @@ mod tests {
                 .await
                 .unwrap();
             let (release, gate) = mpsc::channel();
-            *storage.pending.before_sync.lock() = Some(gate);
+            *storage.pending.test.before_sync.lock() = Some(gate);
             drop(old);
             let wait = storage
                 .pending
@@ -677,7 +677,7 @@ mod tests {
         let attachment = if retire_before_attach {
             let (entered, entering) = ::tokio::sync::oneshot::channel();
             let (release, gate) = mpsc::channel();
-            *storage.pending.before_attach.lock() = Some((entered, gate));
+            *storage.pending.test.before_attach.lock() = Some((entered, gate));
             Some((entering, release))
         } else {
             None
@@ -782,11 +782,11 @@ mod tests {
                 .await
                 .unwrap();
             let (sync_release, sync_gate) = mpsc::channel();
-            *storage.pending.before_sync.lock() = Some(sync_gate);
+            *storage.pending.test.before_sync.lock() = Some(sync_gate);
             drop(blob);
             let (entered, entering) = ::tokio::sync::oneshot::channel();
             let (release, gate) = mpsc::channel();
-            *storage.pending.before_metadata.lock() = Some((entered, gate));
+            *storage.pending.test.before_metadata.lock() = Some((entered, gate));
             let mut opening = Box::pin(storage.open("partition", b"blob"));
             assert!((&mut opening).now_or_never().is_none());
             storage.scan("partition").await.unwrap();
@@ -969,7 +969,7 @@ mod tests {
         assert!(matches!(result, Err(Error::WriteFailed)));
 
         let (release, gate) = mpsc::channel();
-        *storage.pending.before_sync.lock() = Some(gate);
+        *storage.pending.test.before_sync.lock() = Some(gate);
         drop(blob);
         let mut reopen = Box::pin(storage.open("partition", b"blob"));
         let early = ::tokio::time::timeout(std::time::Duration::from_millis(20), &mut reopen).await;

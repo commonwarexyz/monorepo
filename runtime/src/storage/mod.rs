@@ -98,20 +98,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) struct Pending {
         syncs: Mutex<HashMap<(String, Vec<u8>), Entry>>,
         #[cfg(test)]
+        test: TestState,
+    }
+
+    #[cfg(test)]
+    #[derive(Default)]
+    struct TestState {
         finished: AtomicU64,
-        #[cfg(test)]
         deferred: Mutex<Vec<Receiver>>,
-        #[cfg(test)]
         before_sync: Mutex<Option<MpscReceiver<()>>>,
-        #[cfg(test)]
         after_dispatch: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
-        #[cfg(test)]
         fail_creation_after: Mutex<Option<usize>>,
-        #[cfg(test)]
         after_identity_observation: Mutex<Option<(MpscSender<usize>, MpscReceiver<()>)>>,
-        #[cfg(test)]
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
-        #[cfg(test)]
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
@@ -165,7 +164,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             name: &[u8],
         ) -> Result<(Arc<Generation>, Option<Receiver>), Error> {
             #[cfg(test)]
-            if let Some((entered, released)) = self.before_attach.lock().take() {
+            if let Some((entered, released)) = self.test.before_attach.lock().take() {
                 let _ = entered.send(());
                 let _ = released.recv();
             }
@@ -200,7 +199,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn finish(&self, key: &(String, Vec<u8>), sender: Sender, result: Result<(), Error>) {
             #[cfg(test)]
             if result.is_ok() {
-                self.finished.fetch_add(1, Ordering::AcqRel);
+                self.test.finished.fetch_add(1, Ordering::AcqRel);
             }
             self.resolve(key, sender, result);
         }
@@ -231,7 +230,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         #[cfg(test)]
         fn observe_identity(&self, identity: &Weak<Generation>) {
-            let hook = self.after_identity_observation.lock().take();
+            let hook = self.test.after_identity_observation.lock().take();
             if let Some((entered, release)) = hook {
                 entered.send(identity.strong_count()).unwrap();
                 let _ = release.recv();
@@ -271,7 +270,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
                 /// Number of syncs that finished successfully.
                 pub(crate) fn finished(&self) -> u64 {
-                    self.finished.load(Ordering::Acquire)
+                    self.test.finished.load(Ordering::Acquire)
                 }
             }
         }
@@ -345,8 +344,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ) -> impl FnOnce() + Send + 'static {
         #[cfg(test)]
         let gate = {
-            pending.deferred.lock().push(sender.subscribe());
-            pending.before_sync.lock().take()
+            pending.test.deferred.lock().push(sender.subscribe());
+            pending.test.before_sync.lock().take()
         };
         move || {
             #[cfg(test)]
@@ -380,7 +379,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         if #[cfg(test)] {
             pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
                 for partial in [true, false] {
-                    *pending.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
+                    *pending.test.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
                     assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
                     if !partial {
                         for _ in 0..2 {
@@ -394,7 +393,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     drop(blob);
                     storage.remove("failed_creation", None).await.unwrap();
                 }
-                assert!(pending.deferred.lock().is_empty(), "failed creation must not launch a sync job");
+                assert!(pending.test.deferred.lock().is_empty(), "failed creation must not launch a sync job");
             }
 
             pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
@@ -410,7 +409,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                         let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
                         writer.write_at(0, b"dirty").await.unwrap();
                         writer.wait_for_sync().await.unwrap();
-                        let before = pending.deferred.lock().len();
+                        let before = pending.test.deferred.lock().len();
                         let finished = pending.finished();
                         let target = by_name.then_some(name.as_slice());
 
@@ -426,7 +425,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                             storage.remove(partition, target).await.unwrap();
                         }
 
-                        let jobs = pending.deferred.lock()[before..].to_vec();
+                        let jobs = pending.test.deferred.lock()[before..].to_vec();
                         assert_eq!(jobs.len(), usize::from(!unlink_first));
                         for mut job in jobs {
                             timeout(Duration::from_secs(10), job.wait_for(Option::is_some))
@@ -509,12 +508,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
                     // Dropping the sender also releases the worker if an assertion unwinds.
                     let (release, gate) = mpsc::channel();
-                    pending.deferred.lock().clear();
-                    *pending.before_sync.lock() = Some(gate);
+                    pending.test.deferred.lock().clear();
+                    *pending.test.before_sync.lock() = Some(gate);
                     drop(current);
                     drop(old);
                     drop(reader);
-                    let jobs = pending.deferred.lock().clone();
+                    let jobs = pending.test.deferred.lock().clone();
                     if let Some(mut obsolete) = jobs.get(1).cloned() {
                         timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
                             .await.unwrap().unwrap().clone().unwrap().unwrap();
@@ -686,7 +685,7 @@ pub(crate) mod tests {
             let outcome = sender.as_ref().map(|sender| sender.subscribe());
             let (entered, entering) = mpsc::channel();
             let (release, released) = mpsc::channel();
-            *pending.after_identity_observation.lock() = Some((entered, released));
+            *pending.test.after_identity_observation.lock() = Some((entered, released));
             let (done, finished) = mpsc::channel();
             let observer = {
                 let pending = pending.clone();
