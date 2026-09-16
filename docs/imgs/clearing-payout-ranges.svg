@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1170" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 728" role="img" aria-labelledby="title description">
   <title id="title">Claiming a payout exactly once</title>
   <desc id="description">A fixed finalized payout root proves that output 12 exists, while a separate unclaimed-range map determines whether it may be paid. The map begins with the end-exclusive interval 10 through 15. Claiming 12 splits it into 10 through 12 and 13 through 15. Claiming 10 and 14 shrinks those ranges to 11 through 12 and 13 through 14. Claiming 11 and 13 leaves the map empty. Every successful claim atomically updates the ranges, reduces the reserve, and pays the destination. Replaying 12 is rejected because it is no longer in an unclaimed range, even though the same membership opening remains valid. No lifetime claimed set is stored, and no MMR leaf is deleted.</desc>
-  <rect width="1080" height="1170" fill="#fff"/>
+  <rect width="1080" height="728" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     .title { font-size: 22px; font-weight: 700; fill: #111; }
@@ -12,8 +12,6 @@
     .note { font-size: 14px; fill: #666; }
     .range { font-size: 18px; font-weight: 700; fill: #2424d4; text-anchor: middle; }
     .center { text-anchor: middle; }
-    .right { text-anchor: end; }
-    .blue { fill: #2424d4; }
     .green { fill: #14733b; }
     .red { fill: #b42318; }
     .evidence { fill: #f4f4ff; stroke: #b8b8ed; stroke-width: 1.5; }
@@ -26,15 +24,11 @@
     .number { fill: #2424d4; }
     .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
     .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
-    .thin-flow { fill: none; stroke: #777; stroke-width: 1.5; marker-end: url(#gray-arrow); }
     .reject-flow { fill: none; stroke: #b42318; stroke-width: 2; marker-end: url(#red-arrow); }
   </style>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0 0 L10 5 L0 10 z" fill="#2424d4"/>
-    </marker>
-    <marker id="gray-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0 0 L10 5 L0 10 z" fill="#777"/>
     </marker>
     <marker id="red-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0 0 L10 5 L0 10 z" fill="#b42318"/>
@@ -44,79 +38,66 @@
   <text class="title" x="36" y="46">Claiming a Payout Exactly Once</text>
   <text class="subtitle" x="36" y="78">Membership proves existence. Unclaimed ranges authorize payment.</text>
 
-  <rect class="evidence" x="36" y="106" width="1008" height="144" rx="6"/>
-  <text class="eyebrow blue" x="60" y="137">MEMBERSHIP EVIDENCE · FIXED FINALIZED ROOT</text>
-  <rect class="record" x="60" y="163" width="190" height="54" rx="4"/>
-  <text class="label center" x="155" y="197">payout root P</text>
-  <path class="thin-flow" d="M268 190 H311"/>
-  <rect class="record" x="330" y="163" width="228" height="54" rx="4"/>
-  <text class="label center" x="444" y="185">output 12</text>
-  <text class="label center" x="444" y="208">+ opening</text>
-  <path class="thin-flow" d="M576 190 H619"/>
-  <rect class="paid" x="638" y="163" width="190" height="54" rx="4"/>
-  <text class="label center green" x="733" y="197">verified</text>
-  <text class="note" x="854" y="184">Same opening</text>
-  <text class="note" x="854" y="210">stays valid.</text>
+  <rect class="evidence" x="36" y="102" width="1008" height="84" rx="6"/>
+  <rect class="record" x="58" y="123" width="170" height="42" rx="4"/>
+  <text class="label center" x="143" y="150">payout root P</text>
+  <path class="flow" d="M244 144 H284"/>
+  <rect class="record" x="300" y="123" width="246" height="42" rx="4"/>
+  <text class="label center" x="423" y="150">output 12 + opening</text>
+  <path class="flow" d="M562 144 H602"/>
+  <rect class="paid" x="618" y="123" width="144" height="42" rx="4"/>
+  <text class="label center green" x="690" y="150">valid</text>
+  <text class="note" x="790" y="136">Same finalized root</text>
+  <text class="note" x="790" y="160">and opening throughout.</text>
 
-  <text class="eyebrow" x="90" y="286">UNCLAIMED RANGE STATE · END-EXCLUSIVE</text>
-  <text class="note" x="90" y="317">Each claim atomically updates ranges, reserve, and payment.</text>
+  <text class="eyebrow" x="36" y="226">UNCLAIMED RANGES · END-EXCLUSIVE</text>
+  <text class="note" x="36" y="252">Each claim atomically updates ranges, reserve, and payment.</text>
 
-  <rect class="step" x="90" y="340" width="900" height="112" rx="6"/>
-  <circle class="number" cx="126" cy="375" r="18"/>
-  <text class="number-text" x="126" y="382">1</text>
-  <text class="heading" x="162" y="382">Outputs become claimable</text>
-  <text class="note" x="162" y="417">indices 10, 11, 12, 13, 14</text>
-  <rect class="chip" x="782" y="367" width="184" height="58" rx="5"/>
-  <text class="range" x="874" y="403">[10,15)</text>
+  <rect class="step" x="36" y="272" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="352" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="432" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="512" width="1008" height="64" rx="6"/>
+  <path class="flow" d="M66 324 V364"/>
+  <path class="flow" d="M66 404 V444"/>
+  <path class="flow" d="M66 484 V524"/>
 
-  <path class="flow" d="M540 464 V504"/>
+  <circle class="number" cx="66" cy="304" r="15"/>
+  <text class="number-text" x="66" y="310">1</text>
+  <text class="heading" x="96" y="298">Finalize outputs 10–14</text>
+  <text class="note" x="96" y="322">Five outputs become claimable</text>
+  <rect class="chip" x="750" y="284" width="174" height="40" rx="5"/>
+  <text class="range" x="837" y="311">[10,15)</text>
 
-  <rect class="step" x="90" y="516" width="900" height="112" rx="6"/>
-  <circle class="number" cx="126" cy="551" r="18"/>
-  <text class="number-text" x="126" y="558">2</text>
-  <text class="heading" x="162" y="558">Claim 12</text>
-  <text class="note" x="162" y="593">one range splits into two</text>
-  <rect class="chip" x="530" y="543" width="150" height="58" rx="5"/>
-  <text class="range" x="605" y="579">[10,12)</text>
-  <rect class="paid" x="694" y="543" width="112" height="58" rx="5"/>
-  <text class="label center green" x="750" y="567">12</text>
-  <text class="note center green" x="750" y="593">paid</text>
-  <rect class="chip" x="820" y="543" width="150" height="58" rx="5"/>
-  <text class="range" x="895" y="579">[13,15)</text>
+  <circle class="number" cx="66" cy="384" r="15"/>
+  <text class="number-text" x="66" y="390">2</text>
+  <text class="heading" x="96" y="378">Claim 12</text>
+  <text class="note" x="96" y="402">Split around the paid index</text>
+  <rect class="chip" x="650" y="364" width="174" height="40" rx="5"/>
+  <text class="range" x="737" y="391">[10,12)</text>
+  <rect class="chip" x="850" y="364" width="174" height="40" rx="5"/>
+  <text class="range" x="937" y="391">[13,15)</text>
 
-  <path class="flow" d="M540 640 V680"/>
+  <circle class="number" cx="66" cy="464" r="15"/>
+  <text class="number-text" x="66" y="470">3</text>
+  <text class="heading" x="96" y="458">Claim 10 and 14</text>
+  <text class="note" x="96" y="482">Both ranges shrink</text>
+  <rect class="chip" x="650" y="444" width="174" height="40" rx="5"/>
+  <text class="range" x="737" y="471">[11,12)</text>
+  <rect class="chip" x="850" y="444" width="174" height="40" rx="5"/>
+  <text class="range" x="937" y="471">[13,14)</text>
 
-  <rect class="step" x="90" y="692" width="900" height="112" rx="6"/>
-  <circle class="number" cx="126" cy="727" r="18"/>
-  <text class="number-text" x="126" y="734">3</text>
-  <text class="heading" x="162" y="734">Claim 10 and 14</text>
-  <text class="note" x="162" y="769">both ranges shrink</text>
-  <rect class="chip" x="530" y="719" width="150" height="58" rx="5"/>
-  <text class="range" x="605" y="755">[11,12)</text>
-  <rect class="paid" x="694" y="719" width="112" height="58" rx="5"/>
-  <text class="label center green" x="750" y="743">10 · 14</text>
-  <text class="note center green" x="750" y="769">paid</text>
-  <rect class="chip" x="820" y="719" width="150" height="58" rx="5"/>
-  <text class="range" x="895" y="755">[13,14)</text>
+  <circle class="number" cx="66" cy="544" r="15"/>
+  <text class="number-text" x="66" y="550">4</text>
+  <text class="heading" x="96" y="538">Claim 11 and 13</text>
+  <text class="note" x="96" y="562">Remove the last two singletons</text>
+  <rect class="empty" x="750" y="524" width="174" height="40" rx="5"/>
+  <text class="range" x="837" y="551" style="fill:#666;">EMPTY</text>
 
-  <path class="flow" d="M540 816 V856"/>
-
-  <rect class="step" x="90" y="868" width="900" height="112" rx="6"/>
-  <circle class="number" cx="126" cy="903" r="18"/>
-  <text class="number-text" x="126" y="910">4</text>
-  <text class="heading" x="162" y="910">Claim 11 and 13</text>
-  <text class="note" x="162" y="945">singletons are consumed</text>
-  <rect class="paid" x="654" y="895" width="140" height="58" rx="5"/>
-  <text class="label center green" x="724" y="919">11 · 13</text>
-  <text class="note center green" x="724" y="945">paid</text>
-  <rect class="empty" x="810" y="895" width="160" height="58" rx="5"/>
-  <text class="range" x="890" y="931" style="fill:#666;">EMPTY</text>
-
-  <rect class="replay" x="90" y="1034" width="900" height="104" rx="6"/>
-  <text class="eyebrow red" x="114" y="1065">REPLAY CHECK</text>
-  <text class="label" x="114" y="1104">claim 12 · same opening valid</text>
-  <path class="reject-flow" d="M480 1094 H532"/>
-  <text class="heading red" x="560" y="1104">REJECT</text>
-  <text class="note" x="660" y="1104">no range contains 12</text>
-  <text class="note center" x="540" y="1131">No claimed set · no MMR leaf deletion.</text>
+  <rect class="replay" x="36" y="610" width="1008" height="66" rx="6"/>
+  <text class="label" x="60" y="650">Replay 12 · same valid opening</text>
+  <path class="reject-flow" d="M420 643 H472"/>
+  <text class="heading red" x="498" y="650">REJECT</text>
+  <text class="note" x="620" y="636">No unclaimed interval</text>
+  <text class="note" x="620" y="660">contains index 12.</text>
+  <text class="note center" x="540" y="707">Claims leave the MMR unchanged. No claimed-output set is stored.</text>
 </svg>
