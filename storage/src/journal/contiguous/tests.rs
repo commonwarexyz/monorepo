@@ -1,7 +1,7 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
 use super::{Contiguous, Many, fixed, variable};
-use crate::journal::{Error, contiguous::Mutable};
+use crate::journal::{Error, authenticated, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
     ReadOptions, Runner as _, Spawner as _, Supervisor as _,
@@ -1942,7 +1942,7 @@ fn test_fresh_sync_avoids_reset_writes() {
                 .unwrap(),
         );
         let (sync, sync_io) = RecordingContext::new(context.child("fixed_sync"));
-        let journal = crate::journal::authenticated::init_sync::<_, fixed::Journal<_, u64>>(
+        let journal = authenticated::init_sync::<_, fixed::Journal<_, u64>>(
             sync.child("journal"),
             fixed_cfg("fixed-sync"),
             0..10,
@@ -1970,7 +1970,7 @@ fn test_fresh_sync_avoids_reset_writes() {
                 .unwrap(),
         );
         let (sync, sync_io) = RecordingContext::new(context.child("variable_sync"));
-        let journal = crate::journal::authenticated::init_sync::<_, variable::Journal<_, u64>>(
+        let journal = authenticated::init_sync::<_, variable::Journal<_, u64>>(
             sync.child("journal"),
             variable_cfg("variable-sync"),
             0..10,

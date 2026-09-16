@@ -413,6 +413,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::Unmerkleized;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -570,9 +571,7 @@ mod tests {
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
             let expected_root = merkleized.root();
 
             {
@@ -609,9 +608,7 @@ mod tests {
                 .await
                 .append(U64::new(7))
                 .with_metadata(U64::new(11));
-            let first = crate::stateful::db::Unmerkleized::merkleize(first)
-                .await
-                .unwrap();
+            let first = Unmerkleized::merkleize(first).await.unwrap();
             let first_target = sync::CompactTarget {
                 root: first.root(),
                 size: first.bounds().tip.size,
@@ -627,9 +624,7 @@ mod tests {
                 .await
                 .append(U64::new(8))
                 .with_metadata(U64::new(22));
-            let second = crate::stateful::db::Unmerkleized::merkleize(second)
-                .await
-                .unwrap();
+            let second = Unmerkleized::merkleize(second).await.unwrap();
             let (slot, database) = db.write().await;
             let database = <FixedDb as ManagedDb<_>>::apply(database, second)
                 .await
@@ -668,9 +663,7 @@ mod tests {
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             let valid_target = sync::CompactTarget {
                 root: merkleized.root(),

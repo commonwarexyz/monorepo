@@ -356,7 +356,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         Ok(self)
     }
 
-    /// Stores an item in the [Cache] and syncs it, plus any other pending writes, to disk.
+    /// Store an item in the [Cache] and sync all pending writes to disk.
     ///
     /// If the index already exists or falls below the prune floor, pending writes are still synced.
     pub async fn put_sync(mut self, index: u64, value: V) -> Result<Self, Error> {

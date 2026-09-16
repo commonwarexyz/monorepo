@@ -32,7 +32,7 @@ use commonware_utils::{
     sync::Mutex,
     vec::NonEmptyVec,
 };
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{any::Any, num::NonZeroUsize, sync::Arc};
 
 #[derive(Clone)]
 struct FixtureReporter {
@@ -188,7 +188,7 @@ pub(crate) struct MarshalFixture {
     pub(crate) floor: Floor,
     /// Keeps the fixture alive: the unstarted actor (its mailbox dead-letters once this
     /// drops) or the started actor's resolver handler and task handle.
-    pub(crate) guards: Box<dyn std::any::Any>,
+    pub(crate) guards: Box<dyn Any>,
 }
 
 impl MarshalFixture {

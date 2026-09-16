@@ -785,6 +785,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::Unmerkleized;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -847,9 +848,7 @@ mod tests {
             let value = Sha256::hash(&[b"winner"]);
             let pre_finalization = db.new_batch_for_test::<_>().await;
             let winner = db.new_batch_for_test::<_>().await.write(key, Some(value));
-            let winner = crate::stateful::db::Unmerkleized::merkleize(winner)
-                .await
-                .unwrap();
+            let winner = Unmerkleized::merkleize(winner).await.unwrap();
 
             let (slot, database) = db.write().await;
             let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
@@ -889,9 +888,7 @@ mod tests {
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(seed).await.unwrap();
             {
                 let (slot, database) = db.write().await;
                 let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
@@ -919,11 +916,10 @@ mod tests {
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, *v);
             }
-            let explicit_root =
-                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
-                    .await
-                    .unwrap()
-                    .root();
+            let explicit_root = Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                .await
+                .unwrap()
+                .root();
 
             // Staged path, with metadata set on the staged handle.
             let staged_batch = db.new_batch_for_test::<_>().await;
@@ -985,9 +981,7 @@ mod tests {
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let batch = db.new_batch_for_test::<_>().await.write(key, Some(value));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             let starts = pending.starts();
             let (slot, database) = db.write().await;

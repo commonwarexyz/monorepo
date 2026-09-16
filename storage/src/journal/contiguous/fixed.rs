@@ -2169,7 +2169,7 @@ mod tests {
     use commonware_runtime::{
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _, WriteOptions,
-        buffer::paged::{Writer, corrupt_page},
+        buffer::paged::{Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, StorageEvent,
@@ -2177,7 +2177,7 @@ mod tests {
             release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
@@ -2680,7 +2680,7 @@ mod tests {
                                 (journal, _) = journal.append(&value).await.unwrap();
                             }
                             _ = journal.sync().await.unwrap();
-                            let rate = commonware_utils::Probability::new(numerator, 10).unwrap();
+                            let rate = Probability::new(numerator, 10).unwrap();
                             *context.storage_fault_config().write() = deterministic::FaultConfig {
                                 sync_rate: (kind == 0).then_some(rate),
                                 remove_rate: (kind == 1).then_some(rate),
@@ -5405,8 +5405,8 @@ mod tests {
     }
 
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
-    /// page, which `Writer::new`'s backward scan cannot see. Recovery must forward-validate the
-    /// suspect blob and truncate at the hole.
+    /// page, which `PagedRecovery::open`'s backward scan cannot see. Recovery must forward-validate
+    /// the suspect blob and truncate at the hole.
     #[test_traced]
     fn test_fixed_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
