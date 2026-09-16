@@ -18,6 +18,10 @@ fn minifuzz_dispatched_contract() {
 
 #[test]
 fn minifuzz_backend_matches_portable() {
+    eprintln!(
+        "Ocelot kernel differential backend: {}",
+        super::selected_name()
+    );
     commonware_invariants::minifuzz::Builder::default()
         .with_seed(0)
         .with_search_limit(100)

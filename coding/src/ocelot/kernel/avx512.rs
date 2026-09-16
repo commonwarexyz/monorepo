@@ -10,6 +10,10 @@ use core::arch::x86_64::{
 ///
 /// The private field ensures this can only be constructed after checking the
 /// required CPU features with [`Self::new`].
+///
+/// # Panics
+///
+/// [`Default::default`] panics if the CPU lacks AVX-512F or GFNI support.
 #[derive(Clone, Copy, Debug)]
 pub struct Avx512(());
 
@@ -138,6 +142,7 @@ fn available() -> bool {
 #[inline]
 const fn prefix_mask(bytes: usize) -> __mmask16 {
     let lanes = bytes / 4;
+    debug_assert!(lanes >= 1);
     u16::MAX >> (16 - lanes)
 }
 

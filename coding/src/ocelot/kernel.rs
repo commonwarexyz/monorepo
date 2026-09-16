@@ -134,3 +134,18 @@ pub fn with_kernel<F: WithKernel>(f: F) -> F::Output {
     }
     f.call(portable::Portable)
 }
+
+#[cfg(test)]
+pub(crate) fn selected_name() -> &'static str {
+    struct Name;
+
+    impl WithKernel for Name {
+        type Output = &'static str;
+
+        fn call<K: Kernel>(self, _kernel: K) -> Self::Output {
+            core::any::type_name::<K>()
+        }
+    }
+
+    with_kernel(Name)
+}
