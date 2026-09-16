@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 728" role="img" aria-labelledby="title description">
   <title id="title">Claiming a payout exactly once</title>
-  <desc id="description">A fixed finalized payout root proves that output 12 exists, while a separate unclaimed-range map determines whether it may be paid. The map begins with the end-exclusive interval 10 through 15. Claiming 12 splits it into 10 through 12 and 13 through 15. Claiming 10 and 14 shrinks those ranges to 11 through 12 and 13 through 14. Claiming 11 and 13 leaves the map empty. Every successful claim atomically updates the ranges, reduces the reserve, and pays the destination. Replaying 12 is rejected because it is no longer in an unclaimed range, even though the same membership opening remains valid. No lifetime claimed set is stored, and no MMR leaf is deleted.</desc>
+  <desc id="description">A fixed finalized payout root proves that output 12 exists. Only finalized payout indices 10 through 14 are shown. Other claimed-map records are outside this illustration. The chain records claimed indices as end-exclusive ranges. Claiming 12 stores the range 12 through 13. Claiming 10 and 14 adds the singleton ranges 10 through 11 and 14 through 15. Claiming 11 merges the first two ranges into 10 through 13. Claiming 13 then merges all five paid outputs into one range, 10 through 15. Each claim atomically records its index, reduces the reserve, and pays the destination. Replaying 12 is rejected because a claimed range already contains it, even though its membership opening remains valid.</desc>
   <rect width="1080" height="728" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -19,7 +19,6 @@
     .record { fill: #fff; stroke: #bcbcbc; stroke-width: 1.5; }
     .chip { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
     .paid { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
-    .empty { fill: #fff; stroke: #999; stroke-width: 1.5; stroke-dasharray: 6 5; }
     .replay { fill: #fff8f7; stroke: #d98b83; stroke-width: 1.5; }
     .number { fill: #2424d4; }
     .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
@@ -36,7 +35,7 @@
   </defs>
 
   <text class="title" x="36" y="46">Claiming a Payout Exactly Once</text>
-  <text class="subtitle" x="36" y="78">Membership proves existence. Unclaimed ranges authorize payment.</text>
+  <text class="subtitle" x="36" y="78">Membership proves existence. Claimed ranges prevent duplicate payment.</text>
 
   <rect class="evidence" x="36" y="102" width="1008" height="84" rx="6"/>
   <rect class="record" x="58" y="123" width="170" height="42" rx="4"/>
@@ -50,8 +49,8 @@
   <text class="note" x="790" y="136">Same finalized root</text>
   <text class="note" x="790" y="160">and opening throughout.</text>
 
-  <text class="eyebrow" x="36" y="226">UNCLAIMED RANGES · END-EXCLUSIVE</text>
-  <text class="note" x="36" y="252">Each claim atomically updates ranges, reserve, and payment.</text>
+  <text class="eyebrow" x="36" y="226">CLAIMED RANGES · END-EXCLUSIVE</text>
+  <text class="note" x="36" y="252">Finalized payout indices 10–14 shown. Initially, none are claimed.</text>
 
   <rect class="step" x="36" y="272" width="1008" height="64" rx="6"/>
   <rect class="step" x="36" y="352" width="1008" height="64" rx="6"/>
@@ -63,41 +62,43 @@
 
   <circle class="number" cx="66" cy="304" r="15"/>
   <text class="number-text" x="66" y="310">1</text>
-  <text class="heading" x="96" y="298">Finalize outputs 10–14</text>
-  <text class="note" x="96" y="322">Five outputs become claimable</text>
-  <rect class="chip" x="750" y="284" width="174" height="40" rx="5"/>
-  <text class="range" x="837" y="311">[10,15)</text>
+  <text class="heading" x="96" y="298">Claim 12</text>
+  <text class="note" x="96" y="322">Record the paid index</text>
+  <rect class="chip" x="762" y="284" width="124" height="40" rx="5"/>
+  <text class="range" x="824" y="311">[12,13)</text>
 
   <circle class="number" cx="66" cy="384" r="15"/>
   <text class="number-text" x="66" y="390">2</text>
-  <text class="heading" x="96" y="378">Claim 12</text>
-  <text class="note" x="96" y="402">Split around the paid index</text>
-  <rect class="chip" x="650" y="364" width="174" height="40" rx="5"/>
-  <text class="range" x="737" y="391">[10,12)</text>
-  <rect class="chip" x="850" y="364" width="174" height="40" rx="5"/>
-  <text class="range" x="937" y="391">[13,15)</text>
+  <text class="heading" x="96" y="378">Claim 10 and 14</text>
+  <text class="note" x="96" y="402">Three separate paid ranges</text>
+  <rect class="chip" x="622" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="684" y="391">[10,11)</text>
+  <rect class="chip" x="762" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="824" y="391">[12,13)</text>
+  <rect class="chip" x="902" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="964" y="391">[14,15)</text>
 
   <circle class="number" cx="66" cy="464" r="15"/>
   <text class="number-text" x="66" y="470">3</text>
-  <text class="heading" x="96" y="458">Claim 10 and 14</text>
-  <text class="note" x="96" y="482">Both ranges shrink</text>
-  <rect class="chip" x="650" y="444" width="174" height="40" rx="5"/>
-  <text class="range" x="737" y="471">[11,12)</text>
-  <rect class="chip" x="850" y="444" width="174" height="40" rx="5"/>
-  <text class="range" x="937" y="471">[13,14)</text>
+  <text class="heading" x="96" y="458">Claim 11</text>
+  <text class="note" x="96" y="482">Join the first two ranges</text>
+  <rect class="chip" x="622" y="444" width="264" height="40" rx="5"/>
+  <text class="range" x="754" y="471">[10,13)</text>
+  <rect class="chip" x="902" y="444" width="124" height="40" rx="5"/>
+  <text class="range" x="964" y="471">[14,15)</text>
 
   <circle class="number" cx="66" cy="544" r="15"/>
   <text class="number-text" x="66" y="550">4</text>
-  <text class="heading" x="96" y="538">Claim 11 and 13</text>
-  <text class="note" x="96" y="562">Remove the last two singletons</text>
-  <rect class="empty" x="750" y="524" width="174" height="40" rx="5"/>
-  <text class="range" x="837" y="551" style="fill:#666;">EMPTY</text>
+  <text class="heading" x="96" y="538">Claim 13</text>
+  <text class="note" x="96" y="562">All five claims fit in one range</text>
+  <rect class="chip" x="622" y="524" width="404" height="40" rx="5"/>
+  <text class="range" x="824" y="551">[10,15)</text>
 
   <rect class="replay" x="36" y="610" width="1008" height="66" rx="6"/>
   <text class="label" x="60" y="650">Replay 12 · same valid opening</text>
   <path class="reject-flow" d="M420 643 H472"/>
   <text class="heading red" x="498" y="650">REJECT</text>
-  <text class="note" x="620" y="636">No unclaimed interval</text>
-  <text class="note" x="620" y="660">contains index 12.</text>
-  <text class="note center" x="540" y="707">Claims leave the MMR unchanged. No claimed-output set is stored.</text>
+  <text class="note" x="620" y="636">Already claimed:</text>
+  <text class="note" x="620" y="660">12 is inside [10,15).</text>
+  <text class="note center" x="540" y="707">Each claim atomically updates its range, reduces the reserve, and pays.</text>
 </svg>

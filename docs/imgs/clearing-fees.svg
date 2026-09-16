@@ -1,23 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 520" role="img" aria-labelledby="title description">
-  <title id="title">Collecting a fee in one signed batch</title>
-  <desc id="description">In an independent fresh-epoch example, payer a signs one batch that pays 20 to b, 7 to c, and 2 to the operator's designated fee account, for a total debit of 29. The fee of 2 is an example operator quote, not a protocol constant. The operator checks that the ordinary fee increment satisfies its policy, then countersigns the same payer state once. One acknowledgment binds the entire batch. Validators net all three entries as ordinary payments, with no fee-specific protocol machinery.</desc>
-  <rect width="1080" height="520" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 420" role="img" aria-labelledby="title description">
+  <title id="title">A fee is another entry in the signed batch</title>
+  <desc id="description">In a fresh epoch, payer a signs a batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated account. Sequence 1 and cumulative debit 29 are bound to the epoch and the payment root. The operator countersigns this payer state. Recipient b receives that countersigned state and an opening for its entry, amount 20 and payment count 1. The same acknowledgment binds all three entries, including the fee.</desc>
+  <rect width="1080" height="420" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     .title { font-size: 22px; font-weight: 700; fill: #111; }
-    .subtitle { font-size: 14px; fill: #666; }
     .heading { font-size: 18px; font-weight: 700; fill: #111; }
     .label { font-size: 16px; fill: #333; }
     .note { font-size: 14px; fill: #666; }
     .center { text-anchor: middle; }
     .right { text-anchor: end; }
     .blue { fill: #2424d4; }
-    .green { fill: #14733b; }
-    .step { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
-    .selected { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
-    .accepted { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
-    .number { fill: #2424d4; }
-    .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
+    .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .record { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
     .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
     .rule { stroke: #dedede; stroke-width: 1; }
   </style>
@@ -28,40 +23,31 @@
   </defs>
 
   <text class="title" x="36" y="46">Collecting Fees in a Batch</text>
-  <text class="subtitle" x="36" y="78">Fresh-epoch example · the operator quotes a fee of 2.</text>
+  <text class="note" x="36" y="78">The quoted fee is another payment covered by the same acknowledgment.</text>
 
-  <rect class="step" x="36" y="104" width="476" height="272" rx="6"/>
-  <circle class="number" cx="66" cy="137" r="15"/>
-  <text class="number-text" x="66" y="143">1</text>
-  <text class="heading" x="92" y="144">Payer a signs one batch</text>
-  <rect class="selected" x="58" y="166" width="432" height="186" rx="5"/>
-  <text class="label blue" x="80" y="195">ONE SIGNATURE</text>
-  <text class="label right blue" x="468" y="195">debit 29</text>
-  <path class="rule" d="M80 210 H468 M80 252 H468 M80 294 H468"/>
-  <text class="label" x="80" y="236">to b</text>
-  <text class="label right" x="468" y="236">20</text>
-  <text class="label" x="80" y="278">to c</text>
-  <text class="label right" x="468" y="278">7</text>
-  <text class="label blue" x="80" y="320">to operator fee account</text>
-  <text class="label right blue" x="468" y="320">2</text>
+  <rect class="panel" x="36" y="104" width="476" height="286" rx="6"/>
+  <text class="heading" x="58" y="140">Payer a's signed state</text>
+  <text class="note" x="58" y="166">Fresh epoch · sequence 1 · debit 29</text>
+  <rect class="record" x="58" y="184" width="432" height="180" rx="5"/>
+  <text class="label blue" x="80" y="213">ONE PAYMENT ROOT</text>
+  <path class="rule" d="M80 226 H468 M80 266 H468 M80 306 H468"/>
+  <text class="label" x="80" y="253">to b</text>
+  <text class="label right" x="468" y="253">20</text>
+  <text class="label" x="80" y="293">to c</text>
+  <text class="label right" x="468" y="293">7</text>
+  <text class="label blue" x="80" y="333">to operator fee account</text>
+  <text class="label right blue" x="468" y="333">2</text>
 
-  <path class="flow" d="M528 254 H568"/>
+  <path class="flow" d="M528 247 H568"/>
 
-  <rect class="step" x="584" y="104" width="460" height="272" rx="6"/>
-  <circle class="number" cx="614" cy="137" r="15"/>
-  <text class="number-text" x="614" y="143">2</text>
-  <text class="heading" x="640" y="144">Operator checks the fee</text>
-  <rect class="accepted" x="608" y="168" width="412" height="55" rx="5"/>
-  <text class="label center green" x="814" y="202">increment 2 meets quote</text>
-  <path class="flow" d="M814 236 V259"/>
-  <rect class="selected" x="608" y="272" width="412" height="80" rx="5"/>
-  <text class="label center blue" x="814" y="302">COUNTERSIGN ONCE</text>
-  <text class="note center" x="814" y="330">Same payer state · all three payments</text>
-
-  <path class="flow" d="M814 388 V414"/>
-
-  <rect class="step" x="36" y="430" width="1008" height="64" rx="6"/>
-  <circle class="number" cx="66" cy="462" r="15"/>
-  <text class="number-text" x="66" y="468">3</text>
-  <text class="heading" x="92" y="469">Validators net all three as ordinary payments</text>
+  <rect class="panel" x="584" y="104" width="460" height="286" rx="6"/>
+  <text class="heading" x="608" y="140">Recipient b's receipt</text>
+  <rect class="record" x="608" y="164" width="412" height="102" rx="5"/>
+  <text class="label center blue" x="814" y="194">Countersigned state R</text>
+  <text class="note center" x="814" y="223">Payer a + operator signatures</text>
+  <text class="note center" x="814" y="249">Epoch · sequence 1 · debit 29 · root</text>
+  <text class="label center" x="814" y="292">+</text>
+  <rect class="record" x="608" y="308" width="412" height="56" rx="5"/>
+  <text class="label center" x="814" y="331">b: amount 20 · payment count 1</text>
+  <text class="note center" x="814" y="354">Opening to the same payment root</text>
 </svg>
