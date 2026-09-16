@@ -339,7 +339,7 @@ The operator can price each transfer type or payer independently, including volu
 Figure 7: The fee shares the same signed payment root as the recipient payments. Recipient $b$ receives the countersigned payer state and an opening for its own entry.
 :::
 
-## The Close Follows Accounts and Edges
+## The Cost of Settlement
 
 We benchmarked the Commonware Library's [reference implementation](https://github.com/commonwarexyz/monorepo/pull/4664) with one million live accounts, a fixed recipient pool of $B=512$, and one recipient per payer $K=1$. We vary active payers $A$. The operator sends the dealing to validators, who derive the close descriptor and certify its commitment.
 
