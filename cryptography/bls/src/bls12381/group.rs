@@ -786,6 +786,53 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
+    #[test]
+    fn batch_msm_full_curve_bucket_inputs() {
+        let torsion = G1::from_affine(Fp::ZERO, Fp::from_u64(2));
+        let mixed = torsion.add_jacobian(&G1::generator());
+        let raw_identity = G1 {
+            x: Fp::from_u64(13),
+            y: Fp::from_u64(17),
+            z: Fp::ZERO,
+        };
+        for retained in [31, 32, 33, 65] {
+            let mut points = alloc::vec::Vec::new();
+            let mut coefficients = alloc::vec::Vec::new();
+            let mut expected = G1::IDENTITY;
+            for i in 0..retained {
+                let point = match i % 5 {
+                    0 => torsion,
+                    1 => mixed,
+                    2 => mixed.neg(),
+                    3 => raw_identity,
+                    _ => torsion.neg(),
+                };
+                let scale = Fp::from_u64(2 + i as u64 % 11);
+                let scaled = G1 {
+                    x: point.x.mul(scale.square()),
+                    y: point.y.mul(scale.square().mul(scale)),
+                    z: point.z.mul(scale),
+                };
+                let value = [1u128, 1 << 127, u128::MAX][i % 3];
+                expected = expected
+                    .add_jacobian(&point.mul_words_jacobian(&[value as u64, (value >> 64) as u64]));
+                points.extend([raw_identity, scaled]);
+                coefficients.extend([
+                    EncodedScalar::from_batch_be_bytes(&[0; 16]),
+                    EncodedScalar::from_batch_be_bytes(&value.to_be_bytes()),
+                ]);
+            }
+            assert_eq!(
+                G1::msm_vartime_encoded(&points, &coefficients)
+                    .unwrap()
+                    .to_bytes(),
+                expected.to_bytes(),
+                "retained={retained}",
+            );
+        }
+    }
+
     #[test]
     fn full_curve_endomorphisms() {
         let b = Fp2 {
@@ -1175,6 +1222,59 @@ mod tests {
                         $group::msm_vartime(&points, &coefficients),
                         Some(expected),
                     );
+                }
+
+                #[cfg(not(miri))]
+                #[test]
+                fn msm_vartime_normalization_boundaries() {
+                    let chunk = 192 * 1024 / core::mem::size_of::<$field>();
+                    let generator = $group::generator();
+                    let raw_identity = $group {
+                        x: <$field>::from_u64(13),
+                        y: <$field>::from_u64(17),
+                        z: <$field>::ONE.sub(<$field>::ONE),
+                    };
+                    for finite in [0, 1, chunk - 1, chunk, chunk + 1] {
+                        let mut points = alloc::vec::Vec::new();
+                        let mut coefficients = alloc::vec::Vec::new();
+                        let mut weight = 0i64;
+                        for i in 0..finite {
+                            let negative = i % 3 == 1;
+                            let point = if negative { generator.neg() } else { generator };
+                            let scale = <$field>::from_u64(2 + i as u64 % 11);
+                            points.push($group {
+                                x: point.x.mul(scale.square()),
+                                y: point.y.mul(scale.square().mul(scale)),
+                                z: point.z.mul(scale),
+                            });
+                            let coefficient = 1 + (i % 2) as u64;
+                            coefficients.push(Scalar::from_u64(coefficient));
+                            weight += if negative { -(coefficient as i64) } else { coefficient as i64 };
+                        }
+                        if finite < 32 {
+                            points.extend(alloc::vec![raw_identity; 32]);
+                            coefficients.extend(alloc::vec![Scalar::ONE; 32]);
+                        }
+                        let expected_point = if weight < 0 { generator.neg() } else { generator };
+                        let expected = oracle_mul(
+                            &oracle_point(&expected_point.to_bytes()),
+                            &Scalar::from_u64(weight.unsigned_abs()),
+                        );
+                        assert_eq!(
+                            $group::msm_vartime(&points, &coefficients).unwrap().to_bytes(),
+                            expected,
+                            "finite={finite}",
+                        );
+                        points.insert(points.len() / 2, raw_identity);
+                        coefficients.insert(coefficients.len() / 2, Scalar::ONE);
+                        points.insert(0, generator);
+                        coefficients.insert(0, Scalar::ZERO);
+                        assert_eq!(
+                            $group::msm_vartime(&points, &coefficients).unwrap().to_bytes(),
+                            expected,
+                            "finite={finite} interleaved identity and zero coefficient",
+                        );
+                    }
                 }
 
                 #[test]

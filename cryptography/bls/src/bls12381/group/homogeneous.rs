@@ -11,6 +11,8 @@
 //! Debug builds retain call boundaries around coordinate conversions and point
 //! formulas to keep their temporary field values in separate stack frames.
 
+mod affine;
+
 use super::{G1, G2, PSI_X, PSI_Y, PSI2_X, msm};
 use crate::bls12381::{
     Fp,
@@ -20,6 +22,8 @@ use crate::bls12381::{
     },
     scalar::X_SQUARED,
 };
+use affine::{G1Affine, G2Affine};
+use alloc::vec::Vec;
 use commonware_cryptography_vroom::{
     Backend, Bls12381, WithBackend,
     rns::{Ring, Standard},
@@ -39,17 +43,15 @@ impl WithBackend for Msm<'_, G1, msm::EncodedScalar> {
     #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> G1 {
         let ring = Ring::<Bls12381, B>::new(backend);
-        let identity = G1Point::identity();
         let (terms, bits) = msm::prepare_terms!(
-            self.0, self.1, scalar => *scalar,
-            point => G1Point::from_jacobian(point, &ring)
+            0..self.0.len(), self.1, scalar => *scalar, point => point
         );
-        msm::compute(terms, bits, &ring, identity).to_jacobian(&ring)
+        G1Point::msm_indexed(self.0, terms, bits, &ring).to_jacobian(&ring)
     }
 }
 
 macro_rules! point {
-    ($name:ident, $group:ident, $words:ident, $field:ty, $standard:ty,
+    ($name:ident, $affine:ident, $group:ident, $words:ident, $field:ty, $standard:ty,
      words[$($words_cfg:meta),*],
      $base:ident, $ring:ident = $ring_value:expr, $value:ident => $mul_3b:expr) => {
         #[derive(Clone, Copy)]
@@ -61,6 +63,31 @@ macro_rules! point {
         }
 
         impl $name {
+            #[inline(always)]
+            fn msm_indexed<B: Backend>(
+                points: &[$group],
+                terms: Vec<msm::Term<usize>>,
+                bits: usize,
+                ring: &Ring<Bls12381, B>,
+            ) -> Self {
+                // Scalar-retained cardinality owns the geometry, including identity inputs.
+                let identity = Self::identity();
+                let width = msm::window_width(terms.len());
+                if terms.len() < 32 {
+                    let mut imported = Vec::with_capacity(terms.len());
+                    for term in terms {
+                        imported.push(msm::Term {
+                            point: Self::from_jacobian(&points[term.point], ring),
+                            scalar: term.scalar,
+                        });
+                    }
+                    return msm::compute(imported, bits, ring, identity);
+                }
+
+                let terms = $affine::normalize(points, terms, ring);
+                msm::bucketed(&terms, bits, width, ring, identity)
+            }
+
             pub(super) fn from_affine(x: $field, y: $field) -> Self {
                 Self {
                     x: x.into(),
@@ -308,10 +335,9 @@ macro_rules! point {
             #[inline(always)]
             fn call<B: Backend>(self, backend: B) -> $group {
                 let ring = Ring::<Bls12381, B>::new(backend);
-                let identity = $name::identity();
                 let (terms, bits) =
-                    msm::prepare_terms!(self.0, self.1, scalar => msm::EncodedScalar::new(scalar), point => $name::from_jacobian(point, &ring));
-                msm::compute(terms, bits, &ring, identity).to_jacobian(&ring)
+                    msm::prepare_terms!(0..self.0.len(), self.1, scalar => msm::EncodedScalar::new(scalar), point => point);
+                $name::msm_indexed(self.0, terms, bits, &ring).to_jacobian(&ring)
             }
         }
 
@@ -334,12 +360,12 @@ macro_rules! point {
 }
 
 point!(
-    G1Point, G1, G1Words, Fp, Standard<Bls12381>,
+    G1Point, G1Affine, G1, G1Words, Fp, Standard<Bls12381>,
     words[],
     base, ring = base, value => value.scale::<12>()
 );
 point!(
-    G2Point, G2, G2Words, Fp2, Fp2Standard,
+    G2Point, G2Affine, G2, G2Words, Fp2, Fp2Standard,
     words[cfg(test)],
     base, ring = Fp2Ring::new(base), value => ring.mul_3b(value)
 );

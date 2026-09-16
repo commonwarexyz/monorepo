@@ -13,6 +13,18 @@ pub(super) trait Point<C>: Copy {
     fn neg(&self, context: &C) -> Self;
 }
 
+pub(super) trait BucketInput<P, C>: Copy {
+    fn add_to(&self, bucket: &P, negative: bool, context: &C) -> P;
+}
+
+impl<P: Point<C>, C> BucketInput<P, C> for P {
+    #[inline(always)]
+    fn add_to(&self, bucket: &P, negative: bool, context: &C) -> P {
+        let point = if negative { self.neg(context) } else { *self };
+        bucket.add(&point, context)
+    }
+}
+
 pub(super) struct Term<P> {
     pub point: P,
     pub scalar: EncodedScalar,
@@ -94,15 +106,15 @@ pub(super) fn precompute_window<P: Point<C>, C, const N: usize>(
     }
 }
 
-// Scalar preparation and point import expand in the selected worker. Zero
-// coefficients are filtered before point import, and retained terms set the width.
+// Encoding and input mapping expand in the selected worker. Zero coefficients
+// are filtered before mapping, and retained terms set the width.
 macro_rules! prepare_terms {
     ($points:expr, $scalars:expr, $scalar:ident => $encode:expr, $point:ident => $import:expr) => {{
         let points = $points;
         let scalars = $scalars;
-        let mut terms = alloc::vec::Vec::with_capacity(points.len());
+        let mut terms = alloc::vec::Vec::with_capacity(scalars.len());
         let mut bits = 0;
-        for ($point, $scalar) in points.iter().zip(scalars) {
+        for ($point, $scalar) in points.into_iter().zip(scalars) {
             let scalar = $encode;
             let scalar_bits = scalar.bits();
             if scalar_bits == 0 {
@@ -158,34 +170,43 @@ pub(super) fn compute<P: Point<C>, C>(
             }
         }
     } else {
-        let mut buckets = alloc::vec![identity; 1 << (width - 1)];
-        for window in (0..windows).rev() {
-            if window != windows - 1 {
-                for _ in 0..width {
-                    result = result.double(context);
-                }
+        return bucketed(&terms, bits, width, context, identity);
+    }
+    result
+}
+
+#[inline(always)]
+pub(super) fn bucketed<P: Point<C>, T: BucketInput<P, C>, C>(
+    terms: &[Term<T>],
+    bits: usize,
+    width: usize,
+    context: &C,
+    identity: P,
+) -> P {
+    let windows = bits / width + 1;
+    let mut result = identity;
+    let mut buckets = alloc::vec![identity; 1 << (width - 1)];
+    for window in (0..windows).rev() {
+        if window != windows - 1 {
+            for _ in 0..width {
+                result = result.double(context);
             }
-            let mut used = 0;
-            for term in &terms {
-                let digit = term.scalar.digit(window, width);
-                if digit != 0 {
-                    let magnitude = digit.unsigned_abs() as usize;
-                    used = used.max(magnitude);
-                    let point = if digit < 0 {
-                        term.point.neg(context)
-                    } else {
-                        term.point
-                    };
-                    let bucket = &mut buckets[magnitude - 1];
-                    *bucket = bucket.add(&point, context);
-                }
+        }
+        let mut used = 0;
+        for term in terms {
+            let digit = term.scalar.digit(window, width);
+            if digit != 0 {
+                let magnitude = digit.unsigned_abs() as usize;
+                used = used.max(magnitude);
+                let bucket = &mut buckets[magnitude - 1];
+                *bucket = term.point.add_to(bucket, digit < 0, context);
             }
-            let mut sum = identity;
-            for bucket in buckets[..used].iter_mut().rev() {
-                sum = sum.add(bucket, context);
-                result = result.add(&sum, context);
-                *bucket = identity;
-            }
+        }
+        let mut sum = identity;
+        for bucket in buckets[..used].iter_mut().rev() {
+            sum = sum.add(bucket, context);
+            result = result.add(&sum, context);
+            *bucket = identity;
         }
     }
     result
