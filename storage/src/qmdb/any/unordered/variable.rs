@@ -184,7 +184,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }

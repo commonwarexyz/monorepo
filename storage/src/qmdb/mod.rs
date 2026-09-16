@@ -68,12 +68,12 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use cache::Cache;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    cache::Clock,
     channel::mpsc,
 };
 use core::{num::NonZeroUsize, ops::Range};
@@ -82,8 +82,9 @@ use std::{collections::VecDeque, sync::Arc};
 use thiserror::Error;
 
 pub mod any;
-pub mod batch_chain;
 pub(crate) mod bitmap;
+mod cache;
+pub mod chain;
 pub(crate) mod compact;
 pub mod compaction;
 #[cfg(test)]
@@ -223,7 +224,7 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     ///
-    /// See [`batch_chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
@@ -291,7 +292,7 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -313,7 +314,7 @@ where
 
                 // This update op is now a `find_update_op` candidate for later ops of its key.
                 if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key.clone());
+                    cache.put(loc, op.into_key().expect("operation without key"));
                 }
             }
         } else if op.has_floor().is_some() {
@@ -330,7 +331,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -352,7 +353,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -370,7 +371,7 @@ where
     // the authoritative deletion.
     cursor.delete();
     if let Some(cache) = cache {
-        cache.remove(&*loc);
+        cache.remove(*loc);
     }
 
     Ok(Some(loc))
@@ -382,7 +383,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -407,7 +408,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -424,7 +425,7 @@ where
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
-            cache.remove(&*loc);
+            cache.remove(*loc);
         }
         return Ok(Some(loc));
     }
@@ -441,7 +442,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -450,7 +451,7 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
             *k == *key
         } else {
             let op = reader.read(*loc).await?;
@@ -460,7 +461,7 @@ where
             // Every caller immediately mutates a match. Admitting it here could evict a live
             // candidate before the caller invalidates this location.
             if !matches && let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, k.clone());
+                cache.put(*loc, op.into_key().expect("operation without key"));
             }
             matches
         };
@@ -576,7 +577,7 @@ where
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
@@ -873,18 +874,15 @@ pub trait SnapshotBuild<F: Family>:
 {
     /// The concurrency configuration the build consumes. Index types that always build serially
     /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + 'static;
+    type Concurrency: Copy + Send + Sync + 'static;
 
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache (`None` disables it).
-    // In-crate callers await this future at concrete index types, so the flexibility an explicit
-    // `Send` bound on the returned future would add is unused.
-    #[allow(async_fn_in_trait)]
-    async fn build_snapshot<E, C>(
+    /// build's `(location -> key)` cache in entries (`None` disables it).
+    fn build_snapshot<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -892,12 +890,14 @@ pub trait SnapshotBuild<F: Family>:
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        async move {
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        }
     }
 }
 
