@@ -11,6 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::future::Future;
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -62,7 +63,7 @@ where
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
-        locs: impl IntoIterator<Item = Location<F>>,
+        locs: impl Iterator<Item = Location<F>> + Send,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
         for loc in locs {
@@ -78,32 +79,32 @@ where
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
-        if self.is_empty() {
-            return Ok(None);
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get_span(
+        &self,
+        key: &K,
+    ) -> impl Future<Output = Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            if self.is_empty() {
+                return Ok(None);
+            }
+
+            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+                return Ok(Some(span));
+            }
+
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+                // DB is empty.
+                return Ok(None);
+            };
+
+            let span = self.find_span(iter.copied(), key).await?.expect(
+                "a span that includes any given key should always exist if db is non-empty",
+            );
+
+            Ok(Some(span))
         }
-
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let span = self.find_span(locs, key).await?;
-        if let Some(span) = span {
-            return Ok(Some(span));
-        }
-
-        let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
-            // DB is empty.
-            return Ok(None);
-        };
-
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = iter.copied().collect();
-        let span = self
-            .find_span(locs, key)
-            .await?
-            .expect("a span that includes any given key should always exist if db is non-empty");
-
-        Ok(Some(span))
     }
 
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
@@ -114,56 +115,62 @@ where
     }
 
     /// Returns the key data for `key` with its location, or None if the key is not active.
-    pub(crate) async fn get_with_loc(
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
+    pub(crate) fn get_with_loc(
         &self,
         key: &K,
-    ) -> Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>> {
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        for loc in locs {
-            let op = self.log.read(*loc).await?;
-            assert!(
-                op.is_update(),
-                "location does not reference update operation. loc={loc}"
-            );
-            if op.key().expect("update operation must have key") == key {
-                let Operation::Update(data) = op else {
-                    unreachable!("expected update operation");
-                };
-                return Ok(Some((data, loc)));
+    ) -> impl Future<Output = Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>>> + Send
+    {
+        async move {
+            for loc in self.snapshot.get(key).copied() {
+                let op = self.log.read(*loc).await?;
+                assert!(
+                    op.is_update(),
+                    "location does not reference update operation. loc={loc}"
+                );
+                if op.key().expect("update operation must have key") == key {
+                    let Operation::Update(data) = op else {
+                        unreachable!("expected update operation");
+                    };
+                    return Ok(Some((data, loc)));
+                }
             }
-        }
 
-        Ok(None)
+            Ok(None)
+        }
     }
 
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
-    pub async fn stream_range<'a>(
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
+    pub fn stream_range<'a>(
         &'a self,
         start: K,
-    ) -> Result<
-        impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + 'a,
-        crate::qmdb::Error<F>,
-    >
+    ) -> impl Future<
+        Output = Result<
+            impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + Send + 'a,
+            crate::qmdb::Error<F>,
+        >,
+    > + Send
     where
         V: 'a,
     {
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let start_locs: Vec<Location<F>> = self.snapshot.get(&start).copied().collect();
-        let mut init_pending = self.fetch_all_updates(start_locs.iter()).await?;
-        init_pending.retain(|x| x.key >= start);
+        async move {
+            let mut init_pending = self
+                .fetch_all_updates(self.snapshot.get(&start).copied())
+                .await?;
+            init_pending.retain(|x| x.key >= start);
 
-        Ok(stream::unfold(
-            (start, init_pending),
-            move |(driver_key, mut pending): (K, Vec<Update<K, V>>)| async move {
-                if !pending.is_empty() {
-                    let item = pending.pop().expect("pending is not empty");
-                    return Some((Ok((item.key, item.value)), (driver_key, pending)));
-                }
+            Ok(stream::unfold(
+                (start, init_pending),
+                move |(driver_key, mut pending): (K, Vec<Update<K, V>>)| async move {
+                    if !pending.is_empty() {
+                        let item = pending.pop().expect("pending is not empty");
+                        return Some((Ok((item.key, item.value)), (driver_key, pending)));
+                    }
 
-                // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-                let locs: Vec<Location<F>> = {
                     let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
                     else {
                         return None; // DB is empty
@@ -171,32 +178,29 @@ where
                     if wrapped {
                         return None; // End of DB
                     }
-                    iter.copied().collect()
-                };
 
-                // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
-                // fetch a much larger batch of "pending" keys.
-                match self.fetch_all_updates(locs.iter()).await {
-                    Ok(mut pending) => {
-                        let item = pending.pop().expect("pending is not empty");
-                        let key = item.key.clone();
-                        Some((Ok((item.key, item.value)), (key, pending)))
+                    // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
+                    // fetch a much larger batch of "pending" keys.
+                    match self.fetch_all_updates(iter.copied()).await {
+                        Ok(mut pending) => {
+                            let item = pending.pop().expect("pending is not empty");
+                            let key = item.key.clone();
+                            Some((Ok((item.key, item.value)), (key, pending)))
+                        }
+                        Err(e) => Some((Err(e), (driver_key, pending))),
                     }
-                    Err(e) => Some((Err(e), (driver_key, pending))),
-                }
-            },
-        ))
+                },
+            ))
+        }
     }
 
     /// Fetches all update operations corresponding to the input locations, returning the result in
     /// reverse order of the keys.
     async fn fetch_all_updates(
         &self,
-        locs: impl IntoIterator<Item = &Location<F>>,
+        locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        let futures = locs
-            .into_iter()
-            .map(|loc| Self::get_update_op(&self.log, *loc));
+        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
