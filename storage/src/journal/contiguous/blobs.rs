@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_codec::{Buf, Codec, Error as CodecError, ReadExt};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -809,7 +809,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
+            self.buf.append(buf.freeze());
             if self.offset == blob_size {
                 self.exhausted = true;
             }
