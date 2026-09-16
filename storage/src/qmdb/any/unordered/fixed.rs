@@ -417,6 +417,154 @@ pub(crate) mod test {
         });
     }
 
+    /// The floor prefetch armed by apply_batch actually warms the log: after a cold
+    /// reopen, applying batches spawns warming whose pages then serve sync probes at the
+    /// floor.
+    #[test_traced]
+    fn test_apply_batch_floor_prefetch_warms_log() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            use crate::journal::contiguous::Contiguous as _;
+
+            // Build a database with enough committed history that the floor sits inside
+            // sealed blobs, then reopen it with a fresh page cache.
+            let cfg = fixed_db_config::<TwoCap>("prefetch-e2e", &context);
+            let mut db = AnyTest::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..300u64 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash(&[&(i + 1).to_be_bytes()]);
+                let batch = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                // Yield so each armed warming task drains instead of queueing behind the
+                // population loop.
+                reschedule().await;
+            }
+            let db = db.commit().await.unwrap();
+            drop(db);
+
+            let mut db = AnyTest::init(context.child("second"), cfg).await.unwrap();
+            let floor = *db.inactivity_floor_loc;
+            assert!(floor > 0, "history must have raised the floor");
+
+            // Apply a batch to arm the prefetch, then yield so the detached warming task
+            // runs to completion.
+            let key = Sha256::hash(&[&1000u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&2000u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+
+            // Drive the deterministic scheduler until the detached warming task lands the
+            // floor's page in the cache (bounded so a broken prefetch still fails fast).
+            let floor = *db.inactivity_floor_loc;
+            let mut warm = false;
+            for _ in 0..50_000 {
+                reschedule().await;
+                if db.log.try_read_sync(floor).is_some() {
+                    warm = true;
+                    break;
+                }
+            }
+            assert!(warm, "floor position {floor} should be warm after prefetch");
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Applying a batch that advances the floor arms the adaptive prefetch window.
+    #[test_traced]
+    fn test_apply_batch_arms_floor_prefetch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+            assert_eq!(db.floor_prefetch_target, 0);
+            for i in 0..3u64 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                let value = Sha256::hash(&[&(i + 100).to_be_bytes()]);
+                let batch = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+            assert!(db.floor_prefetch_target > 0);
+            let target = db.floor_prefetch_target;
+
+            // Deleting the last active keys snaps the floor to the tip without scanning:
+            // the jump must not poison the estimator.
+            let mut batch = db.new_batch();
+            for i in 0..3u64 {
+                let key = Sha256::hash(&[&i.to_be_bytes()]);
+                batch = batch.write(key, None);
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.active_keys, 0);
+            assert_eq!(
+                db.floor_prefetch_target, target,
+                "delete-all must not update the estimator"
+            );
+
+            // A delete-all snap collapsed inside an applied chain must not poison the
+            // estimator either: build (delete-all) -> (re-insert) and apply only the tip.
+            let target_after_refill = db.floor_prefetch_target;
+            let key_a = Sha256::hash(&[&20u64.to_be_bytes()]);
+            let val_a = Sha256::hash(&[&21u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key_a, Some(val_a))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let mut delete_all = db.new_batch();
+            for i in [7u64, 20u64] {
+                delete_all = delete_all.write(Sha256::hash(&[&i.to_be_bytes()]), None);
+            }
+            let delete_all = delete_all.merkleize(&db, None).await.unwrap();
+            let reinsert = delete_all
+                .new_batch::<Sha256>()
+                .write(Sha256::hash(&[&30u64.to_be_bytes()]), Some(val_a))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(reinsert).await.unwrap();
+            assert!(
+                db.floor_prefetch_target <= target_after_refill.max(4),
+                "collapsed snap must not inflate the estimator: {}",
+                db.floor_prefetch_target
+            );
+
+            // Refilling resumes normal scan-based updates from the sane estimate.
+            let key = Sha256::hash(&[&7u64.to_be_bytes()]);
+            let value = Sha256::hash(&[&8u64.to_be_bytes()]);
+            let batch = db
+                .new_batch()
+                .write(key, Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            assert!(db.floor_prefetch_target <= target.max(4));
+
+            let db = db.commit().await.unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// `get_many` over a batch large enough for the fused sharded path matches per-key `get`.
     #[test_traced]
     fn test_get_many_fused_sharded_matches_get() {
