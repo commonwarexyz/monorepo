@@ -104,7 +104,8 @@ O’Grady</a></div>
         <p><em>Update (9/16/26): Operators can process payments to the
         same recipient in parallel across payers, with one signature
         check covering each payer’s batch. Validators retain the account
-        state, activity, payouts, and local signing decisions in QMDB
+        state, activity, payouts, and local signing decisions in <a
+        href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/">QMDB</a>
         databases and apply only the changes at each
         settlement.</em></p>
         <p><em>Update (8/20/26): Clearing now uses a 32-byte commitment
@@ -249,10 +250,7 @@ O’Grady</a></div>
         class="math inline">V_a=\{b:(20,1)\}</span>.</p>
         <p>The wallet durably saves each request before sending it,
         retries the same bytes if the response is lost, and retains the
-        verified acknowledgment and openings. One signature can also
-        advance several recipients in a batch that the operator either
-        rejects in full or accepts with one acknowledgment containing an
-        opening for each advanced entry.</p>
+        verified acknowledgment and openings.</p>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>Bajillion defines each payment as an update to the payer’s
@@ -352,8 +350,10 @@ O’Grady</a></div>
         class="math inline">b</span> and <span
         class="math inline">c</span> retained in the close.</p>
         </div>
-        <p>QMDB’s Current Ordered variant, an authenticated key-value
-        store, keeps each live account’s balance under its public key,
+        <p><a
+        href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/ordered/">QMDB’s
+        Current Ordered variant</a>, an authenticated key-value store,
+        keeps each live account’s balance under its public key,
         committed by <span
         class="math inline">\mathsf{StateRoot}</span>. Deposits and
         payments can add accounts, and a zero balance removes the
@@ -385,8 +385,9 @@ O’Grady</a></div>
         <li>The <strong>payout root</strong> commits the cumulative log
         of external payout outputs.</li>
         </ul>
-        <p>Activity and payouts use Keyless QMDBs backed by flat Merkle
-        mountain ranges (MMRs).</p>
+        <p>Activity and payouts use <a
+        href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/keyless/">Keyless
+        QMDBs</a> backed by flat Merkle mountain ranges (MMRs).</p>
         <p>Each close appends its sorted account Rows, then its payment
         Entries grouped by payer. A Row records the account’s final
         debit, sequence number, and outgoing-payment binary Merkle tree
@@ -646,13 +647,15 @@ O’Grady</a></div>
         withdrawal authorization waits until its signed deadline before
         signing another payment.</p>
         <h2 id="collecting-fees">Collecting Fees</h2>
-        <p>An operator can require the payer to include a payment to a
-        designated fee recipient, such as the operator’s own account, in
-        the same signed batch. It checks the requested payments and the
-        fee increment before countersigning. If the fee is insufficient,
-        it rejects the batch. The payer authorizes the fee alongside the
-        other payments, and the operator’s acknowledgment binds them
-        together.</p>
+        <p>Because one signature can advance several recipients in a
+        batch, an operator can require the payer to include a payment to
+        a designated fee recipient, such as the operator’s own account.
+        It checks the requested payments and the fee increment before
+        countersigning. If the fee is insufficient, it rejects the
+        entire batch. For an accepted batch, it returns one
+        acknowledgment containing an opening for each advanced entry.
+        The payer authorizes the fee alongside the other payments, and
+        the operator’s acknowledgment binds them together.</p>
         <p>The operator can price each transfer type or payer
         independently, including volume discounts or negotiated rates.
         Validators net the fee entry like any other payment, and

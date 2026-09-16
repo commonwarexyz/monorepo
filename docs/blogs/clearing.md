@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in QMDB databases and apply only the changes at each settlement.*
+*Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in [QMDB](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/) databases and apply only the changes at each settlement.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -107,7 +107,7 @@ $$
 
 For this payment, $n_a=1$, $D_a=20$, and $V_a=\{b:(20,1)\}$.
 
-The wallet durably saves each request before sending it, retries the same bytes if the response is lost, and retains the verified acknowledgment and openings. One signature can also advance several recipients in a batch that the operator either rejects in full or accepts with one acknowledgment containing an opening for each advanced entry.
+The wallet durably saves each request before sending it, retries the same bytes if the response is lost, and retains the verified acknowledgment and openings.
 
 ## Optimizing for Hot Accounts
 
@@ -175,7 +175,7 @@ Without deposits or withdrawals, $L_{e+1}=L_e=200$.
 Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
 :::
 
-QMDB's Current Ordered variant, an authenticated key-value store, keeps each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record.
+[QMDB's Current Ordered variant](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/ordered/), an authenticated key-value store, keeps each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record.
 
 When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before authorizing a sweep.
 
@@ -191,7 +191,7 @@ From these results, every validator derives three roots, all backed by QMDB:
 - The **activity root** commits the cumulative log of account Rows and payment Entries.
 - The **payout root** commits the cumulative log of external payout outputs.
 
-Activity and payouts use Keyless QMDBs backed by flat Merkle mountain ranges (MMRs).
+Activity and payouts use [Keyless QMDBs](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/keyless/) backed by flat Merkle mountain ranges (MMRs).
 
 Each close appends its sorted account Rows, then its payment Entries grouped by payer. A Row records the account's final debit, sequence number, and outgoing-payment binary Merkle tree (BMT) root. The certified row range includes zero-net participants, so their receipts remain challengeable even when their balances do not change. A proof server can read the Entries directly from QMDB to reconstruct the payer's signed BMT.
 
@@ -327,7 +327,7 @@ Deposits fixed at registration are available immediately. A new account funded o
 
 ## Collecting Fees
 
-An operator can require the payer to include a payment to a designated fee recipient, such as the operator's own account, in the same signed batch. It checks the requested payments and the fee increment before countersigning. If the fee is insufficient, it rejects the batch. The payer authorizes the fee alongside the other payments, and the operator's acknowledgment binds them together.
+Because one signature can advance several recipients in a batch, an operator can require the payer to include a payment to a designated fee recipient, such as the operator's own account. It checks the requested payments and the fee increment before countersigning. If the fee is insufficient, it rejects the entire batch. For an accepted batch, it returns one acknowledgment containing an opening for each advanced entry. The payer authorizes the fee alongside the other payments, and the operator's acknowledgment binds them together.
 
 The operator can price each transfer type or payer independently, including volume discounts or negotiated rates. Validators net the fee entry like any other payment, and settlement uses the same commitments and proofs. The fee schedule stays with the operator, so changing it requires no protocol change.
 
