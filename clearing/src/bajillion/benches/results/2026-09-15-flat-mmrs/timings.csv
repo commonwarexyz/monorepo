@@ -1,0 +1,81 @@
+kind,name,mean_ns,samples
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1000000 operations=1000002 floor=0,2246.480942397918,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1024 operations=1026 floor=0,1425.527016532444,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=128 operations=130 floor=0,1136.1989781413909,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=2 operations=4 floor=0,678.9168707443941,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=1000000 R=128 operations=1000131 floor=0,1758.7678665463827,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=1024 R=128 operations=1155 floor=0,1319.3517782961146,20
+criterion,bajillion::native_proofs::activity_verify/absence_adjacent/H=65536 R=128 operations=65667 floor=0,1305.6588846793475,20
+criterion,bajillion::native_proofs::activity_verify/absence_empty/H=0 R=0 operations=2 floor=0,8.027353948705464,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=0 R=1 operations=3 floor=0,449.0521645055508,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=0 R=1000000 operations=1000002 floor=0,2140.652104487204,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=0 R=1024 operations=1026 floor=0,1302.797659046717,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=0 R=128 operations=130 floor=0,990.041528282088,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=0 R=2 operations=4 floor=0,459.2820985028208,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=1000000 R=128 operations=1000131 floor=0,1605.0778230687604,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=1024 R=128 operations=1155 floor=0,1128.4744845531363,20
+criterion,bajillion::native_proofs::activity_verify/absence_left/H=65536 R=128 operations=65667 floor=0,1102.9703938773769,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=0 R=1 operations=3 floor=0,449.6718253244183,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=0 R=1000000 operations=1000002 floor=0,1008.6572154261655,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=0 R=1024 operations=1026 floor=0,495.4537690446544,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=0 R=128 operations=130 floor=0,483.5492413695667,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=0 R=2 operations=4 floor=0,464.2865608991583,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=1000000 R=128 operations=1000131 floor=0,1214.457258196268,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=1024 R=128 operations=1155 floor=0,640.74188052352,20
+criterion,bajillion::native_proofs::activity_verify/absence_right/H=65536 R=128 operations=65667 floor=0,641.1779463428983,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=0 R=1 operations=3 floor=0,427.1298347735984,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=0 R=1000000 operations=1000002 floor=0,2110.760115497436,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=0 R=1024 operations=1026 floor=0,1271.6048024702727,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=0 R=128 operations=130 floor=0,973.1525915928978,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=0 R=2 operations=4 floor=0,441.6654397466394,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=1000000 R=128 operations=1000131 floor=0,1535.1770504094666,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=1024 R=128 operations=1155 floor=0,1109.7016997038859,20
+criterion,bajillion::native_proofs::activity_verify/presence/H=65536 R=128 operations=65667 floor=0,1100.3877886478806,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=0 W=1 N=1000000 operations=3 floor=0,401.373796021074,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=0 W=1000000 N=1000000 operations=1000002 floor=0,2156.1497957399997,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=0 W=1024 N=1000000 operations=1026 floor=0,1239.740416814107,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=0 W=500000 N=1000000 operations=500002 floor=0,2044.183989935998,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=1000000 W=1 N=1000000 operations=1000004 floor=0,1038.9384833644308,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=1024 W=1 N=1000000 operations=1028 floor=0,516.2047852973327,20
+criterion,bajillion::native_proofs::payout_verify/current_first/H=65536 W=1 N=1000000 operations=65540 floor=0,526.0235834415379,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=0 W=1 N=1000000 operations=3 floor=0,400.99622873552846,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=0 W=1000000 N=1000000 operations=1000002 floor=0,962.360030587263,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=0 W=1024 N=1000000 operations=1026 floor=0,456.1454216993805,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=0 W=500000 N=1000000 operations=500002 floor=0,950.0641443603414,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=1000000 W=1 N=1000000 operations=1000004 floor=0,1044.8981214619166,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=1024 W=1 N=1000000 operations=1028 floor=0,535.1523075453067,20
+criterion,bajillion::native_proofs::payout_verify/current_last/H=65536 W=1 N=1000000 operations=65540 floor=0,545.0441041534662,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=0 W=1 N=1000000 operations=3 floor=0,401.89079998959403,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=0 W=1000000 N=1000000 operations=1000002 floor=0,2149.963827323848,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=0 W=1024 N=1000000 operations=1026 floor=0,1231.262774067272,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=0 W=500000 N=1000000 operations=500002 floor=0,2044.1341888845145,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=1000000 W=1 N=1000000 operations=1000004 floor=0,1056.9050688531202,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=1024 W=1 N=1000000 operations=1028 floor=0,524.7569682970714,20
+criterion,bajillion::native_proofs::payout_verify/current_middle/H=65536 W=1 N=1000000 operations=65540 floor=0,543.2901369079666,20
+criterion,bajillion::native_proofs::payout_verify/empty_commit/H=0 W=0 N=1000000 operations=2 floor=0,285.31792883636433,20
+criterion,bajillion::native_proofs::payout_verify/historical/H=1000000 W=1 N=1000000 operations=1000002 floor=0,2091.978413154092,20
+criterion,bajillion::native_proofs::payout_verify/historical/H=1024 W=1 N=1000000 operations=1026 floor=0,1243.6369750841282,20
+criterion,bajillion::native_proofs::payout_verify/historical/H=65536 W=1 N=1000000 operations=65538 floor=0,1803.4412927683181,20
+criterion,bajillion::native_proofs::payout_verify/historical_refreshed/H=1000000 W=1 N=1000000 operations=1000004 floor=0,2074.1361199042085,20
+criterion,bajillion::native_proofs::payout_verify/historical_refreshed/H=1024 W=1 N=1000000 operations=1028 floor=0,1246.2560958939735,20
+criterion,bajillion::native_proofs::payout_verify/historical_refreshed/H=65536 W=1 N=1000000 operations=65540 floor=0,1824.0255035162743,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=0 W=1 N=1000000 operations=5 floor=0,486.2437311767955,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=0 W=1000000 N=1000000 operations=1000004 floor=0,2159.446869411563,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=0 W=1024 N=1000000 operations=1028 floor=0,1237.1611937178604,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=0 W=500000 N=1000000 operations=500004 floor=0,2025.9279533279082,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=1000000 W=1 N=1000000 operations=1000006 floor=0,1137.003147485991,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=1024 W=1 N=1000000 operations=1030 floor=0,616.2553933816663,20
+criterion,bajillion::native_proofs::payout_verify/old_after_append/H=65536 W=1 N=1000000 operations=65542 floor=0,624.6421682068184,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=0 W=1 N=1000000 operations=7 floor=2,491.27847523367564,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=0 W=1000000 N=1000000 operations=1000006 floor=1000001,2644.0644780609773,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=0 W=1024 N=1000000 operations=1030 floor=1025,1246.6169539213156,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=0 W=500000 N=1000000 operations=500006 floor=500001,2509.2474341385414,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=1000000 W=1 N=1000000 operations=1000008 floor=1000003,673.4377647111789,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=1024 W=1 N=1000000 operations=1032 floor=1027,584.1413197202511,20
+criterion,bajillion::native_proofs::payout_verify/old_after_floor/H=65536 W=1 N=1000000 operations=65544 floor=65539,598.6912559094452,20
+criterion,bajillion::prepare/N=1000000 A=1000000 B=512 K=1 E=1000000,1612635093.4,20
+criterion,bajillion::prepare/N=1000000 A=1024 B=512 K=1 E=1024,1162897.75,20
+criterion,bajillion::prepare/N=1000000 A=1024 B=512 K=8 E=8192,3295847.4,20
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=1024 B=512 K=1 W=0 H=0,276161537.3333333,3
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=1024 B=512 K=8 W=0 H=0,1151880715.3333333,3
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=1024 B=8 K=8 W=0 H=0,1152647687.6666667,3

@@ -14,6 +14,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
+* [clearing](./clearing/README.md): Settle actions at scale.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
 * [collector](./collector/README.md): Collect responses to committable requests.
@@ -42,6 +43,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
+* [terminal](./examples/terminal/README.md): Clear payments through a SQLite operator and settle them on a chain.
 
 ## Miscellaneous
 

@@ -1,0 +1,813 @@
+{
+  "build_environment": {
+    "cargo_home_config": {},
+    "rustup_toolchain": null,
+    "unset_overrides": [
+      "AR",
+      "CC",
+      "CXX",
+      "RUSTFLAGS",
+      "CARGO_ENCODED_RUSTFLAGS",
+      "RUSTC_WRAPPER",
+      "RUSTC_WORKSPACE_WRAPPER",
+      "CARGO_BUILD_RUSTFLAGS",
+      "CARGO_BUILD_TARGET",
+      "CARGO_PROFILE_*",
+      "CARGO_TARGET_*_LINKER",
+      "CARGO_TARGET_*_RUSTFLAGS"
+    ]
+  },
+  "commands": [
+    {
+      "binary_name": "bajillion-570d0bd092ec1873",
+      "binary_sha256": "006cc9fb5e2e9650af54440d73f3ba3400cb68944eed1137cf7e23a34363118e",
+      "command": [
+        "cargo",
+        "bench",
+        "--locked",
+        "-p",
+        "commonware-clearing",
+        "--features",
+        "bench",
+        "--bench",
+        "bajillion",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "elapsed_seconds": 37.69934953699976,
+      "environment": {},
+      "exit_code": 0,
+      "name": "build-clearing",
+      "started_utc": "2026-09-16T06:05:15.277397+00:00",
+      "stderr_sha256": "d65babd518d9519d621a2eb44089f492b675324b2f12d473b671fffa8f5fe667",
+      "stdout_sha256": "f2bc89f3b1a5703b9e772cc92bcaf5230b5bf7ad2740b64d3b6736922eff0ceb",
+      "telemetry_sha256": "36d1a403e5caa0f712f8b96d148aa65a0991e0b34cf4efd53da4703a3985f959",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "binary_name": "durable_ack-c72c5b89bc870ebd",
+      "binary_sha256": "306d4ae07525d45a33e6bf0deb39f34ccbf6945f4563d77eafc3c5379211019a",
+      "command": [
+        "cargo",
+        "bench",
+        "--locked",
+        "-p",
+        "commonware-terminal",
+        "--bench",
+        "durable_ack",
+        "--features",
+        "bench",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "elapsed_seconds": 166.796368798,
+      "environment": {},
+      "exit_code": 0,
+      "name": "build-ack",
+      "started_utc": "2026-09-16T06:05:53.342047+00:00",
+      "stderr_sha256": "e0bba8efe4855dd49dd8dbd05bb944aaf2604d6ae11e3d120dacf94cc5f21b86",
+      "stdout_sha256": "cf3404dfb156152bf81a0d785789c0d727d02ef87f74ebcf7ffb7f7bcc9b97db",
+      "telemetry_sha256": "26e1f6a194db644bd6f0073fc7b170521c9bc304a5fbad523e79b2bc8d8f22bf",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "durable_ack-c72c5b89bc870ebd",
+        "--storage-directory",
+        "/opt/bajillion-db/ack-scaling/gib-publication-scaling",
+        "--accounts",
+        "1000000",
+        "--senders",
+        "1000000",
+        "--recipients",
+        "512",
+        "--out-degree",
+        "1",
+        "--withdrawals",
+        "0",
+        "--history",
+        "0",
+        "--samples",
+        "3",
+        "--warmup",
+        "0",
+        "--runtime-workers",
+        "2",
+        "--workers",
+        "16",
+        "--benchmark-limits"
+      ],
+      "elapsed_seconds": 919.42962291,
+      "environment": {},
+      "exit_code": 0,
+      "name": "ack-N1000000-A1000000-B512-K1-W0-H0-timed",
+      "started_utc": "2026-09-16T06:08:40.703196+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "d0e9960c56139974482b607d3e0d79b243553cbda5ac6c28d7f70cc29b658c36",
+      "telemetry_sha256": "a6111129fd49bcc4279e875bbf27135449bee82da10c6d84fc6945a8e8c792b0",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "durable_ack-c72c5b89bc870ebd",
+        "--storage-directory",
+        "/opt/bajillion-db/ack-scaling/gib-publication-scaling",
+        "--accounts",
+        "1000000",
+        "--senders",
+        "100000",
+        "--recipients",
+        "512",
+        "--out-degree",
+        "1",
+        "--withdrawals",
+        "0",
+        "--history",
+        "0",
+        "--samples",
+        "3",
+        "--warmup",
+        "0",
+        "--runtime-workers",
+        "2",
+        "--workers",
+        "16",
+        "--benchmark-limits"
+      ],
+      "elapsed_seconds": 101.89397227500012,
+      "environment": {},
+      "exit_code": 0,
+      "name": "ack-N1000000-A100000-B512-K1-W0-H0-timed",
+      "started_utc": "2026-09-16T06:24:00.292942+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "1e91e22eabdb8759348a0304e26bb3d930e81e72ceb4ff52bec582159f16fdb3",
+      "telemetry_sha256": "1c479adc477ef0323986bea39fc96fbe26d4b32bccfd771bdc301cc47db222da",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "durable_ack-c72c5b89bc870ebd",
+        "--storage-directory",
+        "/opt/bajillion-db/ack-scaling/gib-publication-scaling",
+        "--accounts",
+        "1000000",
+        "--senders",
+        "10000",
+        "--recipients",
+        "512",
+        "--out-degree",
+        "1",
+        "--withdrawals",
+        "0",
+        "--history",
+        "0",
+        "--samples",
+        "3",
+        "--warmup",
+        "0",
+        "--runtime-workers",
+        "2",
+        "--workers",
+        "16",
+        "--benchmark-limits"
+      ],
+      "elapsed_seconds": 19.172460463999414,
+      "environment": {},
+      "exit_code": 0,
+      "name": "ack-N1000000-A10000-B512-K1-W0-H0-timed",
+      "started_utc": "2026-09-16T06:25:42.349657+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "40afc7ffcb96adf826e703b898558ac35fc8990f555b7cde142f81b60a8722cb",
+      "telemetry_sha256": "9c3702c8300dece2445babe9380581c743a6504f3c8bee278760c317e9f4a17f",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "durable_ack-c72c5b89bc870ebd",
+        "--storage-directory",
+        "/opt/bajillion-db/ack-scaling/gib-publication-scaling",
+        "--accounts",
+        "1000000",
+        "--senders",
+        "1000",
+        "--recipients",
+        "512",
+        "--out-degree",
+        "1",
+        "--withdrawals",
+        "0",
+        "--history",
+        "0",
+        "--samples",
+        "3",
+        "--warmup",
+        "0",
+        "--runtime-workers",
+        "2",
+        "--workers",
+        "16",
+        "--benchmark-limits"
+      ],
+      "elapsed_seconds": 11.102965256000061,
+      "environment": {},
+      "exit_code": 0,
+      "name": "ack-N1000000-A1000-B512-K1-W0-H0-timed",
+      "started_utc": "2026-09-16T06:26:01.685812+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "565e0d30b4890bc514be19c75ff09863057557f6e1d3cb5d3b8a8b7eb8c0bdd7",
+      "telemetry_sha256": "a9b85b86fa4a0e3ea95cdf783d2028d529c44c5b8f22fe3ac606b77951c03ecb",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 1.0235075020000295,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "1000"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R1000-check",
+      "started_utc": "2026-09-16T06:26:12.952506+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "fd11c767e1257e21d0d6e2e175006e32f316c923356c48e4168341c0ad81c138",
+      "telemetry_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 1.0230411289994663,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "10000"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R10000-check",
+      "started_utc": "2026-09-16T06:26:14.116155+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "ce64bc7ce48c9b94b65b3e70914adaaa575a1f7e80eb956d1283f2a2ec7c2e46",
+      "telemetry_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 2.0297782850002477,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "100000"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R100000-check",
+      "started_utc": "2026-09-16T06:26:15.278959+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "8ae0942f6ef2ed65c8344701dd1aec9798bbc4fc30307998156a410729546055",
+      "telemetry_sha256": "fa010c292d98684024819bcb4791922228bc02b007edd84c3886782a326db5ae",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 11.09017817699987,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "1000000"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R1000000-check",
+      "started_utc": "2026-09-16T06:26:17.449655+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "1d907c86c5da4e9649175e37e68320847b32b166721bf315a942ec6cc4bc73cd",
+      "telemetry_sha256": "3e31992cf8bcb4cd0bdb8a41c239360d06e38118584443aa66a94072e0d91a47",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 12.112410144999558,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "challenge-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=1000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0"
+      },
+      "exit_code": 0,
+      "name": "challenge-1000000-1000-512-1",
+      "started_utc": "2026-09-16T06:26:28.679622+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "5f0a01dc5bb5931c5e81cbe3e92673d59a0c779f329b7b7132fbae7d417921bb",
+      "telemetry_sha256": "0de1fa2da69b15cc6a1cd780bffb8c49f290a9956a66688d95aab65f06184e11",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 12.113857917000132,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "challenge-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=10000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0"
+      },
+      "exit_code": 0,
+      "name": "challenge-1000000-10000-512-1",
+      "started_utc": "2026-09-16T06:26:40.933112+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "3a65097d5f0ce08d18ad2ce3ae0639c083e702479c02234c57b7e0b846238bd5",
+      "telemetry_sha256": "1c47ad89cd7bb10bb62518109f6f355107609cb01d4b2c1eb00587c1bd08685f",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 20.17959613700077,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "challenge-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=100000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0"
+      },
+      "exit_code": 0,
+      "name": "challenge-1000000-100000-512-1",
+      "started_utc": "2026-09-16T06:26:53.187925+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "7a1ba2c08afa14cd0dbe3ea94dc43db429c9b9bace1b2d46ade463e8df2db04b",
+      "telemetry_sha256": "dbfdaae39fd233105f778752753d0a257b21a8215ce68718a998681cd5357a00",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 85.67333972199958,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "challenge-sizes",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=1000000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0"
+      },
+      "exit_code": 0,
+      "name": "challenge-1000000-1000000-512-1",
+      "started_utc": "2026-09-16T06:27:13.509952+00:00",
+      "stderr_sha256": "3f7f92052702ef0ec1db090121572a45f933879e818ce6420af1372a58816cdc",
+      "stdout_sha256": "2040abd9061606ee59c73a84a5ea8a516e1c6ddb0aad608b4f1e5d77cb6bf439",
+      "telemetry_sha256": "5ed530fc498210d542af7617626bdd0bf486b375f883e15efe8d905c3dcd42c6",
+      "termination_reason": null,
+      "timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 1.0231865819996528,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-proof-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "1000",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R1000-timed-raw",
+      "started_utc": "2026-09-16T06:28:39.324786+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6b4e4c5613609642fa737cb4657199e58cbda719b5f5b400428461be075074ed",
+      "telemetry_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 1.0233691230005206,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-proof-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "10000",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R10000-timed-raw",
+      "started_utc": "2026-09-16T06:28:40.531055+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "cb86d088541f356f7ab2f056eb8b69a5994f4afa096a7ad90b40c087860ea611",
+      "telemetry_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 2.0307953540004746,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-proof-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "100000",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R100000-timed-raw",
+      "started_utc": "2026-09-16T06:28:41.736086+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "8c9e7e3753077f79a9b61f2620cdcd7765ed1fdb7a37647d78a6faa2e5c8f4e4",
+      "telemetry_sha256": "987b7d4250f1e0f2b8e33a0ec6e6661c42aa8d1d844fb7ff24093b966b825ed9",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 11.106547164000403,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "native-activity-proof-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_ROWS": "1000000",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "activity-H0-R1000000-timed-raw",
+      "started_utc": "2026-09-16T06:28:43.949126+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e7885113d3634315e24ec65694df5ac4021c32c2a4b42e2ef5cc3d0639945fed",
+      "telemetry_sha256": "1b31aada980002e7b572d7f97e8cbfdce71bc4c2962f3f9947781d80a85953a4",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 6.060908082999958,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "prepare-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=1000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "prepare-1000000-1000-512-1-raw",
+      "started_utc": "2026-09-16T06:28:55.237886+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "ce07a1ca5d387752379c3037b356d27665b58a9c24feaa2690464426e1e4867d",
+      "telemetry_sha256": "6f5740c0ebf18e47eecc3e8cff31c04385d632bf4f39e8c60e493e07135fb379",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 7.067854635000003,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "prepare-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=10000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "prepare-1000000-10000-512-1-raw",
+      "started_utc": "2026-09-16T06:29:01.482162+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "de6930c77c8f5f97f7097f1fa86f7b0569c28b7c489f69eee4b62c40f9f0eb29",
+      "telemetry_sha256": "ca35cedcda412b77b7b8979ac2109ceedac866d09cedb54b9b5a12e2f4eefb93",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 10.09902122099993,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "prepare-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=100000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "prepare-1000000-100000-512-1-raw",
+      "started_utc": "2026-09-16T06:29:08.731607+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "d91a7fc642545f49fb8d68b0ee076dabaa90a8cae3cd2f1e50ce3dd0bb18eb74",
+      "telemetry_sha256": "9e9076d68879ad4b2ed2339202a16f056f9f28821eae07dec09c2c13cca80f8b",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "command": [
+        "bajillion-570d0bd092ec1873",
+        "--test"
+      ],
+      "elapsed_seconds": 43.400095496000176,
+      "environment": {
+        "COMMONWARE_CLEARING_ACCOUNTS": "1000000",
+        "COMMONWARE_CLEARING_BENCH": "prepare-samples",
+        "COMMONWARE_CLEARING_HISTORY": "0",
+        "COMMONWARE_CLEARING_PAYOUTS": "0",
+        "COMMONWARE_CLEARING_PROFILE": "N=1000000 A=1000000 B=512 K=1",
+        "COMMONWARE_CLEARING_ROWS": "0",
+        "COMMONWARE_CLEARING_SAMPLES": "3"
+      },
+      "exit_code": 0,
+      "name": "prepare-1000000-1000000-512-1-raw",
+      "started_utc": "2026-09-16T06:29:19.013024+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e0dcd1c3c27233a33bae9468006c47cbb0dd8a114e9e1d34cf33acf530c81ebd",
+      "telemetry_sha256": "ec523a6cd7bc4e48caae8bee466261813ac1c8c2d8071a22391f263573ed5d5a",
+      "termination_reason": null,
+      "timeout_seconds": 10800,
+      "validated": true
+    },
+    {
+      "finished_utc": "2026-09-16T06:30:02.549984+00:00"
+    }
+  ],
+  "cpu_tick_hz": 100,
+  "expected_criterion": [],
+  "expected_raw": [
+    "bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1000 operations=1002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=10000 operations=10002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=100000 operations=100002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1000000 operations=1000002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_left/H=0 R=1000 operations=1002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_left/H=0 R=10000 operations=10002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_left/H=0 R=100000 operations=100002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_left/H=0 R=1000000 operations=1000002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_right/H=0 R=1000 operations=1002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_right/H=0 R=10000 operations=10002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_right/H=0 R=100000 operations=100002 floor=0",
+    "bajillion::native_proofs::activity_verify/absence_right/H=0 R=1000000 operations=1000002 floor=0",
+    "bajillion::native_proofs::activity_verify/presence/H=0 R=1000 operations=1002 floor=0",
+    "bajillion::native_proofs::activity_verify/presence/H=0 R=10000 operations=10002 floor=0",
+    "bajillion::native_proofs::activity_verify/presence/H=0 R=100000 operations=100002 floor=0",
+    "bajillion::native_proofs::activity_verify/presence/H=0 R=1000000 operations=1000002 floor=0",
+    "bajillion::prepare/N=1000000 A=1000 B=512 K=1 E=1000",
+    "bajillion::prepare/N=1000000 A=10000 B=512 K=1 E=10000",
+    "bajillion::prepare/N=1000000 A=100000 B=512 K=1 E=100000",
+    "bajillion::prepare/N=1000000 A=1000000 B=512 K=1 E=1000000"
+  ],
+  "host": {
+    "block_devices": "{\n   \"blockdevices\": [\n      {\n         \"name\": \"loop0\",\n         \"type\": \"loop\",\n         \"size\": \"28.4M\",\n         \"fstype\": \"squashfs\",\n         \"mountpoints\": [\n             \"/snap/amazon-ssm-agent/13349\"\n         ]\n      },{\n         \"name\": \"loop1\",\n         \"type\": \"loop\",\n         \"size\": \"74M\",\n         \"fstype\": \"squashfs\",\n         \"mountpoints\": [\n             \"/snap/core22/2437\"\n         ]\n      },{\n         \"name\": \"loop2\",\n         \"type\": \"loop\",\n         \"size\": \"50.1M\",\n         \"fstype\": \"squashfs\",\n         \"mountpoints\": [\n             \"/snap/snapd/27710\"\n         ]\n      },{\n         \"name\": \"nvme0n1\",\n         \"type\": \"disk\",\n         \"size\": \"160G\",\n         \"fstype\": null,\n         \"mountpoints\": [\n             null\n         ],\n         \"children\": [\n            {\n               \"name\": \"nvme0n1p1\",\n               \"type\": \"part\",\n               \"size\": \"159G\",\n               \"fstype\": \"ext4\",\n               \"mountpoints\": [\n                   \"/\"\n               ]\n            },{\n               \"name\": \"nvme0n1p14\",\n               \"type\": \"part\",\n               \"size\": \"4M\",\n               \"fstype\": null,\n               \"mountpoints\": [\n                   null\n               ]\n            },{\n               \"name\": \"nvme0n1p15\",\n               \"type\": \"part\",\n               \"size\": \"106M\",\n               \"fstype\": \"vfat\",\n               \"mountpoints\": [\n                   \"/boot/efi\"\n               ]\n            },{\n               \"name\": \"nvme0n1p16\",\n               \"type\": \"part\",\n               \"size\": \"913M\",\n               \"fstype\": \"ext4\",\n               \"mountpoints\": [\n                   \"/boot\"\n               ]\n            }\n         ]\n      }\n   ]\n}\n",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)\n",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 9R45\nCPU family:                              26\nModel:                                   2\nThread(s) per core:                      1\nCore(s) per socket:                      16\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                5199.99\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch topoext perfctr_core ssbd perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 clzero xsaveerptr rdpru wbnoinvd arat avx512vbmi pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid movdiri movdir64b fsrm avx512_vp2intersect flush_l1d\nHypervisor vendor:                       KVM\nVirtualization type:                     full\nL1d cache:                               768 KiB (16 instances)\nL1i cache:                               512 KiB (16 instances)\nL2 cache:                                16 MiB (16 instances)\nL3 cache:                                64 MiB (2 instances)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-15\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Mitigation; IBPB on VMEXIT only\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP disabled; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "filesystem_details": "{\n   \"filesystems\": [\n      {\n         \"source\": \"/dev/nvme0n1p1\",\n         \"fstype\": \"ext4\",\n         \"size\": \"153.9G\",\n         \"used\": \"16.1G\",\n         \"avail\": \"137.8G\",\n         \"options\": \"rw,relatime,discard,errors=remount-ro,commit=30\"\n      }\n   ]\n}\n",
+    "linker": "GNU ld (GNU Binutils for Ubuntu) 2.42\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) a later version.\nThis program has absolutely no warranty.\n",
+    "memory": "               total        used        free      shared  buff/cache   available\nMem:     32991899648  1691676672 15239675904     3112960 16548691968 31300222976\nSwap:              0           0           0\n",
+    "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "storage_filesystem": {
+      "device": "/dev/root",
+      "mount": "/",
+      "options": "rw,relatime",
+      "type": "ext4"
+    },
+    "uname": "Linux ip-10-80-1-16 7.0.0-1012-aws #12~24.04.1-Ubuntu SMP PREEMPT Wed Aug 12 14:00:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux\n"
+  },
+  "outputs": {
+    "bytes.csv": "647ee0e3dd0cd600d783ced421905f00c0284afda90b1cef0dbe31af3fc280df",
+    "raw-checks.jsonl.gz": "6fbbf53a08bd90c88a0281534210064d514ac9abb89a48a5d559002a5960470a",
+    "samples.jsonl.gz": "a6e457df750155a465015b0fe74fa70162cacd94611a236472b75fe6869c6789",
+    "timings.csv": "1c63ec3bde29a58abf9785906ae867e4a7d36fc3370584b449fb2695c27e6427"
+  },
+  "plan": {
+    "ack": [
+      [
+        1000000,
+        1000,
+        512,
+        1,
+        0,
+        0
+      ],
+      [
+        1000000,
+        10000,
+        512,
+        1,
+        0,
+        0
+      ],
+      [
+        1000000,
+        100000,
+        512,
+        1,
+        0,
+        0
+      ],
+      [
+        1000000,
+        1000000,
+        512,
+        1,
+        0,
+        0
+      ]
+    ],
+    "activity": [
+      [
+        0,
+        1000
+      ],
+      [
+        0,
+        10000
+      ],
+      [
+        0,
+        100000
+      ],
+      [
+        0,
+        1000000
+      ]
+    ],
+    "payout": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1024
+      ],
+      [
+        0,
+        500000
+      ],
+      [
+        0,
+        1000000
+      ],
+      [
+        1024,
+        1
+      ],
+      [
+        65536,
+        1
+      ],
+      [
+        1000000,
+        1
+      ]
+    ],
+    "profiles": [
+      [
+        1000000,
+        1000,
+        512,
+        1
+      ],
+      [
+        1000000,
+        10000,
+        512,
+        1
+      ],
+      [
+        1000000,
+        100000,
+        512,
+        1
+      ],
+      [
+        1000000,
+        1000000,
+        512,
+        1
+      ]
+    ],
+    "settings": {
+      "accounts": 1000000,
+      "ack_samples": 3,
+      "ack_warmup": 0,
+      "criterion_measurement_seconds": 1.0,
+      "criterion_warmup_seconds": 0.25,
+      "instance_type": "c8a.4xlarge",
+      "minimum_free_gib": 20,
+      "proof_samples": 20,
+      "raw_samples": 3,
+      "rss_gib": 24,
+      "runtime_workers": 2,
+      "storage_iops": 6000,
+      "storage_medium": "gp3",
+      "storage_size_gib": 160,
+      "storage_throughput_mib_per_second": 250,
+      "timeout_seconds": 1800,
+      "timing_timeout_seconds": 10800,
+      "workers": 16
+    }
+  },
+  "resource_contract": {
+    "gates": [
+      "rss",
+      "free_disk",
+      "elapsed_time"
+    ],
+    "process_count": "telemetry_only"
+  },
+  "schema": 1,
+  "source": {
+    "base_revision": "8cdc7e7e54df4428d38d92ec9c3537be5c8eb07b",
+    "execution": "reconstructed immutable private snapshot",
+    "lockfile_sha256": "ed12ad6a56b72437a00ffbf5aedb1819ce7900fe8c1bbec8850bac8a6c9a03c2",
+    "patch_sha256": "2012b5409073300c382872a1e5121e7c448a62c02d2c07e8a8d8969d64db8098",
+    "results_excluded": "clearing/src/bajillion/benches/results/",
+    "source_file_count": 1670,
+    "source_sha256": "31fc064849def2b35f16d2dba60e32ee931f7b84e97ac07f542cd4c7e48274e9",
+    "untracked_archive_sha256": "44b7219b053aeb8e10917fabf8832910d1bd08373f1eb3344543f029a1b5c3eb"
+  },
+  "started_utc": "2026-09-16T06:05:13.212900+00:00"
+}

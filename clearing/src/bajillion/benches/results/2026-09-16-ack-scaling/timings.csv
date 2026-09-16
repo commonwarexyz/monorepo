@@ -1,0 +1,25 @@
+kind,name,mean_ns,samples
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=1000 B=512 K=1 W=0 H=0,14014318.666666666,3
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=10000 B=512 K=1 W=0 H=0,70710294.66666667,3
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=100000 B=512 K=1 W=0 H=0,581484219.6666666,3
+durable_ack,commonware_terminal::chain::da::benches::durable_ack/N=1000000 A=1000000 B=512 K=1 W=0 H=0,6138513064.333333,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1000 operations=1002 floor=0,1326.0723333333333,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=10000 operations=10002 floor=0,1705.5363333333335,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=100000 operations=100002 floor=0,2013.817,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_adjacent/H=0 R=1000000 operations=1000002 floor=0,2239.9633333333336,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_left/H=0 R=1000 operations=1002 floor=0,1224.1139999999998,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_left/H=0 R=10000 operations=10002 floor=0,1589.612,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_left/H=0 R=100000 operations=100002 floor=0,1882.625,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_left/H=0 R=1000000 operations=1000002 floor=0,2124.528333333333,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_right/H=0 R=1000 operations=1002 floor=0,947.431,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_right/H=0 R=10000 operations=10002 floor=0,850.0866666666667,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_right/H=0 R=100000 operations=100002 floor=0,914.904,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/absence_right/H=0 R=1000000 operations=1000002 floor=0,1009.5453333333334,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/presence/H=0 R=1000 operations=1002 floor=0,1202.4966666666667,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/presence/H=0 R=10000 operations=10002 floor=0,1562.2116666666668,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/presence/H=0 R=100000 operations=100002 floor=0,1871.5653333333332,3
+raw_activity_verify,bajillion::native_proofs::activity_verify/presence/H=0 R=1000000 operations=1000002 floor=0,2142.812,3
+raw_prepare,bajillion::prepare/N=1000000 A=1000 B=512 K=1 E=1000,1151877.3333333333,3
+raw_prepare,bajillion::prepare/N=1000000 A=10000 B=512 K=1 E=10000,12120703.333333334,3
+raw_prepare,bajillion::prepare/N=1000000 A=100000 B=512 K=1 E=100000,140155164.66666666,3
+raw_prepare,bajillion::prepare/N=1000000 A=1000000 B=512 K=1 E=1000000,1595702055.0,3
