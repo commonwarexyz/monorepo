@@ -151,121 +151,83 @@ fn root<H: Hasher>(original_len: usize, data: &[u8]) -> H::Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Sha256, blake3::Blake3};
+    use commonware_codec::Encode as _;
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::NZUsize;
 
-    fn check_parallel<H: Hasher>() {
+    fn reference(data: &[u8]) -> Digest {
+        let mut level = data.to_vec();
+        while level.len() > CHUNK_SIZE {
+            level = level
+                .chunks(CHUNK_SIZE)
+                .flat_map(|chunk| Sha256::hash(&[chunk]).to_vec())
+                .collect();
+        }
+        Sha256::hash(&[&UInt(data.len() as u64).encode(), &level])
+    }
+
+    #[test]
+    fn matches_sha256_reference() {
         let pools = [NZUsize!(1), NZUsize!(3), NZUsize!(4)]
             .map(|workers| Rayon::new(workers).unwrap().manual());
         for rows in [1, 2, 3, 7] {
             for len in [
                 0,
+                1,
+                127,
+                128,
+                1023,
                 1024,
                 1025,
+                32768,
+                32769,
                 TILE_BYTES - 1,
                 TILE_BYTES,
                 TILE_BYTES + 1,
+                1024 * 1024,
+                1024 * 1024 + 1,
                 2 * 1024 * 1024 + 1,
             ] {
                 let data: Vec<Vec<u8>> = (0..rows)
                     .map(|row| (0..len).map(|i| ((i + row) % 251) as u8).collect())
                     .collect();
-                let expected = shards::<H>(&data, &Sequential);
+                let expected: Vec<_> = data.iter().map(|row| reference(row)).collect();
+                assert_eq!(
+                    shards::<Sha256>(&data, &Sequential),
+                    expected,
+                    "rows={rows} len={len}"
+                );
+                assert_eq!(shard::<Sha256>(&data[0], &Sequential), expected[0]);
                 for strategy in &pools {
                     assert_eq!(
-                        shards::<H>(&data, strategy),
+                        shards::<Sha256>(&data, strategy),
                         expected,
                         "rows={rows} len={len}"
                     );
-                    assert_eq!(shard::<H>(&data[0], strategy), expected[0], "len={len}");
+                    assert_eq!(
+                        shard::<Sha256>(&data[0], strategy),
+                        expected[0],
+                        "len={len}"
+                    );
                 }
             }
         }
-        assert!(shards::<H>(&[] as &[&[u8]], &pools[0]).is_empty());
-    }
-
-    #[test]
-    fn parallel_matches_sequential() {
-        check_parallel::<Sha256>();
-        check_parallel::<Blake3>();
-    }
-
-    #[test]
-    fn sha256_vectors() {
-        // Independently generated with SHA-256 and unsigned LEB128 framing.
-        for (len, expected) in [
-            (
-                0,
-                "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
-            ),
-            (
-                1,
-                "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254",
-            ),
-            (
-                127,
-                "cf91fd5bb06aa5fad3b283fbce9fb8e4cfd8381a294664ae01bb9439c0a70958",
-            ),
-            (
-                128,
-                "08f4ebdcdd7e7c86d97a0bde419940dfcc276b8ce6fe9f272fc005bfbf0df142",
-            ),
-            (
-                1023,
-                "d7c698107dda6879c660d1f6b1b8e7111a3e8e9178c8f64cfee187b712bddd22",
-            ),
-            (
-                1024,
-                "661d526d9acba1ea39be47f93d2a497c5b42fab350c0f02e76a7665eb7b6a712",
-            ),
-            (
-                1025,
-                "c4c483e607967ffe82d01bad48570c0c2138b8e751ca51e828e0566e47e307e2",
-            ),
-            (
-                32768,
-                "e18a36b24b52b383561b19646c52625cb81512b255b85b2df345ccb07a9fddd9",
-            ),
-            (
-                32769,
-                "ef762e3e99ea8839e64d54f5519dcb40e94495fe89182e7705f9cbeaa11d76df",
-            ),
-            (
-                1048576,
-                "3f7530aecf32b4327a6232a3938be43f055d5f9366ded1aed7e1d9adbd1762df",
-            ),
-            (
-                1048577,
-                "2f39abd76a15a4e24493d35f6260401742eef41a4b1317e1c0fc5d02b3e98df2",
-            ),
-        ] {
-            let data: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
-            assert_eq!(
-                shard::<Sha256>(&data, &Sequential).to_string(),
-                expected,
-                "len={len}"
-            );
-        }
-    }
-
-    fn check_length_binding<H: Hasher>() {
-        for len in [1025, 32769, 1048577] {
-            let mut data: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
-            let root = shard::<H>(&data, &Sequential);
-            while data.len() > CHUNK_SIZE {
-                data = data
-                    .chunks(CHUNK_SIZE)
-                    .flat_map(|chunk| H::hash(&[chunk]).as_ref().to_vec())
-                    .collect();
-                assert_ne!(root, shard::<H>(&data, &Sequential), "len={len}");
-            }
-        }
+        assert!(shards::<Sha256>(&[] as &[&[u8]], &pools[0]).is_empty());
     }
 
     #[test]
     fn binds_original_length() {
-        check_length_binding::<Sha256>();
-        check_length_binding::<Blake3>();
+        for len in [1025, 32769, 1048577] {
+            let mut data: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
+            let root = shard::<Sha256>(&data, &Sequential);
+            while data.len() > CHUNK_SIZE {
+                data = data
+                    .chunks(CHUNK_SIZE)
+                    .flat_map(|chunk| Sha256::hash(&[chunk]).to_vec())
+                    .collect();
+                assert_ne!(root, shard::<Sha256>(&data, &Sequential), "len={len}");
+            }
+        }
     }
 }
