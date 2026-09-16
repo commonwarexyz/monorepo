@@ -47,7 +47,7 @@ use crate::{
     Relay, Reporter,
     marshal::{
         Update,
-        application::gates::{GateOutcome, Gates},
+        application::gates::{self, GateOutcome, Gates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             Standard, relay,
@@ -603,7 +603,7 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
-        let (mut tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let decision = self.application.handoff_policy(&consensus_context);
         if decision == HandoffPolicy::AwaitCertification {
             tx.send_lossy(HandoffProposal::AwaitCertification);
@@ -618,14 +618,10 @@ where
             .with_attribute("round", consensus_context.round);
         context.spawn(move |_| async move {
             let proposal = Automaton::propose(&mut handoff, consensus_context).await;
-            select! {
-                _ = tx.closed() => {},
-                result = proposal => {
-                    if let Ok(digest) = result {
-                        tx.send_lossy(HandoffProposal::Proposed(digest));
-                    }
-                },
-            }
+            gates::forward(tx, proposal, |payload| {
+                Some(HandoffProposal::Proposed(payload))
+            })
+            .await;
         });
         rx
     }
