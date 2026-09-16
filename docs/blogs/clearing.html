@@ -456,10 +456,10 @@ O’Grady</a></div>
         canonical bytes with the authenticated epoch context. The
         certified close binds that identifier, the exact predecessor
         snapshot, all three successor roots, both log counts and epoch
-        ranges, and the outflow totals. This lets the operator check
+        ranges, and the withdrawal total. This lets the operator check
         that a certificate belongs to its proposal without rebuilding
         the validators’ logs.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.">
         <div class="image-caption">
         <p>Figure 5: Every validator derives the same three QMDB roots
         before signing one close commitment. Before its vote leaves, it
@@ -682,8 +682,11 @@ O’Grady</a></div>
         credit. Importing it adds to the live balance, preserving
         payments already accepted in the successor epoch.</p>
         </div>
-        <p>Accounts with deposits or withdrawals must resolve their full
-        admitted outcome before spending in the successor epoch.</p>
+        <p>Deposits fixed at registration are available immediately. A
+        new account funded only by incoming credit must wait for that
+        close to be admitted before spending. A wallet with a live
+        withdrawal authorization waits until its signed deadline before
+        signing another payment.</p>
         <h2 id="the-close-follows-accounts-and-edges">The Close Follows
         Accounts and Edges</h2>
         <p>We benchmarked the Commonware Library’s <a
@@ -730,8 +733,9 @@ O’Grady</a></div>
         two I/O workers. The shared cache is 1 GiB with 4 KiB pages.
         State/activity write buffers are 256 MiB, other write and replay
         buffers 8 MiB. Full state/activity sections occupy 2.1–2.3 GiB,
-        Merkle blobs about 2 GiB. Fixtures fit in RAM. Large dealings
-        use benchmark limits.</p>
+        Merkle blobs about 2 GiB. Fixtures fit in RAM. All fixtures use
+        benchmark limits, since one million accounts exceed the deployed
+        genesis bound.</p>
         </div>
         <p>Repeated payments between the same pairs reuse these
         settlement records, spreading their byte cost over more

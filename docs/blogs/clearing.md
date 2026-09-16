@@ -227,10 +227,10 @@ The settlement chain keeps these commitments and counts, bounded pending-close m
 
 A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, derives the same transitions, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
 
-The dealing's $\mathsf{ProposalId}$ hashes its canonical bytes with the authenticated epoch context. The certified close binds that identifier, the exact predecessor snapshot, all three successor roots, both log counts and epoch ranges, and the outflow totals. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' logs.
+The dealing's $\mathsf{ProposalId}$ hashes its canonical bytes with the authenticated epoch context. The certified close binds that identifier, the exact predecessor snapshot, all three successor roots, both log counts and epoch ranges, and the withdrawal total. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' logs.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains only the three shared roots.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.">
 ```
 
 ::: {.image-caption}
@@ -341,7 +341,7 @@ $$
 Figure 7: Both calculations include the same predecessor credit. Importing it adds to the live balance, preserving payments already accepted in the successor epoch.
 :::
 
-Accounts with deposits or withdrawals must resolve their full admitted outcome before spending in the successor epoch.
+Deposits fixed at registration are available immediately. A new account funded only by incoming credit must wait for that close to be admitted before spending. A wallet with a live withdrawal authorization waits until its signed deadline before signing another payment.
 
 ## The Close Follows Accounts and Edges
 
@@ -376,7 +376,7 @@ The close descriptor is 192 B, and the commitment with its 100-validator certifi
 ::: {.image-caption}
 Figure 8: Means of three runs with no warmup. The validator timer covers validation, sealing, signing, and durable writes to the public and private QMDBs. It starts with an encoded dealing and an open, durable predecessor. Setup and reopen checks are excluded. Sizes use decimal KB and MB.
 
-AWS c8a.4xlarge: 16 AMD EPYC vCPUs, 32 GiB RAM, and a 160 GiB gp3 EBS SSD (6,000 IOPS, 250 MiB/s, ext4). Votes wait for filesystem durability barriers to network-attached EBS. Validation and the three public databases share 16 workers, with two I/O workers. The shared cache is 1 GiB with 4 KiB pages. State/activity write buffers are 256 MiB, other write and replay buffers 8 MiB. Full state/activity sections occupy 2.1–2.3 GiB, Merkle blobs about 2 GiB. Fixtures fit in RAM. Large dealings use benchmark limits.
+AWS c8a.4xlarge: 16 AMD EPYC vCPUs, 32 GiB RAM, and a 160 GiB gp3 EBS SSD (6,000 IOPS, 250 MiB/s, ext4). Votes wait for filesystem durability barriers to network-attached EBS. Validation and the three public databases share 16 workers, with two I/O workers. The shared cache is 1 GiB with 4 KiB pages. State/activity write buffers are 256 MiB, other write and replay buffers 8 MiB. Full state/activity sections occupy 2.1–2.3 GiB, Merkle blobs about 2 GiB. Fixtures fit in RAM. All fixtures use benchmark limits, since one million accounts exceed the deployed genesis bound.
 :::
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
