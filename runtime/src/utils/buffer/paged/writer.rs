@@ -50,6 +50,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
+use commonware_codec::{FixedSize, Write};
 use commonware_cryptography::Crc32;
 use commonware_utils::Widen;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -282,6 +283,26 @@ impl<B: Blob> Writer<B> {
             self.flush_internal(false, false).await?;
         }
         Ok(offset)
+    }
+
+    /// Encode a fixed-size value directly into the write buffer if it fits.
+    ///
+    /// Returns its logical offset on success. Returns `None` without encoding or changing the
+    /// writer when there is insufficient buffer space. Performs no I/O and does not make the
+    /// append durable; callers can fall back to [`Self::append_owned`] when it does not fit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the encoder writes a different number of bytes than [`FixedSize::SIZE`].
+    /// If the encoder panics, the writer's logical contents and size remain unchanged.
+    #[commonware_macros::stability(BETA)]
+    pub fn try_append_encoded<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
+        if T::SIZE > self.buffer.capacity - self.buffer.len() {
+            return None;
+        }
+        let offset = self.buffer.size();
+        self.buffer.append_encoded(value);
+        Some(offset)
     }
 
     /// Append owned bytes to the tip of the blob.
@@ -1339,6 +1360,50 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test_traced]
+    fn test_encoded_append_capacity_snapshot_and_recovery() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, size) = context.open("encoded_append", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, NZU16!(16), NZUsize!(4));
+            let mut writer = Writer::new(blob, size, 32, cache.clone()).await.unwrap();
+            assert_eq!(writer.try_append_encoded(&0u64), Some(0));
+            assert_eq!(writer.try_append_encoded(&MustNotEncode::<25>), None);
+            let snapshot = writer.snapshot().await.unwrap();
+            for i in 1..4u64 {
+                assert_eq!(writer.try_append_encoded(&i), Some(i * 8));
+            }
+
+            struct MustNotEncode<const SIZE: usize>;
+            impl<const SIZE: usize> FixedSize for MustNotEncode<SIZE> {
+                const SIZE: usize = SIZE;
+            }
+            impl<const SIZE: usize> Write for MustNotEncode<SIZE> {
+                fn write(&self, _: &mut impl BufMut) {
+                    panic!("a full writer must not invoke the encoder");
+                }
+            }
+            assert_eq!(writer.try_append_encoded(&MustNotEncode::<8>), None);
+            assert_eq!(writer.size(), 32);
+            assert_eq!(
+                snapshot.read_at(0, 8).await.unwrap().coalesce().as_ref(),
+                &0u64.to_be_bytes()
+            );
+
+            // The rejected value can use the ordinary crossing path without losing data.
+            assert_eq!(writer.append(&4u64.to_be_bytes()).await.unwrap(), 32);
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, size) = context.open("encoded_append", b"blob").await.unwrap();
+            let writer = Writer::new(blob, size, 32, cache).await.unwrap();
+            assert_eq!(writer.size(), 40);
+            let expected: Vec<_> = (0..5u64).flat_map(u64::to_be_bytes).collect();
+            assert_eq!(
+                writer.read_at(0, 40).await.unwrap().coalesce().as_ref(),
+                expected
+            );
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_writes_use_uncached_hint() {
