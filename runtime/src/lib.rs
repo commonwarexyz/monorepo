@@ -60,6 +60,7 @@ stability_scope!(BETA {
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        ops::RangeInclusive,
         sync::Arc,
         time::{Duration, SystemTime},
     };
@@ -106,7 +107,7 @@ stability_scope!(BETA {
     impl BlobLayout {
         /// All blob layouts supported by this runtime.
         #[allow(deprecated)]
-        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
+        pub const ALL: RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
     }
 
     /// Application-owned version of a [`Blob`]'s contents.
@@ -194,12 +195,12 @@ stability_scope!(BETA {
         BlobCorrupt(String, String, String),
         #[error("blob layout mismatch: expected one of {expected:?}, found {found:?}")]
         BlobLayoutMismatch {
-            expected: std::ops::RangeInclusive<BlobLayout>,
+            expected: RangeInclusive<BlobLayout>,
             found: BlobLayout,
         },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
-            expected: std::ops::RangeInclusive<BlobVersion>,
+            expected: RangeInclusive<BlobVersion>,
             found: BlobVersion,
         },
         #[error("invalid or missing checksum")]
@@ -722,7 +723,7 @@ stability_scope!(BETA {
         ///
         /// # Errors
         ///
-        /// Returns [Error::BlobAlreadyOpen] if a handle from an earlier open of the blob is
+        /// Returns [`Error::BlobAlreadyOpen`] if a handle from an earlier open of the blob is
         /// still alive and the blob has not been removed since.
         ///
         /// # Versions
@@ -744,7 +745,7 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: &[u8],
-            versions: std::ops::RangeInclusive<BlobVersion>,
+            versions: RangeInclusive<BlobVersion>,
         ) -> impl Future<Output = Result<(Self::Blob, u64, BlobVersion), Error>> + Send;
 
         /// Remove a blob from a given partition.
@@ -872,19 +873,19 @@ stability_scope!(BETA {
     ///
     /// Cloning a blob shares one open, similar to wrapping a single file
     /// descriptor in a lock. A blob has one open at a time: opening it again
-    /// while any clone is alive returns [Error::BlobAlreadyOpen]. Use clones
+    /// while any clone is alive returns [`Error::BlobAlreadyOpen`]. Use clones
     /// to share access to a blob.
     ///
     /// Dropping the last clone of a blob whose writes or resizes are not covered
-    /// by a completed [Blob::sync] does not make them durable at a known point.
+    /// by a completed [`Blob::sync`] does not make them durable at a known point.
     /// A runtime may sync them afterwards, surfacing a failure to later
-    /// [Storage::open_versioned] calls for the same blob until it is removed, or a
+    /// [`Storage::open_versioned`] calls for the same blob until it is removed, or a
     /// later handle may not see them at all. Call `sync` before dropping to make
     /// changes durable and to observe errors.
     ///
     /// # Durability
     ///
-    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged. A blob reopened within a run after every clone was dropped reads only
     /// bytes a sync covered, see the `Storage` durability notes.

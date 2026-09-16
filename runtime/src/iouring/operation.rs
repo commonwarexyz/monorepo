@@ -440,7 +440,7 @@ pub mod tests {
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
 
-            // A clean open skips the sync, so record an uncovered mutation first.
+            // Dirty the open so start_sync submits a request to the closed worker.
             blob.write_at(0, b"x", WriteOptions::default())
                 .await
                 .unwrap();

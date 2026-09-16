@@ -535,7 +535,7 @@ pub mod tests {
     }
 
     /// Share one directory hold across the simulated file requests in this process.
-    fn held(file: File) -> Arc<Shared> {
+    fn make_shared_file(file: File) -> Arc<Shared> {
         static HOLD: OnceLock<Arc<Hold>> = OnceLock::new();
         let hold = HOLD.get_or_init(|| {
             Hold::acquire(
@@ -556,7 +556,9 @@ pub mod tests {
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without submitting kernel work.
     fn make_sync_request() -> Request {
-        Request::Sync(SyncRequest::new(held(File::from(make_socket_fd()))))
+        Request::Sync(SyncRequest::new(make_shared_file(File::from(
+            make_socket_fd(),
+        ))))
     }
 
     /// Build a send that needs five bytes of progress before completing.
@@ -583,7 +585,7 @@ pub mod tests {
     /// Build a file read that needs five bytes of progress before completing.
     fn make_read_request() -> Request {
         Request::ReadAt(ReadAtRequest {
-            file: held(File::from(make_socket_fd())),
+            file: make_shared_file(File::from(make_socket_fd())),
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),

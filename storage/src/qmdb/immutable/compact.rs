@@ -1536,12 +1536,13 @@ mod tests {
                     .await;
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
-                // Commit persists witness data. Sync must also persist recovery metadata.
+
+                // Persist recovery metadata with the committed witness.
                 let db = db.sync().await.unwrap();
                 db.root()
             };
 
-            // Check the watermark before reopening can rebuild the offsets journal
+            // Check the watermark before reopening can rebuild the offsets journal.
             let metadata = Metadata::<_, u64, VecU64>::init(
                 context.child("checkpoint"),
                 MetadataConfig {
@@ -1551,7 +1552,8 @@ mod tests {
             )
             .await
             .unwrap();
-            // Key 3 records the durable prefix: the bootstrap witness and the applied batch
+
+            // Key 3 records the durable prefix: the bootstrap witness and the applied batch.
             assert_eq!(metadata.get(&3).copied().map(u64::from), Some(2));
             drop(metadata);
 

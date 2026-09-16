@@ -6,6 +6,7 @@ use commonware_utils::sync::{Mutex, MutexGuard};
 use futures::{Future, FutureExt as _};
 use std::{
     collections::BTreeMap,
+    ptr,
     sync::{Arc, Weak},
 };
 
@@ -116,7 +117,7 @@ impl Drop for Live {
         let mut opens = self.opens.live.lock();
         if opens
             .get(&self.key)
-            .is_some_and(|live| std::ptr::eq(live.as_ptr(), self))
+            .is_some_and(|live| ptr::eq(live.as_ptr(), self))
         {
             opens.remove(&self.key);
         }
@@ -179,32 +180,30 @@ pub(crate) mod tests {
         Blob as _, BufferPooler as _, Runner as _, Storage as _, deterministic::Runner,
         mocks::MemoryStorage,
     };
-    use std::time::Duration;
+    use std::{
+        cell::RefCell,
+        env,
+        process::Command,
+        sync::mpsc::{self, Receiver, Sender},
+        thread,
+        time::{Duration, Instant},
+    };
 
-    type OpenObservation = (
-        std::sync::mpsc::Sender<usize>,
-        std::sync::mpsc::Receiver<()>,
-    );
+    type OpenObservation = (Sender<usize>, Receiver<()>);
 
-    pub(crate) fn pause_namespace(
-        entered: std::sync::mpsc::Sender<()>,
-        released: std::sync::mpsc::Receiver<()>,
-    ) {
+    pub(crate) fn pause_namespace(entered: Sender<()>, released: Receiver<()>) {
         NAMESPACE_HANDOFF.with(|hook| *hook.borrow_mut() = Some((entered, released)));
     }
 
-    pub(crate) fn watch_registry(entered: std::sync::mpsc::Sender<bool>) {
+    pub(crate) fn watch_registry(entered: Sender<bool>) {
         REGISTRY_OBSERVATION.with(|hook| *hook.borrow_mut() = Some(entered));
     }
 
     thread_local! {
-        static OPEN_OBSERVATION: std::cell::RefCell<Option<OpenObservation>> =
-            const { std::cell::RefCell::new(None) };
-        static NAMESPACE_HANDOFF: std::cell::RefCell<Option<(
-            std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>,
-        )>> = const { std::cell::RefCell::new(None) };
-        static REGISTRY_OBSERVATION: std::cell::RefCell<Option<std::sync::mpsc::Sender<bool>>> =
-            const { std::cell::RefCell::new(None) };
+        static OPEN_OBSERVATION: RefCell<Option<OpenObservation>> = const { RefCell::new(None) };
+        static NAMESPACE_HANDOFF: RefCell<Option<(Sender<()>, Receiver<()>)>> =
+            const { RefCell::new(None) };
+        static REGISTRY_OBSERVATION: RefCell<Option<Sender<bool>>> = const { RefCell::new(None) };
     }
 
     pub(super) fn namespace_handoff() {
@@ -239,8 +238,8 @@ pub(crate) mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_open_racing_last_blob_drop() {
         const CHILD: &str = "COMMONWARE_TEST_OPEN_LAST_DROP";
-        if std::env::var_os(CHILD).is_none() {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        if env::var_os(CHILD).is_none() {
+            let mut child = Command::new(env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "storage::open::tests::test_open_racing_last_blob_drop",
@@ -249,18 +248,18 @@ pub(crate) mod tests {
                 .env(CHILD, "1")
                 .spawn()
                 .unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + Duration::from_secs(15);
             loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     assert!(status.success(), "open/drop lifecycle check failed");
                     return;
                 }
-                if std::time::Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     child.kill().unwrap();
                     child.wait().unwrap();
                     panic!("open registry deadlocked during final blob drop");
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(10));
             }
         }
 
@@ -272,28 +271,25 @@ pub(crate) mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
             let identity = Arc::downgrade(&blob._live);
-            let (release_drop, dropping) = std::sync::mpsc::channel();
-            let dropper = std::thread::spawn(move || {
+            let (release_drop, dropping) = mpsc::channel();
+            let dropper = thread::spawn(move || {
                 dropping.recv().unwrap();
                 drop(blob);
             });
-            let (entered, entering) = std::sync::mpsc::channel();
-            let (release, released) = std::sync::mpsc::channel();
+            let (entered, entering) = mpsc::channel();
+            let (release, released) = mpsc::channel();
             OPEN_OBSERVATION.with(|hook| *hook.borrow_mut() = Some((entered, released)));
-            let coordinator = std::thread::spawn(move || {
+            let coordinator = thread::spawn(move || {
                 let timeout = Duration::from_secs(5);
                 let owners = entering.recv_timeout(timeout).unwrap();
                 release_drop.send(()).unwrap();
 
-                // Counts schedule the external owner's last drop while the registry is
-                // locked. Successful opens below establish that the registry progresses.
-                let deadline = std::time::Instant::now() + timeout;
+                // The strong count changes when the external owner drops. Successful opens below
+                // verify that the registry progresses while the drop is scheduled.
+                let deadline = Instant::now() + timeout;
                 while identity.strong_count() == owners {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "external owner did not drop"
-                    );
-                    std::thread::yield_now();
+                    assert!(Instant::now() < deadline, "external owner did not drop");
+                    thread::yield_now();
                 }
                 release.send(()).unwrap();
             });

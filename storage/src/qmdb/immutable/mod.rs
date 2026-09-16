@@ -3286,12 +3286,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Regression test for recovery-after-reopen with floor change.
-    ///
-    /// After reopening a database (which rebuilds the snapshot from the latest
-    /// floor), reopening at an earlier commit with a lower floor must restore
-    /// all keys that were live at the initialization target -- not just the ones that
-    /// happened to be in the rebuilt snapshot.
+    /// Reopening at an earlier commit restores every key live at that commit, even after an
+    /// ordinary reopen rebuilds the snapshot from the latest floor.
     #[boxed]
     pub(crate) async fn run_bounded_initialization_after_reopen_with_floor_change<F: Family, V, C>(
         context: deterministic::Context,

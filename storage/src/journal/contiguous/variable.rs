@@ -44,6 +44,8 @@ use futures::{
     FutureExt as _, Stream,
     future::{try_join, try_join_all},
 };
+#[cfg(test)]
+use std::future::pending;
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -1290,6 +1292,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         }
         let anchor = self.offsets.recovery_watermark().max(start);
         let mut blob = position_to_blob(anchor, per_blob);
+
         // Bounds must not acknowledge missing blobs below the replay anchor.
         let mut expected = position_to_blob(start, per_blob);
         for (&retained, _) in self.pending.range(expected..blob) {
@@ -1440,7 +1443,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             Inner::<E, V>::remove_blobs_after(&self.partition, &mut self.pending, tail).await?;
             #[cfg(test)]
             if self.halt_after_data_removal {
-                std::future::pending::<()>().await;
+                pending::<()>().await;
             }
             for (&blob, writer) in &mut self.pending {
                 if let Some(bytes) = retained_bytes(blob)
@@ -1450,6 +1453,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 }
             }
         }
+
         // Retain the selected scan results so alignment does not decode these frames again.
         self.recovered_scans.retain(|&blob, _| blob <= tail);
         for scan in self.recovered_scans.values_mut() {
@@ -2716,48 +2720,52 @@ mod tests {
         },
         utils::codec::View,
     };
+    use commonware_codec::{
+        Buf as CodecBuf, Error as CodecError, FixedSize, Read as CodecRead, Write as CodecWrite,
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
         WriteOptions,
-        buffer::paged::{CacheRef, Writer, corrupt_page},
+        buffer::paged::{CacheRef, Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
-    use std::num::NonZeroU16;
+    use std::{
+        num::NonZeroU16,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: usize = 2;
+
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
     struct Counted(u64);
 
-    impl commonware_codec::Write for Counted {
+    impl CodecWrite for Counted {
         fn write(&self, buf: &mut impl bytes::BufMut) {
-            commonware_codec::Write::write(&self.0, buf);
+            CodecWrite::write(&self.0, buf);
         }
     }
 
-    impl commonware_codec::FixedSize for Counted {
+    impl FixedSize for Counted {
         const SIZE: usize = 8;
     }
 
-    impl commonware_codec::Read for Counted {
-        type Cfg = Arc<std::sync::atomic::AtomicUsize>;
+    impl CodecRead for Counted {
+        type Cfg = Arc<AtomicUsize>;
 
-        fn read_cfg(
-            buf: &mut impl commonware_codec::Buf,
-            count: &Self::Cfg,
-        ) -> Result<Self, commonware_codec::Error> {
-            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        fn read_cfg(buf: &mut impl CodecBuf, count: &Self::Cfg) -> Result<Self, CodecError> {
+            count.fetch_add(1, Ordering::Relaxed);
             Ok(Self(u64::read_cfg(buf, &())?))
         }
     }
@@ -2952,7 +2960,7 @@ mod tests {
         for start in [0, 7] {
             for watermark in [start, 10, 13] {
                 deterministic::Runner::default().start(|context| async move {
-                    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let count = Arc::new(AtomicUsize::new(0));
                     let cfg = Config {
                         partition: "selected-offset".into(),
                         items_per_section: NZU64!(5),
@@ -2980,7 +2988,8 @@ mod tests {
                         Recovery::<_, Counted>::open(context.child("recover"), cfg, Some(12))
                             .await
                             .unwrap();
-                    count.store(0, std::sync::atomic::Ordering::Relaxed);
+                    count.store(0, Ordering::Relaxed);
+
                     // Every selectable end comes from a blob boundary, an acknowledged offset,
                     // or the inspection scan. Resolving it must not decode frames again.
                     for size in start..=12 {
@@ -2990,14 +2999,11 @@ mod tests {
                             (size - first) * 9
                         );
                     }
-                    assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
+                    assert_eq!(count.load(Ordering::Relaxed), 0);
                     for value in start..12 {
                         assert_eq!(pending.read(value).await.unwrap().0, value);
                     }
-                    assert_eq!(
-                        count.load(std::sync::atomic::Ordering::Relaxed),
-                        (12 - start) as usize
-                    );
+                    assert_eq!(count.load(Ordering::Relaxed), (12 - start) as usize);
                     let journal = Journal(Box::new(pending.publish(7).await.unwrap()));
                     assert_eq!(journal.bounds(), start..7);
                     if start < 7 {
@@ -3018,7 +3024,7 @@ mod tests {
             (None, 10, 3),
         ] {
             deterministic::Runner::default().start(|context| async move {
-                let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count = Arc::new(AtomicUsize::new(0));
                 let cfg = Config {
                     partition: "decode-once".into(),
                     items_per_section: NZU64!(5),
@@ -3041,7 +3047,7 @@ mod tests {
                         .await
                         .unwrap(),
                 );
-                count.store(0, std::sync::atomic::Ordering::Relaxed);
+                count.store(0, Ordering::Relaxed);
                 let mut journal = match cap {
                     Some(cap) => {
                         Journal::<_, Counted>::init_at_most(context.child("recover"), cfg, cap)
@@ -3050,7 +3056,7 @@ mod tests {
                     None => Journal::<_, Counted>::init(context.child("recover"), cfg).await,
                 }
                 .unwrap();
-                assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), expected);
+                assert_eq!(count.load(Ordering::Relaxed), expected);
                 let size = cap.unwrap_or(u64::MAX).min(13);
                 assert_eq!(journal.bounds(), 0..size);
                 for value in 0..size {
@@ -3064,14 +3070,12 @@ mod tests {
 
     #[test]
     fn test_interrupted_offset_rebuild_preserves_committed_data() {
-        fn config(
-            context: &deterministic::Context,
-        ) -> Config<<Counted as commonware_codec::Read>::Cfg> {
+        fn config(context: &deterministic::Context) -> Config<<Counted as CodecRead>::Cfg> {
             Config {
                 partition: "interrupted-offset-rebuild".into(),
                 items_per_section: NZU64!(256),
                 compression: None,
-                codec_config: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                codec_config: Arc::new(AtomicUsize::new(0)),
                 page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(128),
                 replay_buffer: NZUsize!(128),
@@ -3093,7 +3097,7 @@ mod tests {
                         drop(journal.commit().await.unwrap());
 
                         let count = cfg.codec_config.clone();
-                        count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        count.store(0, Ordering::Relaxed);
                         *context.storage_fault_config().write() = deterministic::FaultConfig {
                             write_rate: Some(deterministic::WriteConfig {
                                 failure_rate: probability!(1.0),
@@ -3110,7 +3114,7 @@ mod tests {
 
                         // The fault must interrupt replay after it starts and before it reaches
                         // the end, so this exercises a partially rebuilt offsets suffix.
-                        let decoded = count.load(std::sync::atomic::Ordering::Relaxed);
+                        let decoded = count.load(Ordering::Relaxed);
                         assert!(decoded > 0 && decoded < (128 - start) as usize);
                     });
 
@@ -3168,7 +3172,7 @@ mod tests {
                                 (journal, _) = journal.append(&value).await.unwrap();
                             }
                             _ = journal.sync().await.unwrap();
-                            let rate = commonware_utils::Probability::new(numerator, 10).unwrap();
+                            let rate = Probability::new(numerator, 10).unwrap();
                             *context.storage_fault_config().write() = deterministic::FaultConfig {
                                 sync_rate: (kind == 0).then_some(rate),
                                 remove_rate: (kind == 1).then_some(rate),
@@ -3178,6 +3182,7 @@ mod tests {
                                 }),
                                 ..Default::default()
                             };
+
                             // The failed initializer is consumed. Inspect only freshly opened
                             // storage.
                             Journal::<_, u64>::init_at_most(context.child("faulted"), cfg, 7)
@@ -6791,14 +6796,9 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
-                blob,
-                size,
-                1024,
-                cfg.page_cache.clone(),
-            )
-            .await
-            .unwrap();
+            let mut writer = PagedRecovery::open(blob, size, 1024, cfg.page_cache.clone())
+                .await
+                .unwrap();
             writer.truncate(offset).await.unwrap();
             writer.sync().await.unwrap();
             drop(writer);

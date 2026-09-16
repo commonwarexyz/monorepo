@@ -629,6 +629,7 @@ mod tests {
                 for value in 0..30u8 {
                     (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
                 }
+
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
@@ -765,6 +766,7 @@ mod tests {
                 for value in 0..30u64 {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
+
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
@@ -822,6 +824,7 @@ mod tests {
                 for value in 0..50u8 {
                     (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
                 }
+
                 // Pruning syncs the retained blobs without advancing the recovery watermark, so
                 // a torn tail is a crash shape rather than corruption.
                 let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(40))
@@ -891,6 +894,7 @@ mod tests {
                 for value in 0..30u8 {
                     (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
                 }
+
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
@@ -956,6 +960,7 @@ mod tests {
                 for value in 0..27u8 {
                     (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
                 }
+
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
@@ -1023,6 +1028,7 @@ mod tests {
                 for value in 0..50u64 {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
+
                 // Pruning syncs the retained blobs without advancing the recovery watermark, so
                 // a torn tail is a crash shape rather than corruption.
                 let journal = <VariableJournal as Journal<F>>::resize(journal, Location::new(40))
@@ -1100,6 +1106,7 @@ mod tests {
                 for value in 0..30u64 {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
+
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);

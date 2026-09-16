@@ -391,7 +391,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn open_with_max<F: Family>(
         ctx: deterministic::Context,
-        cap: Option<crate::merkle::Location<F>>,
+        cap: Option<Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<
@@ -462,7 +462,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn open_small_sections_with_max<F: Family>(
         ctx: deterministic::Context,
-        cap: Option<crate::merkle::Location<F>>,
+        cap: Option<Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<
@@ -617,6 +617,7 @@ mod tests {
             bytes[31] = i;
             Digest::from(bytes)
         }
+
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both histories' writes overlapping.
         fn rebranch_config(pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {

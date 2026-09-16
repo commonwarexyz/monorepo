@@ -275,8 +275,8 @@ impl Request {
                 )
             }
             Self::WriteAt(r) => {
-                // Only plain writes stay in `Writing`. Settle here so a caller that stopped
-                // waiting still leaves the open's debt correct.
+                // Only plain writes remain in `Writing`. Other successful states are durable.
+                // Settle tracking even when the observer stopped waiting.
                 r.file
                     .wrote(r.state != WriteAtState::Writing, result.is_ok());
                 (
@@ -356,9 +356,9 @@ pub enum RetiredResources {
         /// Original byte owners, including consumed chunks.
         _write: WriteBuffers,
     },
-    /// Open, directory hold, and any positioned I/O buffer/cache owners.
+    /// Storage open, directory hold, and any positioned I/O buffer/cache owners.
     File {
-        /// Open that issued the request, carrying its file, directory hold, and sync obligation.
+        /// Storage open carrying its file, directory hold, and sync obligation.
         _file: Arc<Shared>,
         /// Shared capability state retained by positioned I/O.
         _cache: Option<Cache>,
@@ -776,7 +776,7 @@ pub struct SyncRequest {
 }
 
 impl SyncRequest {
-    /// Capture the mutations this sync can cover before submitting it to the ring.
+    /// Record the mutation frontier this sync can cover before ring submission.
     pub fn new(file: Arc<Shared>) -> Self {
         let seen = file.tracker.begin_sync();
         Self { file, seen }
@@ -884,7 +884,7 @@ mod tests {
     }
 
     /// Retain a descriptor and directory hold for simulated storage requests.
-    fn make_file_fd() -> Arc<Shared> {
+    fn make_shared_file() -> Arc<Shared> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         let file = File::from(OwnedFd::from(left));
 
@@ -924,7 +924,7 @@ mod tests {
     /// Create a five-byte positioned read with the requested cache policy.
     fn make_read_request(cache: Cache) -> ReadAtRequest {
         ReadAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),
@@ -935,7 +935,7 @@ mod tests {
     /// Create a five-byte positioned write with no durability requirement.
     fn make_write_request(cache: Cache) -> WriteAtRequest {
         WriteAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
@@ -1240,7 +1240,7 @@ mod tests {
                     true,
                 ),
                 (
-                    Request::Sync(SyncRequest::new(make_file_fd())),
+                    Request::Sync(SyncRequest::new(make_shared_file())),
                     opcode::Fsync::CODE,
                     None,
                     true,
@@ -1504,7 +1504,7 @@ mod tests {
         ] {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
             let mut write = WriteAtRequest {
-                file: make_file_fd(),
+                file: make_shared_file(),
                 offset: 17,
                 write: IoBufs::from(buf.clone()).into(),
                 state,
@@ -1582,7 +1582,7 @@ mod tests {
         let dont_cache_supported = Arc::new(AtomicBool::new(true));
 
         let mut request = WriteAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,
@@ -1599,12 +1599,12 @@ mod tests {
 
     #[test]
     fn test_active_sync_paths() {
-        let mut request = Request::Sync(SyncRequest::new(make_file_fd()));
+        let mut request = Request::Sync(SyncRequest::new(make_shared_file()));
         assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
         // A sync exposes the kernel error code, including unsolicited ECANCELED.
         for code in [libc::ECANCELED, libc::EIO] {
-            let request = Request::Sync(SyncRequest::new(make_file_fd()));
+            let request = Request::Sync(SyncRequest::new(make_shared_file()));
             let RequestOutput::Sync(Err(Error::Io(error))) = complete(request, ACTIVE, -code)
             else {
                 panic!("expected sync I/O error");
@@ -1613,7 +1613,7 @@ mod tests {
         }
 
         for result in [0, 1] {
-            let request = Request::Sync(SyncRequest::new(make_file_fd()));
+            let request = Request::Sync(SyncRequest::new(make_shared_file()));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::Sync(Ok(()))
@@ -1625,7 +1625,7 @@ mod tests {
     fn test_sync_completion_credits_only_its_successful_barrier() {
         for success in [false, true] {
             for later_write in [false, true] {
-                let file = make_file_fd();
+                let file = make_shared_file();
                 file.tracker.write();
                 file.tracker.complete();
                 let request = Request::Sync(SyncRequest::new(file.clone()));
@@ -1677,7 +1677,7 @@ mod tests {
         ));
         drop(retired);
 
-        let request = Request::Sync(SyncRequest::new(make_file_fd()));
+        let request = Request::Sync(SyncRequest::new(make_shared_file()));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Sync(Err(Error::Timeout))));
         drop(retired);

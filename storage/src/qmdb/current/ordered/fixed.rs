@@ -55,7 +55,7 @@ impl<
     pub async fn init(
         context: E,
         config: Config<T, S>,
-        max_size: Option<crate::merkle::Location<F>>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         crate::qmdb::current::init(context, config, max_size).await
     }
@@ -104,7 +104,7 @@ pub mod partitioned {
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
-            max_size: Option<crate::merkle::Location<F>>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config, max_size).await
         }

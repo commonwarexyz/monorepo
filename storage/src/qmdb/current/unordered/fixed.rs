@@ -54,7 +54,7 @@ impl<
     pub async fn init(
         context: E,
         config: Config<T, S>,
-        max_size: Option<crate::merkle::Location<F>>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         crate::qmdb::current::init(context, config, max_size).await
     }
@@ -107,7 +107,7 @@ pub mod partitioned {
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
-            max_size: Option<crate::merkle::Location<F>>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config, max_size).await
         }
@@ -141,7 +141,7 @@ pub mod test {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, num::NonZeroU16};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -567,13 +567,13 @@ pub mod test {
             bytes[31] = i;
             Digest::from(bytes)
         }
+
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
         fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
-            let page_size = std::num::NonZeroU16::new(
-                <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
-            )
-            .unwrap();
+            let page_size =
+                NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
+                    .unwrap();
             FixedConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "rebranch-merkle-journal".into(),

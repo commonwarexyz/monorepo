@@ -135,7 +135,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Drop sections the committed bits do not cover without opening them
+            // Remove uncovered sections before opening blobs so their tails need no repair.
             let keep = match bits.as_ref().and_then(|bits| bits.get(&index)) {
                 Some(Some(bits)) => bits.count_ones() != 0,
                 Some(None) => true,
@@ -147,6 +147,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     .await?;
                 continue;
             }
+
             let (blob, mut len) = context
                 .open(&config.partition, &index.to_be_bytes())
                 .await?;

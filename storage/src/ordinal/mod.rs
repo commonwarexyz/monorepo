@@ -2193,7 +2193,6 @@ mod tests {
         });
     }
 
-    /// Config with two records per section.
     fn small_cfg() -> Config {
         Config {
             partition: "test-ordinal".into(),
@@ -2249,7 +2248,7 @@ mod tests {
             .await
             .expect("Failed to initialize store");
 
-            // Both sections are retained as stored, so recovery has nothing to write
+            // Both sections are retained as stored, so recovery has nothing to write.
             assert_eq!(pending.calls(), 0);
             for i in 0..4 {
                 assert!(store.has(i));
@@ -2285,9 +2284,7 @@ mod tests {
             .await
             .expect("Failed to initialize store");
 
-            // Section 0 is retained as stored, so the only durability work possible would be
-            // repairing the torn section the bits discard. It must be removed without being
-            // opened.
+            // Recovery retains the intact section and removes the torn section unopened.
             assert_eq!(pending.calls(), 0);
             assert!(store.has(0));
             assert!(store.has(1));
@@ -2312,8 +2309,7 @@ mod tests {
             seed_two_sections(&context, &cfg).await;
             tear_tail(&context, &cfg, 1).await;
 
-            // Repairing the discarded section would need a sync on the index partition, which
-            // this context refuses. The retained section needs none, so init must succeed.
+            // Fail any attempt to sync while removing the uncovered section.
             let faulty = SyncFaultContext {
                 inner: context,
                 fail_partition: cfg.partition.clone(),
@@ -2367,9 +2363,8 @@ mod tests {
             .await
             .expect("Failed to initialize store");
 
-            // The torn section is covered, so its tail is repaired (one sync). The clearing pass
-            // writes nothing, since truncation removed the unmarked record, but still syncs the
-            // section (one sync).
+            // Tail repair and clearing each sync the retained section. Truncation already
+            // removed the unmarked record, so clearing has no remaining writes.
             assert_eq!(pending.calls(), 2);
             assert!(store.has(0));
             assert!(!store.has(1));
@@ -2381,7 +2376,7 @@ mod tests {
             );
             drop(store);
 
-            // The repaired blob holds exactly the surviving record
+            // The repaired blob holds exactly the surviving record.
             let (_, len) = delayed
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await

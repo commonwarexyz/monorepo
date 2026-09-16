@@ -116,20 +116,15 @@ impl crate::Storage for Storage {
         super::validate_partition_name(partition)?;
 
         let (blob, mut logical_len, blob_version, wait) = {
-            // Acquire the filesystem lock
             let _guard = self.lock.lock();
-
-            // Construct the full path
             let path = self.storage_directory.join(partition).join(hex(name));
             let parent = path
                 .parent()
                 .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-            // Create the partition directory if it does not exist
             fs::create_dir_all(parent)
                 .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-            // Open the file, creating it if it doesn't exist
             let mut file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -536,6 +531,7 @@ impl crate::Blob for Blob {
         } else {
             WriteAtState::WritingBeforeSync
         };
+
         // A multi-batch durable write ends in a whole-file sync that covers every mutation
         // completed before it was issued. A single-batch durable write covers only itself.
         let sync = options.contains(WriteOptions::SYNC);
@@ -545,8 +541,9 @@ impl crate::Blob for Blob {
         } else {
             0
         };
+
         // A plain write records its mutation before submission. The ring settles the debt at
-        // completion through [Shared::wrote], so a caller that stops waiting changes nothing.
+        // completion through `Shared::wrote`, so a caller that stops waiting changes nothing.
         if !sync {
             self.open.tracker.write();
         }
@@ -642,7 +639,10 @@ mod tests {
             unix::{ffi::OsStringExt, net::UnixStream},
         },
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
     };
 
     /// Distinguish temporary directories created within one test process.
@@ -762,8 +762,8 @@ mod tests {
             .unwrap();
 
         // Occupy the ambient pool so it cannot settle work on behalf of the native runner.
-        let (entered, entering) = std::sync::mpsc::channel();
-        let (release, gate) = std::sync::mpsc::channel();
+        let (entered, entering) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
         ambient.spawn_blocking(move || {
             entered.send(()).unwrap();
             let _ = gate.recv();
@@ -1562,6 +1562,7 @@ mod tests {
                 Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
             let mut write =
                 Box::pin(async move { writer.write_at(0, b"x", WriteOptions::default()).await });
+
             // A clean open skips the sync, so record an uncovered mutation first.
             blob.open.tracker.write();
             let mut sync = Box::pin(async move { blob.sync().await });

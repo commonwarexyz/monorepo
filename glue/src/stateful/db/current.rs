@@ -700,7 +700,7 @@ mod open {
     use commonware_runtime::Spawner;
     use commonware_storage::{
         Context,
-        merkle::Graftable,
+        merkle::{Graftable, Location},
         qmdb::{
             Error,
             any::{
@@ -711,7 +711,9 @@ mod open {
             current::{
                 VariableConfig, ordered::variable::Db as OrderedVariableDb, unordered::variable::Db,
             },
+            operation::Key,
         },
+        translator::Translator,
     };
     type VConfig<T, F, K, V, S> = VariableConfig<
         T,
@@ -724,15 +726,15 @@ mod open {
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
         config: VConfig<T, F, K, V, S>,
-        max_size: Option<commonware_storage::merkle::Location<F>>,
+        max_size: Option<Location<F>>,
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
         E: Context + Spawner,
-        K: commonware_storage::qmdb::operation::Key,
+        K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: commonware_storage::translator::Translator,
+        T: Translator,
         S: Strategy,
         Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
@@ -742,15 +744,15 @@ mod open {
     pub(super) async fn ordered_variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
         config: OrderedVConfig<T, F, K, V, S>,
-        max_size: Option<commonware_storage::merkle::Location<F>>,
+        max_size: Option<Location<F>>,
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
         E: Context + Spawner,
-        K: commonware_storage::qmdb::operation::Key,
+        K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: commonware_storage::translator::Translator,
+        T: Translator,
         S: Strategy,
         Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     {
@@ -1173,6 +1175,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{DatabaseSet, Unmerkleized};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
@@ -1325,7 +1328,7 @@ mod tests {
     {
     }
 
-    fn assert_database_set<T: crate::stateful::db::DatabaseSet<deterministic::Context>>() {}
+    fn assert_database_set<T: DatabaseSet<deterministic::Context>>() {}
 
     #[test]
     fn ordered_current_db_trait_impls_compile() {
@@ -1362,9 +1365,7 @@ mod tests {
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
             let expected_root = merkleized.root();
 
             {
@@ -1404,9 +1405,7 @@ mod tests {
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(seed).await.unwrap();
             {
                 let (slot, database) = db.write().await;
                 slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized).await);
@@ -1427,11 +1426,10 @@ mod tests {
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, *v);
             }
-            let explicit_root =
-                crate::stateful::db::Unmerkleized::merkleize(explicit.with_metadata(metadata))
-                    .await
-                    .unwrap()
-                    .root();
+            let explicit_root = Unmerkleized::merkleize(explicit.with_metadata(metadata))
+                .await
+                .unwrap()
+                .root();
 
             // Staged path, with metadata set on the staged handle.
             let staged_batch = db.new_batch_for_test::<_>().await;
@@ -1481,9 +1479,7 @@ mod tests {
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
             let expected_root = merkleized.root();
 
             {
@@ -1519,9 +1515,7 @@ mod tests {
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             let verification_db = <OrderedFixedDb as ManagedDb<_>>::init(
                 context.child("verification_db"),
@@ -1577,9 +1571,7 @@ mod tests {
                 .await
                 .write(key1, Some(value1))
                 .with_metadata(metadata1);
-            let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
-                .await
-                .unwrap();
+            let merkleized1 = Unmerkleized::merkleize(batch1).await.unwrap();
             {
                 let (slot, database) = db.write().await;
                 slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized1).await);
@@ -1597,9 +1589,7 @@ mod tests {
                 .await
                 .write(key2, Some(value2))
                 .with_metadata(metadata2);
-            let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
-                .await
-                .unwrap();
+            let merkleized2 = Unmerkleized::merkleize(batch2).await.unwrap();
             {
                 let (slot, database) = db.write().await;
                 slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized2).await);
@@ -1668,9 +1658,7 @@ mod tests {
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             let verification_db = FixedDb::init(
                 context.child("verification_db"),
@@ -1756,9 +1744,7 @@ mod tests {
                         .await
                         .write(key, Some(value))
                         .with_metadata(metadata);
-                    let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                        .await
-                        .unwrap();
+                    let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
                     let (slot, database) = db.write().await;
                     slot.put(apply_and_finalize::<FixedDb>(database, merkleized).await);
                     let guard = db.read().await;
@@ -1787,9 +1773,7 @@ mod tests {
                     .await
                     .write(key, Some(value))
                     .with_metadata(metadata);
-                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                    .await
-                    .unwrap();
+                let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
                 let (slot, database) = db.write().await;
                 let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await

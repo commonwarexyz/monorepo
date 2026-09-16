@@ -291,7 +291,8 @@ async fn assert_blob_sizes(
     let mut actual = BTreeMap::new();
     for name in context.scan(partition).await.expect("blob scan failed") {
         let section = u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
-        // Read the durable size without opening: the recovered archive holds these blobs.
+
+        // The archive holds the blobs open, so inspect their durable bytes directly.
         let size = context
             .durable(partition, &name)
             .expect("blob section missing")

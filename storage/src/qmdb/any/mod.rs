@@ -72,6 +72,7 @@ use crate::{
     },
     merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
+        Error as QmdbError,
         any::operation::{Operation, Update},
         bitmap::Shared,
         metrics::Metrics,
@@ -158,7 +159,7 @@ pub async fn init<F, E, U, H, I, J, S>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
-) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, QmdbError<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -182,7 +183,7 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -205,22 +206,16 @@ where
         .as_ref()
         .is_some_and(|bitmap| size < bitmap.pruned_bits())
     {
-        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
-            size,
-        )));
+        return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
     let floor = crate::qmdb::validate_initialization(&pending, true).await?;
     if let (Some(bitmap), Some(floor)) = (&bitmap, floor)
         && *floor < bitmap.pruned_bits()
     {
-        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
-            size,
-        )));
+        return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
     if pair_absorption_threshold.is_some_and(|minimum| size < minimum) {
-        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
-            size,
-        )));
+        return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
     let mut log = pending.finish().await?;
 
@@ -261,7 +256,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, bitmap::Prunable};
     use core::{future::Future, pin::Pin};
     use std::{
         collections::HashMap,
@@ -2588,7 +2583,7 @@ pub(crate) mod test {
                 panic!("expected bounded initialization to zero to fail");
             };
             assert!(
-                matches!(zero_err, crate::qmdb::Error::InvalidInitializationBound),
+                matches!(zero_err, QmdbError::InvalidInitializationBound),
                 "unexpected bounded initialization error: {zero_err:?}"
             );
 
@@ -2702,7 +2697,7 @@ pub(crate) mod test {
             assert!(
                 matches!(
                     err,
-                    crate::qmdb::Error::HistoricalFloorPruned(_)
+                    QmdbError::HistoricalFloorPruned(_)
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
@@ -2761,8 +2756,7 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_any_live_child_across_coarse_prune() {
         deterministic::Runner::default().start(|context| async move {
-            const CHUNK_BITS: u64 =
-                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+            const CHUNK_BITS: u64 = Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
             const { assert!(CHUNK_BITS <= 600) };
 
             for child_after_prune in [false, true] {

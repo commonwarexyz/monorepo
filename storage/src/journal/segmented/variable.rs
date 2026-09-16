@@ -410,10 +410,10 @@ impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
-    /// Open with a ceiling on `(section, logical byte end)`, then validate the retained replay.
-    /// Ends inside an item round down to the preceding complete item. Higher sections are removed.
-    /// This validates all retained sections before returning. Payload reads are bounded by the
-    /// requested prefix. All section names are still scanned.
+    /// Open through `(section, logical byte end)` and remove later sections.
+    ///
+    /// An end inside an item rounds down. All retained data is validated before returning. Payload
+    /// reads stop at the bound, but every section name is validated, including names above it.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -430,6 +430,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         )
         .await?;
         let mut journal = Self::init(context, cfg).await?;
+
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
         if let Some(blob) = journal.0.manager.get(section)?
             && end > 0
@@ -1206,6 +1207,7 @@ mod tests {
                 }
                 (journal, _, _) = journal.append(1, &100).await.unwrap();
                 _ = journal.sync_all().await.unwrap();
+
                 // A valid later page survives after the torn page in section zero.
                 corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 1, 64).await;
                 let journal =
@@ -2917,7 +2919,6 @@ mod tests {
                 assert!(size > 0, "section {section} should have data");
             }
 
-            // Truncate to section 5 (should remove sections 6-10)
             let size = journal.size(5).unwrap();
             journal = journal.test_reopen_at_most(5, size).await.unwrap();
 
@@ -3253,6 +3254,7 @@ mod tests {
                 .unwrap();
             let (journal, _, _) = journal.append(1, &[127; 16]).await.unwrap();
             let journal = journal.sync_all().await.unwrap();
+
             // The first payload byte looks like a length larger than the remaining frame.
             let mut replay = journal
                 .replay(1, 1, NZUsize!(1024), ReadOptions::default())
@@ -3598,8 +3600,7 @@ mod tests {
             // Append to section 1
             (journal, _, _) = journal.append(1, &100i32).await.expect("Failed to append");
 
-            // Create section 2 but don't append anything - just sync to create the blob
-            // Actually, we need to append something and then truncate to make it empty
+            // Create section 2, then truncate it to empty.
             (journal, _, _) = journal.append(2, &200i32).await.expect("Failed to append");
             journal = journal.sync(2).await.expect("Failed to sync");
             journal = journal

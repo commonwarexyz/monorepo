@@ -33,6 +33,7 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
 use core::{
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
@@ -616,7 +617,8 @@ where
     }
 
     /// Create a [Journal], replaying any journal operations missing from Merkle.
-    /// Return an error if the Merkle tree extends past the journal end.
+    ///
+    /// Returns an error if the Merkle tree extends past the journal end.
     #[boxed]
     pub async fn from_components(
         merkle: Merkle<F, E, H::Digest, S>,
@@ -637,10 +639,10 @@ where
         })
     }
 
-    /// Align the Merkle structure to be consistent with the journal. The structure must not
-    /// extend past the journal end. Any items in the journal that are not in the structure are
-    /// added. Items are added in batches of size `apply_batch_size` to bound peak memory use. Each
-    /// batch's items are buffered in memory so their leaves can be hashed across the strategy.
+    /// Align the Merkle structure with the journal.
+    ///
+    /// The Merkle structure must not extend past the journal end. Missing leaves are added in
+    /// batches of `apply_batch_size` to bound peak memory use during hashing.
     async fn align(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -904,6 +906,7 @@ where
     S: Strategy,
 {
     /// Create an authenticated journal ending at its last matching item.
+    ///
     /// An empty retained range preserves its append position.
     #[boxed]
     pub async fn new(
@@ -1126,28 +1129,20 @@ pub trait BackingRecovery: Send + Sync + Sized {
     fn read(
         &self,
         position: u64,
-    ) -> impl core::future::Future<
-        Output = Result<<Self::Journal as Contiguous>::Item, JournalError>,
-    > + Send;
+    ) -> impl Future<Output = Result<<Self::Journal as Contiguous>::Item, JournalError>> + Send;
 
     /// Discard stored items and establish an empty journal at `size` during initialization.
-    fn reset(
-        self,
-        size: u64,
-    ) -> impl core::future::Future<Output = Result<Self, JournalError>> + Send;
+    fn reset(self, size: u64) -> impl Future<Output = Result<Self, JournalError>> + Send;
 
     /// Durably retain at most `size` items and publish the live journal.
-    fn finish(
-        self,
-        size: u64,
-    ) -> impl core::future::Future<Output = Result<Self::Journal, JournalError>> + Send;
+    fn finish(self, size: u64) -> impl Future<Output = Result<Self::Journal, JournalError>> + Send;
 
     /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
     fn last_matching<P>(
         &self,
         ceiling: u64,
         mut predicate: P,
-    ) -> impl core::future::Future<Output = Result<u64, JournalError>> + Send
+    ) -> impl Future<Output = Result<u64, JournalError>> + Send
     where
         P: FnMut(&<Self::Journal as Contiguous>::Item) -> bool + Send,
     {
@@ -1183,7 +1178,7 @@ pub trait Backing<E: Context>: Mutable {
         context: E,
         cfg: Self::Config,
         max_size: Option<u64>,
-    ) -> impl core::future::Future<Output = Result<Self::Recovery, JournalError>> + Send;
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
     /// Open recovery storage reset to an empty journal at `size`, discarding stored items
     /// without opening their blobs. Returns [JournalError::SizeOverflow] for `u64::MAX`.
@@ -1191,7 +1186,7 @@ pub trait Backing<E: Context>: Mutable {
         context: E,
         cfg: Self::Config,
         size: u64,
-    ) -> impl core::future::Future<Output = Result<Self::Recovery, JournalError>> + Send;
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
     /// Whether stored items may serve a sync range starting at `position`, judged from blob
     /// names and the checkpoint without opening any data: the retained start is at or below
@@ -1201,7 +1196,7 @@ pub trait Backing<E: Context>: Mutable {
         context: &E,
         cfg: &Self::Config,
         position: u64,
-    ) -> impl core::future::Future<Output = Result<bool, JournalError>> + Send;
+    ) -> impl Future<Output = Result<bool, JournalError>> + Send;
 
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send + Sync;
@@ -1985,6 +1980,7 @@ mod tests {
         fn is_commit<F: Family>(op: &TestOp<F>) -> bool {
             op.is_commit()
         }
+
         // One operation per page makes the reopen bound page aligned in the operation journal.
         // The two-page write buffer floor flushes the branch in whole-buffer bursts.
         fn journal_cfg<F: Family + PartialEq>(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
@@ -1997,6 +1993,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
             }
         }
+
         // One node per page makes the reopen bound page aligned in the Merkle journal.
         fn merkle_cfg(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
             let page = NonZeroU16::new(Digest::SIZE as u16).unwrap();

@@ -56,7 +56,7 @@ where
     pub async fn init(
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
-        max_size: Option<crate::merkle::Location<F>>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg, max_size).await
     }
@@ -126,7 +126,7 @@ pub mod partitioned {
         pub async fn init(
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
-            max_size: Option<crate::merkle::Location<F>>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg, max_size).await
         }

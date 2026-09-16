@@ -668,10 +668,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
             .truncate_pending_section(section, index_size)
             .await?;
 
-        // Derive value size from last entry (section may not exist if empty)
         let value_size = self.retained_value_end(section, index_size).await?;
 
-        // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;
         Ok(self)
     }
@@ -831,7 +829,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         }
 
         // Every advertised prefix is proven before ordinary suffix repair may mutate either
-        // journal. An empty sidecar retains the legacy inferred-recovery behavior.
+        // journal. An empty sidecar selects inferred recovery.
         let ceiling = cap.map_or(u64::MAX, |(section, _)| section);
         let recovery = if floors.is_empty() {
             RecoveryMode::Infer { ceiling }
@@ -1798,7 +1796,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should recover and truncate index
+            // Recovery truncates the invalid index suffix.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -1817,7 +1815,6 @@ mod tests {
                 assert_eq!(value, [i; 16]);
             }
 
-            // Entry at position 3 should fail (index was truncated)
             let result = oversized.get(1, 3).await;
             assert!(result.is_err());
 
@@ -1997,6 +1994,7 @@ mod tests {
     #[test_traced]
     fn test_oversized_init_at_most_truncation_survives_crash() {
         const BOUND: u64 = 3;
+
         // One entry per index page makes the bound page aligned. A value buffer smaller than one
         // frame writes every value straight to the blob, and the two-page index buffer floor
         // flushes three of the four new entries while the fourth stays buffered, so the new
@@ -2118,6 +2116,7 @@ mod tests {
                         .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                         .await
                         .unwrap();
+
                     // Retain the second index entry across the crash, but lose its buffered value.
                     journal.index = journal.index.sync(1).await.unwrap();
                 });
@@ -3554,7 +3553,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should recover and truncate index to 0
+            // Recovery truncates the invalid index to zero entries.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4069,9 +4068,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Simulate crash during prune: prune ONLY the glob, not the index
-            // This creates the "glob pruned but index not" scenario
-            use crate::journal::segmented::glob::{Config as GlobConfig, Glob};
+            // Leave the index intact after pruning the glob to model an interrupted prune.
             let glob_cfg = GlobConfig {
                 partition: cfg.value_partition.clone(),
                 compression: cfg.compression,
@@ -4085,14 +4082,13 @@ mod tests {
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
-            // Reinitialize - should recover gracefully with warning
-            // Index section 1 will be truncated to 0 entries
+            // Recovery truncates index section 1 to zero entries.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
                     .expect("Failed to reinit");
 
-            // Section 1 entries should be gone (index truncated due to glob pruned)
+            // Pruning the glob removes the corresponding index entries.
             assert!(oversized.get(1, 0).await.is_err());
 
             // Sections 2 and 3 should still be valid
@@ -4199,7 +4195,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should truncate index to match glob
+            // Recovery truncates the index to the glob boundary.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4211,7 +4207,6 @@ mod tests {
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Entries 3-7 should be gone (unsynced, index truncated)
             assert!(oversized.get(1, 3).await.is_err());
 
             oversized.destroy().await.expect("Failed to destroy");
@@ -4463,7 +4458,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should handle gracefully (truncate to 0)
+            // Recovery truncates the partial index to zero entries.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -4607,13 +4602,11 @@ mod tests {
                     .await
                     .expect("Failed to reinit");
 
-            // First 2 entries should be valid (index truncated to match glob)
             for i in 0..2u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Entries 2-4 should be gone (index truncated during recovery)
             assert!(oversized.get(1, 2).await.is_err());
 
             // Should be able to append after recovery
@@ -5393,7 +5386,6 @@ mod tests {
                     .await
                     .expect("Failed to reinit");
 
-            // The corrupted entry should have been truncated (invalid)
             assert!(oversized.get(1, 0).await.is_err());
 
             // Should be able to append after recovery
@@ -5631,7 +5623,6 @@ mod tests {
                 .expect("Failed to get last section");
             assert_eq!(entry.id, large_sections[2]);
 
-            // Middle section should have been truncated (no entries)
             assert!(oversized.get(middle_section, 0).await.is_err());
 
             // Verify we can still append to these large sections
@@ -5707,7 +5698,6 @@ mod tests {
                     .await
                     .expect("Failed to reinit after nested crash");
 
-            // Only first 3 entries should be valid (recovery should truncate again)
             for i in 0..3u8 {
                 let entry = oversized.get(1, i as u64).await.expect("Failed to get");
                 assert_eq!(entry.id, i as u64);
@@ -5720,7 +5710,6 @@ mod tests {
                 assert_eq!(value, [i; 16]);
             }
 
-            // Entry 3 should not exist (index was truncated to match glob)
             assert!(oversized.get(1, 3).await.is_err());
 
             // Verify append works after nested crash recovery

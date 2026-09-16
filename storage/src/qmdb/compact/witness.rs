@@ -691,8 +691,9 @@ where
             return Err(Error::HistoricalFloorPruned(cap));
         }
     }
-    let entry = pending.read(end - 1).await?;
+
     // Verify the selected witness before discarding any newer entry.
+    let entry = pending.read(end - 1).await?;
     let (witness, op) = rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)?;
     let journal = pending.finish(end).await?;
     Ok((Store::new(journal, witness), op))

@@ -594,10 +594,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
-    /// Open with a ceiling on `(section, logical byte end)`, then validate the retained replay.
-    /// Ends inside an item round down to the preceding complete item. Higher sections are removed.
-    /// This validates all retained sections before returning. Payload reads are bounded by the
-    /// requested prefix. All section names are still scanned.
+    /// Open through `(section, logical byte end)` and remove later sections.
+    ///
+    /// An end inside an item rounds down. All retained data is validated before returning. Payload
+    /// reads stop at the bound, but every section name is validated, including names above it.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
@@ -614,6 +614,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         )
         .await?;
         let mut journal = Self::init(context, cfg).await?;
+
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
         if let Some(blob) = journal.0.manager.get(section)?
             && end > 0
@@ -672,7 +673,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
     }
 
-    /// Shorten the selected unpublished section and remove later sections during paired initialization.
+    /// Truncate the unpublished section and remove later sections.
     pub(crate) async fn truncate_pending_tail(
         mut self,
         section: u64,
@@ -1395,6 +1396,7 @@ mod tests {
                 }
                 (journal, _) = journal.append(1, &100).await.unwrap();
                 _ = journal.sync_all().await.unwrap();
+
                 // A valid page prefix may end inside the last item after an interrupted append.
                 let (blob, size) = context
                     .open(&cfg.partition, &0u64.to_be_bytes())
@@ -1410,6 +1412,7 @@ mod tests {
                 .unwrap();
                 partial.truncate(tail).await.unwrap();
                 drop(partial);
+
                 // A valid later page survives after the torn page in section zero.
                 corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 4, 5).await;
                 let journal =
@@ -2138,7 +2141,6 @@ mod tests {
                 assert!(size > 0, "section {section} should have data");
             }
 
-            // Truncate to section 1 (should remove sections 2, 3)
             let size = journal.size(1).expect("failed to get size");
             journal = journal
                 .test_reopen_at_most(1, size)
@@ -2212,7 +2214,6 @@ mod tests {
             }
             journal = journal.sync_all().await.expect("failed to sync");
 
-            // Truncate to section 5 (should remove sections 6-10)
             let size = journal.size(5).expect("failed to get size");
             journal = journal
                 .test_reopen_at_most(5, size)

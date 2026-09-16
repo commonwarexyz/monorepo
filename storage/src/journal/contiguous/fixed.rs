@@ -153,7 +153,7 @@ use commonware_runtime::{
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -408,6 +408,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 clear_target = target,
                 "crash repair: completing interrupted clear"
             );
+
             // A persisted reset is authoritative even when an open requests another cap.
             let new_partition = format!("{}-blobs", cfg.partition);
             Partition::<E>::remove_all(&context, &cfg.partition).await?;
@@ -467,6 +468,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 pending.insert(blob, partition.open_recovery(blob).await?);
             }
         }
+
         // Check the two newest blobs for interior holes before any resize. Only they can hold
         // non-durable data, and a crash during an in-flight fsync can lose an interior page while
         // later pages survive. `Writer::new` sizes a blob by its last valid page, so it cannot see
@@ -698,7 +700,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         }
         let writer = self.pending.get_mut(&blob).expect("opened recovery blob");
         let mut bytes = Vec::with_capacity(A::SIZE);
-        commonware_codec::Write::write(item, &mut bytes);
+        item.write(&mut bytes);
         writer.append(&bytes).await?;
         self.bounds.end = end;
         Ok(self)
@@ -736,14 +738,14 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         {
             // Keep a durable tail at the retained boundary before removing its last backing
             // blob. Derived-offset repair must not stage a reset of dependent data.
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.pending.entry(tail_blob)
-            {
+            if let Entry::Vacant(entry) = self.pending.entry(tail_blob) {
                 let mut writer = self.partition.open_recovery(tail_blob).await?;
                 writer.sync().await?;
                 entry.insert(writer);
             }
             self.discarded.retain(|&blob| blob != tail_blob);
         }
+
         // Make the target newest before changing its partial-page checksum.
         while let Some(blob) = self.discarded.pop() {
             self.partition.remove(blob).await?;
@@ -795,9 +797,10 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         if boundary <= self.bounds.start {
             return Ok((self, false));
         }
+
         // Preserve the retained position before removing its last backing blob. A bounded
         // recovery may have discarded the empty tail that ordinarily records this boundary.
-        if let std::collections::btree_map::Entry::Vacant(entry) = self.pending.entry(blob) {
+        if let Entry::Vacant(entry) = self.pending.entry(blob) {
             entry.insert(self.partition.open_recovery(blob).await?);
         }
         for writer in self.pending.values_mut() {
@@ -2146,7 +2149,7 @@ mod tests {
     use commonware_runtime::{
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _, WriteOptions,
-        buffer::paged::{Writer, corrupt_page},
+        buffer::paged::{Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, StorageEvent,
@@ -2154,7 +2157,7 @@ mod tests {
             release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
@@ -2532,6 +2535,7 @@ mod tests {
                 Recovery::<_, Digest>::open(context.child("cap"), cfg.clone(), checkpoint, Some(7))
                     .await
                     .unwrap();
+
             // Interrupt initialization after durable repair and before publication.
             drop(recovery.repair_to(7).await.unwrap());
             let journal = Journal::<_, Digest>::init(context.child("retry"), cfg)
@@ -2555,6 +2559,7 @@ mod tests {
                 journal.test_sync_blob(blob).await.unwrap();
             }
             drop(journal);
+
             // Lose an unacknowledged index prefix while newer index blobs survive.
             let (blob, _) = context
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
@@ -2608,7 +2613,7 @@ mod tests {
                                 (journal, _) = journal.append(&value).await.unwrap();
                             }
                             _ = journal.sync().await.unwrap();
-                            let rate = commonware_utils::Probability::new(numerator, 10).unwrap();
+                            let rate = Probability::new(numerator, 10).unwrap();
                             *context.storage_fault_config().write() = deterministic::FaultConfig {
                                 sync_rate: (kind == 0).then_some(rate),
                                 remove_rate: (kind == 1).then_some(rate),
@@ -2618,6 +2623,7 @@ mod tests {
                                 }),
                                 ..Default::default()
                             };
+
                             // The failed initializer is consumed. Inspect only freshly opened
                             // storage.
                             Journal::<_, u64>::init_at_most(context.child("faulted"), cfg, 7)
@@ -3876,11 +3882,9 @@ mod tests {
                     .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 1");
-                let mut append = commonware_runtime::buffer::paged::Recovery::open(
-                    blob, blob_size, 2048, cache_ref,
-                )
-                .await
-                .expect("failed to wrap blob 1");
+                let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
+                    .await
+                    .expect("failed to wrap blob 1");
                 append
                     .truncate(4 * Digest::SIZE as u64)
                     .await
@@ -4098,11 +4102,9 @@ mod tests {
                     .open(&blob_partition(&cfg), &2u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 2");
-                let mut append = commonware_runtime::buffer::paged::Recovery::open(
-                    blob, blob_size, 2048, cache_ref,
-                )
-                .await
-                .expect("failed to wrap blob 2");
+                let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
+                    .await
+                    .expect("failed to wrap blob 2");
                 append
                     .truncate(2 * Digest::SIZE as u64)
                     .await
@@ -4604,6 +4606,7 @@ mod tests {
             // Make sure truncating works after pruning
             (journal, _) = journal.prune(300).await.expect("pruning failed");
             assert_eq!(journal.size(), ITEMS_REMAINING);
+
             // Truncating to the prune point should work. Always remain in the journal.
             journal = {
                 _ = journal.sync().await.unwrap();
@@ -5089,14 +5092,9 @@ mod tests {
             };
             let partition = blob_partition(&cfg);
             let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
-            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
-                blob,
-                size,
-                128,
-                cfg.page_cache.clone(),
-            )
-            .await
-            .unwrap();
+            let mut writer = PagedRecovery::open(blob, size, 128, cfg.page_cache.clone())
+                .await
+                .unwrap();
             let values = [11u64, 22, 33, 44];
             let mut bytes = Vec::new();
             for value in values {
@@ -5158,14 +5156,10 @@ mod tests {
 
             let partition = blob_partition(&cfg);
             let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
-            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
-                blob,
-                size,
-                cfg.write_buffer.get(),
-                cfg.page_cache.clone(),
-            )
-            .await
-            .unwrap();
+            let mut writer =
+                PagedRecovery::open(blob, size, cfg.write_buffer.get(), cfg.page_cache.clone())
+                    .await
+                    .unwrap();
             assert_eq!(writer.size(), 16);
             writer.append(&[0; 4]).await.unwrap();
             assert_eq!(writer.size(), 20);

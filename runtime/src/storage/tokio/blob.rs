@@ -8,6 +8,8 @@ use crate::{
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::{channel::oneshot, sync::Mutex};
+#[cfg(test)]
+use std::sync::{Barrier, mpsc::Receiver};
 use std::{
     fs::File,
     io::IoSlice,
@@ -18,6 +20,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+#[cfg(test)]
+use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::task;
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
@@ -54,12 +58,10 @@ impl Cache {
 
 /// A blob's file with the writes no completed sync covers.
 ///
-/// An operation must capture the file to touch it, so it carries the
-/// directory hold into the blocking pool without having to remember to, and
-/// keeps the open's obligation pending until it has finished. Dropping the
-/// last reference resolves that obligation: at once when a completed sync
-/// covers every mutation, and otherwise through a deferred sync that the next
-/// open of the blob waits for.
+/// Every operation retains the file, carrying the directory hold into the blocking pool and
+/// keeping the open's obligation pending until the operation finishes. Dropping the last
+/// reference resolves that obligation immediately when a completed sync covers every mutation.
+/// Otherwise, the next open waits for a deferred sync.
 struct Shared {
     file: Arc<Held>,
     tracker: Tracker,
@@ -68,12 +70,7 @@ struct Shared {
     /// Resolves the obligation the open registered when its last handle dropped.
     promise: Mutex<Option<Sender>>,
     #[cfg(test)]
-    before_mutation: Mutex<
-        Option<(
-            ::tokio::sync::oneshot::Sender<()>,
-            std::sync::mpsc::Receiver<()>,
-        )>,
-    >,
+    before_mutation: Mutex<Option<(OneshotSender<()>, Receiver<()>)>>,
 }
 
 #[cfg(test)]
@@ -148,7 +145,7 @@ pub struct Blob {
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
     #[cfg(test)]
-    after_start_sync: Option<Arc<std::sync::Barrier>>,
+    after_start_sync: Option<Arc<Barrier>>,
 }
 
 impl Blob {
@@ -584,15 +581,20 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use futures::FutureExt as _;
-    use std::time::Duration;
+    #[cfg(target_os = "linux")]
+    use std::sync::Weak;
+    use std::{
+        env,
+        ops::RangeInclusive,
+        path::PathBuf,
+        process,
+        sync::{Barrier, mpsc},
+        time::Duration,
+    };
     use tokio::time::timeout;
 
-    fn storage_for_reopen_test(
-        label: &str,
-        layouts: std::ops::RangeInclusive<Layout>,
-    ) -> (Storage, std::path::PathBuf) {
-        let directory =
-            std::env::temp_dir().join(format!("storage_tokio_{label}_{}", std::process::id()));
+    fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
+        let directory = env::temp_dir().join(format!("storage_tokio_{label}_{}", process::id()));
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         (
@@ -617,7 +619,7 @@ mod tests {
             old.write_at(0, b"old", WriteOptions::default())
                 .await
                 .unwrap();
-            let (release, gate) = std::sync::mpsc::channel();
+            let (release, gate) = mpsc::channel();
             *storage.pending.before_sync.lock() = Some(gate);
             drop(old);
             let wait = storage
@@ -643,7 +645,7 @@ mod tests {
                 .unwrap();
         }
         let (entered, entering) = ::tokio::sync::oneshot::channel();
-        let (release, gate) = std::sync::mpsc::channel();
+        let (release, gate) = mpsc::channel();
         *blob.open.shared.before_mutation.lock() = Some((entered, gate));
         let mut mutation = Box::pin(async {
             if shrink {
@@ -671,7 +673,7 @@ mod tests {
 
         let attachment = if retire_before_attach {
             let (entered, entering) = ::tokio::sync::oneshot::channel();
-            let (release, gate) = std::sync::mpsc::channel();
+            let (release, gate) = mpsc::channel();
             *storage.pending.before_attach.lock() = Some((entered, gate));
             Some((entering, release))
         } else {
@@ -776,11 +778,11 @@ mod tests {
             blob.write_at(0, b"old", WriteOptions::default())
                 .await
                 .unwrap();
-            let (sync_release, sync_gate) = std::sync::mpsc::channel();
+            let (sync_release, sync_gate) = mpsc::channel();
             *storage.pending.before_sync.lock() = Some(sync_gate);
             drop(blob);
             let (entered, entering) = ::tokio::sync::oneshot::channel();
-            let (release, gate) = std::sync::mpsc::channel();
+            let (release, gate) = mpsc::channel();
             *storage.pending.before_metadata.lock() = Some((entered, gate));
             let mut opening = Box::pin(storage.open("partition", b"blob"));
             assert!((&mut opening).now_or_never().is_none());
@@ -867,7 +869,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     struct WriteErrorObserver {
-        shared: std::sync::Weak<Shared>,
+        shared: Weak<Shared>,
         accounted: Arc<AtomicBool>,
     }
 
@@ -913,7 +915,7 @@ mod tests {
 
     struct PanickingOwner {
         entered: Option<::tokio::sync::oneshot::Sender<()>>,
-        release: std::sync::mpsc::Receiver<()>,
+        release: mpsc::Receiver<()>,
     }
 
     impl AsRef<[u8]> for PanickingOwner {
@@ -933,13 +935,13 @@ mod tests {
     #[tokio::test]
     async fn test_reopen_syncs_fallback_write_after_owner_panic() {
         let storage_directory =
-            std::env::temp_dir().join(format!("storage_tokio_owner_panic_{}", std::process::id()));
+            env::temp_dir().join(format!("storage_tokio_owner_panic_{}", process::id()));
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let (entered, entering) = ::tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = mpsc::channel();
         let mut chunks = vec![crate::IoBuf::from(bytes::Bytes::from_owner(
             PanickingOwner {
                 entered: Some(entered),
@@ -963,7 +965,7 @@ mod tests {
         assert_eq!(bytes.unwrap().coalesce().as_ref(), b"x");
         assert!(matches!(result, Err(Error::WriteFailed)));
 
-        let (release, gate) = std::sync::mpsc::channel();
+        let (release, gate) = mpsc::channel();
         *storage.pending.before_sync.lock() = Some(gate);
         drop(blob);
         let mut reopen = Box::pin(storage.open("partition", b"blob"));
@@ -1005,7 +1007,7 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
         let (mut blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let gate = Arc::new(std::sync::Barrier::new(2));
+        let gate = Arc::new(Barrier::new(2));
         blob.after_start_sync = Some(gate.clone());
 
         // Keep the completed sync worker alive while the caller writes and closes the blob.

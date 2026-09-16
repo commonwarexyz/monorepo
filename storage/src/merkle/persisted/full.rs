@@ -288,6 +288,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Validate reconstruction anchors before authorizing deliberate history deletion.
+    ///
     /// A persisted pruning boundary beyond the available journal is corruption, including
     /// when the journal is empty.
     pub(crate) async fn prepare(
@@ -320,6 +321,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         {
             return Err(Error::ElementPruned(Position::try_from(cap)?));
         }
+
         // An unrepresentably large cap cannot constrain any representable persisted tree.
         let node_cap = max_leaves
             .map(|leaves| Position::<F>::try_from(leaves).map_or(u64::MAX, |position| *position));
@@ -1876,8 +1878,6 @@ mod tests {
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
     /// nodes, and confirms we appropriately recover to a valid state.
     async fn full_recovery_inner<F: Family>(context: deterministic::Context) {
-        use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
-
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
@@ -2836,7 +2836,9 @@ mod tests {
 
                 let cfg = test_config(&context);
                 drop(seed_recovery_tree::<F>(&context, cfg.clone(), 4).await);
-                // Persist the state at the interruption point between sync metadata and reset intent.
+
+                // Persist the state at the interruption point between sync metadata and
+                // reset intent.
                 let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
                     context.child("metadata"),
                     MConfig {
@@ -2986,8 +2988,9 @@ mod tests {
                     deterministic::Runner::default().start_and_recover(move |context| async move {
                         let hasher = Standard::<Sha256>::new(ForwardFold);
                         let mut cfg = test_config(&context);
-                        cfg.items_per_blob = std::num::NonZeroU64::new(per_blob).unwrap();
+                        cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
                         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 16).await;
+
                         // Stop a prune after its boundary and pins become durable.
                         let (merkle, _) = merkle.update_metadata(boundary).await.unwrap();
                         drop(merkle);
@@ -3028,6 +3031,7 @@ mod tests {
                             .prune(*pending.metadata_prune_pos)
                             .await
                             .unwrap();
+
                         // Crash before publication opens the retained tail.
                         drop(pending);
                         root
@@ -3035,7 +3039,7 @@ mod tests {
                 deterministic::Runner::from(checkpoint).start(move |context| async move {
                     let hasher = Standard::<Sha256>::new(ForwardFold);
                     let mut cfg = test_config(&context);
-                    cfg.items_per_blob = std::num::NonZeroU64::new(per_blob).unwrap();
+                    cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
                     let merkle = Merkle::<F, _, Digest, Sequential>::init(
                         context.child("reopen"),
                         &hasher,
@@ -4915,7 +4919,7 @@ mod tests {
             assert_eq!(journal.size(), valid_size + 1);
         }
 
-        // init_sync should recover by truncating to the last valid size.
+        // Recovery truncates to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest, Sequential> {
             config: test_config(&context),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),

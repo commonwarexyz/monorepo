@@ -54,11 +54,11 @@ use crate::{
     },
     prefixed_name,
     storage::{
-        audited::Storage as AuditedStorage,
-        faulty::Storage as FaultyStorage,
-        memory::{Snapshot as MemStorageSnapshot, Storage as MemStorage},
-        metered::Storage as MeteredStorage,
-        open::Opens,
+        audited::{Blob as AuditedBlob, Storage as AuditedStorage},
+        faulty::{Blob as FaultyBlob, Storage as FaultyStorage},
+        memory::{Blob as MemBlob, Snapshot as MemStorageSnapshot, Storage as MemStorage},
+        metered::{Blob as MeteredBlob, Storage as MeteredStorage},
+        open::{Blob as OpenBlob, Opens},
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -99,6 +99,7 @@ use std::{
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{Arc, Weak},
@@ -925,11 +926,7 @@ type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
 /// A blob handle whose open stays exclusive until every clone drops.
-pub type Blob = crate::storage::open::Blob<
-    crate::storage::metered::Blob<
-        crate::storage::audited::Blob<crate::storage::faulty::Blob<crate::storage::memory::Blob>>,
-    >,
->;
+pub type Blob = OpenBlob<MeteredBlob<AuditedBlob<FaultyBlob<MemBlob>>>>;
 
 fn build_storage(
     inner: MemStorage,
@@ -1638,7 +1635,7 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let opened = self.opens.open(
             partition,
@@ -1690,6 +1687,8 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::mpsc;
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -1709,9 +1708,9 @@ mod tests {
             let name = named.then_some(b"blob".as_slice());
             let worker_context = context.child("namespace");
             let competing_context = context.child("competing");
-            let (entered, entering) = std::sync::mpsc::channel();
-            let (release, released) = std::sync::mpsc::channel();
-            let (observed, observing) = std::sync::mpsc::channel();
+            let (entered, entering) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let (observed, observing) = mpsc::channel();
             let operation = move |context: Context, open| async move {
                 if open {
                     Some(context.open("partition", b"blob").await.unwrap())
@@ -1771,15 +1770,18 @@ mod tests {
             };
 
             // An old handle's cleanup cannot release the replacement's logical open.
-            let clone = current.clone();
+            let retained = current.clone();
             drop(old);
             drop(current);
             assert!(matches!(
                 context.open("partition", b"blob").await,
                 Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
-            clone.write_at(0, b"new", WriteOptions::SYNC).await.unwrap();
-            drop(clone);
+            retained
+                .write_at(0, b"new", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(retained);
             let (reopened, len) = context.open("partition", b"blob").await.unwrap();
             assert_eq!(len, 3);
             assert_eq!(
@@ -1813,9 +1815,9 @@ mod tests {
                 .await
                 .unwrap();
             blob.write_at(2, b"X", WriteOptions::SYNC).await.unwrap();
-            let clone = blob.clone();
+            let retained = blob.clone();
             drop(blob);
-            drop(clone);
+            drop(retained);
 
             // Retained write fragments keep their replay targets, but release every user lease.
             let (reopened, len) = context.open("partition", b"blob").await.unwrap();
@@ -1828,7 +1830,7 @@ mod tests {
                     .coalesce(),
                 b"saXed"
             );
-            let clone = reopened.clone();
+            let retained = reopened.clone();
             drop(reopened);
 
             // Duplicate opens contribute to the runtime audit.
@@ -1839,11 +1841,11 @@ mod tests {
             ));
             assert_ne!(before, context.auditor().state());
             if sync {
-                clone
+                retained
                     .write_at(0, b"fresh", WriteOptions::default())
                     .await
                     .unwrap();
-                clone.sync().await.unwrap();
+                retained.sync().await.unwrap();
             }
         });
 

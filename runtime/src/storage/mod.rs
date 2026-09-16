@@ -7,20 +7,28 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use std::{
         collections::HashMap,
         fs::File,
-        io::{Read as _, Seek as _, SeekFrom},
+        io::{self, Read as _, Seek as _, SeekFrom},
         ops::RangeInclusive,
         path::Path,
+        ptr,
         sync::{
-            Arc,
+            Arc, Weak,
             atomic::{AtomicU64, Ordering},
         },
     };
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     use ::tokio::sync::watch;
     use commonware_formatting::hex;
     #[cfg(test)]
     use crate::{Blob as _, BufferPool, ReadOptions, WriteOptions, buffer::Write};
+    use commonware_utils::sync::Mutex;
     #[cfg(test)]
     use commonware_utils::NZUsize;
+    #[cfg(test)]
+    use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender};
+    #[cfg(test)]
+    use ::tokio::sync::oneshot::Sender as OneshotSender;
     #[cfg(test)]
     use std::time::Duration;
     #[cfg(test)]
@@ -36,15 +44,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8.
-    pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
+    pub(crate) fn sync(dir: &Path) -> io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
-                use std::os::fd::AsRawFd;
-                let file = std::fs::File::open(dir)?;
+                let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(io::Error::last_os_error());
                 }
                 tracing::debug!(
                     storage_directory = %dir.display(),
@@ -88,29 +95,29 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// the receiver retains outstanding work and errors until the name is removed or recreated.
     #[derive(Default)]
     pub(crate) struct Pending {
-        syncs: commonware_utils::sync::Mutex<HashMap<(String, Vec<u8>), Entry>>,
+        syncs: Mutex<HashMap<(String, Vec<u8>), Entry>>,
         #[cfg(test)]
         finished: AtomicU64,
         #[cfg(test)]
-        deferred: commonware_utils::sync::Mutex<Vec<Receiver>>,
+        deferred: Mutex<Vec<Receiver>>,
         #[cfg(test)]
-        before_sync: commonware_utils::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        before_sync: Mutex<Option<MpscReceiver<()>>>,
         #[cfg(test)]
-        after_dispatch: commonware_utils::sync::Mutex<Option<(::tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        after_dispatch: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         #[cfg(test)]
-        fail_creation_after: commonware_utils::sync::Mutex<Option<usize>>,
+        fail_creation_after: Mutex<Option<usize>>,
         #[cfg(test)]
-        after_identity_observation: commonware_utils::sync::Mutex<Option<(std::sync::mpsc::Sender<usize>, std::sync::mpsc::Receiver<()>)>>,
+        after_identity_observation: Mutex<Option<(MpscSender<usize>, MpscReceiver<()>)>>,
         #[cfg(test)]
-        before_metadata: commonware_utils::sync::Mutex<Option<(::tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         #[cfg(test)]
-        before_attach: commonware_utils::sync::Mutex<Option<(::tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
     #[derive(Default)]
     struct Entry {
         /// Liveness checks must not acquire an owner: its destructor locks this registry.
-        identity: std::sync::Weak<Generation>,
+        identity: Weak<Generation>,
         sync: Option<Receiver>,
     }
 
@@ -133,7 +140,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn drop(&mut self) {
             let mut syncs = self.pending.syncs.lock();
             if syncs.get(&self.key).is_some_and(|entry| {
-                std::ptr::eq(entry.identity.as_ptr(), self) && entry.sync.is_none()
+                ptr::eq(entry.identity.as_ptr(), self) && entry.sync.is_none()
             }) {
                 syncs.remove(&self.key);
             }
@@ -180,7 +187,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn start(&self, generation: &Generation) -> Option<Sender> {
             let mut syncs = self.syncs.lock();
             let entry = syncs.get_mut(&generation.key)?;
-            if !std::ptr::eq(entry.identity.as_ptr(), generation) || entry.sync.is_some() {
+            if !ptr::eq(entry.identity.as_ptr(), generation) || entry.sync.is_some() {
                 return None;
             }
             let (sender, receiver) = watch::channel(None);
@@ -222,7 +229,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
 
         #[cfg(test)]
-        fn observe_identity(&self, identity: &std::sync::Weak<Generation>) {
+        fn observe_identity(&self, identity: &Weak<Generation>) {
             let hook = self.after_identity_observation.lock().take();
             if let Some((entered, release)) = hook {
                 entered.send(identity.strong_count()).unwrap();
@@ -345,7 +352,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     /// Run a Tokio blob's final sync on the blocking pool, or inline outside a runtime.
-    /// A shutting-down pool may discard queued work; the next startup flush then owns durability.
+    /// A shutting-down pool may discard queued work. The next startup flush then ensures
+    /// durability.
     pub(crate) fn defer_sync(
         pending: Arc<Pending>,
         key: (String, Vec<u8>),
@@ -495,7 +503,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
 
             // Dropping the sender also releases the worker if an assertion unwinds.
-            let (release, gate) = std::sync::mpsc::channel();
+            let (release, gate) = mpsc::channel();
             pending.deferred.lock().clear();
             *pending.before_sync.lock() = Some(gate);
             drop(current);
@@ -699,8 +707,8 @@ pub(crate) mod tests {
                 })
             };
 
-            // Release the external owner while the registry is locked. Counts schedule
-            // the last drop; completion and registry progress are the liveness oracle.
+            // Release the external owner while the registry is locked. The strong count detects
+            // the last drop. Operation completion and an independent attachment verify progress.
             let deadline = Instant::now() + timeout;
             while identity.strong_count() == owners {
                 assert!(Instant::now() < deadline, "generation owner did not drop");
@@ -767,6 +775,7 @@ pub(crate) mod tests {
             for _ in 0..2 {
                 let (generation, wait) = pending.attach("a", b"1").unwrap();
                 assert!(matches!(Pending::wait(wait).await, Err(Error::Closed)));
+
                 // A failed open cannot replace the retained failure with its own release.
                 assert!(generation.release().is_none());
                 drop(generation);

@@ -224,15 +224,18 @@ mod tests {
             let prune_loc = Location::new(50);
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr = mmr.prune(prune_loc).await.unwrap();
+
             // Reopen below the previous in-memory boundary and verify the retained pinned nodes.
             let cap = mmr.leaves() - 80;
             _ = mmr.sync().await.unwrap();
             mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
                 .await
                 .unwrap();
-            // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
+
+            // A proof for the oldest item validates the pinned node boundary.
             mmr.proof(&hasher, prune_loc, 0).await.unwrap();
-            // prune all remaining leaves 1 at a time.
+
+            // Prune all remaining leaves one at a time.
             while mmr.size() > prune_pos {
                 let cap = mmr.leaves() - 1;
                 _ = mmr.sync().await.unwrap();

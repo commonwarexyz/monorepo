@@ -5,7 +5,7 @@ use commonware_runtime::{
     Blob, BufferPoolConfig, BufferPooler, ReadOptions, Runner, Storage, WriteOptions,
     buffer::{
         Read, Write,
-        paged::{CacheRef, Writer},
+        paged::{CacheRef, Recovery, Writer},
     },
     deterministic,
 };
@@ -317,7 +317,7 @@ fn fuzz(input: FuzzInput) {
                             .open("test_partition", b"append_blob")
                             .await
                             .unwrap();
-                        let mut recovery = match commonware_runtime::buffer::paged::Recovery::open(
+                        let mut recovery = match Recovery::open(
                             blob,
                             size,
                             MAX_SIZE,

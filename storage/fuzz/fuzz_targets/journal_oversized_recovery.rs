@@ -122,7 +122,8 @@ struct FuzzInput {
     routes: [u8; 24],
     /// Per-entry action applied after its append: pipeline a sync of its section, release one
     /// held completion, settle everything held, sync one section, or sync everything. Tracked
-    /// mode adds an empty flush that publishes marker debt, a prune, and bounded section initialization.
+    /// mode adds an empty flush that publishes marker debt, a prune, and bounded section
+    /// initialization.
     /// These ops complete before the fault window opens, so the marker-before-data ordering inside
     /// bounded initialization is not falsifiable here. Prune's ordering is made falsifiable by the
     /// interrupted-prune final op and by the remove faults armed around every prune.
@@ -229,10 +230,10 @@ async fn frame_valid(
 /// truncating at the first invalid value.
 ///
 /// Markers trail durability: under crash cuts (no bit rot) a floor was published only after a
-/// completed joint sync covered it, and prune or bounded initialization durably move markers before
-/// data can shrink, so a floor can never exceed the section's durable record count and every frame
-/// below it must still be in bounds and checksum-valid. Both halves are asserted here against the
-/// image-derived boundaries.
+/// completed joint sync covered it, and prune or bounded initialization durably move markers
+/// before data can shrink, so a floor can never exceed the section's durable record count and
+/// every frame below it must still be in bounds and checksum-valid. Both halves are asserted here
+/// against the image-derived boundaries.
 ///
 /// Maps each section to `(id, value readable)` per retained position, asserting identity against
 /// the intended append stream since an in-model crash cut cannot forge a CRC-valid record.
@@ -410,6 +411,7 @@ async fn blob_sizes(context: &deterministic::Context) -> BTreeMap<(bool, u64), u
         for name in context.scan(partition).await.expect("size scan failed") {
             let section =
                 u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
+
             // Read the durable size without opening: a recovered journal may hold these blobs.
             let size = context
                 .durable(partition, &name)

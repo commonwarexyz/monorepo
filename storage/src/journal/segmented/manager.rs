@@ -9,7 +9,7 @@ use commonware_runtime::{
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
     buffer::{
         Write,
-        paged::{CacheRef, Recovery as PagedRecovery},
+        paged::{CHECKSUM_SIZE, CacheRef, Recovery as PagedRecovery},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
@@ -66,11 +66,12 @@ pub(super) async fn truncate_paged_tail<E: Storage>(
         }
         if stored == section {
             let (blob, size) = context.open(partition, &stored.to_be_bytes()).await?;
+
             // An unrepresentable physical ceiling excludes no representable blob bytes.
             let page_size = u64::from(page_size.get());
             let ceiling = end
                 .div_ceil(page_size)
-                .saturating_mul(page_size + commonware_runtime::buffer::paged::CHECKSUM_SIZE);
+                .saturating_mul(page_size + CHECKSUM_SIZE);
             if ceiling < size {
                 blob.resize(ceiling).await?;
                 blob.sync().await?;
@@ -668,7 +669,7 @@ pub(super) mod tests {
         page: &[u8],
         suffix_pages: usize,
     ) {
-        let physical = page.len() + commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
+        let physical = page.len() + CHECKSUM_SIZE as usize;
         let source = format!("{partition}-source");
         let (raw, size) = context.open(&source, b"source").await.unwrap();
         let cache = CacheRef::from_pooler(
