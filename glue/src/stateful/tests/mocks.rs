@@ -18,7 +18,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -275,25 +275,10 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-struct PolicyGate {
-    started: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-    cancelled: Arc<AtomicBool>,
-}
-
-struct CancellationGuard(Arc<AtomicBool>);
-
-impl Drop for CancellationGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
     handoff_policy: Option<HandoffPolicy>,
-    policy_gate: Arc<Mutex<Option<PolicyGate>>>,
 }
 
 impl TestApp {
@@ -308,31 +293,11 @@ impl TestApp {
         )
     }
 
-    pub(crate) fn gated_handoff_policy(
-        policy: HandoffPolicy,
-    ) -> (
-        Self,
-        oneshot::Receiver<()>,
-        oneshot::Sender<()>,
-        Arc<AtomicBool>,
-    ) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        (
-            Self {
-                handoff_policy: Some(policy),
-                policy_gate: Arc::new(Mutex::new(Some(PolicyGate {
-                    started,
-                    release: release_rx,
-                    cancelled: cancelled.clone(),
-                }))),
-                ..Self::default()
-            },
-            started_rx,
-            release,
-            cancelled,
-        )
+    pub(crate) fn with_handoff_policy(policy: HandoffPolicy) -> Self {
+        Self {
+            handoff_policy: Some(policy),
+            ..Self::default()
+        }
     }
 }
 
@@ -361,14 +326,7 @@ impl<
         TestBlock::new(0, 0)
     }
 
-    async fn handoff_policy(&mut self, _context: (E, Self::Context)) -> HandoffPolicy {
-        let gate = { self.policy_gate.lock().take() };
-        if let Some(mut gate) = gate {
-            let guard = CancellationGuard(gate.cancelled);
-            let _ = gate.started.send(());
-            let _ = (&mut gate.release).await;
-            drop(guard);
-        }
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         self.handoff_policy
             .unwrap_or(HandoffPolicy::AwaitCertification)
     }

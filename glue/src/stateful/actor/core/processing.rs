@@ -11,7 +11,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    HandoffPolicy, Heightable,
+    Heightable,
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant},
@@ -22,9 +22,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    Acknowledgement as _,
-    acknowledgement::Exact,
-    channel::{fallible::OneshotExt, oneshot},
+    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
 };
 use futures::{
     FutureExt as _,
@@ -33,25 +31,6 @@ use futures::{
 use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
-
-pub(super) fn spawn_handoff_policy<E, A>(
-    context: &E,
-    mut application: A,
-    request: (E, A::Context),
-    mut response: oneshot::Sender<HandoffPolicy>,
-) where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    context.child("handoff_policy").spawn(move |_| async move {
-        select! {
-            policy = application.handoff_policy(request) => {
-                response.send_lossy(policy);
-            },
-            _ = response.closed() => {},
-        }
-    });
-}
 
 /// Work selected for one iteration of the processing loop.
 enum Step<M, P> {
@@ -370,7 +349,6 @@ where
                         provider: self.provider.clone(),
                     };
                     let verifier = self.processor.verifier();
-                    let policy_application = self.processor.application();
                     let actor_context = self.context.as_present();
                     let marshal = self.marshal.clone();
                     let proposal = self
@@ -405,14 +383,6 @@ where
                                             verification,
                                         },
                                     ),
-                                    Some(Message::HandoffPolicy { context, response }) => {
-                                        spawn_handoff_policy(
-                                            self.context.as_present(),
-                                            policy_application.clone(),
-                                            context,
-                                            response,
-                                        );
-                                    }
                                     Some(message) => {
                                         // Independent requests may overtake an active proposal.
                                         // The first state-mutating message becomes a FIFO barrier
@@ -446,14 +416,6 @@ where
                             ancestry,
                             verification,
                         },
-                    );
-                }
-                Step::Message(Message::HandoffPolicy { context, response }) => {
-                    spawn_handoff_policy(
-                        self.context.as_present(),
-                        self.processor.application(),
-                        context,
-                        response,
                     );
                 }
                 Step::Message(Message::Finalized {
@@ -935,6 +897,7 @@ mod tests {
             StatefulMetrics::new(context),
             None,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -945,7 +908,11 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            marshal.guards,
+            actor,
+        )
     }
 
     /// Spawn a [`Processing`] loop over a gated [`TestDb`], returning its
@@ -1004,6 +971,7 @@ mod tests {
             StatefulMetrics::new(context),
             pruning,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -1014,7 +982,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     async fn spawn_read_gated_processing(
@@ -1056,6 +1029,7 @@ mod tests {
             StatefulMetrics::new(context),
             pruning,
         );
+        let policy_application = processor.application();
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
@@ -1066,7 +1040,12 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender, policy_application),
+            control,
+            marshal.guards,
+            actor,
+        )
     }
 
     #[test]
@@ -1344,7 +1323,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1428,7 +1407,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -1949,7 +1928,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2031,7 +2010,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2087,7 +2066,7 @@ mod tests {
             // Defer a verification as the syncing actor does before its
             // database set is ready.
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
             let deferred = context.child("deferred").spawn(move |task_context| {
@@ -2184,7 +2163,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2284,7 +2263,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2379,7 +2358,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2487,7 +2466,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2614,7 +2593,7 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2743,7 +2722,7 @@ mod tests {
                 Some(pruning),
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -2982,7 +2961,7 @@ mod tests {
                 None,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
-            let mut mailbox = Mailbox::new(sender);
+            let mut mailbox = Mailbox::new(sender, processor.application());
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,

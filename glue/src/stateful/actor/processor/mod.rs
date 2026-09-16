@@ -660,7 +660,8 @@ where
         }
     }
 
-    /// Returns an application clone for independently-polled policy requests.
+    /// Returns an application clone for test mailboxes.
+    #[cfg(test)]
     pub(super) fn application(&self) -> A {
         self.app.clone()
     }

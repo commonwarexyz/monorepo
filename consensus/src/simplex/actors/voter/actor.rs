@@ -79,7 +79,7 @@ struct Request<V: Viewable, F>(
     V,
     /// Span tracking the request from issuance to processed response.
     Span,
-    /// Oneshot receiver that the automaton is expected to respond over.
+    /// Pending response or retained result.
     F,
 );
 
@@ -117,33 +117,23 @@ enum ProposalResponse<D> {
 enum ProposalReceiver<D> {
     Regular(oneshot::Receiver<D>),
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
-    /// A volatile build result awaiting durable parent certification.
-    /// Readiness changes only through events that wake the actor loop, so this
-    /// variant does not register a waker.
-    Held {
-        payload: D,
-        ready: bool,
-    },
 }
 
-type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalReceiver<D>>>;
+enum ProposalState<D> {
+    Awaiting(ProposalReceiver<D>),
+    /// A volatile build result awaiting durable parent certification.
+    Held(D),
+    Ready(D),
+}
+
+type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
 
-// No variant exposes a pinned reference to its payload.
-impl<D> Unpin for ProposalReceiver<D> {}
-
-impl<D: Copy> Future for ProposalReceiver<D> {
+impl<D> Future for ProposalReceiver<D> {
     type Output = Result<ProposalResponse<D>, oneshot::error::RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            Self::Held { payload, ready } => {
-                if *ready {
-                    Poll::Ready(Ok(ProposalResponse::Proposed(*payload)))
-                } else {
-                    Poll::Pending
-                }
-            }
             Self::Regular(receiver) => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.map(ProposalResponse::Proposed)),
@@ -408,9 +398,7 @@ impl<
 
     /// Attempt to propose a new block.
     #[allow(clippy::async_yields_async)]
-    async fn try_propose(
-        &mut self,
-    ) -> Option<Request<ProposalRequest<D, S::PublicKey>, ProposalReceiver<D>>> {
+    async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
@@ -442,7 +430,7 @@ impl<
                 ProposalReceiver::Regular(receiver)
             }
         };
-        Some(Request(request, span, receiver))
+        Some(Request(request, span, ProposalState::Awaiting(receiver)))
     }
 
     /// Attempt to verify a proposed block.
@@ -1224,14 +1212,26 @@ impl<
 
                 // This checkpoint follows the prior iteration's journal sync. Never
                 // promote a held result in reconciliation, which also runs before sync.
-                if let Some(Request(request, _, ProposalReceiver::Held { ready, .. })) =
-                    pending_propose.as_mut()
+                if let Some(Request(request, _, state)) = pending_propose.as_mut()
+                    && let ProposalState::Held(payload) = state
+                    && self.state.proposal_parent_certified(request.context())
                 {
-                    *ready = self.state.proposal_parent_certified(request.context());
+                    *state = ProposalState::Ready(*payload);
                 }
 
                 // Prepare waiters
-                let propose_wait = Waiter(&mut pending_propose);
+                let propose_wait = async {
+                    let proposed = match pending_propose.as_mut() {
+                        Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
+                        Some(Request(_, _, ProposalState::Ready(payload))) => {
+                            Ok(ProposalResponse::Proposed(*payload))
+                        }
+                        _ => core::future::pending().await,
+                    };
+                    let Request(request, span, _) =
+                        pending_propose.take().expect("request must exist");
+                    (request, span, proposed)
+                };
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
 
@@ -1270,10 +1270,7 @@ impl<
                     && !self.state.proposal_parent_certified(request.context())
                     && let Ok(ProposalResponse::Proposed(payload)) = &proposed
                 {
-                    pending_propose = Some(Request(request, span, ProposalReceiver::Held {
-                        payload: *payload,
-                        ready: false,
-                    }));
+                    pending_propose = Some(Request(request, span, ProposalState::Held(*payload)));
                     continue;
                 }
 

@@ -25,6 +25,7 @@ pub struct MockVerifyingApp<B, S> {
     pub verify_result: bool,
     /// Policy returned for handoff proposal builds.
     pub handoff_policy: HandoffPolicy,
+    proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     _phantom: PhantomData<S>,
 }
 
@@ -35,6 +36,7 @@ impl<B, S> MockVerifyingApp<B, S> {
             propose_result: None,
             verify_result: true,
             handoff_policy: HandoffPolicy::AwaitCertification,
+            proposal_gate: None,
             _phantom: PhantomData,
         }
     }
@@ -45,6 +47,7 @@ impl<B, S> MockVerifyingApp<B, S> {
             propose_result: None,
             verify_result,
             handoff_policy: HandoffPolicy::AwaitCertification,
+            proposal_gate: None,
             _phantom: PhantomData,
         }
     }
@@ -60,6 +63,42 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.handoff_policy = policy;
         self
     }
+
+    /// Block proposal construction until released and report if it is cancelled.
+    pub fn with_proposal_gate(
+        mut self,
+    ) -> (
+        Self,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let (dropped, dropped_rx) = oneshot::channel();
+        self.proposal_gate = Some(Arc::new(Mutex::new(Some(ProposalGate {
+            started,
+            release: release_rx,
+            dropped,
+        }))));
+        (self, started_rx, release, dropped_rx)
+    }
+}
+
+struct ProposalGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+    dropped: oneshot::Sender<()>,
+}
+
+struct DropSignal(Option<oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.0.take() {
+            dropped.send_lossy(());
+        }
+    }
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -68,6 +107,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             propose_result: None,
             verify_result: true,
             handoff_policy: HandoffPolicy::AwaitCertification,
+            proposal_gate: None,
             _phantom: PhantomData,
         }
     }
@@ -90,13 +130,19 @@ where
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
+        let gate = self
+            .proposal_gate
+            .as_ref()
+            .and_then(|gate| gate.lock().take());
+        if let Some(mut gate) = gate {
+            let _drop_signal = DropSignal(Some(gate.dropped));
+            gate.started.send_lossy(());
+            let _ = (&mut gate.release).await;
+        }
         self.propose_result.clone()
     }
 
-    async fn handoff_policy(
-        &mut self,
-        _context: (deterministic::Context, Self::Context),
-    ) -> HandoffPolicy {
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         self.handoff_policy
     }
 
@@ -165,10 +211,7 @@ where
         None
     }
 
-    async fn handoff_policy(
-        &mut self,
-        _context: (deterministic::Context, Self::Context),
-    ) -> HandoffPolicy {
+    fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         self.handoff_policy
     }
 
