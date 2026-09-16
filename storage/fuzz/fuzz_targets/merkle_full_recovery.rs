@@ -3,12 +3,13 @@
 //! Persisted Merkle (MMR and MMB) crash recovery under injected sync, write, and remove faults.
 //!
 //! The op phase interleaves appends with sync, flush, and start_sync barriers, plus prune
-//! drives with remove faults armed so a prune can fail after removing only some blobs. A
-//! start_sync handle is either dropped, crediting nothing while the instance stays in use, or
-//! held and observed before the next durability operation: completion credits the size at the
-//! call, and failure requires the next sync to fail whenever leaves were added since the last
-//! completed sync. The oracle checks the recovered size, leaf count, and prune boundary against
-//! tracked durable floors and attempted ceilings, then compares every readable node against an
+//! drives with remove faults armed so a prune can fail after removing only some blobs. Dropping
+//! a `start_sync` handle leaves the recorded durable bounds unchanged while the instance stays
+//! in use. A held handle is observed before the next durability operation: successful completion
+//! raises the durable size and leaf count to their values when the sync started, and failure
+//! requires the next sync to fail whenever leaves were added since the last completed sync.
+//! The oracle checks the recovered size, leaf count, and prune boundary against tracked durable
+//! floors and attempted ceilings, then compares every readable node against an
 //! independently rebuilt reference tree so a same-size corruption cannot pass. A sentinel
 //! append, sync, and reopen prove the recovered instance still writes durably.
 
@@ -224,9 +225,9 @@ async fn run_operations<F: MerkleFamily>(
                 Ok(merkle) => merkle,
             },
 
-            // A dropped handle credits nothing: the abandoned sync may or may not have
-            // completed by the crash, and the instance stays in use. A held handle is
-            // observed before the next durability operation.
+            // Dropping the handle leaves the durable bounds unchanged because the sync's
+            // outcome is unobserved. The instance stays in use, and held handles are observed
+            // before the next durability operation.
             MerkleOperation::StartSync { hold } => {
                 let size = merkle.size().as_u64();
                 let leaf_count = merkle.leaves().as_u64();
@@ -258,7 +259,7 @@ async fn run_operations<F: MerkleFamily>(
                         Err(_) => {
                             // The error is opaque: the prune may have failed before its
                             // internal sync proved anything durable, so this ceiling is
-                            // conservative and the size/leaves floors stay uncredited. A
+                            // conservative and the size/leaves floors stay unchanged. A
                             // torn remove instead fails after the metadata durably recorded
                             // `safe_loc`, and recovery completes the journal prune to that
                             // boundary, so the recovered boundary can land anywhere up to

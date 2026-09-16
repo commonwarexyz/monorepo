@@ -1602,8 +1602,7 @@ mod tests {
             faults.disarm();
             assert!(handle.await.is_err());
 
-            // The failure is retained: the next sync reports it instead of crediting the lost
-            // bytes as durable.
+            // The writer retains the flush failure and reports it on the next sync.
             assert!(writer.sync().await.is_err());
         });
     }
