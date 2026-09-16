@@ -1,6 +1,6 @@
 ["commonware_coding::ocelot::scheme::conformance::CodecConformance<StrongShard<Sha256Digest>>"]
 n_cases = 65536
-hash = "fbd9887eef769354937c3f9d33398d035e36ec5701eb0af40c69bf2fcc6f97cb"
+hash = "cf5aeb77dac4e5393e7fbc57e53cf8181b8d279baffc9f7d1c3c8e7db884e0c6"
 
 ["commonware_coding::ocelot::scheme::conformance::CodecConformance<WeakShard<Sha256Digest>>"]
 n_cases = 65536

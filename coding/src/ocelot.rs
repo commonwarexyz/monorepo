@@ -1,3 +1,13 @@
+//! Reed-Solomon coding with Merkle commitments and optional checksum hints.
+//!
+//! Byte kernels implement the field operations used by shard arithmetic (`Impl8`
+//! and `Impl16`). Additive FFT transforms build the encoder and decoder in `code`,
+//! and `scheme` adds framing, commitments, proofs, and checksum hints.
+//!
+//! GF(2^16) shards use 128-byte blocks of up to 64 elements: low bytes first,
+//! then high bytes. A shorter final block is split equally. This layout is part
+//! of the wire and commitment format for both GF(2^16) schemes.
+
 mod code;
 mod field;
 mod hash;
@@ -16,7 +26,8 @@ use impl16::Impl16;
 use kernel::{Kernel, WithKernel, with_kernel};
 pub use scheme::Error;
 use scheme::{
-    BasicCheckedShard, CheckedShard, CheckingData, OcelotHintedX, OcelotX, StrongShard, WeakShard,
+    BasicCheckedShard, CheckedShard, CheckingData, OcelotHintedX, OcelotX, Shard, StrongShard,
+    WeakShard,
 };
 use std::{
     fmt,
@@ -42,6 +53,9 @@ macro_rules! ocelot {
             /// Shard digests reduce consecutive 1 KiB chunks to hashes until at most
             /// 1 KiB remains, then hash the `UInt`-encoded original shard length
             /// followed by that buffer. Hash digests must contain 1 to 512 bytes.
+            /// In GF(2^16), each 128-byte block stores low bytes before high bytes;
+            /// a shorter final block is split equally. This layout is part of the
+            /// wire and commitment format.
             ///
             /// Arithmetic kernels are selected internally for the current CPU. Large
             /// shards are processed in independent byte stripes using the supplied strategy.
@@ -67,7 +81,7 @@ macro_rules! ocelot {
 
             impl<H: Hasher> Scheme for $name<H> {
                 type Commitment = H::Digest;
-                type Shard = WeakShard<H::Digest>;
+                type Shard = Shard<H::Digest>;
                 type CheckedShard = BasicCheckedShard<H::Digest>;
                 type Error = Error;
 
@@ -123,7 +137,7 @@ macro_rules! ocelot {
             }
 
             impl<H: Hasher, B: Buf, S: Strategy> WithKernel for Encode<'_, H, B, S> {
-                type Output = Result<(H::Digest, Vec<WeakShard<H::Digest>>), Error>;
+                type Output = Result<(H::Digest, Vec<Shard<H::Digest>>), Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
                     OcelotX::<_, H>::new($implementation::new(kernel))
@@ -135,7 +149,7 @@ macro_rules! ocelot {
                 config: &'a Config,
                 commitment: &'a H::Digest,
                 index: u16,
-                shard: &'a WeakShard<H::Digest>,
+                shard: &'a Shard<H::Digest>,
                 strategy: &'a S,
             }
 
@@ -190,14 +204,31 @@ macro_rules! ocelot_hinted {
             ///
             /// Arithmetic kernels are selected internally for the current CPU.
             /// The encoder commits to all encoded shards before deriving 16 independent
-            /// checksum projections with Fiat-Shamir, each providing 8 bits of soundness.
-            /// A strong shard carries the unencoded checksums; participants encode
+            /// checksum projections with Fiat-Shamir for early rejection of inconsistent
+            /// shards. A strong shard carries a Merkle range proof for the systematic
+            /// prefix and the unencoded checksums; participants encode
             /// them locally and use the resulting checksum
             /// codeword alongside Merkle proofs to check forwarded shards.
             #[doc = concat!("Each original shard contributes ", stringify!($checksum_bytes), " bytes of checksums.")]
             /// Shard digests reduce consecutive 1 KiB chunks to hashes until at most
             /// 1 KiB remains, then hash the `UInt`-encoded original shard length
             /// followed by that buffer. Hash digests must contain 1 to 512 bytes.
+            /// In GF(2^16), each 128-byte block stores low bytes before high bytes;
+            /// a shorter final block is split equally. This layout is part of the
+            /// wire and commitment format.
+            ///
+            /// Decoding hashes only recovered originals and combines their digests with
+            /// those retained from checked originals to verify the systematic range proof.
+            /// Collision resistance fixes these originals for a given commitment; canonical
+            /// length and padding checks then ensure every successful subset returns the
+            /// same payload, independently of checksum soundness or the shard count.
+            /// When all originals are supplied, decoding adds no hashing or proof work.
+            /// The transcript binds the range proof before deriving checksum coefficients.
+            ///
+            /// Checking data retains 16 coefficient bytes per field symbol: 16 times the
+            /// shard size for GF(2^8), or 8 times for GF(2^16), plus one checksum per
+            /// codeword shard and at most 16 proof digests. A 1 MiB GF(2^8) shard therefore
+            /// needs 16 MiB of coefficients per in-flight commitment.
             ///
             /// Encoding and decoding process large shards in independent byte stripes
             /// using the supplied strategy. Checksums use tiles spanning shards and column
@@ -231,7 +262,7 @@ macro_rules! ocelot_hinted {
                 type StrongShard = StrongShard<H::Digest>;
                 type WeakShard = WeakShard<H::Digest>;
                 type CheckingData = CheckingData<H::Digest>;
-                type CheckedShard = CheckedShard;
+                type CheckedShard = CheckedShard<H::Digest>;
                 type Error = Error;
 
                 fn encode(
@@ -331,7 +362,7 @@ macro_rules! ocelot_hinted {
                 strategy: &'a S,
             }
 
-            impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard>, S: Strategy> WithKernel
+            impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard<H::Digest>>, S: Strategy> WithKernel
                 for Decode<'_, H, T, S>
             {
                 type Output = Result<Vec<u8>, Error>;
@@ -357,7 +388,7 @@ macro_rules! ocelot_hinted {
             }
 
             impl<H: Hasher, S: Strategy> WithKernel for Weaken<'_, H, S> {
-                type Output = Result<(CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>), Error>;
+                type Output = Result<(CheckingData<H::Digest>, CheckedShard<H::Digest>, WeakShard<H::Digest>), Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
                     OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).weaken(
@@ -381,7 +412,7 @@ macro_rules! ocelot_hinted {
             }
 
             impl<H: Hasher, S: Strategy> WithKernel for Check<'_, H, S> {
-                type Output = Result<CheckedShard, Error>;
+                type Output = Result<CheckedShard<H::Digest>, Error>;
 
                 fn call<K: Kernel>(self, kernel: K) -> Self::Output {
                     OcelotHintedX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).check(
