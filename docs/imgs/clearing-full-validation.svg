@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
   <title id="title">Every Validator Checks the Same Close</title>
-  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue dotted callout expands the dealing: account keys a, b, c, and d have indices 0 through 3. Four sender records are stacked, with c's final sequence 2 expanded to show a total of 4 to b and 7 to d, each with count 1, authenticated by c's signature. Beneath them, four acknowledgment cards show the operator's signatures accepting the final endpoints of a, b, c, and d. The highlighted c card corresponds to the expanded sender record. An Aggregate arrow leads to the single aggregate signature included in the dealing. Validators derive the balances, roots, and final commitment from this activity and their local state. A green dotted callout expands the certified close: the QMDB state root and the activity and withdrawal BMT roots feed into a 32-byte commitment, bound to the epoch, prior state, and withdrawal total of zero. An aggregate signature and signer bitmap form the attached 67-of-100 certificate. The solid lines within this callout show what the commitment binds.</desc>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -172,21 +172,21 @@
   <path class="leader" d="M900 260 V463" stroke="#087a32"/>
   <circle cx="900" cy="260" r="4" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
   <rect x="700" y="463" width="586" height="417" rx="6" fill="#f2faf4" stroke="#087a32" stroke-width="1.5"/>
-  <text class="heading green" x="724" y="497">Certified close</text>
+  <text class="heading green" x="724" y="497">Certified candidate</text>
   <text class="note right" x="1262" y="497">Onchain</text>
   <path d="M724 515 H1262" stroke="#c7dfce"/>
   <rect x="724" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
-  <text class="label center green" x="806" y="568">State</text>
-  <text class="note center" x="806" y="594">QMDB root</text>
+  <text class="label center green" x="806" y="568">State root</text>
+  <text class="note center" x="806" y="594">Current Ordered</text>
   <rect x="911" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
-  <text class="label center green" x="993" y="568">Activity</text>
-  <text class="note center" x="993" y="594">BMT root</text>
+  <text class="label center green" x="993" y="568">Activity root</text>
+  <text class="note center" x="993" y="594">Keyless</text>
   <rect x="1098" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
-  <text class="label center green" x="1180" y="568">Withdrawals</text>
-  <text class="note center" x="1180" y="594">BMT root</text>
+  <text class="label center green" x="1180" y="568">Payout root</text>
+  <text class="note center" x="1180" y="594">Keyless</text>
   <path class="binding" d="M806 611 V629 H1180 V611 M993 611 V642"/>
   <rect x="724" y="642" width="538" height="40" rx="4" fill="#fff" stroke="#c7dfce" stroke-width="1.5"/>
-  <text class="note center" x="993" y="668">Epoch · prior state · withdrawal total: 0</text>
+  <text class="note center" x="993" y="668">Certified close context</text>
   <path class="binding" d="M993 682 V704" marker-end="url(#vote-arrow)"/>
   <rect x="796" y="704" width="394" height="62" rx="5" fill="#087a32"/>
   <text class="heading center" x="993" y="743" style="fill:#fff;">32-byte commitment</text>
