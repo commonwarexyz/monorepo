@@ -249,7 +249,7 @@ Each close's certified account range records the final activity of every disclos
 
 Receipt holders can prove three kinds of contradiction:
 
-1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
+1. **Debit mismatch.** The close records a cumulative debit of 20 after the operator acknowledged 35.
 
 2. **Entry mismatch.** A retained entry promises more value or more payments to a recipient than the close records.
 
