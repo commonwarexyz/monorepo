@@ -202,7 +202,7 @@ struct Conjugate(Fp12);
 impl WithBackend for Conjugate {
     type Output = Fp12;
 
-    #[inline]
+    #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         Fp12::from_bounded(fp12::conjugate(&self.0.to_bounded(), &Ring::new(backend)))
     }

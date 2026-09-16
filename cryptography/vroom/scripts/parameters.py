@@ -288,7 +288,9 @@ def build(field: Field, geometry: Geometry) -> Tables:
         floor=True,
     )
 
-    canonical_post = pow(big_m, -1, p)
+    # The radix coefficients carry an extra factor of 2^(64*WORDS) that the
+    # six Montgomery word steps of normalize_canonical divide out.
+    canonical_post = pow(big_m, -1, p) * pow(2, 64 * WORDS, p) % p
     canonical_shifted = tuple(expand_pre * weight % big_n for weight in crt_weights(n))
     canonical_values = tuple(
         (shifted % p) * canonical_post % p for shifted in canonical_shifted
@@ -513,6 +515,7 @@ def validate_model(tables: Tables) -> dict[str, int]:
     canonical_correction = sum(
         word << (64 * limb) for limb, word in enumerate(tables.canonical_correction)
     )
+    inverse_canonical_radix = pow(2, -64 * WORDS, p)
 
     def canonicalize(n_half: tuple[int, ...]) -> int:
         k = sum(
@@ -521,7 +524,7 @@ def validate_model(tables: Tables) -> dict[str, int]:
         return (
             sum(n_half[i] * coefficients[i] for i in range(g.lanes))
             + k * canonical_correction
-        ) % p
+        ) * inverse_canonical_radix % p
 
     def multiply(left_mn, right_mn):
         reduced_m = tuple(
@@ -776,15 +779,24 @@ def parse_reference_array(source: str, name: str) -> list[int]:
 def validate_bls_reference(tables: Tables, reference_header: Path | None) -> None:
     assert tables.field.name == "bls12381"
     mask = (1 << tables.geometry.word) - 1
+    # The reference stores the plain radix coefficients without the
+    # 2^(64*WORDS) factor carried by the emitted tables.
+    p = tables.field.modulus
+    inverse_canonical_radix = pow(2, -64 * WORDS, p)
     from_matrix = [
         (coefficient >> (tables.geometry.word * digit)) & mask
         for row in tables.to_canonical
-        for coefficient in (sum(word << (64 * limb) for limb, word in enumerate(row)),)
+        for coefficient in (
+            sum(word << (64 * limb) for limb, word in enumerate(row))
+            * inverse_canonical_radix
+            % p,
+        )
         for digit in range(tables.geometry.lanes)
     ]
-    correction = sum(
-        word << (64 * limb)
-        for limb, word in enumerate(tables.canonical_correction)
+    correction = (
+        sum(word << (64 * limb) for limb, word in enumerate(tables.canonical_correction))
+        * inverse_canonical_radix
+        % p
     )
     arrays = {
         "moduli1": list(tables.geometry.moduli_m),
@@ -883,7 +895,6 @@ pub(crate) const PARAMETERS: Parameters = Parameters {{
     to_canonical: {fmt_matrix(tables.to_canonical)},
     canonical_correction: {fmt_array(tables.canonical_correction, '        ')},
     canonical_n0: 0x{(-pow(p, -1, 1 << 64)) % (1 << 64):016x},
-    canonical_rr: {fmt_array(words(pow(2, 768, p)), '        ')},
     encoded_p: {fmt_matrix(tables.encoded_p)},
     wide_encoded_p2: {fmt_matrix(tables.wide_encoded_p2)},
     one: {fmt_matrix(tables.one)},

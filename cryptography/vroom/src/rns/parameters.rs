@@ -27,10 +27,11 @@ pub struct Parameters {
     pub(crate) reduce: Conversion,
     pub(crate) expand: Conversion,
     pub(crate) to_rns: Conversion,
+    /// Radix weights of the N-basis lanes modulo p, scaled by 2^384.
     pub(crate) to_canonical: [[u64; 6]; LANES],
+    /// Radix weight of the N-basis quotient modulo p, scaled by 2^384.
     pub(crate) canonical_correction: [u64; 6],
     pub(crate) canonical_n0: u64,
-    pub(crate) canonical_rr: [u64; 6],
     pub(crate) encoded_p: Halves,
     pub(crate) wide_encoded_p2: Halves,
     pub(crate) one: Halves,

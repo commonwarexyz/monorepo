@@ -9,7 +9,7 @@
         "M_over_p": 196983448409059955952082405820229394131238081,
         "N_over_p": 196983448409120140970165191353273717344399941,
         "canonical_acc_bits": 307,
-        "canonical_acc_over_p_bits": 54,
+        "canonical_acc_over_p_bits": 55,
         "expand": {
           "high_acc_bits": 52,
           "k_max": 10375039237473780,

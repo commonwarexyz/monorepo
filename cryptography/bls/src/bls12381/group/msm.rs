@@ -25,6 +25,32 @@ impl<P: Point<C>, C> BucketInput<P, C> for P {
     }
 }
 
+// Terms whose bucket lines are requested this far ahead. One bucket addition
+// spans more instructions than the reorder window, so the hardware cannot
+// begin the next bucket's loads on its own.
+const LOOKAHEAD: usize = 4;
+
+/// Requests every cache line of a value.
+#[inline(always)]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+pub(super) fn prefetch<P>(value: &P) {
+    let address = core::ptr::from_ref(value).cast::<i8>();
+    for offset in (0..core::mem::size_of::<P>()).step_by(64) {
+        // SAFETY: the address comes from a live reference and the offset stays
+        // below the value's size. Every x86_64 target has the SSE feature the
+        // intrinsic requires.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                address.wrapping_add(offset),
+            )
+        }
+    }
+}
+
+#[inline(always)]
+#[cfg(not(all(target_arch = "x86_64", not(miri))))]
+pub(super) const fn prefetch<P>(_: &P) {}
+
 pub(super) struct Term<P> {
     pub point: P,
     pub scalar: EncodedScalar,
@@ -58,6 +84,28 @@ impl EncodedScalar {
     // below bit zero, and an extra top window absorbs a carry beyond the input.
     #[inline(always)]
     pub fn digit(&self, window: usize, width: usize) -> i32 {
+        let value = self.window(window, width);
+        ((value + 1) >> 1) as i32 - ((value >> width) << width) as i32
+    }
+
+    // The top window keeps its carry instead of pushing it into another
+    // window, so its digit is nonnegative and can reach 2^width.
+    #[inline(always)]
+    pub fn top_digit(&self, window: usize, width: usize) -> i32 {
+        ((self.window(window, width) + 1) >> 1) as i32
+    }
+
+    #[inline(always)]
+    fn decode(&self, window: usize, width: usize, unsigned: bool) -> i32 {
+        if unsigned {
+            self.top_digit(window, width)
+        } else {
+            self.digit(window, width)
+        }
+    }
+
+    #[inline(always)]
+    fn window(&self, window: usize, width: usize) -> u32 {
         let bit = window * width;
         let start = bit.saturating_sub(1);
         let mut value = 0u32;
@@ -68,8 +116,7 @@ impl EncodedScalar {
         if bit == 0 {
             value <<= 1;
         }
-        value &= (1 << (width + 1)) - 1;
-        ((value + 1) >> 1) as i32 - ((value >> width) << width) as i32
+        value & ((1 << (width + 1)) - 1)
     }
 }
 
@@ -183,24 +230,35 @@ pub(super) fn bucketed<P: Point<C>, T: BucketInput<P, C>, C>(
     context: &C,
     identity: P,
 ) -> P {
-    let windows = bits / width + 1;
+    // An unsigned top window saves the pass that a signed top digit's carry
+    // would need, at the price of up to 2^top buckets in that window.
+    let windows = bits.div_ceil(width);
+    let top = bits - (windows - 1) * width;
     let mut result = identity;
-    let mut buckets = alloc::vec![identity; 1 << (width - 1)];
+    let mut buckets = alloc::vec![identity; (1 << (width - 1)).max(1 << top)];
     for window in (0..windows).rev() {
         if window != windows - 1 {
             for _ in 0..width {
                 result = result.double(context);
             }
         }
+        let unsigned = window == windows - 1;
         let mut used = 0;
-        for term in terms {
-            let digit = term.scalar.digit(window, width);
-            if digit != 0 {
-                let magnitude = digit.unsigned_abs() as usize;
-                used = used.max(magnitude);
-                let bucket = &mut buckets[magnitude - 1];
-                *bucket = term.point.add_to(bucket, digit < 0, context);
+        for (index, term) in terms.iter().enumerate() {
+            if let Some(ahead) = terms.get(index + LOOKAHEAD) {
+                let digit = ahead.scalar.decode(window, width, unsigned);
+                if digit != 0 {
+                    prefetch(&buckets[digit.unsigned_abs() as usize - 1]);
+                }
             }
+            let digit = term.scalar.decode(window, width, unsigned);
+            if digit == 0 {
+                continue;
+            }
+            let magnitude = digit.unsigned_abs() as usize;
+            used = used.max(magnitude);
+            let bucket = &mut buckets[magnitude - 1];
+            *bucket = term.point.add_to(bucket, digit < 0, context);
         }
         let mut sum = identity;
         for bucket in buckets[..used].iter_mut().rev() {
@@ -339,8 +397,9 @@ mod tests {
 
         const TOTAL: usize = 67;
         for retained in [31, 32] {
+            // Weights span two windows so the low window recodes negative digits.
             let terms: alloc::vec::Vec<_> = (0..retained)
-                .map(|ordinal| (ordinal as i64 + 1, (ordinal % 15 + 1) as u64))
+                .map(|ordinal| (ordinal as i64 + 1, (ordinal % 15 + 17) as u64))
                 .collect();
             let compact_points: alloc::vec::Vec<_> = terms
                 .iter()
@@ -484,6 +543,17 @@ mod tests {
                     let digit = scalar.digit(window, width);
                     assert!(digit.unsigned_abs() as usize <= 1 << (width - 1));
                     result = (result << width) + digit;
+                }
+                assert_eq!(result, BigInt::from_bytes_le(Sign::Plus, &value));
+
+                // An unsigned top digit absorbs the carry within ceil(bits / width) windows.
+                let bits = scalar.bits().max(1);
+                let windows = bits.div_ceil(width);
+                let top = scalar.top_digit(windows - 1, width);
+                assert!((0..=1 << (bits - (windows - 1) * width)).contains(&top));
+                let mut result = BigInt::from(top);
+                for window in (0..windows - 1).rev() {
+                    result = (result << width) + scalar.digit(window, width);
                 }
                 assert_eq!(result, BigInt::from_bytes_le(Sign::Plus, &value));
             }

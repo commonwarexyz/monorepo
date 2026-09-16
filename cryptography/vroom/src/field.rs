@@ -173,6 +173,7 @@ struct ReduceBytes<'a, P: Modulus> {
 impl<P: Modulus> WithBackend for ReduceBytes<'_, P> {
     type Output = Standard<P>;
 
+    #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         let ring = Ring::<P, B>::new(backend);
         let prefix = self.bytes.len() % 32;
@@ -193,6 +194,7 @@ struct Pow<'a, P: Modulus, const N: usize> {
 impl<P: Modulus, const N: usize> WithBackend for Pow<'_, P, N> {
     type Output = Standard<P>;
 
+    #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         pow(&Ring::<P, B>::new(backend), self.value, self.exponent)
     }
@@ -239,6 +241,7 @@ struct IsSquare<P: Modulus>(Standard<P>);
 impl<P: Modulus> WithBackend for IsSquare<P> {
     type Output = Choice;
 
+    #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         let ring = Ring::<P, B>::new(backend);
         let mut exponent = P::PARAMETERS.modulus;
@@ -560,8 +563,9 @@ pub(crate) const fn from_canonical<P: Modulus>(words: &[u64; 6]) -> Standard<P> 
 
 /// Returns the canonical little-endian radix-2^64 words for a trusted standard value.
 pub(crate) fn canonical<P: Modulus>(value: &Standard<P>) -> [u64; 6] {
-    // Project the N-basis expansion into radix form modulo p. The seven-word
-    // accumulator is below 2^55*p.
+    // Project the N-basis expansion into radix form modulo p. The weights
+    // carry an extra factor of 2^384 that normalization divides out, and the
+    // seven-word accumulator is below 2^55*p.
     let n = &value.halves[1];
     let mut accumulator = [0u64; 7];
     for (&digit, coefficient) in n.iter().zip(&P::PARAMETERS.to_canonical) {
@@ -576,13 +580,16 @@ pub(crate) fn canonical<P: Modulus>(value: &Standard<P>) -> [u64; 6] {
     normalize_canonical::<P>(accumulator)
 }
 
-/// Reduces a seven-word integer below 2^64*p for the sealed odd modulus p < 2^381.
+/// Returns `accumulator * 2^-384 mod p` for a seven-word integer below 2^64*p and
+/// the sealed odd modulus p < 2^381.
 fn normalize_canonical<P: Modulus>(mut accumulator: [u64; 7]) -> [u64; 6] {
     let modulus = &P::PARAMETERS.modulus;
     let n0 = P::PARAMETERS.canonical_n0;
 
-    // Each cancelled low word permits exact division by 2^64. The numerator
-    // stays below 2^65*p, and the six-round result is below 2p.
+    // Word step j clears the low word by adding q_j*p*2^(64j) with q_j < 2^64,
+    // so the six steps add below 2^384*p in total and the shifts divide exactly
+    // by 2^384. Every intermediate numerator is below 2^65*p < 2^448 and fits
+    // the seven words, and the quotient is below (2^64 + 2^384)*p/2^384 < 2p.
     for _ in 0..6 {
         let digit = accumulator[0].wrapping_mul(n0);
         accumulate(&mut accumulator, modulus, digit);
@@ -592,22 +599,7 @@ fn normalize_canonical<P: Modulus>(mut accumulator: [u64; 7]) -> [u64; 6] {
         accumulator[6] = 0;
     }
 
-    // Multiplication by RR = 2^768 mod p followed by six cancellations restores
-    // the canonical radix. Each numerator is below 3*2^64*p < 2^448, so the
-    // seven-word accumulator retains its full carry.
-    let reduced = array::from_fn(|i| accumulator[i]);
-    accumulator = [0; 7];
-    for digit in P::PARAMETERS.canonical_rr {
-        accumulate(&mut accumulator, &reduced, digit);
-        let correction = accumulator[0].wrapping_mul(n0);
-        accumulate(&mut accumulator, modulus, correction);
-        for i in 0..6 {
-            accumulator[i] = accumulator[i + 1];
-        }
-        accumulator[6] = 0;
-    }
-
-    // The final value is below 2p, so one conditional subtraction is sufficient.
+    // The quotient is below 2p, so one conditional subtraction is sufficient.
     let value = array::from_fn(|i| accumulator[i]);
     let (reduced, borrow) = subtract(&value, modulus);
     array::from_fn(|i| u64::conditional_select(&reduced[i], &value[i], borrow))
@@ -979,14 +971,12 @@ mod tests {
     fn check_canonical_normalization<P: Modulus>() {
         let p = integer(&P::PARAMETERS.modulus);
         let limit = &p << 64usize;
-        let rr = integer(&P::PARAMETERS.canonical_rr);
+        let inverse = (BigUint::one() << 384usize).modinv(&p).unwrap();
         assert!(p > BigUint::one() && p.bit(0) && p < (BigUint::one() << 381usize));
         assert_eq!(
             P::PARAMETERS.modulus[0].wrapping_mul(P::PARAMETERS.canonical_n0),
             u64::MAX
         );
-        assert!(!rr.is_zero() && rr < p);
-        assert_eq!(rr, (BigUint::one() << 768usize) % &p);
 
         let mut values = vec![BigUint::zero(), BigUint::one(), &limit - 1u32];
         for multiple in 1..=40u32 {
@@ -1020,7 +1010,7 @@ mod tests {
             let actual = integer(&words);
             assert_eq!(
                 actual,
-                &value % &p,
+                &value * &inverse % &p,
                 "{} S={value:x}",
                 core::any::type_name::<P>()
             );
