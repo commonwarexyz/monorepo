@@ -277,15 +277,10 @@ impl Request {
             Self::WriteAt(r) => {
                 // Only plain writes stay in `Writing`. Settle here so a caller that stopped
                 // waiting still leaves the open's debt correct.
-                r.file.wrote(
+                let result = r.file.wrote(
                     r.state != WriteAtState::Writing,
-                    matches!(
-                        r.state,
-                        WriteAtState::WritingSync
-                            | WriteAtState::Syncing
-                            | WriteAtState::SyncingFull
-                    ),
-                    &result,
+                    matches!(r.state, WriteAtState::WritingSync | WriteAtState::Syncing),
+                    result,
                 );
                 (
                     RequestOutput::WriteAt(result),
@@ -297,10 +292,13 @@ impl Request {
                 )
             }
             Self::Sync(r) => {
-                match &result {
-                    Ok(()) => r.file.synced(r.seen, r.created),
-                    Err(error) => r.file.sync_failed(error),
-                }
+                let result = match result {
+                    Ok(()) => r.file.tracker.end_sync(r.seen),
+                    Err(error) => {
+                        r.file.sync_failed(&error);
+                        Err(error)
+                    }
+                };
                 (
                     RequestOutput::Sync(result),
                     RetiredResources::File {
@@ -336,7 +334,7 @@ pub enum RequestOutput {
     ReadAt(Result<IoBufMut, (IoBufMut, Error)>),
     /// Completion of the whole positioned write and durability sequence.
     WriteAt(Result<(), Error>),
-    /// Completion of a sync.
+    /// Completion of a data sync.
     Sync(Result<(), Error>),
     /// Completion of a socket connection attempt.
     Connect(Result<(), Error>),
@@ -658,43 +656,18 @@ pub enum WriteAtState {
     WritingSync,
     /// Submit plain writes, then issue one trailing data sync.
     WritingBeforeSync,
-    /// Submit plain writes, then issue one trailing full sync, which also covers the header of
-    /// a blob whose creation no flush covered yet.
-    WritingBeforeFull,
     /// Issue the trailing data sync.
     Syncing,
-    /// Issue the trailing full sync.
-    SyncingFull,
 }
 
-impl WriteAtState {
-    /// Whether the next SQE is the trailing sync rather than another write.
-    const fn syncing(&self) -> bool {
-        matches!(self, Self::Syncing | Self::SyncingFull)
-    }
-
-    /// The trailing sync this phase leads into, if any.
-    const fn trailing(&self) -> Option<Self> {
-        match self {
-            Self::WritingBeforeSync => Some(Self::Syncing),
-            Self::WritingBeforeFull => Some(Self::SyncingFull),
-            _ => None,
-        }
-    }
+/// Build a data-only fsync SQE.
+fn build_datasync_sqe(file: &File) -> SqueueEntry {
+    opcode::Fsync::new(Fd(file.as_raw_fd()))
+        .flags(io_uring::types::FsyncFlags::DATASYNC)
+        .build()
 }
 
-/// Build an fsync SQE, restricted to the data a reader needs unless `full` also demands the
-/// file's metadata.
-fn build_fsync_sqe(file: &File, full: bool) -> SqueueEntry {
-    let fsync = opcode::Fsync::new(Fd(file.as_raw_fd()));
-    if full {
-        fsync.build()
-    } else {
-        fsync.flags(io_uring::types::FsyncFlags::DATASYNC).build()
-    }
-}
-
-/// Return the terminal sync status, or `None` for a retry.
+/// Return the terminal data-sync status, or `None` for a retry.
 fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
     match CqeResult::from_raw(result, state) {
         CqeResult::Retry => None,
@@ -737,8 +710,8 @@ impl WriteAtRequest {
 
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
-        if self.state.syncing() {
-            return build_fsync_sqe(&self.file, self.state == WriteAtState::SyncingFull);
+        if self.state == WriteAtState::Syncing {
+            return build_datasync_sqe(&self.file);
         }
 
         let fd = Fd(self.file.as_raw_fd());
@@ -772,7 +745,7 @@ impl WriteAtRequest {
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
-        if self.state.syncing() {
+        if self.state == WriteAtState::Syncing {
             return on_sync_cqe(state, result);
         }
 
@@ -786,13 +759,12 @@ impl WriteAtRequest {
                 self.write.advance(n);
                 self.offset += n as u64;
                 if self.write.is_complete() {
-                    match self.state.trailing() {
+                    if self.state == WriteAtState::WritingBeforeSync {
                         // All batches must finish before the trailing sync starts.
-                        Some(trailing) => {
-                            self.state = trailing;
-                            None
-                        }
-                        None => Some(Ok(())),
+                        self.state = WriteAtState::Syncing;
+                        None
+                    } else {
+                        Some(Ok(()))
                     }
                 } else {
                     None
@@ -808,26 +780,18 @@ pub struct SyncRequest {
     pub file: Arc<Shared>,
     /// Completed mutations that preceded this barrier's submission.
     seen: u64,
-    /// Whether this barrier also retires the blob's unflushed creation.
-    created: bool,
 }
 
 impl SyncRequest {
-    /// Record the durability this sync can credit before ring submission.
+    /// Record the mutation frontier this sync can cover before ring submission.
     pub fn new(file: Arc<Shared>) -> Self {
         let seen = file.tracker.begin_sync();
-        let created = file.tracker.created();
-        Self {
-            file,
-            seen,
-            created,
-        }
+        Self { file, seen }
     }
 
-    /// Build the fsync SQE for this request. A created blob's first barrier makes the whole
-    /// file durable, alongside the directory entries its caller already flushed.
+    /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
-        build_fsync_sqe(&self.file, self.created)
+        build_datasync_sqe(&self.file)
     }
 
     /// Classify one fsync CQE and decide whether the logical request completes
@@ -1680,6 +1644,91 @@ mod tests {
                 let (_, retired) = request.complete(result);
                 drop(retired);
                 assert_eq!(file.tracker.is_dirty(), !success || later_write);
+            }
+        }
+    }
+
+    #[test]
+    fn test_overlapping_durability_failure() {
+        for state in [
+            None,
+            Some(WriteAtState::WritingSync),
+            Some(WriteAtState::Syncing),
+        ] {
+            for failure_first in [false, true] {
+                let file = make_shared_file();
+                file.tracker.write();
+                file.tracker.complete();
+                let mut failed = Request::Sync(SyncRequest::new(file.clone()));
+                let mut successful = state.as_ref().map_or_else(
+                    || Request::Sync(SyncRequest::new(file.clone())),
+                    |state| {
+                        Request::WriteAt(WriteAtRequest {
+                            file: file.clone(),
+                            offset: 0,
+                            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                            state: if *state == WriteAtState::Syncing {
+                                WriteAtState::WritingBeforeSync
+                            } else {
+                                WriteAtState::WritingSync
+                            },
+                            cache: Cache::Enabled,
+                        })
+                    },
+                );
+                if state == Some(WriteAtState::Syncing) {
+                    assert!(successful.on_cqe(ACTIVE, 5).is_none());
+                }
+
+                // Requests are already admitted. Completion accounting runs even when the
+                // observer discards its output, and precedes releasing any retained owner.
+                let finish_failure = || {
+                    let result = failed.on_cqe(ACTIVE, -libc::EIO).unwrap();
+                    let (output, retired) = failed.complete(result);
+                    assert!(matches!(output, RequestOutput::Sync(Err(Error::Io(_)))));
+                    assert!(matches!(
+                        file.tracker.failure(),
+                        Some(Error::BlobSyncFailed(_, _, error))
+                            if error.raw_os_error() == Some(libc::EIO)
+                    ));
+                    drop(retired);
+                };
+                let finish_success = || {
+                    let result = successful
+                        .on_cqe(
+                            ACTIVE,
+                            if state == Some(WriteAtState::WritingSync) {
+                                5
+                            } else {
+                                0
+                            },
+                        )
+                        .unwrap();
+                    let (output, retired) = successful.complete(result);
+                    let result = match output {
+                        RequestOutput::Sync(result) | RequestOutput::WriteAt(result) => result,
+                        _ => unreachable!(),
+                    };
+                    if failure_first {
+                        assert!(
+                            matches!(&result, Err(Error::BlobSyncFailed(_, _, error))
+                                if error.raw_os_error() == Some(libc::EIO)),
+                            "acknowledged after a retained failure: {result:?}"
+                        );
+                        assert!(file.tracker.is_dirty());
+                    } else {
+                        result.unwrap();
+                        assert_eq!(file.tracker.is_dirty(), state.is_some());
+                    }
+                    drop(retired);
+                };
+                if failure_first {
+                    finish_failure();
+                    finish_success();
+                } else {
+                    finish_success();
+                    finish_failure();
+                }
             }
         }
     }

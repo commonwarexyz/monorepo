@@ -181,42 +181,37 @@ stability_scope!(BETA {
             }
         }
 
-        /// Returns true if a blob's header region is consistent with the creation of a
+        /// Returns true if a blob's raw contents are consistent with the creation of a
         /// blob with this layout that was interrupted before its header became durable.
-        ///
-        /// `raw` is the blob's header region alone, at most [Header::resolve_len] bytes.
-        /// Nothing past the region is read, so a file that carries data is classified by
-        /// its header region.
         ///
         /// A V0 header has no integrity metadata. A creation shorter than the prelude is handled
         /// as missing before parsing. Once the full prelude exists, malformed bytes cannot be
         /// distinguished safely from pre-existing corruption and do not qualify for healing.
         ///
-        /// [Layout::V1] creation truncates the file to zero and writes the region without
-        /// flushing it, and this classifier models the states it recovers as a prefix of
-        /// the canonical region, possibly followed by zeros (a persisted length without
-        /// persisted bytes reads as zeros). A region is accepted iff it equals a canonical
-        /// prefix followed by zeros: the magic and layout version are fixed, the blob
-        /// version bytes continue the prefix with whatever value the writer chose, the CRC
-        /// bytes must be a prefix of the CRC over the preceding prelude, which can only
-        /// have begun persisting once the full prelude did, and everything past the prefix
-        /// must be zero.
+        /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
+        /// this classifier models the states it recovers as a prefix of the canonical
+        /// region, possibly followed by zeros (a persisted length without persisted bytes
+        /// reads as zeros). A file is accepted iff it fits within the region and equals a
+        /// canonical prefix followed by zeros: the magic and layout version are fixed;
+        /// the blob version bytes continue the prefix with whatever value the writer
+        /// chose; the CRC bytes must be a prefix of the CRC over the preceding prelude,
+        /// which can only have begun persisting once the full prelude did; and everything
+        /// past the prefix must be zero.
         ///
         /// The prefix shape is a model, not a filesystem guarantee: device writeback before
-        /// the first flush completes may persist bytes out of order. A region that is not a
-        /// canonical prefix (a lost byte followed by persisted ones, or a CRC that does not
-        /// match its own prelude) stays loudly corrupt rather than healing, trading recovery
+        /// the sync completes may persist bytes out of order. A file that is not a canonical
+        /// prefix (a lost byte followed by persisted ones, or a CRC that does not match its
+        /// own prelude) stays loudly corrupt rather than healing, trading recovery
         /// coverage for avoiding broader acceptance that might erase nonzero data.
         pub(crate) fn interrupted_creation(self, raw: &[u8]) -> bool {
             match self {
                 Self::V0 => false,
                 Self::V1 => {
-                    assert!(
-                        raw.len() <= self.data_offset() as usize,
-                        "caller must cap the header region to the data offset"
-                    );
-
-                    // Everything past the parseable header must be zero padding.
+                    // The file cannot extend past the region creation writes, and
+                    // everything past the parseable header must be zero padding.
+                    if raw.len() > self.data_offset() as usize {
+                        return false;
+                    }
                     let head = &raw[..raw.len().min(Header::PARSE_LEN)];
                     if raw[head.len()..].iter().any(|&byte| byte != 0) {
                         return false;
@@ -435,17 +430,8 @@ stability_scope!(BETA {
     ///
     /// Returns `Some((logical_size, blob_version, data_offset))` for a valid header and
     /// `None` when the caller should (re)create the blob: the file is too short to hold a
-    /// header, or its header region is that of a [Layout::V1] creation interrupted
+    /// header, or its contents are those of a [Layout::V1] creation interrupted
     /// before its header became durable. Anything else fails as corrupt or unacceptable.
-    ///
-    /// A torn creation region heals whatever the file's length, so recreating the blob
-    /// drops the bytes past the region. A durable header is never rewritten and a synced
-    /// page never vanishes, so a file that holds data behind a torn creation region can
-    /// only be a creation whose first flush never completed. No caller received `Ok` from
-    /// a durability operation on it (a non-empty durable write on a created blob flushes the
-    /// whole file, header included, before it returns), so those bytes were never acknowledged
-    /// and dropping them loses nothing. A header region that is not a canonical creation
-    /// prefix stays loudly corrupt at every length.
     ///
     /// `raw` must hold the blob's first [Header::resolve_len] bytes, where `raw_len` is
     /// the blob's raw on-disk length.
@@ -467,18 +453,18 @@ stability_scope!(BETA {
             return Ok(None);
         }
 
-        // Data past the header region is never part of a header verdict.
-        let region = &raw[..Header::resolve_len(raw_len)];
-
-        let err = match Header::parse(region, raw_len, layouts, versions) {
+        let err = match Header::parse(raw, raw_len, layouts, versions) {
             Ok(resolved) => return Ok(Some(resolved)),
             Err(err) => err,
         };
 
         // Heal a V1 creation interrupted before its header became durable: the failure
-        // must be one a torn write can produce, and the header region must match the
-        // canonical creation prefix.
-        if err.may_be_torn_creation() && Layout::V1.interrupted_creation(region) {
+        // must be one a torn write can produce, and the contents must match the canonical
+        // creation prefix. Files longer than the creation region hold data and never heal.
+        if raw_len <= Layout::V1.data_offset()
+            && err.may_be_torn_creation()
+            && Layout::V1.interrupted_creation(raw)
+        {
             warn!(
                 partition,
                 name = %hex(name),
@@ -541,20 +527,6 @@ pub(crate) mod tests {
         );
         raw.extend_from_slice(payload);
         raw
-    }
-
-    /// Resolves a durable image the way a backend does, handing [super::resolve] the
-    /// image's header region and its full raw length.
-    fn resolve_image(raw: &[u8]) -> Result<Option<(u64, BlobVersion, u64)>, crate::Error> {
-        let raw_len = raw.len() as u64;
-        super::resolve(
-            &raw[..Header::resolve_len(raw_len)],
-            raw_len,
-            &Layout::ALL,
-            &(BlobVersion::new(0)..=BlobVersion::new(0)),
-            "partition",
-            b"blob",
-        )
     }
 
     #[test]
@@ -971,10 +943,9 @@ pub(crate) mod tests {
                     // The magics share the `CWI` brand, so a V0 blob whose surviving bytes
                     // form a canonical V1 prefix (a default version stamp of 0, an all-zero
                     // payload, and the tag byte lost) is byte-identical to a V1 creation
-                    // torn inside the magic, and heals. Its logical length is lost. Every
-                    // erased byte inside the header region is zero, and bytes past the region
-                    // are dropped unexamined (see `resolve`). Any nonzero stamp, in-region
-                    // payload, or non-prefix survivor stays loud (see the reject table).
+                    // torn inside the magic, and heals. Its logical length is lost, but
+                    // every erased payload byte is zero. Any nonzero stamp, payload, or
+                    // non-prefix survivor stays loud (see the reject table).
                     let mut raw = v0_blob_bytes(0, &[0u8; 100]);
                     raw[3] = 0;
                     raw
@@ -1035,8 +1006,13 @@ pub(crate) mod tests {
                 raw
             }),
             ("nonzero padding", {
-                let mut raw = region;
+                let mut raw = region.clone();
                 raw[100] = 0xFF;
+                raw
+            }),
+            ("data past the header region", {
+                let mut raw = region;
+                raw.push(1);
                 raw
             }),
             ("rotted-magic V0 blob with its version stamp", {
@@ -1055,6 +1031,18 @@ pub(crate) mod tests {
                 raw.extend_from_slice(&[0xAA, 0xBB]);
                 raw
             }),
+            (
+                "all zeros, one byte longer than the creation region",
+                vec![0u8; Layout::V1.data_offset() as usize + 1],
+            ),
+            ("zero payload past the header region, CRC lost", {
+                // A synced V1 blob whose payload is all zeros, with the CRC bytes rotted
+                // away: the file extends past the header region, so healing it would
+                // erase the payload.
+                let mut raw = v1_blob_bytes(5, &[0u8; 100]);
+                raw[8..12].fill(0);
+                raw
+            }),
         ];
         for (label, raw) in cases {
             assert!(
@@ -1062,95 +1050,6 @@ pub(crate) mod tests {
                 "{label} must stay a loud corruption error"
             );
         }
-    }
-
-    /// A torn creation region heals at any file length: nothing past the region was ever
-    /// acknowledged, so recreating the blob loses nothing.
-    #[test]
-    fn test_resolve_heals_torn_creation_with_data() {
-        let region = v1_blob_bytes(0, b"");
-        let payload = b"unacknowledged";
-        let cases: &[(&str, Vec<u8>)] = &[
-            ("region persisted nothing", {
-                let mut raw = vec![0u8; region.len()];
-                raw.extend_from_slice(payload);
-                raw
-            }),
-            ("region persisted the magic and layout version", {
-                let mut raw = vec![0u8; region.len()];
-                raw[..6].copy_from_slice(&region[..6]);
-                raw.extend_from_slice(payload);
-                raw
-            }),
-            ("region persisted a prefix of the CRC", {
-                let mut raw = vec![0u8; region.len()];
-                raw[..10].copy_from_slice(&region[..10]);
-                raw.extend_from_slice(payload);
-                raw
-            }),
-            ("one zero byte past the region", vec![0u8; region.len() + 1]),
-            ("documented residual: any payload behind a lost CRC", {
-                // A durable header is never rewritten and a synced page never vanishes,
-                // so a V1 blob cannot lose its CRC bytes while keeping a payload. The
-                // shape is that of a torn creation and heals. The region alone decides,
-                // so the erased payload is never examined.
-                let mut raw = v1_blob_bytes(0, payload);
-                raw[8..12].fill(0);
-                raw
-            }),
-        ];
-        for (label, raw) in cases {
-            assert!(
-                matches!(resolve_image(raw), Ok(None)),
-                "{label} should heal into a recreated blob"
-            );
-        }
-    }
-
-    /// A header region that is not a canonical creation prefix stays loudly corrupt,
-    /// whether or not the file holds data.
-    #[test]
-    fn test_resolve_rejects_corrupt_region_with_data() {
-        let region = v1_blob_bytes(0, b"");
-        let payload = b"payload";
-        let cases: &[(&str, Vec<u8>)] = &[
-            ("foreign bytes", {
-                let mut raw = vec![0xFFu8; region.len()];
-                raw.extend_from_slice(payload);
-                raw
-            }),
-            ("magic byte lost with later bytes persisted", {
-                let mut raw = v1_blob_bytes(0, payload);
-                raw[3] = 0;
-                raw
-            }),
-            ("nonzero padding behind a torn prefix", {
-                let mut raw = vec![0u8; region.len()];
-                raw[..10].copy_from_slice(&region[..10]);
-                raw[100] = 0xFF;
-                raw.extend_from_slice(payload);
-                raw
-            }),
-        ];
-        for (label, raw) in cases {
-            assert!(
-                matches!(resolve_image(raw), Err(crate::Error::BlobCorrupt(..))),
-                "{label} must stay a loud corruption error"
-            );
-        }
-    }
-
-    /// An intact header keeps its blob, data and all.
-    #[test]
-    fn test_resolve_keeps_intact_header_with_data() {
-        let raw = v1_blob_bytes(0, b"payload");
-        assert!(matches!(
-            resolve_image(&raw),
-            Ok(Some((size, blob_version, data_offset)))
-            if size == 7
-                && blob_version == BlobVersion::new(0)
-                && data_offset == Layout::V1.data_offset()
-        ));
     }
 
     #[test]

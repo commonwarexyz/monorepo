@@ -13,11 +13,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fs::File,
         io::{self, Read as _, Seek as _, SeekFrom},
         ops::RangeInclusive,
-        path::{Path, PathBuf},
+        path::Path,
         ptr,
         sync::{
             Arc, Weak,
-            atomic::{AtomicBool, AtomicU64, Ordering},
+            atomic::{AtomicU64, Ordering},
         },
     };
     #[cfg(target_os = "linux")]
@@ -90,22 +90,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         })
     }
 
-    /// Make a created blob's directory entries durable: its partition directory and the storage
-    /// directory, whose entry for the partition may itself be new.
-    pub(crate) fn sync_dirs(dirs: &Dirs) -> Result<(), Error> {
-        sync_dir(&dirs.partition)?;
-        sync_dir(&dirs.storage)
-    }
-
-    /// Directories whose entries a created blob's first flush makes durable.
-    #[derive(Clone)]
-    pub(crate) struct Dirs {
-        /// The partition directory holding the blob.
-        pub(crate) partition: PathBuf,
-        /// The storage directory holding the partition.
-        pub(crate) storage: PathBuf,
-    }
-
     /// The live open of each blob name and the durability debt its dropped handles left behind.
     ///
     /// A name has at most one live open. Its identity binds settlement to that open, and the
@@ -129,8 +113,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     struct TestState {
         /// Number of flushes an open performed to establish a settled predecessor's debt.
         completions: AtomicU64,
-        /// Number of flushes that made a created blob's header and directory entries durable.
-        creation_flushes: AtomicU64,
         /// Report that the next completion is about to flush the file, then pause it.
         before_complete: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Fail the next flush through a blob handle or an open's completion with this error.
@@ -151,22 +133,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
-    /// Durability a dropped open left for the next open of its name to establish.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub(crate) struct Debt {
-        /// Mutations no completed sync covered.
-        pub(crate) dirty: bool,
-        /// A header and directory entries no flush made durable.
-        pub(crate) created: bool,
-    }
-
-    impl Debt {
-        /// Whether nothing is owed.
-        pub(crate) const fn is_clear(self) -> bool {
-            !self.dirty && !self.created
-        }
-    }
-
     #[derive(Default)]
     struct Entry {
         /// Liveness checks must not acquire an owner: its destructor locks this registry.
@@ -174,7 +140,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Fires once every operation issued through the previous open has finished.
         settle: Option<Receiver>,
         /// Debt the previous opens left, released by the open that establishes it.
-        debt: Debt,
+        dirty: bool,
         /// A durability failure retained until the name is removed or recreated.
         failed: Option<Error>,
     }
@@ -182,7 +148,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     impl Entry {
         /// Whether the entry carries nothing a later open must observe.
         const fn is_clear(&self) -> bool {
-            self.settle.is_none() && self.debt.is_clear() && self.failed.is_none()
+            self.settle.is_none() && !self.dirty && self.failed.is_none()
         }
     }
 
@@ -249,7 +215,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
             let generation = Arc::new(Generation { pending: self.clone(), key });
             entry.identity = Arc::downgrade(&generation);
-            let owed = entry.settle.is_some() || !entry.debt.is_clear();
+            let owed = entry.settle.is_some() || entry.dirty;
             Ok((generation, entry.settle.clone(), owed))
         }
 
@@ -274,7 +240,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &self,
             key: &(String, Vec<u8>),
             sender: Sender,
-            debt: Debt,
+            dirty: bool,
             failure: Option<Error>,
         ) {
             {
@@ -283,8 +249,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     && entry.settle.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
                 {
                     entry.settle = None;
-                    entry.debt.dirty |= debt.dirty;
-                    entry.debt.created |= debt.created;
+                    entry.dirty |= dirty;
                     if failure.is_some() {
                         entry.failed = failure;
                     }
@@ -317,18 +282,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The identity is weak so a cancelled open's completion neither keeps the name open nor
         /// publishes into a successor's entry.
-        pub(crate) fn debt(&self, key: &(String, Vec<u8>), identity: &Weak<Generation>) -> Result<Debt, Error> {
+        pub(crate) fn debt(&self, key: &(String, Vec<u8>), identity: &Weak<Generation>) -> Result<bool, Error> {
             let entries = self.entries.lock();
             let Some(entry) = entries.get(key) else {
-                return Ok(Debt::default());
+                return Ok(false);
             };
             if !Weak::ptr_eq(&entry.identity, identity) {
-                return Ok(Debt::default());
+                return Ok(false);
             }
             if let Some(failed) = &entry.failed {
                 return Err(failed.clone());
             }
-            Ok(entry.debt)
+            Ok(entry.dirty)
         }
 
         /// Publish the outcome of establishing the debt read through [Self::debt]: success
@@ -348,7 +313,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 return;
             }
             match result {
-                Ok(()) => entry.debt = Debt::default(),
+                Ok(()) => entry.dirty = false,
                 Err(error) => entry.failed = Some(error.clone()),
             }
         }
@@ -405,11 +370,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.test.completions.fetch_add(1, Ordering::AcqRel);
         }
 
-        /// Count a flush that made a created blob durable.
-        pub(crate) fn flushed_creation(&self) {
-            self.test.creation_flushes.fetch_add(1, Ordering::AcqRel);
-        }
-
         /// Number of names whose previous open has not settled yet.
         pub(crate) fn outstanding(&self) -> usize {
             self.entries.lock().values().filter(|entry| entry.settle.is_some()).count()
@@ -420,7 +380,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.entries
                 .lock()
                 .get(&(partition.to_owned(), name.to_vec()))
-                .is_some_and(|entry| !entry.debt.is_clear() || entry.failed.is_some())
+                .is_some_and(|entry| entry.dirty || entry.failed.is_some())
         }
 
         /// Number of completions opens performed for settled predecessors.
@@ -428,25 +388,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.test.completions.load(Ordering::Acquire)
         }
 
-        /// Number of flushes that made created blobs durable.
-        pub(crate) fn creation_flushes(&self) -> u64 {
-            self.test.creation_flushes.load(Ordering::Acquire)
-        }
     }
 
     /// Tracks the writes to one blob file that no completed sync covers.
     ///
     /// Shared by every handle of one open, it counts mutations requiring a full-file barrier.
     /// Each sync credits only mutations completed before it began, so a mutation racing a sync
-    /// stays dirty. It also records whether this open created the blob, whose header and
-    /// directory entries the first flush makes durable, and retains the first durability
-    /// failure so a later flush cannot certify bytes the kernel already reported lost.
+    /// stays dirty. It retains the first durability failure so a later flush cannot certify
+    /// bytes the kernel already reported lost.
     #[derive(Default)]
     pub(crate) struct Tracker {
         written: AtomicU64,
         completed: AtomicU64,
         synced: AtomicU64,
-        created: AtomicBool,
         failed: Mutex<Option<Error>>,
         #[cfg(test)]
         skipped: AtomicU64,
@@ -468,35 +422,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.completed.load(Ordering::Acquire)
         }
 
-        /// Credit a completed sync with the writes observed when it began.
-        pub(crate) fn end_sync(&self, seen: u64) {
+        /// Credit a completed sync unless a durability failure was already retained.
+        pub(crate) fn end_sync(&self, seen: u64) -> Result<(), Error> {
+            let failed = self.failed.lock();
+            if let Some(error) = failed.as_ref() {
+                return Err(error.clone());
+            }
             self.synced.fetch_max(seen, Ordering::AcqRel);
+            Ok(())
         }
 
         /// Whether writes were issued that no completed sync covers.
         pub(crate) fn is_dirty(&self) -> bool {
             self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
-        }
-
-        /// Record that this open created the blob and owes the flush that makes its header and
-        /// directory entries durable.
-        pub(crate) fn create(&self) {
-            self.created.store(true, Ordering::Release);
-        }
-
-        /// Whether the blob's creation still awaits its flush.
-        pub(crate) fn created(&self) -> bool {
-            self.created.load(Ordering::Acquire)
-        }
-
-        /// Credit a completed creation flush.
-        pub(crate) fn end_creation(&self) {
-            self.created.store(false, Ordering::Release);
-        }
-
-        /// Whether a flush has work to do: uncovered mutations or an unflushed creation.
-        pub(crate) fn needs_sync(&self) -> bool {
-            self.is_dirty() || self.created()
         }
 
         /// Retain the first durability failure this open observed.
@@ -512,13 +450,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             self.failed.lock().clone()
         }
 
-        /// What this open leaves for the next open of its name to establish.
-        pub(crate) fn debt(&self) -> Debt {
-            Debt {
-                dirty: self.is_dirty(),
-                created: self.created(),
-            }
-        }
     }
 
     #[cfg(test)]
@@ -539,13 +470,29 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(test)] {
+            /// An untouched creation leaves no debt for a later open.
+            pub(crate) async fn check_untouched_creation_leaves_no_debt<S: crate::Storage>(storage: &S, pending: &Pending) {
+                let before = pending.completions();
+                let (blob, _) = storage.open("durable_creation", b"blob").await.unwrap();
+                drop(blob);
+                let owed = pending.owes("durable_creation", b"blob");
+
+                let (blob, size) = storage.open("durable_creation", b"blob").await.unwrap();
+                drop(blob);
+                let completions = pending.completions() - before;
+                storage.remove("durable_creation", None).await.unwrap();
+
+                assert!(!owed, "successful creation must leave no durability debt");
+                assert_eq!(size, 0);
+                assert_eq!(completions, 0, "untouched creation needs no reopen flush");
+            }
+
             /// Failed creation must not expose an unflushed header as a valid blob.
             ///
             /// An incomplete header is recreated on the next open. A complete header retains the
-            /// creation failure across repeated opens until the name is removed. Neither failure
-            /// flushes anything or leaves debt for a later open.
+            /// creation failure across repeated opens until the name is removed. Failed creation
+            /// leaves no payload mutations for a later open to flush.
             pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
-                let flushes = pending.creation_flushes();
                 let completions = pending.completions();
 
                 // Stop after writing either a partial or complete header.
@@ -568,7 +515,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     drop(blob);
                     storage.remove("failed_creation", None).await.unwrap();
                 }
-                assert_eq!(pending.creation_flushes(), flushes, "failed creation must not flush");
                 assert_eq!(pending.completions(), completions, "failed creation must not leave debt");
             }
 
@@ -641,8 +587,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
             /// Successful `SYNC` writes leave nothing for a reopen to flush.
             ///
-            /// The first durable write of a created blob flushes the whole file. Afterwards,
-            /// mixing plain and durable writes must retain any debt the backend's write barrier
+            /// Mixing plain and durable writes must retain any debt the backend's write barrier
             /// did not cover, regardless of the order of those writes.
             pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
                 // The cache hint must not change durability or require a flush on reopen.
@@ -659,36 +604,28 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                     assert_eq!(pending.completions(), before, "successful durable writes need no reopen flush");
                 }
 
-                // Exercise both orders so a durable write cannot hide an uncovered plain write,
-                // on a blob whose creation is still unflushed and on one whose creation is durable.
-                for settled in [false, true] {
-                    for plain_first in [false, true] {
-                        let before = pending.completions();
-                        let name = [2 + u8::from(settled), u8::from(plain_first)];
-                        let (blob, _) = storage.open("durable_writes", &name).await.unwrap();
-                        if settled {
-                            blob.sync().await.unwrap();
-                        }
-                        let (first, second) = if plain_first {
-                            (WriteOptions::default(), WriteOptions::SYNC)
-                        } else {
-                            (WriteOptions::SYNC, WriteOptions::default())
-                        };
-                        blob.write_at(0, b"first", first).await.unwrap();
-                        blob.write_at(5, b"second", second).await.unwrap();
-                        drop(blob);
-                        let (blob, size) = storage.open("durable_writes", &name).await.unwrap();
-                        assert_eq!(size, 11);
-                        assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
-                        drop(blob);
+                // A durable write cannot hide an uncovered plain write in either order.
+                for plain_first in [false, true] {
+                    let before = pending.completions();
+                    let name = [2, u8::from(plain_first)];
+                    let (blob, _) = storage.open("durable_writes", &name).await.unwrap();
+                    let (first, second) = if plain_first {
+                        (WriteOptions::default(), WriteOptions::SYNC)
+                    } else {
+                        (WriteOptions::SYNC, WriteOptions::default())
+                    };
+                    blob.write_at(0, b"first", first).await.unwrap();
+                    blob.write_at(5, b"second", second).await.unwrap();
+                    drop(blob);
+                    let (blob, size) = storage.open("durable_writes", &name).await.unwrap();
+                    assert_eq!(size, 11);
+                    assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+                    drop(blob);
 
-                        // A created blob's first durable write flushes the whole file. Once
-                        // creation is durable, Linux's per-write sync covers only the durable
-                        // write's range while other platforms use a full-file sync, which also
-                        // covers an earlier plain write.
-                        let needs_flush = !plain_first || (settled && cfg!(target_os = "linux"));
-                        assert_eq!(pending.completions() - before, u64::from(needs_flush), "settled={settled} plain_first={plain_first}");
-                    }
+                    // Linux's per-write sync covers only the durable write's range. Other
+                    // platforms use a full-file sync, which also covers an earlier plain write.
+                    let needs_flush = !plain_first || cfg!(target_os = "linux");
+                    assert_eq!(pending.completions() - before, u64::from(needs_flush), "plain_first={plain_first}");
                 }
             }
 
@@ -833,7 +770,7 @@ pub(crate) mod tests {
     mod tracker {
         use crate::{
             Error,
-            storage::{Debt, Pending, Tracker},
+            storage::{Pending, Tracker},
         };
         use std::{
             sync::{Arc, mpsc},
@@ -849,7 +786,7 @@ pub(crate) mod tests {
             assert!(tracker.is_dirty());
             tracker.complete();
             let seen = tracker.begin_sync();
-            tracker.end_sync(seen);
+            tracker.end_sync(seen).unwrap();
             assert!(!tracker.is_dirty());
         }
 
@@ -861,10 +798,10 @@ pub(crate) mod tests {
             // The sync began before the write reached the file, so it cannot cover it.
             let seen = tracker.begin_sync();
             tracker.complete();
-            tracker.end_sync(seen);
+            tracker.end_sync(seen).unwrap();
             assert!(tracker.is_dirty());
             let later = tracker.begin_sync();
-            tracker.end_sync(later);
+            tracker.end_sync(later).unwrap();
             assert!(!tracker.is_dirty());
         }
 
@@ -876,34 +813,15 @@ pub(crate) mod tests {
             let seen = tracker.begin_sync();
             tracker.write();
             tracker.complete();
-            tracker.end_sync(seen);
+            tracker.end_sync(seen).unwrap();
             assert!(tracker.is_dirty());
 
             // A sync observing both writes clears the state, and a stale completion
             // cannot regress it.
             let later = tracker.begin_sync();
-            tracker.end_sync(later);
-            tracker.end_sync(seen);
+            tracker.end_sync(later).unwrap();
+            tracker.end_sync(seen).unwrap();
             assert!(!tracker.is_dirty());
-        }
-
-        #[test]
-        fn test_created_blob_needs_its_first_flush() {
-            let tracker = Tracker::default();
-            assert!(!tracker.needs_sync());
-            tracker.create();
-            assert!(tracker.needs_sync());
-            assert!(!tracker.is_dirty());
-            assert_eq!(
-                tracker.debt(),
-                Debt {
-                    dirty: false,
-                    created: true
-                }
-            );
-            tracker.end_creation();
-            assert!(!tracker.needs_sync());
-            assert!(tracker.debt().is_clear());
         }
 
         #[test]
@@ -934,7 +852,7 @@ pub(crate) mod tests {
                 let done = done.clone();
                 thread::spawn(move || {
                     if let Some(sender) = sender {
-                        pending.settle(&key(), sender, Debt::default(), None);
+                        pending.settle(&key(), sender, false, None);
                     } else {
                         assert!(matches!(
                             pending.attach("a", b"1"),
@@ -1007,15 +925,10 @@ pub(crate) mod tests {
             let waiter = tokio::spawn(Pending::wait(wait));
             tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
-            pending.settle(&key(), sender, Debt::default(), None);
+            pending.settle(&key(), sender, false, None);
             waiter.await.unwrap().unwrap();
             assert_eq!(pending.outstanding(), 0);
-            assert!(
-                pending
-                    .debt(&key(), &Arc::downgrade(&generation))
-                    .unwrap()
-                    .is_clear()
-            );
+            assert!(!pending.debt(&key(), &Arc::downgrade(&generation)).unwrap());
             drop(generation);
             assert!(pending.entries.lock().is_empty());
         }
@@ -1026,55 +939,22 @@ pub(crate) mod tests {
             let (first, _, _) = pending.attach("a", b"1").unwrap();
             let sender = first.release().unwrap();
             drop(first);
-            pending.settle(
-                &key(),
-                sender,
-                Debt {
-                    dirty: true,
-                    created: false,
-                },
-                None,
-            );
+            pending.settle(&key(), sender, true, None);
             assert!(pending.owes("a", b"1"));
 
             // Debt accumulates across settled opens until an open establishes it.
             let (second, wait, owed) = pending.attach("a", b"1").unwrap();
             assert!(wait.is_none());
             assert!(owed);
-            assert_eq!(
-                pending.debt(&key(), &Arc::downgrade(&second)).unwrap(),
-                Debt {
-                    dirty: true,
-                    created: false
-                }
-            );
+            assert!(pending.debt(&key(), &Arc::downgrade(&second)).unwrap());
             let sender = second.release().unwrap();
             drop(second);
-            pending.settle(
-                &key(),
-                sender,
-                Debt {
-                    dirty: false,
-                    created: true,
-                },
-                None,
-            );
+            pending.settle(&key(), sender, false, None);
             let (third, _, owed) = pending.attach("a", b"1").unwrap();
             assert!(owed);
-            assert_eq!(
-                pending.debt(&key(), &Arc::downgrade(&third)).unwrap(),
-                Debt {
-                    dirty: true,
-                    created: true
-                }
-            );
+            assert!(pending.debt(&key(), &Arc::downgrade(&third)).unwrap());
             pending.clear(&key(), &Arc::downgrade(&third), &Ok(()));
-            assert!(
-                pending
-                    .debt(&key(), &Arc::downgrade(&third))
-                    .unwrap()
-                    .is_clear()
-            );
+            assert!(!pending.debt(&key(), &Arc::downgrade(&third)).unwrap());
             assert!(!pending.owes("a", b"1"));
             drop(third);
             assert!(pending.entries.lock().is_empty());
@@ -1087,7 +967,7 @@ pub(crate) mod tests {
             // A failure published at settlement blocks later opens.
             let (generation, _, _) = pending.attach("a", b"1").unwrap();
             let sender = generation.release().unwrap();
-            pending.settle(&key(), sender, Debt::default(), Some(Error::Closed));
+            pending.settle(&key(), sender, false, Some(Error::Closed));
             drop(generation);
             for _ in 0..2 {
                 assert!(matches!(pending.attach("a", b"1"), Err(Error::Closed)));
@@ -1134,28 +1014,15 @@ pub(crate) mod tests {
             assert!(!owed);
 
             // The removed open's settlement and outcome must not touch the replacement's entry.
-            pending.settle(
-                &key(),
-                stale,
-                Debt {
-                    dirty: true,
-                    created: true,
-                },
-                Some(Error::Closed),
-            );
+            pending.settle(&key(), stale, true, Some(Error::Closed));
             assert!(old.release().is_none());
             pending.clear(&key(), &Arc::downgrade(&old), &Err(Error::Closed));
             assert!(!pending.owes("a", b"1"));
-            assert!(
-                pending
-                    .debt(&key(), &Arc::downgrade(&current))
-                    .unwrap()
-                    .is_clear()
-            );
+            assert!(!pending.debt(&key(), &Arc::downgrade(&current)).unwrap());
             drop(old);
             let sender = current.release().unwrap();
             drop(current);
-            pending.settle(&key(), sender, Debt::default(), None);
+            pending.settle(&key(), sender, false, None);
             assert!(pending.entries.lock().is_empty());
         }
 
@@ -1178,7 +1045,7 @@ pub(crate) mod tests {
             let sender = first.release().unwrap();
             drop(first);
             assert_eq!(pending.entries.lock().len(), 1);
-            pending.settle(&key(), sender, Debt::default(), None);
+            pending.settle(&key(), sender, false, None);
             assert!(pending.entries.lock().is_empty());
 
             for name in 0..128u64 {

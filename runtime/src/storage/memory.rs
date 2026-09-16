@@ -1228,13 +1228,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blob_payload_with_lost_crc_is_recreated() {
+    async fn test_blob_zero_payload_with_lost_crc_stays_corrupt() {
         let storage = Storage::new(test_pool());
 
-        // A V1 header whose CRC bytes never persisted, followed by a payload: a creation whose
-        // first flush never completed, so nothing past the header was acknowledged and the blob
-        // is recreated empty.
-        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"unacknowledged");
+        // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
+        // rotted away: the file extends past the header region, so healing it would
+        // erase the payload.
+        let mut raw = crate::storage::header::tests::v1_blob_bytes(0, &[0u8; 100]);
         raw[8..12].fill(0);
         {
             let mut partitions = storage.partitions.lock();
@@ -1242,8 +1242,7 @@ mod tests {
             partition.insert(b"rotted".to_vec(), raw);
         }
 
-        let (blob, size) = storage.open("partition", b"rotted").await.unwrap();
-        assert_eq!(size, 0);
-        drop(blob);
+        let result = storage.open("partition", b"rotted").await;
+        assert!(matches!(result, Err(crate::Error::BlobCorrupt(_, _, _))));
     }
 }

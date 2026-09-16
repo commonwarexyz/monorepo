@@ -676,12 +676,10 @@ stability_scope!(BETA {
     /// a time, see [`Storage::open_versioned`]. Dropping its last handle closes it
     /// without I/O. A later open of that blob waits for every operation issued
     /// through the dropped handles to finish, including cancelled ones, and then
-    /// either makes durable every write, resize and creation that no completed
-    /// sync covered before it returns, or does not expose them through the new
-    /// handle. If making them durable fails, that open fails and so does every
-    /// later open of the blob until it is removed, except that a blob whose
-    /// creation never became durable may instead be found absent and recreated
-    /// empty.
+    /// either makes durable every write and resize that no completed sync covered
+    /// before it returns, or does not expose them through the new handle. If making
+    /// them durable fails, that open fails and so does every later open of the blob
+    /// until it is removed.
     ///
     /// # Cancellation
     ///
@@ -722,11 +720,7 @@ stability_scope!(BETA {
         /// A blob has one open at a time. Clone the returned blob to share it, and
         /// drop every clone before opening the blob again.
         ///
-        /// A new blob is durably created by its first completed [`Blob::sync`],
-        /// [`Blob::start_sync`] or non-empty [`WriteOptions::SYNC`] write, by the next open
-        /// of the blob, or when the runtime next starts (see the `Storage` durability
-        /// notes). Until then a crash may leave it absent, and a later open recreates it
-        /// empty.
+        /// An Ok result indicates the blob is durably created (or already exists).
         ///
         /// # Errors
         ///
@@ -943,11 +937,9 @@ stability_scope!(BETA {
         /// Make every write and resize that completed before this call durable.
         ///
         /// A write still in flight on another clone is covered by its own
-        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. The first sync
-        /// of a blob this open created also makes its creation durable, see
-        /// [`Storage::open_versioned`]. A runtime may return at once when every completed mutation is
-        /// already covered, so callers may sync freely. Once a sync through this open
-        /// has failed, every later sync through it returns that failure.
+        /// [`WriteOptions::SYNC`] or by a later sync, not by this one. A runtime may
+        /// return at once when every completed mutation is already covered, so
+        /// callers may sync freely.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that every write and resize that completed before this call is

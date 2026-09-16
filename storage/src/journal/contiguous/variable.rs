@@ -8935,48 +8935,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_journal_clear_to_size_tolerates_missing_data_tail() {
-        // The offsets journal, not the data partition, witnesses the position after a clear. A
-        // data tail whose creation never reached disk must still recover to the cleared size.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "clear-missing-tail".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            };
-
-            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..25u64 {
-                (journal, _) = journal.append(&(i * 100)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-            journal.0 = journal.0.clear_to_size(100).await.unwrap();
-            drop(journal);
-
-            // Lose the empty data tail the clear created.
-            context.remove(&cfg.data_partition(), None).await.unwrap();
-
-            let mut journal = Journal::<_, u64>::init(context.child("reopened"), cfg)
-                .await
-                .unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 100);
-            assert!(bounds.is_empty());
-            let pos;
-            (journal, pos) = journal.append(&10_000).await.unwrap();
-            assert_eq!(pos, 100);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_variable_journal_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
