@@ -599,6 +599,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // Simplex engine
         let simplex_config = simplex::Config {
+            pipelined_handoff: false,
             scheme,
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),

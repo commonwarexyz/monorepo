@@ -254,6 +254,7 @@ fn main() {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             },
         );

@@ -97,7 +97,9 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, HandoffPolicy, Viewable, marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
@@ -211,6 +213,17 @@ where
 
     /// Block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+    /// Decide whether to build on a parent that has not yet been certified.
+    ///
+    /// Resolve this decision promptly. The request may be cancelled when consensus
+    /// abandons the proposal context, and cancellation must leave application state valid.
+    fn handoff_policy(
+        &mut self,
+        _context: (E, Self::Context),
+    ) -> impl Future<Output = HandoffPolicy> + Send {
+        async move { HandoffPolicy::AwaitCertification }
+    }
 
     /// Build a new block on top of the provided parent ancestry.
     ///

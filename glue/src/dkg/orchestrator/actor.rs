@@ -740,6 +740,7 @@ where
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
+                pipelined_handoff: false,
                 scheme: scheme.as_ref().clone(),
                 elector: self.simplex.elector.clone(),
                 blocker: self.oracle.clone(),

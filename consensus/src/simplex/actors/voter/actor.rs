@@ -117,16 +117,31 @@ enum ProposalResponse<D> {
 enum ProposalReceiver<D> {
     Regular(oneshot::Receiver<D>),
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
+    /// A volatile build result awaiting durable parent certification.
+    Held {
+        payload: D,
+        ready: bool,
+    },
 }
 
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalReceiver<D>>>;
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
 
-impl<D> Future for ProposalReceiver<D> {
+// No variant exposes a pinned reference to its payload.
+impl<D> Unpin for ProposalReceiver<D> {}
+
+impl<D: Copy> Future for ProposalReceiver<D> {
     type Output = Result<ProposalResponse<D>, oneshot::error::RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
+            Self::Held { payload, ready } => {
+                if *ready {
+                    Poll::Ready(Ok(ProposalResponse::Proposed(*payload)))
+                } else {
+                    Poll::Pending
+                }
+            }
             Self::Regular(receiver) => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.map(ProposalResponse::Proposed)),
@@ -158,6 +173,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
     floor: Option<Floor<S, D>>,
+    pipelined_handoff: bool,
 
     certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
@@ -220,6 +236,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 floor: Some(cfg.floor),
+                pipelined_handoff: cfg.pipelined_handoff,
 
                 certificate_config,
                 partition: cfg.partition,
@@ -473,15 +490,14 @@ impl<
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
         // Keep requests for optimistic future views unless their captured proposal
-        // ancestry has been superseded, and clear requests for exited views. A
-        // pending handoff becomes an ordinary request as soon as its parent certifies.
+        // ancestry has been invalidated, and clear requests for exited views.
+        // Parent certification preserves both pending responses and held results.
         // Certification for an exited view can continue after its verification
         // receiver is dropped.
         let current_view = self.state.current_view();
         if pending_propose.as_ref().is_some_and(|request| {
             request.view() < current_view
                 || self.state.supersede_proposal_request(request.0.context())
-                || self.state.release_certified_handoff(&request.0)
         }) {
             *pending_propose = None;
         }
@@ -1204,6 +1220,14 @@ impl<
                 // delaying them.
                 self = self.prune_views().await;
 
+                // This checkpoint follows the prior iteration's journal sync. Never
+                // promote a held result in reconciliation, which also runs before sync.
+                if let Some(Request(request, _, ProposalReceiver::Held { ready, .. })) =
+                    pending_propose.as_mut()
+                {
+                    *ready = self.state.proposal_parent_certified(request.context());
+                }
+
                 // Prepare waiters
                 let propose_wait = Waiter(&mut pending_propose);
                 let verify_wait = Waiter(&mut pending_verify);
@@ -1236,6 +1260,20 @@ impl<
             (request, span, proposed) = propose_wait => {
                 // Clear propose waiter
                 pending_propose = None;
+
+                // Keep an unpublished build outside the round proposal slot. The
+                // captured request and build latch remain live until promotion.
+                if !self.pipelined_handoff
+                    && matches!(&request, ProposalRequest::Handoff(_))
+                    && !self.state.proposal_parent_certified(request.context())
+                    && let Ok(ProposalResponse::Proposed(payload)) = &proposed
+                {
+                    pending_propose = Some(Request(request, span, ProposalReceiver::Held {
+                        payload: *payload,
+                        ready: false,
+                    }));
+                    continue;
+                }
 
                 // Process the automaton's response
                 let Some(proposed_view) =

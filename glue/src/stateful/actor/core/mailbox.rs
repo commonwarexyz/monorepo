@@ -6,7 +6,8 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, HandoffPolicy,
+    Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -87,6 +88,12 @@ where
         response: oneshot::Sender<Option<A::Block>>,
     },
 
+    /// A request for the application's handoff construction policy.
+    HandoffPolicy {
+        context: (E, A::Context),
+        response: oneshot::Sender<HandoffPolicy>,
+    },
+
     /// A request to verify a block.
     Verify {
         span: Span,
@@ -120,6 +127,7 @@ where
     fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
+            Self::HandoffPolicy { response, .. } => response.is_closed(),
             Self::Verify { verification, .. } => verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -290,6 +298,14 @@ where
             response,
         });
         receiver.await.ok().flatten()
+    }
+
+    async fn handoff_policy(&mut self, context: (E, Self::Context)) -> HandoffPolicy {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::HandoffPolicy { context, response });
+        receiver.await.unwrap_or(HandoffPolicy::AwaitCertification)
     }
 
     async fn verify(

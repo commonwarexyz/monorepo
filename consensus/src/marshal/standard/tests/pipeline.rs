@@ -6,17 +6,21 @@ struct PipelineApp {
     verify_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     verify_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     build_started: Arc<Mutex<Option<oneshot::Sender<Ctx>>>>,
+    build_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    build_completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     build_dropped: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    replacement: Arc<Mutex<Option<oneshot::Sender<Ctx>>>>,
     policies: Arc<AtomicUsize>,
+    builds: Arc<AtomicUsize>,
     block: B,
 }
 
-struct Dropped(Option<oneshot::Sender<()>>);
+struct DropSignal(Option<oneshot::Sender<()>>);
 
-impl Drop for Dropped {
+impl Drop for DropSignal {
     fn drop(&mut self) {
-        self.0.take().unwrap().send_lossy(());
+        if let Some(tx) = self.0.take() {
+            tx.send_lossy(());
+        }
     }
 }
 
@@ -28,7 +32,7 @@ impl crate::Application<Runtime> for PipelineApp {
 
     async fn handoff_policy(&mut self, _: (Runtime, Ctx)) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Pipeline
+        HandoffPolicy::Build
     }
 
     async fn propose(
@@ -37,14 +41,21 @@ impl crate::Application<Runtime> for PipelineApp {
         _: impl Ancestry<B>,
         _: (),
     ) -> Option<B> {
-        let started = self.build_started.lock().take();
-        if let Some(started) = started {
-            let _dropped = Dropped(self.build_dropped.lock().take());
-            started.send_lossy(context);
-            std::future::pending::<()>().await;
-            unreachable!();
-        }
-        self.replacement.lock().take().unwrap().send_lossy(context);
+        assert_eq!(
+            self.builds.fetch_add(1, Ordering::SeqCst),
+            0,
+            "the retained handoff must not be replaced by an ordinary build"
+        );
+        let mut drop_signal = DropSignal(self.build_dropped.lock().take());
+        self.build_started
+            .lock()
+            .take()
+            .unwrap()
+            .send_lossy(context);
+        let release = self.build_release.lock().take().unwrap();
+        release.await.unwrap();
+        drop_signal.0.take();
+        self.build_completed.lock().take().unwrap().send_lossy(());
         Some(self.block.clone())
     }
 
@@ -59,8 +70,7 @@ impl crate::Application<Runtime> for PipelineApp {
     }
 }
 
-#[test_traced("WARN")]
-fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
+fn retained_pipeline_handoff(certification_first: bool) {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
         let Fixture {
             participants,
@@ -130,18 +140,22 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
         let block = B::new::<Sha256>(expected_context.clone(), parent_digest, Height::new(3), 300);
         let digest = block.digest();
         let (verify_tx, verify_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
+        let (verify_release_tx, verify_release_rx) = oneshot::channel();
         let (build_tx, build_rx) = oneshot::channel();
-        let (drop_tx, drop_rx) = oneshot::channel();
-        let (replacement_tx, replacement_rx) = oneshot::channel();
+        let (build_release_tx, build_release_rx) = oneshot::channel();
+        let (completed_tx, completed_rx) = oneshot::channel();
+        let (drop_tx, mut drop_rx) = oneshot::channel();
         let policies = Arc::new(AtomicUsize::new(0));
+        let builds = Arc::new(AtomicUsize::new(0));
         let app = PipelineApp {
             verify_started: Arc::new(Mutex::new(Some(verify_tx))),
-            verify_release: Arc::new(Mutex::new(Some(release_rx))),
+            verify_release: Arc::new(Mutex::new(Some(verify_release_rx))),
             build_started: Arc::new(Mutex::new(Some(build_tx))),
+            build_release: Arc::new(Mutex::new(Some(build_release_rx))),
+            build_completed: Arc::new(Mutex::new(Some(completed_tx))),
             build_dropped: Arc::new(Mutex::new(Some(drop_tx))),
-            replacement: Arc::new(Mutex::new(Some(replacement_tx))),
             policies: policies.clone(),
+            builds: builds.clone(),
             block,
         };
         let control = oracle.control(victim.clone());
@@ -168,9 +182,9 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
                 blocker: oracle.control(victim.clone()),
                 automaton: wrapper.clone(),
                 relay: wrapper,
-                reporter: marshal,
+                reporter: marshal.clone(),
                 strategy: Sequential,
-                partition: "pipeline-replacement".into(),
+                partition: format!("retained-pipeline-{certification_first}"),
                 mailbox_size: NZUsize!(128),
                 epoch: Epoch::zero(),
                 floor: simplex::config::Floor::Finalized(floor_finalization),
@@ -188,10 +202,12 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
                 fetch_timeout: Duration::from_secs(1),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
+                pipelined_handoff: false,
             },
         );
         let _engine = engine.start(vote_network, certificate_network, resolver_network);
-        // Register the real verification gate before delivering its notarization.
+
+        // Register the real verification gate before delivering the parent certificate.
         let parent = Proposal::new(parent_round, View::new(1), parent_digest);
         vote_sender.send(
             Recipients::One(victim.clone()),
@@ -216,19 +232,57 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
         };
         assert_eq!(built_context, expected_context);
         assert_eq!(policies.load(Ordering::SeqCst), 1);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
 
-        // Certification releases the handoff while Application::propose is pending.
-        release_tx.send_lossy(());
-        select! {
-            result = drop_rx => result.expect("cancelled application build must be dropped"),
-            _ = context.sleep(Duration::from_secs(5)) => panic!("cancelled application build was retained"),
+        if certification_first {
+            verify_release_tx.send_lossy(());
+            loop {
+                let (sender, message) = vote_receiver.recv().await.unwrap();
+                assert_eq!(sender, victim);
+                if let Vote::<S, D>::Finalize(vote) = Vote::decode(message).unwrap()
+                    && vote.proposal == parent
+                {
+                    break;
+                }
+            }
+            assert!(matches!(drop_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert_eq!(builds.load(Ordering::SeqCst), 1);
+            build_release_tx.send_lossy(());
+            completed_rx.await.unwrap();
+        } else {
+            build_release_tx.send_lossy(());
+            completed_rx.await.unwrap();
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                marshal.get_verified(round).await.is_none(),
+                "the completed candidate must remain staged until its parent certifies"
+            );
+            loop {
+                select! {
+                    result = vote_receiver.recv() => {
+                        let (sender, message) = result.unwrap();
+                        assert_eq!(sender, victim);
+                        let proposal = match Vote::<S, D>::decode(message).unwrap() {
+                            Vote::Notarize(vote) => Some(vote.proposal),
+                            Vote::Finalize(vote) => Some(vote.proposal),
+                            Vote::Nullify(_) => None,
+                        };
+                        assert_ne!(
+                            proposal.map(|proposal| proposal.round),
+                            Some(round),
+                            "default handoff mode must not vote before parent certification"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_millis(10)) => break,
+                }
+            }
+            verify_release_tx.send_lossy(());
         }
-        assert_eq!(replacement_rx.await.unwrap(), expected_context);
-        assert_eq!(
-            policies.load(Ordering::SeqCst),
-            1,
-            "replacement must be ordinary"
-        );
+
+        assert_eq!(policies.load(Ordering::SeqCst), 1);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(drop_rx.await.is_err());
+
         let proposal = loop {
             let (sender, message) = vote_receiver.recv().await.unwrap();
             assert_eq!(sender, victim);
@@ -239,6 +293,7 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
             }
         };
         assert_eq!(proposal, Proposal::new(round, View::new(2), digest));
+        assert!(marshal.get_verified(round).await.is_some());
         let votes: Vec<_> = [0usize, 1, 2]
             .into_iter()
             .map(|i| Notarize::sign(&schemes[i], proposal.clone()).unwrap())
@@ -260,4 +315,14 @@ fn test_pipeline_handoff_build_cancelled_by_parent_certification() {
             }
         }
     });
+}
+
+#[test_traced("WARN")]
+fn test_pipeline_handoff_retains_completed_build_until_parent_certification() {
+    retained_pipeline_handoff(false);
+}
+
+#[test_traced("WARN")]
+fn test_pipeline_handoff_retains_build_across_parent_certification() {
+    retained_pipeline_handoff(true);
 }

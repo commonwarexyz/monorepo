@@ -293,23 +293,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb},
+            mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
-        marshal::{Update, ancestry},
+        Application as _, CertifiableAutomaton as _, CertifiableBlock as _, HandoffPolicy,
+        HandoffProposal, Reporter as _,
+        marshal::{Update, ancestry, core::Mailbox as MarshalMailbox, standard::Deferred},
         simplex::mocks::scheme as scheme_mocks,
+        types::FixedEpocher,
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock as _, Handle, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
@@ -317,7 +319,11 @@ mod tests {
         sync::Mutex,
     };
     use futures::poll;
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{
+        convert::Infallible,
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
 
     /// Blocks startup before the actor begins polling its mailbox.
     struct StartupGate {
@@ -381,6 +387,108 @@ mod tests {
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }
+    }
+
+    async fn spawn_test_stateful(
+        context: &deterministic::Context,
+        prefix: &str,
+        application: TestApp,
+    ) -> (
+        Mailbox<deterministic::Context, TestApp>,
+        MarshalMailbox<TestScheme, TestVariant>,
+        Box<dyn std::any::Any>,
+        Handle<()>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, prefix.as_bytes(), 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            prefix,
+            fixture.schemes[0].clone(),
+            None,
+            NZUsize!(8),
+            true,
+        )
+        .await;
+        let plan = SyncPlan::init(context, format!("{prefix}-stateful")).await;
+        let (stateful, mailbox) = Stateful::init(
+            context.child("stateful"),
+            Config {
+                application,
+                db_config: (),
+                provider: (),
+                marshal: (marshal.mailbox.clone(), marshal.floor),
+                mailbox_size: NZUsize!(8),
+                plan,
+                resolvers: NoopResolver::default(),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
+                },
+                prune_config: None,
+            },
+        );
+        (mailbox, marshal.mailbox, marshal.guards, stateful.start())
+    }
+
+    #[test]
+    fn forwards_handoff_policy_and_cancels_abandoned_request() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (application, started, _release, cancelled) =
+                TestApp::gated_handoff_policy(HandoffPolicy::Build);
+            let (mailbox, marshal, _marshal, actor) =
+                spawn_test_stateful(&context, "stateful-handoff-policy", application).await;
+            let _databases = mailbox.subscribe_databases().await;
+            let mut deferred = Deferred::new(
+                context.child("handoff"),
+                mailbox,
+                marshal.clone(),
+                FixedEpocher::new(NZU64!(10)),
+            );
+
+            let response = deferred
+                .propose_handoff(TestBlock::new(1, 1).context())
+                .await;
+            started
+                .await
+                .expect("custom handoff policy should be forwarded");
+            drop(response);
+            while !cancelled.load(Ordering::SeqCst) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // Build must reach Marshal's ordinary path, including recovered-candidate reuse.
+            let block = TestBlock::new(1, 1);
+            assert!(marshal.verified(block.context().round, block.clone()).await);
+            let response = deferred.propose_handoff(block.context()).await;
+            assert_eq!(
+                response.await.unwrap(),
+                HandoffProposal::Proposed(block.digest())
+            );
+            actor.abort();
+
+            let (mailbox, marshal, _marshal, actor) = spawn_test_stateful(
+                &context,
+                "stateful-default-handoff-policy",
+                TestApp::default(),
+            )
+            .await;
+            let _databases = mailbox.subscribe_databases().await;
+            let mut deferred = Deferred::new(
+                context.child("default_handoff"),
+                mailbox,
+                marshal,
+                FixedEpocher::new(NZU64!(10)),
+            );
+            let response = deferred
+                .propose_handoff(TestBlock::new(1, 1).context())
+                .await;
+            assert_eq!(response.await.unwrap(), HandoffProposal::AwaitCertification);
+            actor.abort();
+        });
     }
 
     #[test]

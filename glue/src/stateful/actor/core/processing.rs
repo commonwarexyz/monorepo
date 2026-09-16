@@ -32,6 +32,25 @@ use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
+pub(super) fn spawn_handoff_policy<E, A>(
+    context: &E,
+    mut application: A,
+    request: (E, A::Context),
+    mut response: commonware_utils::channel::oneshot::Sender<commonware_consensus::HandoffPolicy>,
+) where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    context.child("handoff_policy").spawn(move |_| async move {
+        select! {
+            policy = application.handoff_policy(request) => {
+                response.send_lossy(policy);
+            },
+            _ = response.closed() => {},
+        }
+    });
+}
+
 /// Work selected for one iteration of the processing actor.
 enum Step<M, P> {
     /// A message received from the actor mailbox.
@@ -337,6 +356,7 @@ where
                         provider: self.provider.clone(),
                     };
                     let verifier = self.processor.verifier();
+                    let policy_application = self.processor.application();
                     let actor_context = self.context.as_present();
                     let marshal = self.marshal.clone();
                     let proposal = self
@@ -371,10 +391,18 @@ where
                                             verification,
                                         },
                                     ),
+                                    Some(Message::HandoffPolicy { context, response }) => {
+                                        spawn_handoff_policy(
+                                            self.context.as_present(),
+                                            policy_application.clone(),
+                                            context,
+                                            response,
+                                        );
+                                    }
                                     Some(message) => {
-                                        // Only verification may overtake an active proposal. The
-                                        // first other message becomes a FIFO barrier for later
-                                        // mailbox work.
+                                        // Independent requests may overtake an active proposal.
+                                        // The first state-mutating message becomes a FIFO barrier
+                                        // for later mailbox work.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }
@@ -404,6 +432,14 @@ where
                             ancestry,
                             verification,
                         },
+                    );
+                }
+                Step::Message(Message::HandoffPolicy { context, response }) => {
+                    spawn_handoff_policy(
+                        self.context.as_present(),
+                        self.processor.application(),
+                        context,
+                        response,
                     );
                 }
                 Step::Message(Message::Finalized {

@@ -174,10 +174,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
-    /// An application's response to a pipelined handoff proposal request.
+    /// An application's response to a handoff proposal request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffProposal<D> {
-        /// Use the supplied payload for the handoff.
+        /// The candidate is ready. Consensus controls when it is published and voted for.
         Proposed(D),
         /// Wait until the parent has been certified before requesting a proposal again.
         AwaitCertification,
@@ -198,9 +198,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// response abandons the local proposal opportunity for this view. Parent
         /// certification does not retry it.
         ///
-        /// Return the receiver promptly and do any work behind it. Consensus drops the
-        /// receiver when the request is no longer needed, including when the parent
-        /// certifies first. Stop work when the receiver closes.
+        /// Return the receiver promptly and do any work behind it. Parent certification
+        /// does not cancel this request: a pending response retains the proposal
+        /// opportunity until it resolves or consensus abandons the context. Consensus
+        /// may hold a completed candidate until its parent certifies. Stop pending work
+        /// when the receiver closes.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
@@ -317,11 +319,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
-    /// An application's policy for a pipelined term handoff.
+    /// An application's construction policy for a term handoff.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffPolicy {
-        /// Proceed through the ordinary proposal path without waiting for parent certification.
-        Pipeline,
+        /// Build or reuse a candidate before parent certification. Consensus controls publication.
+        Build,
         /// Wait for the parent to certify before proposing.
         AwaitCertification,
     }
@@ -363,14 +365,16 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Decide whether to build on a parent that has not yet been certified.
         ///
-        /// Returning [`HandoffPolicy::Pipeline`] allows the marshal to continue through its
+        /// Returning [`HandoffPolicy::Build`] allows the marshal to continue through its
         /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
         /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
         /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before
-        /// requesting that ordinary path again.
+        /// requesting that ordinary path again. Consensus controls whether a ready
+        /// candidate may be published before parent certification.
         ///
-        /// This future may be dropped before completion; cancellation must leave application
-        /// state valid.
+        /// Resolve this decision promptly: parent certification does not bypass a pending
+        /// policy, so it can consume the proposal opportunity. This future may be dropped
+        /// when its request is abandoned; cancellation must leave application state valid.
         fn handoff_policy(
             &mut self,
             _context: (E, Self::Context),

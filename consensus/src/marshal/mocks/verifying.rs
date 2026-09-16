@@ -23,7 +23,7 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    /// Policy returned for pipelined handoff proposals.
+    /// Policy returned for handoff proposal builds.
     pub handoff_policy: HandoffPolicy,
     _phantom: PhantomData<S>,
 }
@@ -55,7 +55,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Configure the policy returned for pipelined handoffs.
+    /// Configure the policy returned for handoff builds.
     pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
         self.handoff_policy = policy;
         self
@@ -138,7 +138,7 @@ impl<B, S> GatedVerifyingApp<B, S> {
         )
     }
 
-    /// Configure the policy returned for pipelined handoffs.
+    /// Configure the policy returned for handoff builds.
     pub const fn with_handoff_policy(mut self, policy: HandoffPolicy) -> Self {
         self.handoff_policy = policy;
         self

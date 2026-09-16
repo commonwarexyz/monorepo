@@ -509,6 +509,7 @@ where
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
+                pipelined_handoff: false,
                 scheme,
                 elector: RoundRobin::<Sha256>::default(),
                 blocker: self.config.blocker,

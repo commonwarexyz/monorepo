@@ -246,6 +246,15 @@ where
     /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
+    /// Permit relaying a handoff proposal and casting our notarize vote before its
+    /// exact parent certifies.
+    ///
+    /// Prefer false: the application may prebuild, but consensus retains the result
+    /// until its parent certifies or finalizes. True trusts the outgoing leader not
+    /// to equivocate; an uncertified tip can leave the early child unusable.
+    /// See the module's [pipelined handoff](super#pipelined-handoff) documentation.
+    pub pipelined_handoff: bool,
+
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
