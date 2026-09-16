@@ -10,7 +10,7 @@
 //!
 //! # Seal
 //!
-//! [Writer::seal] consumes the writer, returning an immutable [super::Sealed] view plus a
+//! [Writer::seal] consumes the writer, returning an immutable [Sealed] view plus a
 //! completion handle for the sync it starts.
 //!
 //! # Paging
@@ -177,7 +177,9 @@ impl<B: Blob> Recovery<B> {
         }
 
         let capacity = adjusted_capacity(capacity, page_size);
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
+
+        // A valid tail may still include unsynced writes from the wrapped blob handle.
+        let needs_sync = !invalid_data_found;
 
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
@@ -511,7 +513,7 @@ impl<B: Blob> Writer<B> {
     ///
     /// Later appends preserve this view, including its frozen partial page. Close all
     /// disk-backed views before reopening the storage for initialization repair.
-    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
+    pub async fn snapshot(&mut self) -> Result<Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
     }
@@ -1229,8 +1231,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             return Ok(());
         }
 
-        // The flush had nothing to write. Sync only if a durability barrier is still pending.
-        // Everything flushed is durable once it completes.
+        // With no write to flush, this sync resolves any remaining durability barrier.
         self.sync_state.sync(&self.blob).await?;
         self.durable_page_state = self.partial_page_state;
         Ok(())
@@ -1358,7 +1359,7 @@ mod tests {
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
         buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
-        deterministic,
+        deterministic::{self, Config},
         mocks::{
             DelayedSyncBlob, RecordingContext, WriteFaultContext, WriteFaults, next_pending_sync,
         },
@@ -1374,6 +1375,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     impl<B: Blob, Phase> Writer<B, Phase> {
@@ -3207,6 +3209,7 @@ mod tests {
         });
     }
 
+    // Appends cannot write pages before a pending start_sync finishes.
     #[test_traced("DEBUG")]
     fn test_append_waits_for_outstanding_start_sync_before_writing() {
         let executor = deterministic::Runner::default();
@@ -3248,8 +3251,8 @@ mod tests {
         });
     }
 
+    // Recovery cannot resize the blob before a pending start_sync finishes.
     #[test_traced("DEBUG")]
-    // Verifies shrink cannot resize the blob before pending start_sync finishes.
     fn test_recovery_truncate_shrink_waits_for_outstanding_start_sync_before_resizing() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -4956,8 +4959,7 @@ mod tests {
             .unwrap();
             blob.sync().await.unwrap();
 
-            // Open the blob - Recovery::open() validates the LAST page (page 2), which is still
-            // valid. So it should open successfully with size 250.
+            // Recovery validates only the terminal page. Truncation discovers page 1 corruption.
             let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
@@ -4968,7 +4970,7 @@ mod tests {
             // This should fail because page 1's CRC is corrupted.
             let result = append.truncate(150).await;
             assert!(
-                matches!(result, Err(crate::Error::InvalidChecksum)),
+                matches!(result, Err(Error::InvalidChecksum)),
                 "Expected InvalidChecksum when shrinking to corrupted page, got: {:?}",
                 result
             );
@@ -5071,8 +5073,7 @@ mod tests {
 
     #[test]
     fn test_cancelled_recovery_read_cannot_repopulate_after_truncate() {
-        let cfg =
-            deterministic::Config::default().with_timeout(Some(std::time::Duration::from_secs(5)));
+        let cfg = Config::default().with_timeout(Some(Duration::from_secs(5)));
         deterministic::Runner::new(cfg).start(|context| async move {
             let page = PAGE_SIZE.get() as usize;
             let physical = page + CHECKSUM_SIZE as usize;

@@ -4131,9 +4131,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Simulate crash during prune: prune ONLY the glob, not the index
-            // This creates the "glob pruned but index not" scenario
-            use crate::journal::segmented::glob::{Config as GlobConfig, Glob};
+            // Leave the index intact after pruning the glob to model an interrupted prune.
             let glob_cfg = GlobConfig {
                 partition: cfg.value_partition.clone(),
                 compression: cfg.compression,

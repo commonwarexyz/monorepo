@@ -931,7 +931,7 @@ mod tests {
     /// Create a five-byte positioned read with the requested cache policy.
     fn make_read_request(cache: Cache) -> ReadAtRequest {
         ReadAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),
@@ -942,7 +942,7 @@ mod tests {
     /// Create a five-byte positioned write with no durability requirement.
     fn make_write_request(cache: Cache) -> WriteAtRequest {
         WriteAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
@@ -1511,7 +1511,7 @@ mod tests {
         ] {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
             let mut write = WriteAtRequest {
-                file: make_file_fd(),
+                file: make_shared_file(),
                 offset: 17,
                 write: IoBufs::from(buf.clone()).into(),
                 state,
@@ -1589,7 +1589,7 @@ mod tests {
         let dont_cache_supported = Arc::new(AtomicBool::new(true));
 
         let mut request = WriteAtRequest {
-            file: make_file_fd(),
+            file: make_shared_file(),
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,

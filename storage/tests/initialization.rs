@@ -1,22 +1,24 @@
-use commonware_codec::ReadExt;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Blob, ReadOptions, Runner, Storage, Supervisor, WriteOptions,
+    Blob, BufMut, ReadOptions, Runner, Storage, Supervisor, WriteOptions,
     buffer::paged::{CacheRef, Writer, corrupt_page},
     deterministic,
 };
 use commonware_storage::{
     journal::{
+        Error as JournalError,
         authenticated::Backing,
         contiguous::{Contiguous, fixed, variable},
-        segmented::oversized::{Config as OversizedConfig, Oversized},
+        segmented::oversized::{Config as OversizedConfig, Oversized, Record},
     },
-    merkle::{Location, mmr::Family},
+    merkle::{Location, full::Config as MerkleConfig, mmr::Family},
+    metadata::{Config as MetadataConfig, Metadata},
     qmdb::{keyless, sync},
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
-use std::sync::Arc;
+use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability, sequence::U64};
+use std::{num::NonZeroU64, sync::Arc};
 
 fn cfg(
     context: &deterministic::Context,
@@ -25,7 +27,7 @@ fn cfg(
 ) -> variable::Config<()> {
     variable::Config {
         partition: partition.into(),
-        items_per_section: std::num::NonZeroU64::new(per_section).unwrap(),
+        items_per_section: NonZeroU64::new(per_section).unwrap(),
         compression: None,
         codec_config: (),
         page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(4)),
@@ -98,7 +100,7 @@ fn test_sync_rejects_missing_acknowledged_data() {
         .await;
         let error = result.err().expect("missing acknowledged data must fail");
         assert!(
-            matches!(error, commonware_storage::journal::Error::Corruption(_)),
+            matches!(error, JournalError::Corruption(_)),
             "must reject missing data instead of authorizing a reset: {error}"
         );
     });
@@ -111,7 +113,7 @@ fn test_keyless_synced_range_reopens() {
         let make_config = |suffix: &str| {
             let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             keyless::fixed::Config {
-                merkle: commonware_storage::merkle::full::Config {
+                merkle: MerkleConfig {
                     journal_partition: format!("{suffix}-merkle"),
                     metadata_partition: format!("{suffix}-metadata"),
                     items_per_blob: NZU64!(11),
@@ -171,29 +173,32 @@ fn test_keyless_synced_range_reopens() {
 
 #[derive(Clone, Debug)]
 struct Entry(u64, u64, u32);
-impl commonware_codec::Write for Entry {
-    fn write(&self, buf: &mut impl commonware_runtime::BufMut) {
+
+impl Write for Entry {
+    fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
         self.1.write(buf);
         self.2.write(buf);
     }
 }
-impl commonware_codec::Read for Entry {
+
+impl Read for Entry {
     type Cfg = ();
-    fn read_cfg(
-        buf: &mut impl commonware_codec::Buf,
-        _: &(),
-    ) -> Result<Self, commonware_codec::Error> {
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(u64::read(buf)?, u64::read(buf)?, u32::read(buf)?))
     }
 }
-impl commonware_codec::FixedSize for Entry {
+
+impl FixedSize for Entry {
     const SIZE: usize = 20;
 }
-impl commonware_storage::journal::segmented::oversized::Record for Entry {
+
+impl Record for Entry {
     fn value_location(&self) -> (u64, u32) {
         (self.1, self.2)
     }
+
     fn with_location(self, offset: u64, size: u32) -> Self {
         Self(self.0, offset, size)
     }
@@ -229,20 +234,16 @@ fn test_oversized_overshooting_cap_keeps_lazy_committed_validation() {
         let offset;
         (journal, _, offset, _) = journal.append(1, Entry(2, 0, 0), &[2; 16]).await.unwrap();
         _ = journal.sync_all().await.unwrap();
-        let mut markers = commonware_storage::metadata::Metadata::<
-            _,
-            commonware_utils::sequence::U64,
-            u64,
-        >::init(
+        let mut markers = Metadata::<_, U64, u64>::init(
             context.child("markers"),
-            commonware_storage::metadata::Config {
+            MetadataConfig {
                 partition: "initialization-markers".into(),
                 codec_config: (),
             },
         )
         .await
         .unwrap();
-        markers.put(commonware_utils::sequence::U64::new(1), 2);
+        markers.put(U64::new(1), 2);
         _ = markers.sync().await.unwrap();
         let (blob, _) = context
             .open(&cfg.value_partition, &1u64.to_be_bytes())

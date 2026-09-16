@@ -99,6 +99,7 @@ use std::{
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{Arc, Weak},
@@ -1634,7 +1635,7 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let opened = self.opens.open(
             partition,
@@ -1686,6 +1687,8 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::mpsc as sync_mpsc;
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -1705,9 +1708,9 @@ mod tests {
             let name = named.then_some(b"blob".as_slice());
             let worker_context = context.child("namespace");
             let competing_context = context.child("competing");
-            let (entered, entering) = std::sync::mpsc::channel();
-            let (release, released) = std::sync::mpsc::channel();
-            let (observed, observing) = std::sync::mpsc::channel();
+            let (entered, entering) = sync_mpsc::channel();
+            let (release, released) = sync_mpsc::channel();
+            let (observed, observing) = sync_mpsc::channel();
             let operation = move |context: Context, open| async move {
                 if open {
                     Some(context.open("partition", b"blob").await.unwrap())

@@ -585,7 +585,7 @@ pub mod tests {
     /// Build a file read that needs five bytes of progress before completing.
     fn make_read_request() -> Request {
         Request::ReadAt(ReadAtRequest {
-            file: held(File::from(make_socket_fd())),
+            file: make_shared_file(File::from(make_socket_fd())),
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),

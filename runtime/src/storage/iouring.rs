@@ -734,7 +734,6 @@ mod tests {
             fd::OwnedFd,
             unix::{ffi::OsStringExt, net::UnixStream},
         },
-        panic::{AssertUnwindSafe, catch_unwind},
         sync::atomic::{AtomicU64, Ordering},
     };
 
