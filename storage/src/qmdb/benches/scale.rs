@@ -32,8 +32,8 @@
 //! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
 //! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
 //! two insert workers, and larger values split between spawned decode and insert tasks while the
-//! init task merely forwards). It reports the replay-region size `R` (so a full-coverage cache is
-//! `cache = R`) and the elapsed time.
+//! init task merely forwards). It reports the replay-region size `R` and the elapsed time.
+//! A capacity of `R` entries can still evict locations when too many map to the same cache set.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
@@ -328,7 +328,7 @@ fn generate(
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the selected index flavor
 /// at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
-/// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
+/// replay-region size `R` and the elapsed time.
 fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind) {
     if !db_dir_nonempty(folder) {
         eprintln!(
@@ -576,7 +576,7 @@ fn time_init(
 
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
-        config.init_cache_size = cache_size;
+        config.init_cache = cache_size;
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {

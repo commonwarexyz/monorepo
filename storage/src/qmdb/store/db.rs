@@ -32,7 +32,7 @@
 //!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
-//!         init_cache_size: Some(NZUsize!(1 << 16)),
+//!         init_cache: Some(NZUsize!(1 << 16)),
 //!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
@@ -117,9 +117,9 @@ pub struct Config<T: Translator, C> {
     /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve index
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
+    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
+    /// index collisions without re-reading the log; `None` disables it.
+    pub init_cache: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -392,7 +392,7 @@ where
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
         // Build the index.
-        let cache_size = cfg.init_cache_size;
+        let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut index = Index::new(context.child("index"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
@@ -579,7 +579,7 @@ mod test {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         };
         TestStore::init(context, cfg).await.unwrap()
@@ -618,7 +618,7 @@ mod test {
                 page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         };
         DelayedStore::init(
@@ -1367,7 +1367,7 @@ mod test {
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
+                init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
             };
 

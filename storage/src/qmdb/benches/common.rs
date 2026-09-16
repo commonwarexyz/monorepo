@@ -180,7 +180,7 @@ pub fn any_fix_cfg_full<B>(
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency,
     }
@@ -213,7 +213,7 @@ pub fn cur_fix_cfg_with(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -234,7 +234,7 @@ pub fn any_var_digest_cfg_with(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -256,7 +256,7 @@ pub fn cur_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -285,7 +285,7 @@ pub fn any_var_vec_cfg_with(
             items_per_blob,
         ),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -312,7 +312,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -398,7 +398,7 @@ macro_rules! define_db_variants {
                         $enum_name::$entry => {
                             let ctx = $ctx_expr;
                             let mut cfg = $cfg(&ctx);
-                            cfg.init_cache_size = $cache_size;
+                            cfg.init_cache = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]
