@@ -175,13 +175,13 @@ Without deposits or withdrawals, $L_{e+1}=L_e=200$.
 Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
 :::
 
-[QMDB's Current Ordered variant](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/ordered/), an authenticated key-value store, keeps each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record.
+## Keep the State, Send the Changes
+
+Every validator retains the complete account state in [QMDB's Current Ordered variant](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/ordered/), an authenticated key-value store that keeps each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Deposits and payments can add accounts, and a zero balance removes the record.
 
 When a payment names a new public key, the operator records a balance for it without an onchain registration transaction. The recipient can spend the balance after the close is admitted, or let payments from many senders accumulate across multiple closes before authorizing a sweep.
 
-## Keep the State, Send the Changes
-
-Every validator retains the complete account state in QMDB. At each close, the operator publishes one shared settlement record (the dealing): active account keys, senders' terminal signed payer states, and cumulative payment entries. Recipients are identified by position in the account list. A CDN can cache this shared dealing for efficient distribution.
+At each close, the operator publishes one shared settlement record (the dealing): active account keys, senders' terminal signed payer states, and cumulative payment entries. Recipients are identified by position in the account list. A CDN can cache this shared dealing for efficient distribution.
 
 Each validator checks the payer signatures and the operator's countersignatures, derives incoming credits, and combines them with its stored balances and the deposits and withdrawals fixed at epoch registration.
 
@@ -225,17 +225,9 @@ The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byt
 
 The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge invalidates that close and any pending descendants, whose outputs never enter the finalized payout root and cannot be claimed.
 
-## Keeping Proofs Available
-
-Before releasing a vote, a validator durably commits the three public QMDBs in parallel, then durably records their checkpoint and its exact signing decision in a private QMDB. After a crash, QMDB recovery and rewind align the public stores to that checkpoint. Local signing decisions survive public-store rewind and are never imported from peers. The same databases provide synchronization, historical reads, and proof generation.
-
-Validators retain the records needed by pending closes, challenges, and recovery. Once those obligations pass, QMDB can prune old records while preserving the roots and global positions. Users, operators, or proof services can run replicas with longer retention to serve old openings. Validators need not retain lifetime history or wait for every optional replica before pruning.
-
-A root authenticates data but cannot supply it. Payouts have no claim deadline, so someone must retain the data needed to refresh payout proofs against the latest finalized root. If every replica discards those records, the entitlement remains but its proof is unavailable. Wallets must also retain their private signed receipts because the public logs cannot recreate them.
-
 ## The Unavoidable Challenge
 
-A certificate establishes that the disclosed close is internally valid. The operator could still have signed a promise it left out.
+A certificate establishes that the disclosed close is internally valid. The operator could still have signed a promise it left out. This limitation applies equally to Bajillion, ZK rollups, payment channels, and any other system offering binding preconfirmations.
 
 Consider two executions with the same public close $\mathcal D_e$ and certificate, proof, or attestation $\zeta$. In $\Xi_0$, the operator signs only the acknowledgments represented by the close. In $\Xi_1$, it also delivers a valid private acknowledgment $R^+$. The verifier sees the same evidence in both:
 
@@ -291,7 +283,7 @@ If the operator misses an admission, deposit, or withdrawal deadline, or a holde
 
 The recovery rules keep finalized payouts independently claimable, with no expiry, and refund unadmitted deposits. Accounts recover their balances with QMDB proofs against the frozen root, and each account can claim only once. A close that was never admitted or was invalidated changes neither the recoverable balances nor the finalized payouts.
 
-Even if the operator disappears, recovery depends on a correct, live settlement chain and independently available balance and payout openings. Replicas with longer retention supply those proofs. The fault also freezes the last finalized payout root and count, against which later claims refresh their openings.
+Even if the operator disappears, recovery depends on a correct, live settlement chain and independently available balance and payout openings. The fault also freezes the last finalized payout root and count, against which later claims refresh their openings.
 
 ## Streamlined Epoch Transitions
 

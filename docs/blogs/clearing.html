@@ -350,10 +350,12 @@ O’Grady</a></div>
         class="math inline">b</span> and <span
         class="math inline">c</span> retained in the close.</p>
         </div>
-        <p><a
+        <h2 id="keep-the-state-send-the-changes">Keep the State, Send
+        the Changes</h2>
+        <p>Every validator retains the complete account state in <a
         href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/current/ordered/">QMDB’s
-        Current Ordered variant</a>, an authenticated key-value store,
-        keeps each live account’s balance under its public key,
+        Current Ordered variant</a>, an authenticated key-value store
+        that keeps each live account’s balance under its public key,
         committed by <span
         class="math inline">\mathsf{StateRoot}</span>. Deposits and
         payments can add accounts, and a zero balance removes the
@@ -363,10 +365,7 @@ O’Grady</a></div>
         recipient can spend the balance after the close is admitted, or
         let payments from many senders accumulate across multiple closes
         before authorizing a sweep.</p>
-        <h2 id="keep-the-state-send-the-changes">Keep the State, Send
-        the Changes</h2>
-        <p>Every validator retains the complete account state in QMDB.
-        At each close, the operator publishes one shared settlement
+        <p>At each close, the operator publishes one shared settlement
         record (the dealing): active account keys, senders’ terminal
         signed payer states, and cumulative payment entries. Recipients
         are identified by position in the account list. A CDN can cache
@@ -449,34 +448,13 @@ O’Grady</a></div>
         invalidates that close and any pending descendants, whose
         outputs never enter the finalized payout root and cannot be
         claimed.</p>
-        <h2 id="keeping-proofs-available">Keeping Proofs Available</h2>
-        <p>Before releasing a vote, a validator durably commits the
-        three public QMDBs in parallel, then durably records their
-        checkpoint and its exact signing decision in a private QMDB.
-        After a crash, QMDB recovery and rewind align the public stores
-        to that checkpoint. Local signing decisions survive public-store
-        rewind and are never imported from peers. The same databases
-        provide synchronization, historical reads, and proof
-        generation.</p>
-        <p>Validators retain the records needed by pending closes,
-        challenges, and recovery. Once those obligations pass, QMDB can
-        prune old records while preserving the roots and global
-        positions. Users, operators, or proof services can run replicas
-        with longer retention to serve old openings. Validators need not
-        retain lifetime history or wait for every optional replica
-        before pruning.</p>
-        <p>A root authenticates data but cannot supply it. Payouts have
-        no claim deadline, so someone must retain the data needed to
-        refresh payout proofs against the latest finalized root. If
-        every replica discards those records, the entitlement remains
-        but its proof is unavailable. Wallets must also retain their
-        private signed receipts because the public logs cannot recreate
-        them.</p>
         <h2 id="the-unavoidable-challenge">The Unavoidable
         Challenge</h2>
         <p>A certificate establishes that the disclosed close is
         internally valid. The operator could still have signed a promise
-        it left out.</p>
+        it left out. This limitation applies equally to Bajillion, ZK
+        rollups, payment channels, and any other system offering binding
+        preconfirmations.</p>
         <p>Consider two executions with the same public close <span
         class="math inline">\mathcal D_e</span> and certificate, proof,
         or attestation <span class="math inline">\zeta</span>. In <span
@@ -593,10 +571,9 @@ O’Grady</a></div>
         recoverable balances nor the finalized payouts.</p>
         <p>Even if the operator disappears, recovery depends on a
         correct, live settlement chain and independently available
-        balance and payout openings. Replicas with longer retention
-        supply those proofs. The fault also freezes the last finalized
-        payout root and count, against which later claims refresh their
-        openings.</p>
+        balance and payout openings. The fault also freezes the last
+        finalized payout root and count, against which later claims
+        refresh their openings.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
         Transitions</h2>
         <p>A payment reaches finality through an admitted close, after
