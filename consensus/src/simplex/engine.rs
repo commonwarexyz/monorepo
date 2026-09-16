@@ -110,6 +110,7 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 skip_budget,
+                pipelined_handoff: cfg.pipelined_handoff,
                 view_retention: cfg.view_retention,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

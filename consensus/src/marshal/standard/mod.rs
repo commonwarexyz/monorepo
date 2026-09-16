@@ -2497,6 +2497,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
+                    pipelined_handoff: false,
                 },
             );
             let _engine = engine.start(vote_network, certificate_network, resolver_network);
@@ -3501,7 +3502,7 @@ mod tests {
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
                 let pipeline_app =
-                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Pipeline);
+                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Build);
                 let mut pipeline = Wrapper::new(
                     kind,
                     context.child("pipeline_wrapper"),

@@ -249,13 +249,18 @@
 //! distribution by one network trip at every term boundary. An elector that can name a term's
 //! leader before the term starts (see
 //! [`elector::Elector::elect_without_certificate`]) can offer a pipelined handoff to the
-//! application. The incoming leader's application may then propose on the outgoing term's final
-//! view as soon as it holds a valid proposal for that view, or defer until the view certifies. If
-//! no such proposal arrives, the leader proposes on entering the term as usual. Non-leader
-//! validators keep the same behavior: they buffer votes for the next term start and verify the
-//! early proposal against explicitly certified ancestry once the outgoing view certifies.
+//! application. The incoming leader may prebuild on the outgoing term's final view, or defer
+//! until that view certifies. With [`Config::pipelined_handoff`] set to false, consensus
+//! retains the same build and publishes it only after its exact parent certifies or finalizes.
+//! Setting it to true permits early relay and notarize votes. Pending policy decisions and
+//! builds survive parent certification; invalid ancestry or an exited view discards them.
+//! Preparation is volatile across restart. If the outgoing proposal never arrives, the
+//! incoming leader builds on ordinary certified ancestry. Non-leader validators keep the
+//! same behavior: they buffer votes for the next term start and verify the early proposal
+//! against explicitly certified ancestry once the outgoing view certifies.
 //!
-//! The gain is largest with rotating leaders, where every view is a term boundary. Each
+//! With early publication enabled, the gain is largest with rotating leaders, where every
+//! view is a term boundary. Each
 //! proposal is distributed in parallel with its parent's votes, so sustained view time drops
 //! from two network trips to one. With stable leaders, optimistic validation pipelines every
 //! view except the term start, so the handoff only moves each term's first view one network
@@ -263,8 +268,7 @@
 //!
 //! Pipelining the handoff trusts the outgoing leader not to equivocate. If the outgoing tip never
 //! notarizes, validators cannot use the pipelined proposal built on it. The usual timeout path
-//! then nullifies the incoming term. Only electors whose leaders are derivable without a
-//! certificate can offer the optimization, and the application chooses whether to accept it.
+//! then nullifies the incoming term.
 //!
 //! ### Optimistic Finality
 //!
@@ -1160,6 +1164,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1427,6 +1432,7 @@ mod tests {
                         PAGE_CACHE_SIZE,
                     ),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
@@ -1546,6 +1552,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
@@ -1696,6 +1703,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1843,6 +1851,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: accept_handoffs,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2259,6 +2268,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2427,6 +2437,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -2625,6 +2636,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2749,6 +2761,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2903,6 +2916,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3143,6 +3157,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3306,6 +3321,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3501,6 +3517,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3621,6 +3638,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3752,6 +3770,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3967,6 +3986,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4178,6 +4198,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4349,6 +4370,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4515,6 +4537,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4703,6 +4726,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4826,6 +4850,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4990,6 +5015,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5086,6 +5112,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -5261,6 +5288,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5408,6 +5436,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5572,6 +5601,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5702,6 +5732,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5826,6 +5857,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -6003,6 +6035,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -6321,6 +6354,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                        pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(
@@ -6564,6 +6598,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
+                pipelined_handoff: false,
                 track_historical_votes: false,
             };
             let engine = Engine::new(
@@ -7674,6 +7709,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7824,6 +7860,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7928,6 +7965,7 @@ mod tests {
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -8363,6 +8401,7 @@ mod tests {
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                             forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                             track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
@@ -8435,6 +8474,7 @@ mod tests {
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
+                    pipelined_handoff: false,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);

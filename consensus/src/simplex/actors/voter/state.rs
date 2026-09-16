@@ -1020,26 +1020,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.deferred_handoffs.insert(view, context.parent);
     }
 
-    /// Releases a pending handoff once its captured parent is explicitly certified.
-    ///
-    /// Returns true when the caller should cancel the handoff receiver and issue
-    /// an ordinary proposal request for the same view. Regular requests are
-    /// never released.
-    pub(super) fn release_certified_handoff(
-        &mut self,
-        request: &ProposalRequest<D, S::PublicKey>,
-    ) -> bool {
-        let ProposalRequest::Handoff(context) = request else {
-            return false;
-        };
-        if self.explicit_ancestry_payload(context.parent.0) != Some(&context.parent.1) {
-            return false;
-        }
-        let Some(round) = self.views.get_mut(&context.view()) else {
-            return false;
-        };
-        round.clear_proposal_request();
-        true
+    /// Returns whether the exact captured parent has certified or finalized.
+    pub(super) fn proposal_parent_certified(&self, context: &Context<D, S::PublicKey>) -> bool {
+        self.explicit_ancestry_payload(context.parent.0) == Some(&context.parent.1)
     }
 
     /// Records a proposal built by the automaton if its captured parent remains

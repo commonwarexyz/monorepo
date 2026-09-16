@@ -43,6 +43,7 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub skip_budget: u64,
+    pub pipelined_handoff: bool,
     pub view_retention: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -227,6 +228,8 @@ mod tests {
         drop_proposals: bool,
         /// Whether the mock application accepts pipelined handoff requests.
         accept_handoffs: bool,
+        pipelined_handoff: bool,
+        actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
@@ -253,6 +256,8 @@ mod tests {
                 stall_proposals: false,
                 drop_proposals: false,
                 accept_handoffs: false,
+                pipelined_handoff: false,
+                actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
@@ -354,6 +359,7 @@ mod tests {
             certification_timeout: options.certification_timeout,
             timeout_retry: options.timeout_retry,
             skip_budget: u64::MAX,
+            pipelined_handoff: options.pipelined_handoff,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -377,12 +383,16 @@ mod tests {
             .await
             .unwrap();
 
-        voter.start(
+        let handle = voter.start(
             batcher::Mailbox::new(batcher_sender),
             resolver::Mailbox::new(resolver_sender),
             vote_sender,
             certificate_sender,
         );
+
+        if let Some(slot) = options.actor_handle {
+            *slot.lock() = Some(handle);
+        }
 
         (
             mailbox,
@@ -700,6 +710,7 @@ mod tests {
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
             skip_budget,
+            pipelined_handoff: false,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -1134,6 +1145,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1376,6 +1388,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2061,6 +2074,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2263,6 +2277,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2458,6 +2473,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2552,6 +2568,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2709,6 +2726,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3806,6 +3824,7 @@ mod tests {
                     local_index,
                     propose_latency_ms: 10.0,
                     accept_handoffs: true,
+                    pipelined_handoff: true,
                     ..Default::default()
                 },
             )
@@ -4009,6 +4028,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     certifier,
                     accept_handoffs: true,
+                    pipelined_handoff: true,
                     ..Default::default()
                 },
             )
@@ -4094,10 +4114,10 @@ mod tests {
         });
     }
 
-    /// A pending handoff request becomes an ordinary request when its parent
-    /// certifies, without waiting for the application's handoff response.
+    /// Parent certification preserves a pending handoff request until the
+    /// application responds.
     #[test_traced]
-    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_certification() {
+    fn test_pipelined_handoff_retains_stalled_proposal_after_parent_certification() {
         let n = 5;
         let namespace = b"pipelined_handoff_reissues_after_certification".to_vec();
         let epoch = Epoch::new(333);
@@ -4141,6 +4161,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: true,
                     accept_handoffs: true,
+                    pipelined_handoff: true,
                     ..Default::default()
                 },
             )
@@ -4169,22 +4190,28 @@ mod tests {
             let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
             mailbox.recovered(Certificate::Notarization(notarization));
 
-            let deadline = context.current() + Duration::from_secs(2);
-            while propose_requests.lock().len() < 2 {
-                assert!(
-                    context.current() < deadline,
-                    "ordinary proposal was not reissued after parent certification"
-                );
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(2))];
-            assert_eq!(propose_requests.lock().as_slice(), &expected);
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                propose_requests.lock().as_slice(),
+                &[(View::new(3), View::new(2))],
+                "certification must retain the unresolved handoff"
+            );
         });
     }
 
-    fn pipelined_handoff_replacement_response_order(replacement_first: bool) {
+    #[derive(Clone, Copy)]
+    enum HeldInvalidation {
+        Restart,
+        ConflictingParent,
+        Timeout,
+    }
+
+    fn pipelined_handoff_retained_response_order(
+        certification_first: bool,
+        invalidation: Option<HeldInvalidation>,
+    ) {
         let n = 5;
-        let namespace = if replacement_first {
+        let namespace = if certification_first {
             b"pipelined_handoff_replacement_first".as_slice()
         } else {
             b"pipelined_handoff_stale_first".as_slice()
@@ -4214,23 +4241,42 @@ mod tests {
             let outgoing_index =
                 usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
             let outgoing = participants[outgoing_index].clone();
+            let propose_requests: ProposeRequests = Arc::new(Mutex::new(Vec::new()));
             let propose_responses: ProposeResponses = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses: HandoffProposeResponses = Arc::new(Mutex::new(Vec::new()));
 
+            let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let requests = certification_requests.clone();
+            let actor_handle = Arc::new(Mutex::new(None));
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending_syncs.clone(),
+            };
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
-                &context,
+                &voter_context,
                 &oracle,
                 &participants,
                 &schemes,
-                elector,
+                elector.clone(),
                 VoterOptions {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     local_index,
+                    actor_handle: Some(actor_handle.clone()),
+                    certifier: mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
+                        if round.view() == View::new(2) {
+                            requests.lock().push((round.view(), response));
+                        } else {
+                            response.send(true).unwrap();
+                        }
+                    })),
                     propose_responses: Some(propose_responses.clone()),
+                    propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
                     accept_handoffs: true,
+                    pipelined_handoff: false,
                     ..Default::default()
                 },
             )
@@ -4246,41 +4292,105 @@ mod tests {
                 &relay,
             )
             .await;
-            let (stale_digest, stale_response) =
-                take_proposal_response(&context, &handoff_responses).await;
-
-            let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
-            mailbox.recovered(Certificate::Notarization(notarization));
-            let (replacement_digest, replacement_response) =
-                take_proposal_response(&context, &propose_responses).await;
-            assert_ne!(stale_digest, replacement_digest);
-
-            // Register only after both builds have been issued so the observer
-            // sees exactly the response selected for view 3.
+            let (digest, response) = take_proposal_response(&context, &handoff_responses).await;
             let observer = participants[(local_index + 1) % participants.len()].clone();
             let mut relayed = relay.register(observer);
-            let mut stale_response = Some(stale_response);
-            if !replacement_first {
-                assert!(
-                    stale_response
-                        .take()
-                        .unwrap()
-                        .send(HandoffProposal::Proposed(stale_digest))
-                        .is_err(),
-                    "stale handoff response receiver must already be closed"
-                );
+            let mut certified_parent = parent.clone();
+            if matches!(invalidation, Some(HeldInvalidation::ConflictingParent)) {
+                certified_parent.payload = Sha256::hash(&[b"conflicting parent"]);
             }
-            replacement_response
-                .send(replacement_digest)
-                .expect("replacement proposal receiver must remain open");
+            let (_, notarization) = build_notarization(&schemes, &certified_parent, quorum(n));
+            let mut response = Some(response);
+            if !certification_first {
+                response.take().unwrap().send(HandoffProposal::Proposed(digest)).expect("handoff retained");
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            mailbox.recovered(Certificate::Notarization(notarization));
+            let certified = take_certification_request(&context, &certification_requests, View::new(2)).await;
+            if matches!(invalidation, Some(HeldInvalidation::Restart)) {
+                let handle = actor_handle.lock().take().unwrap();
+                handle.abort();
+                assert!(handle.await.is_err());
+                assert!(certified.send(true).is_err(), "old certification request must be dropped");
+                let restarted_responses: HandoffProposeResponses = Arc::new(Mutex::new(Vec::new()));
+                let (mut restarted, mut restarted_batcher, _, restarted_relay, _) = setup_voter(
+                    &context.child("restarted"), &oracle, &participants, &schemes, elector,
+                    VoterOptions {
+                        local_index,
+                        leader_timeout: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(10),
+                        timeout_retry: Duration::from_secs(30),
+                        accept_handoffs: true,
+                        handoff_propose_responses: Some(restarted_responses.clone()),
+                        ..Default::default()
+                    },
+                ).await;
+                // Replaying the parent's vote offers a fresh opportunity. Dropping
+                // that fresh response must not resurrect the old held digest.
+                let (_, fresh) = take_proposal_response(&context, &restarted_responses).await;
+                drop(fresh);
+                let mut restarted_relay = restarted_relay.register(participants[(local_index + 1) % participants.len()].clone());
+                let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
+                restarted.recovered(Certificate::Notarization(notarization));
+                loop {
+                    match restarted_batcher.recv().await.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(vote)) => assert_ne!(vote.proposal.payload, digest),
+                        batcher::Message::Constructed(Vote::Nullify(vote)) if vote.view() == View::new(3) => break,
+                        _ => {}
+                    }
+                }
+                assert!(restarted_relay.recv().now_or_never().is_none(), "held result must remain volatile");
+                return;
+            }
+            if matches!(invalidation, Some(HeldInvalidation::Timeout)) {
+                let (_, nullification) = build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum(n));
+                mailbox.recovered(Certificate::Nullification(nullification));
+                loop {
+                    if matches!(batcher_receiver.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                        if current == View::new(3)) { break; }
+                }
+                mailbox.timeout(Round::new(epoch, View::new(3)), TimeoutReason::LeaderTimeout);
+                loop {
+                    if matches!(batcher_receiver.recv().await.unwrap(), batcher::Message::Constructed(Vote::Nullify(ref vote))
+                        if vote.view() == View::new(3)) { break; }
+                }
+            }
+            pending_syncs.arm();
+            certified.send(true).unwrap();
+            let deferred = next_pending_sync(&pending_syncs);
+            deferred.blocked.await.expect("certification sync started");
+            assert!(relayed.recv().now_or_never().is_none(), "must not relay before durable certification");
+            while let Some(message) = batcher_receiver.recv().now_or_never().flatten() {
+                assert!(!matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
+                    if vote.view() == View::new(3)), "must not vote before durable certification");
+            }
+            deferred.release.send(Ok(())).unwrap();
+            pending_syncs.unblock();
+            if certification_first {
+                loop {
+                    if matches!(resolver_receiver.recv().await.unwrap(), MailboxMessage::Certified { view, success: true, .. }
+                        if view == View::new(2)) { break; }
+                }
+                assert!(propose_responses.lock().is_empty(), "must not rebuild");
+                response.take().unwrap().send(HandoffProposal::Proposed(digest)).expect("handoff retained");
+            }
 
+            if invalidation.is_some() {
+                context.sleep(Duration::from_millis(100)).await;
+                assert!(relayed.recv().now_or_never().is_none(), "stale build must not relay");
+                while let Some(message) = batcher_receiver.recv().now_or_never().flatten() {
+                    assert!(!matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
+                        if vote.proposal.payload == digest), "stale build must not vote");
+                }
+                return;
+            }
             let mut observed_relay = false;
             let mut observed_vote = false;
             while !observed_relay || !observed_vote {
                 select! {
                     message = relayed.recv() => {
-                        let (digest, _) = message.expect("relay observer must remain open");
-                        assert_eq!(digest, replacement_digest, "only replacement may be relayed");
+                        let (relayed_digest, _) = message.expect("relay observer must remain open");
+                        assert_eq!(relayed_digest, digest, "retained build must be relayed");
                         observed_relay = true;
                     },
                     message = batcher_receiver.recv() => {
@@ -4293,39 +4403,47 @@ mod tests {
                             };
                             assert_eq!(
                                 notarize.proposal.payload,
-                                replacement_digest,
-                                "only replacement may be voted"
+                                digest,
+                                "retained build must be voted"
                             );
                             observed_vote = true;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("replacement proposal was not relayed and voted");
+                        panic!("retained proposal was not relayed and voted");
                     }
                 }
             }
 
-            if replacement_first {
-                assert!(
-                    stale_response
-                        .take()
-                        .unwrap()
-                        .send(HandoffProposal::Proposed(stale_digest))
-                        .is_err(),
-                    "late stale handoff response receiver must already be closed"
-                );
-            }
+            assert_eq!(propose_requests.lock().iter().filter(|(view, _)| *view == View::new(3)).count(), 1,
+                "must not issue a second build for the retained opportunity");
+            assert!(handoff_responses.lock().is_empty(), "must not repeat handoff");
         });
     }
 
     #[test_traced]
-    fn test_pipelined_handoff_stale_response_before_replacement() {
-        pipelined_handoff_replacement_response_order(false);
+    fn test_pipelined_handoff_build_before_certification() {
+        pipelined_handoff_retained_response_order(false, None);
     }
 
     #[test_traced]
-    fn test_pipelined_handoff_replacement_response_before_stale() {
-        pipelined_handoff_replacement_response_order(true);
+    fn test_pipelined_handoff_certification_before_build() {
+        pipelined_handoff_retained_response_order(true, None);
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
+        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::ConflictingParent));
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_rejects_timeout() {
+        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Timeout));
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
+        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Restart));
     }
 
     /// A dropped handoff response is a terminal application failure for the
@@ -4375,6 +4493,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     drop_proposals: true,
                     accept_handoffs: true,
+                    pipelined_handoff: true,
                     ..Default::default()
                 },
             )
@@ -4497,6 +4616,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: true,
                     accept_handoffs: true,
+                    pipelined_handoff: true,
                     ..Default::default()
                 },
             )
@@ -5303,6 +5423,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -5522,6 +5643,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -5731,6 +5853,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -5895,6 +6018,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -6352,6 +6476,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -6633,6 +6758,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6757,6 +6883,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6908,6 +7035,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7068,6 +7196,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7169,6 +7298,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7339,6 +7469,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7451,6 +7582,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7618,6 +7750,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7732,6 +7865,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7899,6 +8033,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8073,6 +8208,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8173,6 +8309,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8349,6 +8486,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8528,6 +8666,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8821,6 +8960,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9793,6 +9933,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9906,6 +10047,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11182,6 +11324,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11462,6 +11605,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11620,6 +11764,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11737,6 +11882,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11889,6 +12035,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -12031,6 +12178,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -12170,6 +12318,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
+                pipelined_handoff: false,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, HandoffPolicy, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
@@ -18,7 +18,7 @@ use std::{
     convert::Infallible,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -275,9 +275,25 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
+struct PolicyGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct CancellationGuard(Arc<AtomicBool>);
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
+    handoff_policy: Option<HandoffPolicy>,
+    policy_gate: Arc<Mutex<Option<PolicyGate>>>,
 }
 
 impl TestApp {
@@ -286,8 +302,36 @@ impl TestApp {
         (
             Self {
                 finalization_hooks: Some(hooks.clone()),
+                ..Self::default()
             },
             hooks,
+        )
+    }
+
+    pub(crate) fn gated_handoff_policy(
+        policy: HandoffPolicy,
+    ) -> (
+        Self,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        Arc<AtomicBool>,
+    ) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                handoff_policy: Some(policy),
+                policy_gate: Arc::new(Mutex::new(Some(PolicyGate {
+                    started,
+                    release: release_rx,
+                    cancelled: cancelled.clone(),
+                }))),
+                ..Self::default()
+            },
+            started_rx,
+            release,
+            cancelled,
         )
     }
 }
@@ -315,6 +359,18 @@ impl<
 
     async fn genesis(&mut self) -> Self::Block {
         TestBlock::new(0, 0)
+    }
+
+    async fn handoff_policy(&mut self, _context: (E, Self::Context)) -> HandoffPolicy {
+        let gate = { self.policy_gate.lock().take() };
+        if let Some(mut gate) = gate {
+            let guard = CancellationGuard(gate.cancelled);
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+            drop(guard);
+        }
+        self.handoff_policy
+            .unwrap_or(HandoffPolicy::AwaitCertification)
     }
 
     async fn propose(
