@@ -13,7 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -2505,6 +2505,136 @@ where
             db,
         )
         .await
+    }
+}
+
+impl<F, K, V, D, S> MerkleizedBatch<F, D, update::Ordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+            return Ok((next > *key).then_some(next));
+        }
+        db.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+            return Ok((prev < *key).then_some(prev));
+        }
+        db.get_prev_key(key).await
+    }
+
+    /// Find a cyclic neighbor from the retained batch chain, if it owns the query's span.
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        // Membership changes rewrite affected predecessors, so each unshadowed update carries
+        // its successor in the final batch view.
+        for (level, diff) in iter::once(self.diff.as_slice())
+            .chain(self.ancestor_diffs.iter().map(|diff| diff.as_slice()))
+            .enumerate()
+        {
+            let end = diff.partition_point(|(candidate, _)| {
+                if NEXT {
+                    candidate <= key
+                } else {
+                    candidate < key
+                }
+            });
+
+            // Search below the query first, wrapping only when that side has no visible active
+            // entry. An earlier key cannot own the span past a later visible active key.
+            let loc = diff[..end]
+                .iter()
+                .rev()
+                .chain(diff[end..].iter().rev())
+                .find_map(|(candidate, entry)| {
+                    let loc = entry.loc()?;
+                    if level > 0
+                        && (lookup_sorted(self.diff.as_slice(), candidate).is_some()
+                            || self.ancestor_diffs[..level - 1]
+                                .iter()
+                                .any(|diff| lookup_sorted(diff.as_slice(), candidate).is_some()))
+                    {
+                        return None;
+                    }
+                    Some(loc)
+                });
+            let Some(loc) = loc else {
+                continue;
+            };
+
+            // Retained item batches are contiguous in log order, including unapplied ancestors
+            // whose handles have been dropped.
+            let mut end = self.journal_batch.size();
+            let operation = iter::once(self.journal_batch.items())
+                .chain(self.journal_batch.ancestor_items.iter().rev())
+                .find_map(|items| {
+                    end -= items.len() as u64;
+                    (*loc >= end).then(|| &items[(*loc - end) as usize])
+                })
+                .expect("active diff entry must reference a retained operation");
+            let Operation::Update(data) = operation else {
+                unreachable!("active diff entry must reference an update");
+            };
+
+            // Successor queries use [start, end); predecessor queries use (start, end]. Both
+            // identify the cyclic owner before the public methods suppress linear wraparound.
+            let contains = if NEXT {
+                span_contains(&data.key, &data.next_key, key)
+            } else if data.key >= data.next_key {
+                key > &data.key || key <= &data.next_key
+            } else {
+                key > &data.key && key <= &data.next_key
+            };
+            if contains {
+                return Some(if NEXT {
+                    data.next_key.clone()
+                } else {
+                    data.key.clone()
+                });
+            }
+        }
+        None
     }
 }
 
