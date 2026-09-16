@@ -49,10 +49,12 @@ fn bench_receive_apply(c: &mut Criterion) {
                         let mut rng = TestRng::new(0);
                         let mut elapsed = Duration::ZERO;
                         let mut first = None;
+
                         for iteration in 0..iterations.max(2) {
                             let measured = iteration < iterations;
                             let context = epoch_context(
                                 &state,
+                                profile.live_accounts,
                                 EPOCH + iteration,
                                 committee,
                                 &operator,
@@ -86,8 +88,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                                     )
                                     .await
                                     .expect("receive validate sign");
-                                let result = validated
-                                    .apply(state)
+                                let result = Box::pin(validated.apply(state))
                                     .await
                                     .expect("advance validator state");
                                 let duration = start.elapsed();
@@ -97,23 +98,21 @@ fn bench_receive_apply(c: &mut Criterion) {
                                 black_box(vote);
                                 result
                             };
-                            assert_eq!(advanced.root(), close.roots.successor);
-                            assert_eq!(
-                                advanced.liability(),
-                                profile.live_accounts as u64 * super::fixtures::OPENING_BALANCE
-                            );
+                            assert_eq!(advanced.state().root(), close.roots.successor);
                             black_box((&advanced, &close));
                             state = advanced;
+
                             if first.is_none() {
-                                first = Some((close, state.head().operations()));
+                                first = Some((close, state.state().head().operations()));
                             }
                         }
                         // The retained first close remains queryable after later applications. Historical
                         // view reconstruction/proof generation is checked here and is not an advancement timing.
                         if let Some((first, operations)) = first {
                             let key = account_key(&accounts[0].0).expect("key");
-                            let head = state.root();
+                            let head = state.state().root();
                             let proof = state
+                                .state()
                                 .lookup_at(first.roots.successor, operations, &key)
                                 .await
                                 .expect("retained state proof");
@@ -124,7 +123,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                                     .map(|b| b.get()),
                                 Some(first.rows[0].successor)
                             );
-                            assert_eq!(state.root(), head);
+                            assert_eq!(state.state().root(), head);
                             black_box((first, proof, state));
                         }
                         elapsed

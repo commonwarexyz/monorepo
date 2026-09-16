@@ -1,0 +1,63 @@
+{
+  "artifacts_sha256": {
+    "bytes.csv": "515677fea56f0adb24732c62923dc6cc9fed6484a91ac2601d7fbedca098307d",
+    "raw-checks.jsonl.gz": "ae89adf93c62582ab753f525aca7d15f3fd9143d5307b9462c00d19b25d52749",
+    "samples.jsonl.gz": "d5ffe44c67e04ef9fc5343a23c47469e5c14f3b74827b12544bb799cd7cff35a",
+    "source-inputs.tar.gz": "fa7865b06f55f28d60585d2b6277395bc86180d897a6b225a938717bb858981c",
+    "timings.csv": "62ef8bd902db0f8f68b3e53f976d8f190993946977bbfedbb212f777bf829600"
+  },
+  "binaries": {
+    "bajillion_sha256": "d4eab40b648c34030baae562f183c6de44a49a32b97820425f44e002e3ee97b7",
+    "durable_ack_sha256": "3007a1d67af28292d24e7c292f1f1ce1a3594e6879cc7abf4d76fdf5d9b91144"
+  },
+  "host": {
+    "cpu": "AMD EPYC 9R45",
+    "filesystem": "ext4",
+    "instance": "AWS c8a.4xlarge",
+    "logical_cpus": 16,
+    "memory_bytes": 32991899648,
+    "os": "Ubuntu 24.04.4 LTS",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "volume": "gp3 160 GiB, 6000 IOPS, 250 MiB/s"
+  },
+  "omitted": [
+    "interrupted preparation N=1000000 A=1024 B=8 K=8",
+    "verify-claim",
+    "adjudication",
+    "sign-vote",
+    "certificate verification",
+    "dense N=A=1000000 durable ACK",
+    "W=1000000 full-exit durable ACK"
+  ],
+  "raw_evidence": {
+    "ack3_files_sha256": {
+      "B512-K1.jsonl": "ccb20f9c15ae36f2cc85358df512f9b579bdd1eadf139453115fcbc592b0b397",
+      "B512-K1.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "B512-K8.jsonl": "61b6b3f04dde955801fc35a00c6a2430ea4517a20a21ab4377d35b1dce592a43",
+      "B512-K8.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "B8-K8.jsonl": "9385170f6723967b66bf886951a1c310d22b3cf3c675a397084b3d6f94a7a7b2",
+      "B8-K8.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "binary.sha256": "c255eb99bd0f7272a022feba1c1a2a9f11ba885708c65b3e1797bb7393911782",
+      "commands.log": "c5f90209457ab365f9d096c25bab45c1cb18e61dd9fffc181621df22d8fee91a"
+    },
+    "ack3_local": "/Users/patrickogrady/.tact/scratchpad/01a0a413-7765-7fd1-b879-d20bb020a633/final-4b0e31348882-20260915T175118Z-r4-ack3",
+    "local_inventory": "/Users/patrickogrady/.tact/scratchpad/01a0a413-7765-7fd1-b879-d20bb020a633/final-raw-local-inventory.json",
+    "local_inventory_sha256": "e3cc1e6738d47402c612c10c489853aa070ec9063f94692b5522d4d184565f6b",
+    "r4_local": "/Users/patrickogrady/.tact/scratchpad/01a0a413-7765-7fd1-b879-d20bb020a633/final-4b0e31348882-20260915T175118Z-r4-local"
+  },
+  "scope": "completed subset; unfinished cases omitted",
+  "source": {
+    "compiled_source_sha256": "4b0e3134888282c902cfe319107e7233fb7d1bd35a42dcc53058e8ddddd7c7ca",
+    "head": "1bd5f46162be55ed5858a63adf3e20d78814dc5f",
+    "lockfile_sha256": "ed12ad6a56b72437a00ffbf5aedb1819ce7900fe8c1bbec8850bac8a6c9a03c2",
+    "setup_only_note": "landed after collection; not in measured binaries; timed prepare inputs and interval unchanged",
+    "setup_only_prepare_source_sha256": "ccf5b4c843b5cb8e901faf0caddb82f20f9664112cb24aff399ddff43c9c01b4",
+    "source_file_count": 1668
+  },
+  "statistics": {
+    "criterion": "equal-weight arithmetic mean of the 20 per-sample times_i/iters_i ratios",
+    "criterion_records": 77,
+    "durable_ack": "arithmetic mean of three raw timer ns values",
+    "durable_ack_records": 3
+  }
+}

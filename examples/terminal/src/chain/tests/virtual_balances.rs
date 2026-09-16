@@ -88,7 +88,7 @@ fn first_credit(invalidated: bool) {
         let db = open(context.child("virtual_credit"), "virtual-credit").await;
         let config = crate::protocol::state_config(
             "virtual-balances",
-            &context,
+            crate::protocol::fixture_page_cache(&context),
             protocol.strategy().clone(),
         );
         let mut balances = replay_state(context.child("balances"), config, &genesis.history).await;
@@ -157,7 +157,7 @@ fn first_credit(invalidated: bool) {
             let epoch = epoch as u64;
             total += amount;
             let withdrawals = WithdrawalBatch::empty();
-            let registration = protocol
+            let mut registration = protocol
                 .registration_at(
                     epoch,
                     DepositBatch::empty(),
@@ -189,24 +189,35 @@ fn first_credit(invalidated: bool) {
                 authorization: SendAuthorization::sign(body, payer.signer()),
                 vector,
             };
+            if epoch > 0 {
+                let head = balances.logs().head();
+                registration.floors = Some(commonware_clearing::bajillion::logs::Floors {
+                    activity: head.activity.operations - 1,
+                    payouts: head.payouts.operations - 1,
+                });
+            }
             let prepared = protocol.prepare(registration, vec![terminal]).unwrap();
             let (result, candidate) = protocol
                 .complete(prepared, &balances, &mut TestRng::new(91 + epoch))
                 .await
                 .unwrap();
             assert!(
-                candidate.mutations().contains(&(
+                candidate.state().mutations().contains(&(
                     account_key(&recipient.public_key()).unwrap(),
                     NonZeroU64::new(total)
                 )),
                 "credits accumulate in the virtual leaf"
             );
-            assert!(result.withdrawal_claims.is_empty());
+            assert_eq!(result.withdrawal_total, 0);
             balances = balances.apply(candidate).await.unwrap();
             let mut transactions = if epoch == 0 {
                 queues(
                     genesis.root(),
-                    balances.opening(recipient.public_key()).await.unwrap(),
+                    balances
+                        .state()
+                        .opening(recipient.public_key())
+                        .await
+                        .unwrap(),
                     height,
                 )
             } else {
@@ -218,6 +229,8 @@ fn first_credit(invalidated: bool) {
             ]);
             seal_native(&db, height, &native, &transactions).await;
             assert_eq!(read(&db, &queue_key).await, None);
+            let commit = result.roots.withdrawal_outputs.operations - 1;
+            assert!(claimed(&db, commit).await.is_none());
             if invalidated {
                 seal_native(
                     &db,
@@ -234,7 +247,11 @@ fn first_credit(invalidated: bool) {
                         }),
                         SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
                             deployment: deployment(),
-                            opening: balances.opening(recipient.public_key()).await.unwrap(),
+                            opening: balances
+                                .state()
+                                .opening(recipient.public_key())
+                                .await
+                                .unwrap(),
                         }),
                     ],
                 )
@@ -243,14 +260,7 @@ fn first_credit(invalidated: bool) {
                 assert_eq!(status(&db).await.state_root, genesis.root());
                 assert_eq!(status(&db).await.custody, 400);
                 assert_eq!(status(&db).await.claimable, 0);
-                assert_eq!(
-                    read(
-                        &db,
-                        &claim_roots_key(&deployment(), &result.header.batch_id::<Sha256>())
-                    )
-                    .await,
-                    None
-                );
+                assert!(claimed(&db, commit).await.is_none());
                 assert_eq!(
                     read(&db, &hard_fault_key(&deployment(), &recipient.public_key())).await,
                     None
@@ -273,6 +283,7 @@ fn first_credit(invalidated: bool) {
             }
             seal_native(&db, height + 12, &native, &[]).await;
             assert!(!status(&db).await.hard_faulted);
+            assert!(claimed(&db, commit).await.is_some());
             assert_eq!(status(&db).await.last_finalized, Some(epoch));
             assert_eq!(status(&db).await.custody, 400);
             assert_eq!(status(&db).await.claimable, 0);
@@ -280,17 +291,21 @@ fn first_credit(invalidated: bool) {
             assert_supply(&db, &native, &[recipient.public_key()]).await;
             height += 13;
         }
-        let opening = balances.opening(recipient.public_key()).await.unwrap();
+        let opening = balances
+            .state()
+            .opening(recipient.public_key())
+            .await
+            .unwrap();
         let request = SignedWithdrawal::sign(
             deployment(),
-            balances.head().root().digest,
+            balances.state().head().root().digest,
             recipient.public_key().encode(),
             WithdrawalAction::Close,
             height + notice,
             recipient.signer(),
         );
         let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
-        let registration = protocol
+        let mut registration = protocol
             .registration_at(
                 2,
                 DepositBatch::empty(),
@@ -300,6 +315,11 @@ fn first_credit(invalidated: bool) {
                 height + 11,
             )
             .unwrap();
+        let head = balances.logs().head();
+        registration.floors = Some(commonware_clearing::bajillion::logs::Floors {
+            activity: head.activity.operations - 1,
+            payouts: head.payouts.operations - 1,
+        });
         let prepared = protocol.prepare(registration, Vec::new()).unwrap();
         let (result, candidate) = protocol
             .complete(prepared, &balances, &mut TestRng::new(93))
@@ -307,14 +327,25 @@ fn first_credit(invalidated: bool) {
             .unwrap();
         assert!(
             candidate
+                .state()
                 .mutations()
                 .contains(&(account_key(&recipient.public_key()).unwrap(), None))
         );
-        assert_eq!(result.withdrawal_claims.len(), 1);
+        let payout_position = result.context.predecessor_logs().payouts.operations;
+        let balances = balances.apply(candidate).await.unwrap();
+        let output = balances.logs().payout_at(payout_position).await.unwrap();
+        let (payout_opening, _) = balances
+            .logs()
+            .payout_opening(
+                &result.roots.withdrawal_outputs,
+                payout_position,
+                NonZeroU64::MIN,
+            )
+            .await
+            .unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            batch_id: result.header.batch_id::<Sha256>(),
-            claim: result.withdrawal_claims[0].clone(),
+            claim: WithdrawalClaim::new(output, payout_opening),
         });
         seal_native(
             &db,
@@ -330,8 +361,7 @@ fn first_credit(invalidated: bool) {
         assert_eq!(read(&db, &native_key).await, None);
         seal_native(&db, height + 12, &native, &[]).await;
         assert_eq!(status(&db).await.claimable, total);
-        let claims_key = claim_roots_key(&deployment(), &result.header.batch_id::<Sha256>());
-        let finalized_claims = read(&db, &claims_key).await;
+        let finalized_claims = claimed(&db, payout_position).await;
         height += 13;
         let mut transactions = queues(result.roots.successor, opening, height);
         transactions.push(register(
@@ -344,7 +374,7 @@ fn first_credit(invalidated: bool) {
         assert_eq!(read(&db, &queue_key).await, None);
         seal_native(&db, height + 11, &native, &[]).await;
         assert!(status(&db).await.hard_faulted);
-        assert_eq!(read(&db, &claims_key).await, finalized_claims);
+        assert_eq!(claimed(&db, payout_position).await, finalized_claims);
         assert_eq!(status(&db).await.claimable, total);
         seal_native(&db, height + 12, &native, &[claim.clone(), claim.clone()]).await;
         assert_eq!(
@@ -356,13 +386,13 @@ fn first_credit(invalidated: bool) {
         assert_eq!(status(&db).await.custody, 400 - total);
         assert_eq!(status(&db).await.claimable, 0);
         assert_supply(&db, &native, &[recipient.public_key()]).await;
-        let consumed = read(&db, &claims_key).await;
+        let consumed = claimed(&db, payout_position).await;
         assert_ne!(consumed, finalized_claims);
         assert!(db.finalize().await.durable().await);
         drop(db);
         let db = open(context.child("reopened"), "virtual-credit").await;
         seal_native(&db, height + 13, &native, &[claim]).await;
-        assert_eq!(read(&db, &claims_key).await, consumed);
+        assert_eq!(claimed(&db, payout_position).await, consumed);
         assert_eq!(
             native_balance(&db, &native, &recipient.public_key())
                 .await

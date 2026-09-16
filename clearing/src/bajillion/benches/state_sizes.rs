@@ -1,4 +1,9 @@
-use super::fixtures::{BenchState, runner, state_config};
+use super::fixtures::{runner, state_config};
+type BenchState = commonware_clearing::bajillion::qmdb::State<
+    commonware_runtime::deterministic::Context,
+    Sha256,
+    commonware_parallel::Rayon,
+>;
 use commonware_clearing::bajillion::qmdb::{AccountKey, StateHead, StateLookup, account_key};
 use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
@@ -23,7 +28,6 @@ async fn report(label: &str, state: &BenchState, head: StateHead<Digest>, key: &
             panic!("empty state discloses its commit");
         };
         assert!(metadata.is_none());
-        assert_eq!(head.liability(), 0);
     } else {
         assert!(matches!(
             decoded,
@@ -31,10 +35,9 @@ async fn report(label: &str, state: &BenchState, head: StateHead<Digest>, key: &
         ));
     }
     println!(
-        "clearing state boundary: context={label} operations={} live_accounts={} liability={} root_bytes={} exclusion_lookup_bytes={}",
+        "clearing state boundary: context={label} operations={} live_accounts={} root_bytes={} exclusion_lookup_bytes={}",
         head.operations(),
         head.live_accounts(),
-        head.liability(),
         head.root().encode_size(),
         wire.len(),
     );
@@ -61,7 +64,6 @@ pub(crate) fn benches() {
             .await
             .unwrap();
         state = state.apply(funded).await.unwrap();
-        assert_eq!(state.liability(), 1);
         assert_eq!(state.live_accounts(), 1);
         report("funded", &state, *state.head(), &missing).await;
         let cleared = state

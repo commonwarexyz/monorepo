@@ -20,7 +20,7 @@ fn bench_initialize(c: &mut Criterion) {
                             let start = Instant::now();
                             let state = new_state(runtime, &accounts).await;
                             let elapsed = start.elapsed();
-                            assert_eq!(state.live_accounts(), live as u64);
+                            assert_eq!(state.state().live_accounts(), live as u64);
                             black_box(state);
                             elapsed
                         })

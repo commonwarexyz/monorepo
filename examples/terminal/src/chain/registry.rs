@@ -155,7 +155,7 @@ mod tests {
     use crate::{
         chain::{
             tx::{RegisterDeploymentRequest, SettlementTx},
-            validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
+            validator::db_config,
         },
         protocol::{self, Timing},
     };
@@ -165,9 +165,7 @@ mod tests {
     use commonware_glue::stateful::db::DatabaseSet;
     use commonware_macros::select;
     use commonware_p2p::{PeerSetSubscription, Provider};
-    use commonware_runtime::{
-        Metrics as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
+    use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::channel::mpsc;
 
     type Tracked = Arc<Mutex<Vec<(u64, TrackedPeers<ed25519::PublicKey>)>>>;
@@ -216,10 +214,7 @@ mod tests {
             }
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
                 context.child("db"),
-                db_config(
-                    "registry-polls",
-                    CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                ),
+                db_config("registry-polls", protocol::fixture_page_cache(&context)),
             )
             .await;
             let known = native.deployments.len();
@@ -306,7 +301,7 @@ mod tests {
             native.deployments[0].network_key = old_peer.clone();
             let view = RegistryView::new(native.deployments.clone());
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
-                context.child("db"), db_config("registry-test", CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE)),
+                context.child("db"), db_config("registry-test", protocol::fixture_page_cache(&context)),
             ).await;
             let committee = Set::from_iter_dedup([ed25519::PrivateKey::from_seed(3).public_key()]);
             let recorder = Recorder::default();
@@ -372,7 +367,7 @@ mod tests {
             let root = db.read().await.root();
             drop(db);
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
-                context.child("reopened"), db_config("registry-test", CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE)),
+                context.child("reopened"), db_config("registry-test", protocol::fixture_page_cache(&context)),
             ).await;
             assert_eq!(db.read().await.root(), root);
             assert_eq!(state::registry(&db, &native).await.unwrap().len(), 4);

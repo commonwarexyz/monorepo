@@ -106,7 +106,7 @@ fn accounts() -> Vec<(ReverseKey, SigningKey)> {
 fn activity_absence_uses_canonical_bytes_even_when_key_ord_is_reversed() {
     let keys = accounts();
     let empty = commitment::empty_root::<Sha256>(VectorKind::OutEntry);
-    let guards = [1, 3, 5].map(|index| {
+    let rows = [1, 3, 5].map(|index| {
         AccountChange::from_row(
             &AccountRow {
                 account: keys[index].0.clone(),
@@ -117,36 +117,62 @@ fn activity_absence_uses_canonical_bytes_even_when_key_ord_is_reversed() {
             },
             empty,
         )
-        .guard::<Sha256>()
     });
-    let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, 3).unwrap();
-    builder.add_values(&guards, &Sequential).unwrap();
-    let tree = builder.build(&Sequential).unwrap();
-    for position in 0..=guards.len() {
-        let start = position.saturating_sub(1);
-        let end = (position + 1).min(guards.len());
-        let lookup = AccountLookup::Absent(ChangeAbsence {
-            predecessor: position.checked_sub(1).map(|i| guards[i].clone()),
-            successor: guards.get(position).cloned(),
-            opening: tree
-                .range_opening(start as u32, (end - start) as u32)
-                .unwrap(),
-        });
-        for present in [1, 3, 5] {
-            assert!(
+    deterministic::Runner::default().start(|runtime| async move {
+        let cfg = logs_config(&runtime, "reverse-absence");
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime, cfg)
+            .await
+            .unwrap();
+        let start = logs.head().activity.operations;
+        let prepared = logs
+            .prepare(
+                logs.head(),
+                ActivityInput::new(rows.to_vec(), vec![]),
+                vec![],
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let logs = logs.apply(prepared).await.unwrap();
+        let range = crate::bajillion::transition::ActivityRange {
+            start,
+            end: start + 3,
+            head: logs.head().activity,
+        };
+        for position in 0..=rows.len() {
+            let start = position.saturating_sub(1);
+            let end = (position + 1).min(rows.len());
+            let lookup = AccountLookup::Absent(ChangeAbsence {
+                predecessor: position.checked_sub(1).map(|i| rows[i].clone()),
+                successor: rows.get(position).cloned(),
+                opening: Some(
+                    logs.activity_opening(
+                        &range.head,
+                        range.start + start as u64,
+                        NonZeroU64::new((end - start) as u64).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .0,
+                ),
+            });
+            for present in [1, 3, 5] {
+                assert!(
+                    lookup.resolve::<Sha256>(&range, &keys[present].0).is_err(),
+                    "position {position} must not prove present key {present} absent"
+                );
+            }
+            assert_eq!(
                 lookup
-                    .resolve::<Sha256>(&tree.root(), &keys[present].0)
-                    .is_err(),
-                "position {position} must not prove present key {present} absent"
+                    .resolve::<Sha256>(&range, &keys[position * 2].0)
+                    .unwrap(),
+                (0, None)
             );
         }
-        assert_eq!(
-            lookup
-                .resolve::<Sha256>(&tree.root(), &keys[position * 2].0)
-                .unwrap(),
-            (0, None)
-        );
-    }
+    });
 }
 
 #[test]
@@ -234,8 +260,9 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
     deterministic::Runner::default().start(|runtime| async move {
         let keys = accounts();
         let cfg = config(&runtime, "reverse-boundary");
+        let log_cfg = logs_config(&runtime, "reverse-boundary");
         let state = State::<_, Sha256>::init(
-            runtime,
+            runtime.child("state"),
             cfg,
             keys.iter()
                 .map(|(key, _)| (account_key(key).unwrap(), NonZeroU64::new(100).unwrap()))
@@ -243,6 +270,10 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         )
         .await
         .unwrap();
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg)
+            .await
+            .unwrap();
+        let state = Replica::from_parts(state, logs);
         let deployment = Sha256::hash(&[b"reverse-boundary"]);
         let deposits = DepositBatch::new(vec![
             DepositRecord::new(keys[3].0.clone(), 20).unwrap(),
@@ -254,7 +285,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             .map(|index| {
                 let body = WithdrawalBody::new(
                     deployment,
-                    state.root().digest,
+                    state.state().root().digest,
                     Bytes::from(vec![index as u8]),
                     WithdrawalAction::Amount(NonZeroU64::new(index as u64).unwrap()),
                     50,
@@ -272,14 +303,22 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             keys[0].0.clone(),
             &deposits,
             &withdrawals,
-            state.liability(),
+            keys.len() as u64 * 100,
             60,
             70,
             CloseLimits::protocol_maximum(),
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+        .bind::<Sha256, _, _>(
+            &state,
+            &deposits,
+            &withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
@@ -351,7 +390,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         assert!(WithdrawalBatch::new(vec![withdrawals.requests()[0].clone(); 2]).is_err());
         assert_eq!(deposits.amount_for(&keys[0].0), 0);
         assert!(withdrawals.request_for(&keys[0].0).is_none());
-        for (position, index) in [1, 3, 5].into_iter().enumerate() {
+        for index in [1, 3, 5] {
             assert_eq!(
                 withdrawals
                     .request_for(&keys[index].0)
@@ -360,15 +399,6 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
                     .destination()
                     .as_ref(),
                 &[index as u8]
-            );
-            let claim = prepared.withdrawal_claim(&keys[index].0).unwrap();
-            assert_eq!(claim.position(), position as u32);
-            assert_eq!(
-                claim
-                    .verify::<Sha256>(&prepared.close().roots.withdrawal_outputs)
-                    .unwrap()
-                    .amount(),
-                index as u64
             );
         }
         assert_eq!(deposits.amount_for(&keys[2].0), 7);
@@ -389,25 +419,28 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         )
         .await
         .unwrap();
-        let retained = Close::decode_evidence::<Sha256>(
-            checked.close().encode_evidence(),
-            &context,
-            &checked.close().header,
-        )
-        .unwrap();
-        let served = crate::bajillion::serve::Index::new(&retained);
+        let (state, close) = Box::pin(checked.apply::<_, Sha256>(state)).await.unwrap();
         for (position, index) in [1, 3, 5].into_iter().enumerate() {
+            let position = context.predecessor_logs().payouts.operations + position as u64;
+            let output = state.logs().payout_at(position).await.unwrap();
+            let (opening, _) = state
+                .logs()
+                .payout_opening(&close.roots.withdrawal_outputs, position, NonZeroU64::MIN)
+                .await
+                .unwrap();
+            let claim = WithdrawalClaim::new(output, opening);
+            assert_eq!(claim.position(), position);
             assert_eq!(
-                served
-                    .withdrawal_claim::<Sha256>(&keys[index].0)
+                claim
+                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
                     .unwrap()
-                    .position(),
-                position as u32
+                    .amount(),
+                index as u64
             );
         }
-        let (state, _) = checked.apply::<_, Sha256>(state).await.unwrap();
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&keys[2].0).unwrap())
                 .await
                 .unwrap()
@@ -417,6 +450,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         );
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&keys[1].0).unwrap())
                 .await
                 .unwrap()
@@ -426,6 +460,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         );
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&keys[3].0).unwrap())
                 .await
                 .unwrap()
@@ -435,6 +470,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         );
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&keys[5].0).unwrap())
                 .await
                 .unwrap()
@@ -450,8 +486,9 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
     deterministic::Runner::default().start(|runtime| async move {
         let keys = accounts();
         let cfg = config(&runtime, "reverse-full");
+        let log_cfg = logs_config(&runtime, "reverse-full");
         let state = State::<_, Sha256>::init(
-            runtime,
+            runtime.child("state"),
             cfg,
             keys.iter()
                 .map(|(key, _)| (account_key(key).unwrap(), NonZeroU64::new(100).unwrap()))
@@ -459,6 +496,10 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         )
         .await
         .unwrap();
+        let logs = Logs::<_, Sha256, ReverseKey>::open(runtime.child("logs"), log_cfg)
+            .await
+            .unwrap();
+        let state = Replica::from_parts(state, logs);
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let validator_private = BlsPrivate::new(Scalar::from(33));
@@ -473,14 +514,22 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             keys[0].0.clone(),
             &deposits,
             &withdrawals,
-            state.liability(),
+            keys.len() as u64 * 100,
             60,
             70,
             CloseLimits::protocol_maximum(),
             committee.commitment::<Sha256>(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+        .bind::<Sha256, _, _>(
+            &state,
+            &deposits,
+            &withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
         let operator_private = BlsPrivate::new(Scalar::from(8));
         let operator =
@@ -547,29 +596,27 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         assert!(scheme.verify_vote(&checked.close().header, &vote));
         let certificate = scheme.assemble_exact([vote]).unwrap();
         assert!(scheme.verify_exact(&checked.close().header, &certificate));
-        let retained = Close::decode_evidence::<Sha256>(
-            checked.close().encode_evidence(),
-            &context,
-            &checked.close().header,
-        )
-        .unwrap();
-        let served = crate::bajillion::serve::Index::new(&retained);
+        let range = checked.close().roots.activity_range(&context).unwrap();
+        let (state, retained) = Box::pin(checked.apply::<_, Sha256>(state)).await.unwrap();
+        let epoch = Epoch::at(state.logs(), EPOCH, range).await.unwrap();
         for (index, (key, _)) in keys.iter().enumerate() {
             assert_eq!(
-                served
-                    .account_lookup::<Sha256>(key)
+                epoch
+                    .account_lookup(state.logs(), key)
+                    .await
                     .unwrap()
-                    .resolve::<Sha256>(&retained.roots.change, key)
+                    .resolve::<Sha256>(&range, key)
                     .unwrap()
                     .0,
                 if [1, 5].contains(&index) { 6 } else { 0 }
             );
             for payer in [1, 5] {
-                let lookup = served
-                    .higher_entry_lookup::<Sha256>(&keys[payer].0, key)
+                let lookup = epoch
+                    .higher_entry_lookup(state.logs(), &keys[payer].0, key)
+                    .await
                     .unwrap();
                 let result = lookup
-                    .resolve::<Sha256>(&retained.roots.change, &keys[payer].0, key)
+                    .resolve::<Sha256>(&range, &keys[payer].0, key)
                     .unwrap();
                 assert_eq!(
                     result,
@@ -583,10 +630,11 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         }
         let send = retained.rows.last().unwrap().outgoing.as_ref().unwrap();
         let body = send.body();
-        let lookup = served.account_lookup::<Sha256>(body.payer()).unwrap();
-        let (_, activity) = lookup
-            .resolve::<Sha256>(&retained.roots.change, body.payer())
+        let lookup = epoch
+            .account_lookup(state.logs(), body.payer())
+            .await
             .unwrap();
+        let (_, activity) = lookup.resolve::<Sha256>(&range, body.payer()).unwrap();
         let activity = activity.unwrap();
         assert!(activity.matches_outgoing(context.payment(), body));
         for foreign_context in [
@@ -623,7 +671,12 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         };
         let genuine = Challenge::HigherAckDebit {
             ack: Box::new(ack.clone()),
-            payer: Box::new(served.account_lookup::<Sha256>(&keys[5].0).unwrap()),
+            payer: Box::new(
+                epoch
+                    .account_lookup(state.logs(), &keys[5].0)
+                    .await
+                    .unwrap(),
+            ),
         };
         assert_eq!(
             adjudicate::<Sha256, _, _>(
@@ -636,13 +689,18 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             .unwrap(),
             Verdict::NoContradiction
         );
-        let (leaves, _, tree) = retained.change_evidence();
+        let account = retained.rows[0].account.clone();
+        let AccountLookup::Present(opening) =
+            epoch.account_lookup(state.logs(), &account).await.unwrap()
+        else {
+            panic!("first row is present")
+        };
         let false_absence = Challenge::HigherAckDebit {
             ack: Box::new(ack),
             payer: Box::new(AccountLookup::Absent(ChangeAbsence {
                 predecessor: None,
-                successor: Some(leaves[0].guard::<Sha256>()),
-                opening: tree.range_opening(0, 1).unwrap(),
+                successor: Some(AccountChange::from_value(account, opening.value)),
+                opening: Some(opening.proof),
             })),
         };
         assert!(matches!(
@@ -655,10 +713,10 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             ),
             Err(ChallengeError::LookupOrder)
         ));
-        let (state, _) = checked.apply::<_, Sha256>(state).await.unwrap();
         for index in [1, 3, 5] {
             assert_eq!(
                 state
+                    .state()
                     .get(&account_key(&keys[index].0).unwrap())
                     .await
                     .unwrap()

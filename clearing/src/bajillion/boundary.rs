@@ -885,7 +885,7 @@ mod tests {
         let deposit_root = deposits.root::<Sha256>().unwrap();
         assert_ne!(deposit_root, reversed_amounts.root::<Sha256>().unwrap());
         let mut activity_domain = commitment::Builder::<Sha256>::new(
-            VectorKind::Change,
+            VectorKind::OutEntry,
             u32::try_from(deposits.records().len()).unwrap(),
         )
         .unwrap();

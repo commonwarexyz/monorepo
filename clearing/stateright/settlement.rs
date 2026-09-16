@@ -526,7 +526,7 @@ impl Batch {
                 admission_deadline: 4,
                 challenge_deadline: 6,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 3,
                     destination: Destination::Bob,
                     amount: 2,
                 }),
@@ -544,7 +544,7 @@ impl Batch {
                 admission_deadline: 6,
                 challenge_deadline: 8,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 5,
                     destination: Destination::Alice,
                     amount: 7,
                 }),
@@ -562,7 +562,7 @@ impl Batch {
                 admission_deadline: 1,
                 challenge_deadline: 3,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 1,
                     destination: Destination::Bob,
                     amount: 2,
                 }),
@@ -581,7 +581,7 @@ impl Batch {
                 admission_deadline: 6,
                 challenge_deadline: 8,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 2,
                     destination: Destination::Bob,
                     amount: 10,
                 }),
@@ -602,7 +602,7 @@ impl Batch {
                 admission_deadline: 4,
                 challenge_deadline: 6,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 3,
                     destination: Destination::Bob,
                     amount: 0,
                 }),
@@ -621,7 +621,7 @@ impl Batch {
                 admission_deadline: 1,
                 challenge_deadline: 3,
                 withdrawal_output: Some(Output {
-                    position: 0,
+                    position: 1,
                     destination: Destination::Bob,
                     amount: 2,
                 }),
@@ -735,7 +735,7 @@ pub(crate) enum SettlementEdge {
     Challenge(Batch, ChallengeKind),
     Finalize(Batch),
     ClaimWithdrawal {
-        batch: Batch,
+        refresh: bool,
         source: Batch,
         position: u8,
     },
@@ -753,6 +753,9 @@ pub(crate) struct SettlementState {
     pub(crate) current_liability: u16,
     pub(crate) custody: u16,
     pub(crate) claimable: u16,
+    pub(crate) finalized_payout_operations: u8,
+    // Consumed native locations include finalized Commit positions.
+    pub(crate) intervals: std::collections::BTreeMap<u8, u8>,
     pub(crate) total_in: u16,
     pub(crate) released: u16,
     pub(crate) clean_claim_paid: u16,
@@ -794,6 +797,8 @@ impl Default for SettlementState {
             current_liability: 15,
             custody: 15,
             claimable: 0,
+            finalized_payout_operations: 1,
+            intervals: std::collections::BTreeMap::new(),
             total_in: 15,
             released: 0,
             clean_claim_paid: 0,
@@ -837,7 +842,7 @@ pub(crate) enum SettlementAction {
     Challenge(ProvenChallenge),
     Finalize,
     ClaimWithdrawal {
-        batch: Batch,
+        refresh: bool,
         source: Batch,
         position: u8,
     },
@@ -915,11 +920,11 @@ impl SettlementModel {
             }
             SettlementAction::Finalize => self.finalize(&mut state)?,
             SettlementAction::ClaimWithdrawal {
-                batch,
+                refresh,
                 source,
                 position,
             } => {
-                self.claim_withdrawal(&mut state, batch, source, position)?;
+                self.claim_withdrawal(&mut state, source, position, refresh)?;
             }
             SettlementAction::ClaimDeposit(account) => {
                 self.claim_deposit(&mut state, account)?;
@@ -932,6 +937,42 @@ impl SettlementModel {
 
     fn operating(state: &SettlementState) -> bool {
         state.fault.healthy() && state.terminal == Terminal::Dormant
+    }
+
+    fn insert_claimed(state: &mut SettlementState, position: u8) -> Option<()> {
+        let before = state
+            .intervals
+            .range(..=position)
+            .next_back()
+            .map(|(&start, &end)| (start, end));
+        if before.is_some_and(|(start, end)| start <= position && position < end) {
+            return None;
+        }
+        let after_start = before.map_or(position, |(start, _)| start);
+        let after = state
+            .intervals
+            .range((
+                std::ops::Bound::Excluded(after_start),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(&start, &end)| (start, end));
+        let mut start = position;
+        let mut end = position.checked_add(1)?;
+        if let Some((before_start, before_end)) = before
+            && before_end == position
+        {
+            state.intervals.remove(&before_start);
+            start = before_start;
+        }
+        if let Some((after_start, after_end)) = after
+            && after_start == end
+        {
+            state.intervals.remove(&after_start);
+            end = after_end;
+        }
+        state.intervals.insert(start, end);
+        Some(())
     }
 
     fn head_root(state: &SettlementState) -> Root {
@@ -1395,6 +1436,13 @@ impl SettlementModel {
         state.status[batch.index()] = BatchStatus::Finalized;
         state.withdrawal_reserve[batch.index()] =
             state.withdrawal_reserve[batch.index()].checked_add(candidate.withdrawal_total())?;
+        let start = state.finalized_payout_operations;
+        if let Some(output) = candidate.withdrawal_output {
+            assert_eq!(output.position, start);
+        }
+        let commit = start + u8::from(candidate.withdrawal_output.is_some());
+        Self::insert_claimed(state, commit)?;
+        state.finalized_payout_operations = commit + 1;
         state.finalized_batches |= batch.bit();
         state.finalized_epochs.push(candidate.epoch);
         state.expected_epoch = state.expected_epoch.checked_add(1)?;
@@ -1405,24 +1453,23 @@ impl SettlementModel {
     fn claim_withdrawal(
         &self,
         state: &mut SettlementState,
-        batch: Batch,
         source: Batch,
         position: u8,
+        refresh: bool,
     ) -> Option<()> {
         let candidate = source.candidate();
         let output = candidate.withdrawal_output?;
-        let bit = batch.bit();
-        // A batch that finalized nothing claimable owns no claim record, so a
-        // fully degraded close has nothing to consume.
-        if source != batch
-            || output.position != position
-            || state.finalized_batches & bit == 0
-            || candidate.withdrawal_total() == 0
-            || state.claimed_withdrawals[batch.index()].is_some()
+        let batch = Batch::ALL.into_iter().find(|batch| {
+            state.finalized_batches & batch.bit() != 0
+                && batch.candidate().withdrawal_output == Some(output)
+        })?;
+        if output.position != position
+            || (!refresh && position + 2 != state.finalized_payout_operations)
             || output.amount > state.withdrawal_reserve[batch.index()]
         {
             return None;
         }
+        Self::insert_claimed(state, position)?;
         state.claimable = state.claimable.checked_sub(output.amount)?;
         state.released = state.released.checked_add(output.amount)?;
         state.clean_claim_paid = state.clean_claim_paid.checked_add(output.amount)?;
@@ -1430,7 +1477,7 @@ impl SettlementModel {
             state.withdrawal_reserve[batch.index()].checked_sub(output.amount)?;
         state.claimed_withdrawals[batch.index()] = Some(position);
         state.last = SettlementEdge::ClaimWithdrawal {
-            batch,
+            refresh,
             source,
             position,
         };
@@ -1860,7 +1907,9 @@ impl SettlementModel {
                         .is_some_and(|output| output.position == position)
             })
         });
-        let custody_conserved = state.custody + state.claimable + state.released == state.total_in
+        let ledger_exact = Self::claimed_ranges_exact(state);
+        let custody_conserved = ledger_exact
+            && state.custody + state.claimable + state.released == state.total_in
             && state.claimable == batch_total(&state.withdrawal_reserve)
             && state.released
                 == state.clean_claim_paid
@@ -1886,6 +1935,43 @@ impl SettlementModel {
             && Self::deadlines_observable(state)
             && Self::hard_fault_has_progress(state)
             && registration_exact
+    }
+
+    fn claimed_ranges_exact(state: &SettlementState) -> bool {
+        let actual_positions = state
+            .intervals
+            .iter()
+            .flat_map(|(&start, &end)| start..end)
+            .collect::<Vec<_>>();
+        let expected_positions = (1..state.finalized_payout_operations)
+            .filter(|position| {
+                !Batch::ALL.into_iter().any(|batch| {
+                    state.finalized_batches & batch.bit() != 0
+                        && state.claimed_withdrawals[batch.index()].is_none()
+                        && batch
+                            .candidate()
+                            .withdrawal_output
+                            .is_some_and(|output| output.position == *position)
+                })
+            })
+            .collect::<Vec<_>>();
+        let unclaimed_outputs = Batch::ALL
+            .into_iter()
+            .filter(|batch| {
+                state.finalized_batches & batch.bit() != 0
+                    && state.claimed_withdrawals[batch.index()].is_none()
+                    && batch.candidate().withdrawal_output.is_some()
+            })
+            .count();
+        let mut previous_end = None;
+        let canonical = state.intervals.iter().all(|(&start, &end)| {
+            let valid = start < end && previous_end.is_none_or(|previous| previous < start);
+            previous_end = Some(end);
+            valid
+        });
+        actual_positions == expected_positions
+            && state.intervals.len() <= unclaimed_outputs + 1
+            && canonical
     }
 }
 
@@ -2012,15 +2098,15 @@ fn absent_recipient_credit_finalizes_virtually(
 }
 
 fn amount_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.claimed_withdrawals[Batch::B2.index()] == Some(0)
+    state.claimed_withdrawals[Batch::B2.index()] == Some(3)
 }
 
 fn close_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.claimed_withdrawals[Batch::B3.index()] == Some(0)
+    state.claimed_withdrawals[Batch::B3.index()] == Some(5)
 }
 
 fn carried_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
-    state.claimed_withdrawals[Batch::B1C.index()] == Some(0)
+    state.claimed_withdrawals[Batch::B1C.index()] == Some(2)
 }
 
 fn degraded_zero_finalized(_: &SettlementModel, state: &SettlementState) -> bool {
@@ -2215,7 +2301,7 @@ impl Model for SettlementModel {
             }
             if let Some(output) = batch.candidate().withdrawal_output {
                 actions.push(SettlementAction::ClaimWithdrawal {
-                    batch,
+                    refresh: true,
                     source: batch,
                     position: output.position,
                 });
@@ -2358,7 +2444,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 2_654_861);
+    assert_eq!(checker.unique_state_count(), 2_766_539);
     checker.assert_properties();
 }
 
@@ -2371,6 +2457,15 @@ fn settlement_invariants_have_negative_controls() {
     };
     assert!(!all_invariants(&model, &skipped));
     assert!(!fifo_without_skips(&model, &skipped));
+
+    let mut adjacent_claimed = SettlementState {
+        finalized_payout_operations: 3,
+        finalized_batches: Batch::B0.bit() | Batch::B1.bit(),
+        ..SettlementState::default()
+    };
+    adjacent_claimed.intervals.insert(1, 2);
+    adjacent_claimed.intervals.insert(2, 3);
+    assert!(!SettlementModel::claimed_ranges_exact(&adjacent_claimed));
 
     // A partial release is neither the requested amount nor zero.
     let mut partial = Batch::B2.candidate();

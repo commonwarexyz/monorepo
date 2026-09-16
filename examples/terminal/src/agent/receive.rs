@@ -39,8 +39,8 @@ pub(crate) struct ReconcileSummary {
     /// past the window, or its close never admitted before settlement faulted.
     pub(crate) unenforceable: Vec<u64>,
     /// Epochs that finalized while the operator still withholds the committed-side evidence
-    /// needed to verify or convict, reported once per stretch of withholding. The epoch keeps
-    /// retrying and self-heals if the evidence is later served.
+    /// needed to verify or convict, reported once per stretch of withholding. The epoch retries
+    /// while its descriptor remains retained; retired historical receipts remain unresolved.
     pub(crate) withheld: Vec<u64>,
 }
 
@@ -166,15 +166,16 @@ impl Agent {
         match receipt_epoch(ctx, chain, self.deployment, &context).await? {
             ReceiptEpoch::Live(_) => {}
             ReceiptEpoch::Finalized(admitted) => {
+                let range = admitted.activity_range();
                 let lookup = self
                     .incoming_lookup(ctx, chain, operator, epoch, &admitted, &payer)
                     .await?;
-                let (cumulative, count) =
-                    lookup.resolve::<Sha256>(&admitted.roots.change, &payer, &account)?;
+                let (cumulative, count) = lookup.resolve::<Sha256>(&range, &payer, &account)?;
                 if cumulative < receipt.cumulative || count < receipt.count {
                     return Ok(None);
                 }
             }
+            ReceiptEpoch::Retired => return Ok(None),
             ReceiptEpoch::Invalidated => return Ok(None),
             ReceiptEpoch::Unresolved | ReceiptEpoch::Faulted(_) => {
                 anyhow::bail!("incoming receipt settlement is not yet decidable");
@@ -196,14 +197,13 @@ impl Agent {
     /// This is a background assurance loop that never gates payments or claims. For every epoch
     /// holding credits, per payer edge, the committed close's public terminal entry must be at
     /// or above the wallet's highest held cumulative credit and payment count. The trust story
-    /// is anchored: the chain certifies the batch identity and change root of the close it
-    /// admitted for the epoch (read with the recency bound, so the admitted-or-absent verdict
-    /// holds at a certified tip no older than the recency threshold), and committed-side
-    /// evidence is trusted only when it verifies under that anchor. The evidence comes from
-    /// validators, which retain the complete close. The operator is a fallback when every
-    /// validator declines. Missing, unanchored, or unprovable evidence leaves that epoch
-    /// unresolved without blocking other epochs. After finalization the challenge window
-    /// is closed, so withheld evidence raises an alarm and remains retryable at every age.
+    /// is anchored by a certified admitted descriptor and its activity range.
+    /// Committed-side evidence is trusted only when it verifies under that range.
+    /// The operator is a fallback for the live admitted path when every native holder declines.
+    /// Missing, unanchored, or unprovable evidence leaves that epoch unresolved without blocking
+    /// other epochs. After finalization the challenge window is closed, so withheld evidence
+    /// raises an alarm. Evidence remains retryable while its finalized descriptor is retained;
+    /// once a successor finalizes, the historical receipt remains unresolved.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -283,6 +283,17 @@ impl Agent {
         if held.is_empty() {
             return Ok(());
         }
+
+        // Finalizing a successor permanently retires this epoch's admitted descriptor and
+        // anchor. The held receipts remain unresolved, but repeating unavailable evidence reads
+        // cannot change that outcome.
+        if status.last_finalized.is_some_and(|last| last > epoch) {
+            if self.withheld.insert(epoch) {
+                summary.withheld.push(epoch);
+            }
+            return Ok(());
+        }
+
         let account = self.account();
 
         // The anchor is the chain's own admission record for this epoch, recency-bounded.
@@ -293,26 +304,40 @@ impl Agent {
         } else {
             None
         };
-        let Ok(admitted) = chain.admitted(ctx, epoch).await else {
-            return Ok(());
+        let admitted = match chain.admitted(ctx, epoch).await {
+            Ok(admitted) => admitted,
+            Err(_) if status.last_finalized.is_some_and(|last| epoch <= last) => {
+                if self.withheld.insert(epoch) {
+                    summary.withheld.push(epoch);
+                }
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
         };
-        let Some(admitted) = admitted else {
+        if admitted.is_none() {
+            if status.last_finalized.is_some_and(|last| epoch <= last) {
+                if self.withheld.insert(epoch) {
+                    summary.withheld.push(epoch);
+                }
+                return Ok(());
+            }
             // No close admitted yet. If settlement faulted, this epoch's close never will, so
             // its held credit is enforcement-dead: record it loudly rather than retry forever.
             if status.hard_faulted {
                 self.store
-                    .record_unenforceable(epoch)
+                    .record_terminal_nonclean(epoch)
                     .context("record unenforceable epoch")?;
                 summary.unenforceable.push(epoch);
             }
             return Ok(());
-        };
+        }
 
-        if !admitted.finalized
+        if let Some(admitted) = admitted.as_ref()
+            && !admitted.finalized
             && let Some(fault) = fault
             && invalidated_epoch(ctx, chain, epoch, status, &fault).await?
         {
-            self.store.record_protected(epoch)?;
+            self.store.record_terminal_nonclean(epoch)?;
             self.withheld.remove(&epoch);
             summary.protected.push(epoch);
             return Ok(());
@@ -321,16 +346,24 @@ impl Agent {
         let mut uncovered = false;
         let mut refused = false;
         for entry in &held {
-            match self
-                .assess_entry(ctx, chain, operator, epoch, &admitted, &account, entry)
-                .await
-            {
+            let verdict = self
+                .assess_entry(
+                    ctx,
+                    chain,
+                    operator,
+                    epoch,
+                    admitted.as_ref().expect("checked above"),
+                    &account,
+                    entry,
+                )
+                .await;
+            match verdict {
                 // One proven challenge invalidates the whole close, so record it immediately and
                 // stop: continuing would resubmit distinct evidence under the same batch and trip
                 // the chain's evidence-replay guard, aborting before the conviction is recorded.
                 EntryVerdict::Convicted => {
                     self.store
-                        .record_protected(epoch)
+                        .record_terminal_nonclean(epoch)
                         .context("record protected outcome")?;
                     self.withheld.remove(&epoch);
                     summary.convicted.push(epoch);
@@ -348,17 +381,19 @@ impl Agent {
 
         if uncovered {
             self.store
-                .record_unenforceable(epoch)
+                .record_terminal_nonclean(epoch)
                 .context("record unenforceable epoch")?;
             self.withheld.remove(&epoch);
             summary.unenforceable.push(epoch);
         } else if refused {
-            // Finalized close evidence remains accountable at every age. An unavailable
-            // edge stays unresolved and alarms once until evidence is served.
-            if admitted.finalized && self.withheld.insert(epoch) {
+            // While the finalized descriptor remains retained, an unavailable edge stays
+            // unresolved and alarms once until evidence is served.
+            if admitted.as_ref().is_some_and(|admitted| admitted.finalized)
+                && self.withheld.insert(epoch)
+            {
                 summary.withheld.push(epoch);
             }
-        } else if admitted.finalized {
+        } else if admitted.as_ref().is_some_and(|admitted| admitted.finalized) {
             self.store
                 .mark_reconciled(epoch)
                 .context("record reconciled epoch")?;
@@ -383,28 +418,26 @@ impl Agent {
         payer: &Key,
     ) -> Result<HigherEntryLookup<Key, Digest>> {
         let account = self.account();
-        if let Ok(lookup) = self
+        let range = admitted.activity_range();
+        let holder_error = match self
             .holders
-            .committed_entry(ctx, chain, admitted, payer, &account)
+            .committed_entry_at(ctx, chain, epoch, &range, payer, &account)
             .await
         {
-            return Ok(lookup);
-        }
-        let evidence = operator_rpc::committed_entry(
+            Ok(lookup) => return Ok(lookup),
+            Err(error) => error,
+        };
+        operator_rpc::committed_entry(
             ctx,
             operator,
             operator_rpc::CommittedEntryRequest {
                 epoch,
                 payer: payer.clone(),
-                recipient: account,
+                recipient: account.clone(),
             },
         )
-        .await?;
-        ensure!(
-            evidence.batch_id == admitted.batch_id && evidence.change_root == admitted.roots.change,
-            "committed entry differs from the certified close"
-        );
-        Ok(evidence.lookup)
+        .await
+        .map_err(|error| error.context(holder_error))
     }
 
     /// Assesses one held receipt and publishes its challenge when undercoverage is provable.
@@ -433,7 +466,7 @@ impl Agent {
         // Resolving served evidence is a cryptographic check on an untrusted party, so a
         // failure is a retryable refusal rather than a fatal error.
         let Ok((cumulative, count)) =
-            lookup.resolve::<Sha256>(&admitted.roots.change, &held.payer, account)
+            lookup.resolve::<Sha256>(&admitted.activity_range(), &held.payer, account)
         else {
             return EntryVerdict::Refused;
         };

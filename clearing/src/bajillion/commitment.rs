@@ -14,14 +14,10 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::bmt;
 use thiserror::Error;
 
-const CHANGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_LEAF";
-const CHANGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_ROOT";
 const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
 const WITHDRAWAL_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_ROOT";
-const WITHDRAWAL_OUTPUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_LEAF";
-const WITHDRAWAL_OUTPUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_ROOT";
 const OUT_ENTRY_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_LEAF";
 const OUT_ENTRY_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_ROOT";
 
@@ -38,14 +34,10 @@ pub const MAX_VECTOR_LENGTH: u32 = 1 << 24;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum VectorKind {
-    /// Sorted vector of changed-account guards.
-    Change = 2,
     /// Chain-sealed deposit vector.
     Deposit = 3,
     /// Chain-sealed withdrawal vector.
     Withdrawal = 4,
-    /// Validator-derived withdrawal outputs in request order.
-    WithdrawalOutput = 6,
     /// Sorted per-payer cumulative outgoing entries.
     OutEntry = 7,
 }
@@ -53,20 +45,16 @@ pub enum VectorKind {
 impl VectorKind {
     const fn leaf_domain(self) -> &'static [u8] {
         match self {
-            Self::Change => CHANGE_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
-            Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_LEAF_DOMAIN,
             Self::OutEntry => OUT_ENTRY_LEAF_DOMAIN,
         }
     }
 
     const fn root_domain(self) -> &'static [u8] {
         match self {
-            Self::Change => CHANGE_ROOT_DOMAIN,
             Self::Deposit => DEPOSIT_ROOT_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_ROOT_DOMAIN,
-            Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_ROOT_DOMAIN,
             Self::OutEntry => OUT_ENTRY_ROOT_DOMAIN,
         }
     }
@@ -83,10 +71,8 @@ impl Read for VectorKind {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            2 => Ok(Self::Change),
             3 => Ok(Self::Deposit),
             4 => Ok(Self::Withdrawal),
-            6 => Ok(Self::WithdrawalOutput),
             7 => Ok(Self::OutEntry),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -100,13 +86,7 @@ impl FixedSize for VectorKind {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VectorKind {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(*u.choose(&[
-            Self::Change,
-            Self::Deposit,
-            Self::Withdrawal,
-            Self::WithdrawalOutput,
-            Self::OutEntry,
-        ])?)
+        Ok(*u.choose(&[Self::Deposit, Self::Withdrawal, Self::OutEntry])?)
     }
 }
 
@@ -761,7 +741,7 @@ mod tests {
     fn roots_bind_kind_length_and_value_order() {
         let values = [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()];
         let state = tree(VectorKind::Deposit, &values).root();
-        let change = tree(VectorKind::Change, &values).root();
+        let change = tree(VectorKind::Withdrawal, &values).root();
         let shorter = tree(VectorKind::Deposit, &values[..2]).root();
         let reordered = tree(
             VectorKind::Deposit,
@@ -780,14 +760,14 @@ mod tests {
     #[test]
     fn bulk_builder_is_strategy_independent_and_failure_atomic() {
         let values = (0..257_u64).collect::<Vec<_>>();
-        let mut scalar = Builder::<Sha256>::new(VectorKind::Change, 257).unwrap();
+        let mut scalar = Builder::<Sha256>::new(VectorKind::Deposit, 257).unwrap();
         for value in &values {
             scalar.add_encoded(value.encode().as_ref()).unwrap();
         }
         let scalar = scalar.build(&Sequential).unwrap();
 
         let parallel = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
-        let mut bulk = Builder::<Sha256>::new(VectorKind::Change, 257).unwrap();
+        let mut bulk = Builder::<Sha256>::new(VectorKind::Deposit, 257).unwrap();
         bulk.add_values(&values, &parallel).unwrap();
         let bulk = bulk.build(&parallel).unwrap();
         assert_eq!(bulk.root(), scalar.root());
@@ -798,7 +778,7 @@ mod tests {
             );
         }
 
-        let mut bounded = Builder::<Sha256>::new(VectorKind::Change, 1).unwrap();
+        let mut bounded = Builder::<Sha256>::new(VectorKind::Deposit, 1).unwrap();
         assert!(bounded.add_values(&values[..2], &Sequential).is_err());
         bounded.add_values(&values[..1], &Sequential).unwrap();
         assert!(bounded.build(&Sequential).is_ok());
@@ -813,15 +793,15 @@ mod tests {
             b"three".as_slice(),
             b"four".as_slice(),
         ];
-        let tree = tree(VectorKind::Change, &values);
+        let tree = tree(VectorKind::Deposit, &values);
         let root = tree.root();
         let opening = tree.opening(4).unwrap();
         opening
-            .verify::<Sha256>(VectorKind::Change, &root, values[4])
+            .verify::<Sha256>(VectorKind::Deposit, &root, values[4])
             .unwrap();
         assert!(
             opening
-                .verify::<Sha256>(VectorKind::Change, &root, b"tampered")
+                .verify::<Sha256>(VectorKind::Deposit, &root, b"tampered")
                 .is_err()
         );
 
@@ -838,20 +818,20 @@ mod tests {
             b"three".as_slice(),
             b"four".as_slice(),
         ];
-        let change_tree = tree(VectorKind::Change, &values);
+        let change_tree = tree(VectorKind::Deposit, &values);
         let root = change_tree.root();
         let opening = change_tree.range_opening(1, 3).unwrap();
         opening
-            .verify::<Sha256, _>(VectorKind::Change, &root, &values[1..4])
+            .verify::<Sha256, _>(VectorKind::Deposit, &root, &values[1..4])
             .unwrap();
         assert!(
             opening
-                .verify::<Sha256, _>(VectorKind::Change, &root, &values[0..3])
+                .verify::<Sha256, _>(VectorKind::Deposit, &root, &values[0..3])
                 .is_err()
         );
         assert!(
             opening
-                .verify::<Sha256, _>(VectorKind::Change, &root, &values[1..3])
+                .verify::<Sha256, _>(VectorKind::Deposit, &root, &values[1..3])
                 .is_err()
         );
         assert!(change_tree.range_opening(4, 2).is_err());
@@ -860,10 +840,10 @@ mod tests {
         let encoded = opening.encode();
         assert_eq!(RangeOpening::decode_cfg(encoded, &3).unwrap(), opening);
 
-        let empty = tree(VectorKind::Change, &[]);
+        let empty = tree(VectorKind::Deposit, &[]);
         let opening = empty.range_opening(0, 0).unwrap();
         opening
-            .verify::<Sha256, &[u8]>(VectorKind::Change, &empty.root(), &[])
+            .verify::<Sha256, &[u8]>(VectorKind::Deposit, &empty.root(), &[])
             .unwrap();
     }
 }

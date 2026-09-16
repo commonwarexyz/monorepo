@@ -12,13 +12,17 @@ use commonware_clearing::bajillion::{
         AccountLookup, AckWitness, ChallengeError, ChangeAbsence, ChangeOpening, EntryWitness,
         HigherEntryLookup, adjudicate, decode_bounded,
     },
-    commitment::{Opening, RangeOpening, VectorKind, VectorRoot, empty_root},
+    commitment::{Opening, RangeOpening, VectorRoot},
+    logs::{ActivityRecord, Floors, Heads, LogHead, Opening as LogOpening},
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     posted,
-    qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
-    state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore, SettlementOutput},
+    qmdb::{StateHead, StateLookup, StateOpening, StateRoot, StateTarget, StateValueOpening},
+    replica::ReplicaHead,
+    settlement::ClaimedRange,
+    state::{AccountChange, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
-        BatchId, CloseContext, CloseLimits, Header, RootBundle, WithdrawalClaim, WithdrawalOutput,
+        ActivityRange, BatchId, CloseContext, CloseLimits, Header, ProposalId, RootBundle,
+        WithdrawalClaim, WithdrawalOutput,
     },
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -75,20 +79,37 @@ async fn semantic_header(
         u64::from(seed),
         operator.public_key(),
         &state,
+        0,
         &deposits,
         &withdrawals,
         u64::from(seed),
         u64::from(seed) + 1,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"wire-decode-committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
-    let roots = RootBundle {
-        change: empty_root::<Sha256>(VectorKind::Change),
-        withdrawal_outputs: empty_root::<Sha256>(VectorKind::WithdrawalOutput),
-        successor: state.root(),
-    };
-    let withdrawal_total = 0;
-    let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
+    let prepared = commonware_clearing::bajillion::transition::prepare_close_with_strategy::<
+        Sha256,
+        _,
+        _,
+        _,
+        _,
+    >(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        vec![],
+        &commonware_parallel::Sequential,
+    )
+    .await
+    .unwrap();
+    let roots = prepared.close().roots;
+    let withdrawal_total = prepared.close().withdrawal_total;
+    let header = prepared.close().header;
     (context, header, roots, withdrawal_total)
 }
 
@@ -117,12 +138,17 @@ async fn dealing_roundtrip(bytes: &[u8], limits: CloseLimits, runtime: determini
         0,
         operator.public_key(),
         &state,
+        0,
         &deposits,
         &withdrawals,
         0,
         1,
         limits,
         Sha256::hash(&[b"committee"]),
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
     );
     if let Ok(dealing) = posted::decode::<VerifyingKey, Digest>(bytes.to_vec().into(), &context) {
         assert_eq!(dealing.encoded().as_ref(), bytes);
@@ -160,7 +186,7 @@ fuzz_target!(|data: &[u8]| {
         u64::MAX,
         u64::MAX,
     );
-    match selector % 44 {
+    match selector % 54 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -185,40 +211,50 @@ fuzz_target!(|data: &[u8]| {
         12 => roundtrip::<AccountChange<VerifyingKey, Digest>>(bytes, &()),
         13 => roundtrip::<ChangeValue<Digest>>(bytes, &()),
         14 => roundtrip::<ChangeValueCore>(bytes, &()),
-        15 => roundtrip::<ChangeGuard<VerifyingKey, Digest>>(bytes, &()),
-        16 => roundtrip::<Opening<Digest>>(bytes, &()),
-        17 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
-        18 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
-        19 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
-        20 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
-        21 => roundtrip::<VectorSendBody<VerifyingKey, Digest>>(bytes, &()),
-        22 => roundtrip::<SendAuthorization<VerifyingKey, Digest>>(bytes, &()),
-        23 => roundtrip::<VectorAck<VerifyingKey, Digest>>(bytes, &()),
-        24 => roundtrip::<EntryReceipt<VerifyingKey, Digest>>(bytes, &()),
-        25 => roundtrip::<OutEntry<VerifyingKey>>(bytes, &()),
-        26 => roundtrip::<OutVector<VerifyingKey>>(bytes, &()),
-        27 => roundtrip::<OutTipLookup<VerifyingKey, Digest>>(bytes, &()),
-        28 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
-        29 => roundtrip::<CloseContext<VerifyingKey, Digest>>(bytes, &()),
-        30 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
-        31 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
-        32 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
-        33 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
-        34 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
-        35 => roundtrip::<AckWitness<VerifyingKey, Digest>>(bytes, &()),
-        36 => roundtrip::<EntryWitness<VerifyingKey, Digest>>(bytes, &()),
-        37 => roundtrip::<HigherEntryLookup<VerifyingKey, Digest>>(bytes, &()),
-        38 => {
+        15 => roundtrip::<Opening<Digest>>(bytes, &()),
+        16 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
+        17 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
+        18 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
+        19 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
+        20 => roundtrip::<VectorSendBody<VerifyingKey, Digest>>(bytes, &()),
+        21 => roundtrip::<SendAuthorization<VerifyingKey, Digest>>(bytes, &()),
+        22 => roundtrip::<VectorAck<VerifyingKey, Digest>>(bytes, &()),
+        23 => roundtrip::<EntryReceipt<VerifyingKey, Digest>>(bytes, &()),
+        24 => roundtrip::<OutEntry<VerifyingKey>>(bytes, &()),
+        25 => roundtrip::<OutVector<VerifyingKey>>(bytes, &()),
+        26 => roundtrip::<OutTipLookup<VerifyingKey, Digest>>(bytes, &()),
+        27 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
+        28 => roundtrip::<CloseContext<VerifyingKey, Digest>>(bytes, &()),
+        29 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
+        30 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
+        31 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
+        32 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
+        33 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
+        34 => roundtrip::<AckWitness<VerifyingKey, Digest>>(bytes, &()),
+        35 => roundtrip::<EntryWitness<VerifyingKey, Digest>>(bytes, &()),
+        36 => roundtrip::<HigherEntryLookup<VerifyingKey, Digest>>(bytes, &()),
+        37 => {
             deterministic::Runner::seeded(u64::from(limit_selector)).start(|runtime| async move {
                 challenge_roundtrip(bytes, limit_selector, runtime).await
             })
         }
-        39 => roundtrip::<Header<Digest>>(bytes, &()),
-        40 => roundtrip::<RootBundle<Digest>>(bytes, &()),
-        41 => roundtrip::<BatchId<Digest>>(bytes, &()),
-        42 => roundtrip::<CloseLimits>(bytes, &()),
-        43 => deterministic::Runner::seeded(u64::from(limit_selector))
+        38 => roundtrip::<Header<Digest>>(bytes, &()),
+        39 => roundtrip::<RootBundle<Digest>>(bytes, &()),
+        40 => roundtrip::<BatchId<Digest>>(bytes, &()),
+        41 => roundtrip::<CloseLimits>(bytes, &()),
+        42 => deterministic::Runner::seeded(u64::from(limit_selector))
             .start(|runtime| async move { dealing_roundtrip(bytes, close_limits, runtime).await }),
+        43 => roundtrip::<LogHead<Digest>>(bytes, &()),
+        44 => roundtrip::<Heads<Digest>>(bytes, &()),
+        45 => roundtrip::<Floors>(bytes, &()),
+        46 => roundtrip::<LogOpening<Digest>>(bytes, &()),
+        47 => roundtrip::<ClaimedRange>(bytes, &()),
+        48 => roundtrip::<ProposalId<Digest>>(bytes, &()),
+        49 => roundtrip::<StateHead<Digest>>(bytes, &()),
+        50 => roundtrip::<ReplicaHead<Digest>>(bytes, &()),
+        51 => roundtrip::<StateTarget<Digest>>(bytes, &()),
+        52 => roundtrip::<ActivityRecord<VerifyingKey, Digest>>(bytes, &()),
+        53 => roundtrip::<ActivityRange<Digest>>(bytes, &()),
         _ => unreachable!(),
     }
 

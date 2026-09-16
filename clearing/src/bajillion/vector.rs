@@ -139,7 +139,10 @@ impl<P: PublicKey> OutVector<P> {
         self.validate()
     }
 
-    fn commitment<H, D>(&self) -> Result<commitment::Tree<D>, Error>
+    /// Builds the typed tree for checking the root and opening multiple entries.
+    ///
+    /// Opening positions correspond to indices in [`Self::entries`].
+    pub fn commitment<H, D>(&self) -> Result<commitment::Tree<D>, Error>
     where
         H: Hasher<Digest = D>,
         D: Digest,

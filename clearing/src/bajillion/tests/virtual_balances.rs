@@ -4,6 +4,7 @@ use crate::bajillion::state::SettlementOutput;
 fn epoch(
     state: &TestState,
     epoch: u64,
+    predecessor_liability: u64,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, ShaDigest>,
 ) -> CloseContext<VerifyingKey, ShaDigest> {
@@ -13,14 +14,22 @@ fn epoch(
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
         deposits,
         withdrawals,
-        state.liability(),
+        predecessor_liability,
         98,
         99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"committee"]),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(state, deposits, withdrawals)
+    .bind::<Sha256, _, _>(
+        state,
+        deposits,
+        withdrawals,
+        Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    )
     .unwrap()
 }
 
@@ -108,7 +117,7 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 140, &deposits, &withdrawals);
         let prepared = verify(
             &state,
             &context,
@@ -127,12 +136,13 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
                 .iter()
                 .all(|row| row.output == SettlementOutput::None)
         );
-        assert!(prepared.close().withdrawal_evidence().0.is_empty());
-        assert_eq!(prepared.state().head().liability(), 140);
-        let (state, close) = prepared.apply::<_, Sha256>(state).await.unwrap();
+        assert!(prepared.close().withdrawal_outputs().is_empty());
+        let range = prepared.close().roots.activity_range(&context).unwrap();
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
         for (key, balance) in [(&a, 70), (&b, 47), (&c, 15), (&d, 8)] {
             assert_eq!(
                 state
+                    .state()
                     .get(&account_key(&key.public_key()).unwrap())
                     .await
                     .unwrap()
@@ -140,17 +150,18 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
                 Some(balance)
             );
         }
-        assert_eq!(state.live_accounts(), 4);
-        let restored =
-            Close::decode_evidence::<Sha256>(close.encode_evidence(), &context, &close.header)
+        assert_eq!(state.state().live_accounts(), 4);
+        let retained = Epoch::at(state.logs(), EPOCH, range).await.unwrap();
+        for key in [&a, &b, &c, &d] {
+            let account = key.public_key();
+            retained
+                .account_lookup(state.logs(), &account)
+                .await
+                .unwrap()
+                .resolve::<Sha256>(&range, &account)
                 .unwrap();
-        assert!(
-            restored
-                .rows
-                .iter()
-                .all(|row| row.output == SettlementOutput::None)
-        );
-        assert_eq!(restored.roots, close.roots);
+        }
+        assert_eq!(close.roots.activity_range(&context).unwrap(), range);
     });
 }
 
@@ -161,7 +172,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
         let state = new_state(runtime, "eligibility", vec![(a.public_key(), 100)]).await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 100, &deposits, &withdrawals);
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
@@ -183,16 +194,17 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
             vec![terminal(&context, &a, &[(&b, 20)])],
         )
         .await;
-        let (state, _) = first.apply::<_, Sha256>(state).await.unwrap();
+        let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&b.public_key()).unwrap())
                 .await
                 .unwrap()
                 .map(NonZeroU64::get),
             Some(20)
         );
-        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
+        let next = epoch(&state, EPOCH + 1, 100, &deposits, &withdrawals);
         let second = verify(
             &state,
             &next,
@@ -201,9 +213,10 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
             vec![terminal(&next, &b, &[(&a, 5)])],
         )
         .await;
-        let (state, _) = second.apply::<_, Sha256>(state).await.unwrap();
+        let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&b.public_key()).unwrap())
                 .await
                 .unwrap()
@@ -225,7 +238,7 @@ fn eligible_recipient_reuses_incoming_credit() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 101, &deposits, &withdrawals);
         let close = verify(
             &state,
             &context,
@@ -237,9 +250,10 @@ fn eligible_recipient_reuses_incoming_credit() {
             ],
         )
         .await;
-        let (state, _) = close.apply::<_, Sha256>(state).await.unwrap();
+        let (state, _) = Box::pin(close.apply::<_, Sha256>(state)).await.unwrap();
         assert!(
             state
+                .state()
                 .get(&account_key(&b.public_key()).unwrap())
                 .await
                 .unwrap()
@@ -247,13 +261,13 @@ fn eligible_recipient_reuses_incoming_credit() {
         );
         assert_eq!(
             state
+                .state()
                 .get(&account_key(&c.public_key()).unwrap())
                 .await
                 .unwrap()
                 .map(NonZeroU64::get),
             Some(21)
         );
-        assert_eq!(state.liability(), 101);
     });
 }
 
@@ -270,14 +284,14 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
             Sha256::hash(&[b"virtual-balances"]),
-            state.root().digest,
+            state.state().root().digest,
             Bytes::from_static(b"destination"),
             WithdrawalAction::Close,
             99,
             &b,
         )])
         .unwrap();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
+        let context = epoch(&state, EPOCH, 140, &deposits, &withdrawals);
         let first = verify(
             &state,
             &context,
@@ -286,24 +300,27 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
             vec![terminal(&context, &a, &[(&b, 10)])],
         )
         .await;
-        let claim = first.withdrawal_claim(&b.public_key()).unwrap();
-        assert_eq!(
-            claim
-                .verify::<Sha256>(&first.close().roots.withdrawal_outputs)
-                .unwrap()
-                .amount(),
-            50
-        );
-        let (state, _) = first.apply::<_, Sha256>(state).await.unwrap();
+        let payout_head = first.close().roots.withdrawal_outputs;
+        let payout_position = context.predecessor_logs().payouts.operations;
+        let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+        let output = state.logs().payout_at(payout_position).await.unwrap();
+        let (opening, _) = state
+            .logs()
+            .payout_opening(&payout_head, payout_position, NonZeroU64::MIN)
+            .await
+            .unwrap();
+        let claim = WithdrawalClaim::new(output, opening);
+        assert_eq!(claim.verify::<Sha256>(&payout_head).unwrap().amount(), 50);
         assert!(
             state
+                .state()
                 .get(&account_key(&b.public_key()).unwrap())
                 .await
                 .unwrap()
                 .is_none()
         );
         let withdrawals = WithdrawalBatch::empty();
-        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
+        let next = epoch(&state, EPOCH + 1, 90, &deposits, &withdrawals);
         let second = verify(
             &state,
             &next,
@@ -319,34 +336,34 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
                 .iter()
                 .all(|row| row.output == SettlementOutput::None)
         );
-        let (state, _) = second.apply::<_, Sha256>(state).await.unwrap();
+        let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
         assert_eq!(
             state
+                .state()
                 .opening(b.public_key())
                 .await
                 .unwrap()
-                .verify::<Sha256>(&state.root())
+                .verify::<Sha256>(&state.state().root())
                 .unwrap()
                 .get(),
             7
         );
-        assert_eq!(state.liability(), 90);
     });
 }
 
 #[test]
 fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proofs() {
-    let ((mut accepted, first_context, first_header, evidence), checkpoint) =
-        deterministic::Runner::default().start_and_recover(|runtime| async move {
+    let ((mut accepted, _first_context), checkpoint) = deterministic::Runner::default()
+        .start_and_recover(|runtime| async move {
             let [a, b] = [101, 102].map(SigningKey::from_seed);
             let state = new_state(runtime, "virtual-recovery", vec![(a.public_key(), 100)]).await;
-            let genesis = Accepted {
-                head: *state.head(),
-                mutations: vec![(account_key(&a.public_key()).unwrap(), NonZeroU64::new(100))],
-            };
+            let genesis = Accepted::genesis(
+                &state,
+                vec![(account_key(&a.public_key()).unwrap(), NonZeroU64::new(100))],
+            );
             let deposits = DepositBatch::empty();
             let withdrawals = WithdrawalBatch::empty();
-            let context = epoch(&state, EPOCH, &deposits, &withdrawals);
+            let context = epoch(&state, EPOCH, 100, &deposits, &withdrawals);
             let first = verify(
                 &state,
                 &context,
@@ -355,15 +372,10 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
                 vec![terminal(&context, &a, &[(&b, 20)])],
             )
             .await;
-            let first_record = Accepted {
-                head: *first.state().head(),
-                mutations: first.state().mutations().to_vec(),
-            };
-            let header = first.close().header;
-            let evidence = first.close().encode_evidence();
-            let (state, _) = first.apply::<_, Sha256>(state).await.unwrap();
-            let state = state.commit().await.unwrap();
-            let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
+            let first_record = Accepted::prepared(&first);
+            let (state, _) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+            let state = Box::pin(state.sync()).await.unwrap();
+            let next = epoch(&state, EPOCH + 1, 100, &deposits, &withdrawals);
             let second = verify(
                 &state,
                 &next,
@@ -372,16 +384,8 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
                 vec![terminal(&next, &b, &[(&a, 5)])],
             )
             .await;
-            let second_record = Accepted {
-                head: *second.state().head(),
-                mutations: second.state().mutations().to_vec(),
-            };
-            (
-                vec![genesis, first_record, second_record],
-                context,
-                header,
-                evidence,
-            )
+            let second_record = Accepted::prepared(&second);
+            (vec![genesis, first_record, second_record], context)
         });
     // The application has retained the next accepted batch, while QMDB contains the first.
     // Removing earlier payloads makes recovery depend only on the missing journal suffix.
@@ -392,12 +396,12 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
         let state = replay_state(runtime, "virtual-recovery", &accepted)
             .await
             .unwrap();
-        assert_eq!(*state.head(), accepted[2].head);
-        assert_eq!(state.liability(), 100);
+        assert_eq!(*state.state().head(), accepted[2].head);
         for (record, expected) in accepted.iter().zip([None, Some(20), Some(15)]) {
             let root = record.head.root();
             let key = account_key(&b).unwrap();
             let lookup = state
+                .state()
                 .lookup_at(root, record.head.operations(), &key)
                 .await
                 .unwrap();
@@ -408,15 +412,22 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
                     .map(NonZeroU64::get),
                 expected
             );
-            assert_eq!(*state.head(), accepted[2].head);
+            assert_eq!(*state.state().head(), accepted[2].head);
         }
-        let close =
-            Close::decode_evidence::<Sha256>(evidence, &first_context, &first_header).unwrap();
-        let lookup = crate::bajillion::serve::Index::new(&close)
-            .account_lookup::<Sha256>(&b)
-            .unwrap();
+        let start = accepted[0].logs.activity.operations;
+        let epoch = Epoch::at(
+            state.logs(),
+            EPOCH,
+            crate::bajillion::transition::ActivityRange {
+                start,
+                end: start + accepted[1].activity.rows().len() as u64,
+                head: accepted[1].logs.activity,
+            },
+        )
+        .await
+        .unwrap();
+        let lookup = epoch.account_lookup(state.logs(), &b).await.unwrap();
         assert!(matches!(lookup, AccountLookup::Present(_)));
-        assert!(close.withdrawal_evidence().0.is_empty());
     });
 }
 
@@ -433,16 +444,24 @@ fn receiving_balance_creation_respects_live_account_limit() {
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
             &deposits,
             &withdrawals,
-            state.liability(),
+            100,
             98,
             99,
             CloseLimits::new(1, 2, 0, 1, 1, 100, 0, 0),
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+        .bind::<Sha256, _, _>(
+            &state,
+            &deposits,
+            &withdrawals,
+            Floors {
+                activity: 0,
+                payouts: 0,
+            },
+        )
         .unwrap();
-        let before = *state.head();
+        let before = *state.state().head();
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
@@ -453,7 +472,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
         )
         .await;
         assert!(matches!(rejected, Err(CloseError::CloseLimit)));
-        assert_eq!(*state.head(), before);
+        assert_eq!(*state.state().head(), before);
         let prepared = verify(
             &state,
             &context,
@@ -462,10 +481,11 @@ fn receiving_balance_creation_respects_live_account_limit() {
             vec![terminal(&context, &a, &[(&b, 100)])],
         )
         .await;
-        let (state, _) = prepared.apply::<_, Sha256>(state).await.unwrap();
-        assert_eq!(state.live_accounts(), 1);
+        let (state, _) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
+        assert_eq!(state.state().live_accounts(), 1);
         assert!(
             state
+                .state()
                 .get(&account_key(&a.public_key()).unwrap())
                 .await
                 .unwrap()
@@ -473,10 +493,11 @@ fn receiving_balance_creation_respects_live_account_limit() {
         );
         assert_eq!(
             state
+                .state()
                 .opening(b.public_key())
                 .await
                 .unwrap()
-                .verify::<Sha256>(&state.root())
+                .verify::<Sha256>(&state.state().root())
                 .unwrap()
                 .get(),
             100

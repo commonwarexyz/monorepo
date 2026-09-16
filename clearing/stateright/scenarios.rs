@@ -6,6 +6,7 @@ use super::{
         SettlementModel, SettlementState, Terminal, WithdrawalAction, WithdrawalId,
     },
 };
+use std::collections::BTreeMap;
 
 fn step(model: SettlementModel, state: &mut SettlementState, action: SettlementAction) {
     *state = model
@@ -55,7 +56,7 @@ const fn withdrawal_claim(batch: Batch) -> SettlementAction {
         .expect("the fixture has a withdrawal output")
         .position;
     SettlementAction::ClaimWithdrawal {
-        batch,
+        refresh: true,
         source: batch,
         position,
     }
@@ -712,8 +713,10 @@ fn middle_fault_preserves_only_the_clean_fifo_prefix() {
         state.status[Batch::B2.index()],
         BatchStatus::Invalidated(Batch::B1)
     );
+    assert!(state.intervals.is_empty());
     rejected(model, &state, SettlementAction::BeginTerminal);
     finalize_b0(model, &mut state);
+    assert_eq!(state.intervals, BTreeMap::from([(1, 2)]));
     drain_terminal(model, &mut state);
     assert_eq!(state.recovered_state[Account::Alice as usize], 8);
     assert_eq!(state.recovered_state[Account::Bob as usize], 9);
@@ -736,12 +739,15 @@ fn tail_fault_precedes_and_drains_its_two_batch_clean_prefix() {
     assert_eq!(state.clean_prefix_len, 2);
     assert_eq!(state.status[Batch::B0.index()], BatchStatus::Pending);
     assert_eq!(state.status[Batch::B1.index()], BatchStatus::Pending);
+    assert!(state.intervals.is_empty());
 
     // The permanent fence still permits the two clean epochs to finalize in FIFO order.
     step(model, &mut state, SettlementAction::Observe(5));
     step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.intervals, BTreeMap::from([(1, 2)]));
     step(model, &mut state, SettlementAction::Observe(6));
     step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.intervals, BTreeMap::from([(1, 3)]));
     assert_eq!(state.finalized_batches & 0b11, 0b11);
 
     drain_terminal(model, &mut state);
@@ -842,7 +848,7 @@ fn finalized_withdrawal_reserve_survives_a_later_malicious_close() {
 }
 
 #[test]
-fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
+fn clean_claims_require_exact_positions_and_current_root_proofs() {
     let model = SettlementModel::default();
     let mut state = admit_first_three(model);
     finalize_b0(model, &mut state);
@@ -854,12 +860,12 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
     step(model, &mut state, SettlementAction::Observe(9));
     step(model, &mut state, SettlementAction::Finalize);
 
-    // Wrong positions and proof roots stutter without consuming reserves.
+    // Wrong positions and stale proof roots stutter without consuming reserves.
     rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
-            batch: Batch::B2,
+            refresh: true,
             source: Batch::B2,
             position: 1,
         },
@@ -868,33 +874,40 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
-            batch: Batch::B2,
+            refresh: false,
             source: Batch::Offset,
-            position: 0,
+            position: 1,
         },
     );
     rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
-            batch: Batch::B2,
+            refresh: true,
             source: Batch::B3,
-            position: 0,
+            position: 3,
         },
     );
     rejected(
         model,
         &state,
         SettlementAction::ClaimWithdrawal {
-            batch: Batch::B1,
+            refresh: true,
             source: Batch::B1,
             position: 1,
         },
     );
-    // Each exact positioned output consumes only its own batch-scoped reserve.
+    // Both claim orders bridge the same Commit gaps into one canonical range.
+    let mut reverse = state.clone();
+    step(model, &mut reverse, withdrawal_claim(Batch::B3));
+    step(model, &mut reverse, withdrawal_claim(Batch::B2));
+    assert_eq!(reverse.intervals, BTreeMap::from([(1, 7)]));
+
+    // Each native position consumes its output once; per-batch reserves are only the oracle.
     step(model, &mut state, withdrawal_claim(Batch::B2));
     rejected(model, &state, withdrawal_claim(Batch::B2));
     step(model, &mut state, withdrawal_claim(Batch::B3));
+    assert_eq!(state.intervals, BTreeMap::from([(1, 7)]));
     assert_eq!(state.withdrawal_reserve, [0; 8]);
     assert_eq!(state.clean_claim_paid, 9);
 }
@@ -1080,7 +1093,7 @@ fn carried_withdrawal_clears_and_consumes_its_replay_id_at_admission() {
     assert_eq!(state.outstanding_withdrawals, [None, None, None]);
     assert_eq!(state.withdrawal_reserve[Batch::B1C.index()], 10);
     step(model, &mut state, withdrawal_claim(Batch::B1C));
-    assert_eq!(state.claimed_withdrawals[Batch::B1C.index()], Some(0));
+    assert_eq!(state.claimed_withdrawals[Batch::B1C.index()], Some(2));
     assert_eq!(state.withdrawal_reserve[Batch::B1C.index()], 0);
     assert_eq!(state.clean_claim_paid, 10);
     assert!(!state.current_state[Account::Bob as usize].active);
@@ -1119,10 +1132,12 @@ fn degraded_amount_finalizes_and_claims_a_zero_release() {
     assert_eq!(state.current_state[Account::Bob as usize].balance, 1);
     assert_eq!(state.current_state[Account::Alice as usize].balance, 15);
 
-    // A fully degraded close finalizes no claimable value, so it owns no
-    // claim record and the zero output cannot be consumed.
+    assert_eq!(state.intervals, BTreeMap::from([(1, 3), (4, 5)]));
+    step(model, &mut state, withdrawal_claim(Batch::B2D));
+    assert_eq!(state.claimed_withdrawals[Batch::B2D.index()], Some(3));
+    assert_eq!(state.intervals, BTreeMap::from([(1, 5)]));
+    assert_eq!(state.claimable, 0);
     rejected(model, &state, withdrawal_claim(Batch::B2D));
-    assert_eq!(state.claimed_withdrawals[Batch::B2D.index()], None);
 
     // The request still consumed its slot and replay id through its deadline.
     let attempt = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Amount);

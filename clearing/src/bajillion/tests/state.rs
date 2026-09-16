@@ -12,8 +12,14 @@ fn current_membership_and_absence_bind_root_key_and_positive_balance() {
             accounts.iter().map(|key| (key.clone(), 100)).collect(),
         )
         .await;
-        let opening = state.opening(accounts[0].clone()).await.unwrap();
-        assert_eq!(opening.verify::<Sha256>(&state.root()).unwrap().get(), 100);
+        let opening = state.state().opening(accounts[0].clone()).await.unwrap();
+        assert_eq!(
+            opening
+                .verify::<Sha256>(&state.state().root())
+                .unwrap()
+                .get(),
+            100
+        );
         let encoded = opening.encode();
         assert_eq!(encoded.len(), opening.encode_size());
         assert_eq!(
@@ -35,35 +41,38 @@ fn current_membership_and_absence_bind_root_key_and_positive_balance() {
         assert!(StateOpening::<VerifyingKey, ShaDigest>::decode_cfg(zero, &128).is_err());
         let mut wrong = opening.clone();
         wrong.balance = NonZeroU64::new(101).unwrap();
-        assert!(wrong.verify::<Sha256>(&state.root()).is_err());
+        assert!(wrong.verify::<Sha256>(&state.state().root()).is_err());
         wrong = opening.clone();
         wrong.account = accounts[1].clone();
-        assert!(wrong.verify::<Sha256>(&state.root()).is_err());
+        assert!(wrong.verify::<Sha256>(&state.state().root()).is_err());
         assert!(
             opening
                 .verify::<Sha256>(&StateRoot::new(Sha256::hash(&[b"foreign-root"])))
                 .is_err()
         );
         let present = state
+            .state()
             .lookup(&account_key(&accounts[0]).unwrap())
             .await
             .unwrap();
         assert!(
             present
-                .resolve::<Sha256>(&state.root(), &account_key(&accounts[1]).unwrap())
+                .resolve::<Sha256>(&state.state().root(), &account_key(&accounts[1]).unwrap())
                 .is_err()
         );
         let missing = SigningKey::from_seed(999).public_key();
         let key = account_key(&missing).unwrap();
-        let absence = state.lookup(&key).await.unwrap();
+        let absence = state.state().lookup(&key).await.unwrap();
         assert!(matches!(absence, StateLookup::Absent(_)));
         assert_eq!(
-            absence.resolve::<Sha256>(&state.root(), &key).unwrap(),
+            absence
+                .resolve::<Sha256>(&state.state().root(), &key)
+                .unwrap(),
             None
         );
         assert!(
             absence
-                .resolve::<Sha256>(&state.root(), &account_key(&accounts[0]).unwrap())
+                .resolve::<Sha256>(&state.state().root(), &account_key(&accounts[0]).unwrap())
                 .is_err()
         );
         assert_eq!(
@@ -80,10 +89,11 @@ fn ordered_absence_covers_empty_and_wrapped_key_space() {
         let key = account_key(&SigningKey::from_seed(42).public_key()).unwrap();
         assert_eq!(
             empty
+                .state()
                 .lookup(&key)
                 .await
                 .unwrap()
-                .resolve::<Sha256>(&empty.root(), &key)
+                .resolve::<Sha256>(&empty.state().root(), &key)
                 .unwrap(),
             None
         );
@@ -99,40 +109,56 @@ fn ordered_absence_covers_empty_and_wrapped_key_space() {
         .await;
         for index in [0, 2, 4] {
             let key = account_key(&accounts[index]).unwrap();
-            let proof = state.lookup(&key).await.unwrap();
+            let proof = state.state().lookup(&key).await.unwrap();
             assert!(matches!(proof, StateLookup::Absent(_)));
-            assert_eq!(proof.resolve::<Sha256>(&state.root(), &key).unwrap(), None);
+            assert_eq!(
+                proof
+                    .resolve::<Sha256>(&state.state().root(), &key)
+                    .unwrap(),
+                None
+            );
         }
     });
 }
 
 #[test]
 fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
-    let ((heads, account, context, header, evidence, ack), checkpoint) =
+    let ((heads, account, context, header, roots, withdrawal_total, ack), checkpoint) =
         deterministic::Runner::default().start_and_recover(|runtime| async move {
             let fixture = fixture(runtime, 8, 8, 4, 1).await;
-            let genesis = *fixture.state.head();
+            let genesis = *fixture.state.state().head();
             let first = validate(&fixture, fixture.prepared.encoded().clone())
                 .await
                 .unwrap();
             let first_head = *first.state().head();
-            let evidence = first.close().encode_evidence();
+            let roots = first.close().roots;
+            let withdrawal_total = first.close().withdrawal_total;
             let header = first.close().header;
-            let (state, close) = first.apply::<_, Sha256>(fixture.state).await.unwrap();
+            let (state, close) = Box::pin(first.apply::<_, Sha256>(fixture.state))
+                .await
+                .unwrap();
             let context = EpochContext::new::<Sha256>(
                 *fixture.context.deployment(),
                 EPOCH + 1,
                 fixture.operator.public_key(),
                 &fixture.deposits,
                 &fixture.withdrawals,
-                state.liability(),
+                fixture.context.predecessor_liability() - withdrawal_total,
                 100,
                 101,
                 CloseLimits::protocol_maximum(),
                 *fixture.context.committee(),
             )
             .unwrap()
-            .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
+            .bind::<Sha256, _, _>(
+                &state,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                Floors {
+                    activity: 0,
+                    payouts: 0,
+                },
+            )
             .unwrap();
             let terminals = fixture
                 .terminals
@@ -193,23 +219,23 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                     send.body().cumulative_debit() == 1 && send.body().seq() == 0
                 })
             }));
-            let (state, _) = second.apply::<_, Sha256>(state).await.unwrap();
-            let state = state.commit().await.unwrap();
+            let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
+            let state = Box::pin(state.sync()).await.unwrap();
             assert_eq!(first_head.root(), close.roots.successor);
-            let heads = [genesis, first_head, *state.head()];
+            let heads = [genesis, first_head, *state.state().head()];
             (
                 heads,
                 fixture.accounts[0].0.clone(),
                 fixture.context,
                 header,
-                evidence,
+                roots,
+                withdrawal_total,
                 fixture.acks[0].clone(),
             )
         });
     deterministic::Runner::from(checkpoint).start(|runtime| async move {
-        let cfg = config(&runtime, "fixture");
-        let state = TestState::open(runtime, cfg).await.unwrap();
-        assert_eq!(*state.head(), heads[2]);
+        let state = open_state(runtime, "fixture").await.unwrap();
+        assert_eq!(*state.state().head(), heads[2]);
         for (head, balance) in
             heads
                 .into_iter()
@@ -217,29 +243,38 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
         {
             let root = head.root();
             let proof = state
+                .state()
                 .opening_at(root, head.operations(), account.clone())
                 .await
                 .unwrap();
             assert_eq!(proof.verify::<Sha256>(&root).unwrap().get(), balance);
-            assert!(state.opening_at(root, 0, account.clone()).await.is_err());
-            assert_eq!(*state.head(), heads[2]);
+            assert!(
+                state
+                    .state()
+                    .opening_at(root, 0, account.clone())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(*state.state().head(), heads[2]);
         }
         assert!(
             state
+                .state()
                 .opening_at(heads[0].root(), heads[2].operations(), account.clone())
                 .await
                 .is_err()
         );
-        assert_eq!(*state.head(), heads[2]);
-        let close = Close::decode_evidence::<Sha256>(evidence, &context, &header).unwrap();
-        let index = ChallengeIndex::new::<Sha256>(&context, &close).unwrap();
-        let lookup = account_lookup::<Sha256, _, _>(&index, &account).unwrap();
+        assert_eq!(*state.state().head(), heads[2]);
+        let epoch = Epoch::at(state.logs(), EPOCH, roots.activity_range(&context).unwrap())
+            .await
+            .unwrap();
+        let lookup = epoch.account_lookup(state.logs(), &account).await.unwrap();
         assert_eq!(
             adjudicate::<Sha256, _, _>(
                 &context,
                 &header,
-                &close.roots,
-                close.withdrawal_total,
+                &roots,
+                withdrawal_total,
                 &Challenge::HigherAckDebit {
                     ack: Box::new(AckWitness::from_ack(&ack)),
                     payer: Box::new(lookup)

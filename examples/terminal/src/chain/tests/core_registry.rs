@@ -364,11 +364,7 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
             crate::chain::state::preflight(&db, &finalized, &native, &Timing::DEFAULT, &direct).await.unwrap(),
             crate::chain::state::Preflight::Eligible { action: None }
         );
-        let release = super::super::state::withdrawal_release_key(
-            &deployment(),
-            &claim.batch_id,
-            claim.claim.position(),
-        );
+        let position = claim.claim.position();
         seal_native(
             &db,
             14,
@@ -386,7 +382,8 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
             read(&db, &deposit_key(&target, &event.id)).await,
             Some(Record::Deposit(event))
         );
-        assert_eq!(read(&db, &release).await, None);
+        assert!(claimed(&db, position).await.is_none());
+        assert_eq!(read(&db, &claimed_key(&target, position)).await, None);
         assert_eq!(status(&db).await.claimable, 7);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),
@@ -397,10 +394,8 @@ fn non_bootstrap_deposits_are_accepted_and_replay_preserves_finalized_claims() {
         );
         assert_supply(&db, &native, &[]).await;
         seal_native(&db, 15, &native, &[SettlementTx::ClaimWithdrawal(claim)]).await;
-        assert!(matches!(
-            read(&db, &release).await,
-            Some(Record::WithdrawalRelease(_))
-        ));
+        assert!(claimed(&db, position).await.is_some());
+        assert_eq!(read(&db, &claimed_key(&target, position)).await, None);
         assert_eq!(status(&db).await.claimable, 0);
         assert_eq!(
             native_balance(&db, &native, &account).await.unwrap(),

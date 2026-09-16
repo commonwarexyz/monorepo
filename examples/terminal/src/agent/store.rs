@@ -11,23 +11,20 @@
 
 use super::pay::merge_entries;
 use crate::{
-    chain::{
-        state as chain_state,
-        tx::{DepositRequest, NativeTransferRequest},
-    },
-    operator::rpc as operator_rpc,
+    chain::tx::{DepositRequest, NativeTransferRequest},
     protocol::{
-        Acceptance, Ack, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_DESTINATION_BYTES, MAX_ENTRIES,
-        Receipt,
+        Acceptance, Ack, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_BATCH_SEND_ENTRIES,
+        MAX_DESTINATION_BYTES, MAX_ENTRIES, MAX_SENDS_PER_BATCH, Receipt,
     },
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
+    logs::LogHead,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
-    transition::BatchId,
+    transition::WithdrawalClaim,
     vector::{OutEntry, OutVector},
 };
 use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
@@ -36,8 +33,9 @@ use commonware_cryptography_curve25519::signing::Signature;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 26;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
+const LOG_HEAD_BYTES: usize = LogHead::<Digest>::SIZE;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
 const MAX_STATE_OPENING_BYTES: usize = 16 * 1024;
 const MAX_STATE_PROOF_DIGESTS: usize = 256;
@@ -58,6 +56,27 @@ pub(crate) struct PendingPayment {
     pub(crate) authorization: SendAuthorization<Key, Digest>,
     pub(crate) entries: Vec<Entry>,
     pub(crate) recovery_root: StateRoot<Digest>,
+    pub(crate) acceptance: Option<VerifiedAcceptance>,
+    /// Settlement proved this authorization permanently excluded. Its entries remain the
+    /// durable local intent until a successor-context replacement is staged atomically.
+    pub(crate) replaceable: bool,
+}
+
+/// An operator acceptance whose signatures, opening structure, and staged-body binding were
+/// checked before it crossed the SQLite mutation boundary.
+#[derive(Clone)]
+pub(crate) struct VerifiedAcceptance(Acceptance);
+
+impl VerifiedAcceptance {
+    /// Constructs the marker after the wallet's native batch verifier or durable reopen path has
+    /// checked the complete acceptance.
+    pub(super) const fn from_verified(acceptance: Acceptance) -> Self {
+        Self(acceptance)
+    }
+
+    pub(super) const fn acceptance(&self) -> &Acceptance {
+        &self.0
+    }
 }
 
 /// An operator-claimed signing context paired with an independently authenticated floor.
@@ -69,18 +88,18 @@ pub(crate) struct ContextCache {
     pub(crate) epoch: u64,
 }
 
-/// An open withdrawal intent with replaceable, locally verified evidence.
-/// Its batch identity is authenticated when evidence becomes available.
+/// A wallet-owned payout candidate authenticated at one finalized payout head.
 #[derive(Clone)]
 pub(crate) struct PendingWithdrawalClaim {
-    pub(crate) evidence: Option<operator_rpc::WithdrawalEvidenceResponse>,
+    pub(crate) head: LogHead<Digest>,
+    pub(crate) claim: WithdrawalClaim<Digest>,
 }
 
 pub(crate) struct State {
     /// The durable optimistic signing state, absent for a fresh wallet or after an
     /// invalidation.
     pub(crate) cache: Option<ContextCache>,
-    pub(crate) pending_payment: Option<PendingPayment>,
+    pub(crate) pending_payments: Vec<PendingPayment>,
     pub(crate) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
     pub(crate) pending_deposit: Option<DepositRequest>,
     pub(crate) pending_transfer: Option<NativeTransferRequest>,
@@ -137,28 +156,31 @@ pub(crate) struct VectorState {
 pub(crate) enum ReconcileOutcome {
     /// The committed close's terminal entries covered every held receipt.
     Reconciled = 1,
-    /// The admitted close was invalidated before finalization.
-    Protected = 2,
-    /// An enforcement dead end: a finalized close understated a held receipt past the
-    /// challenge window, or a registered epoch's close never admitted and settlement faulted.
-    Unenforceable = 3,
+    /// The held credit reached a permanent non-clean outcome.
+    TerminalNonclean = 2,
 }
 
-/// The ledger records every concluded payment as `Accepted` (operator receipts held),
-/// `Finalized` (exact outgoing body authenticated in finalized activity), or `Abandoned`.
+/// The ledger records every concluded payment as `Accepted` (operator receipts held while its
+/// signing context remains live), `Retired` (its context has a permanent settlement boundary,
+/// with or without held receipts), or `Abandoned`.
 #[derive(Clone, Copy)]
 #[repr(i64)]
 enum PaymentState {
     Accepted = 3,
-    Finalized = 4,
+    Retired = 4,
     Abandoned = 5,
 }
 
 /// Payment conclusions whose deltas contribute to the wallet's balance lower bound.
-const SETTLED_STATES: [i64; 2] = [
-    PaymentState::Accepted as i64,
-    PaymentState::Finalized as i64,
-];
+const SETTLED_STATES: [i64; 2] = [PaymentState::Accepted as i64, PaymentState::Retired as i64];
+
+/// One authenticated conclusion for the included prefix of a pending batch.
+pub(crate) enum PaymentConclusion {
+    /// The wallet holds the exact operator acceptance.
+    Accepted(Box<VerifiedAcceptance>),
+    /// Finalized activity authenticates the endpoint, but no acceptance is available.
+    Retired,
+}
 
 struct Binding {
     account: Key,
@@ -302,21 +324,24 @@ impl Store {
             "payment context has an unexpected operator"
         );
 
-        // A certified view can predate durable local conclusions after a client restart.
+        // A certified view can predate durable local exclusions after a client restart.
         // Epochs outside SQLite's integer range have no archived conclusions.
         let mut statement = self.connection.prepare_cached(
             "SELECT length(authorization), authorization FROM agent_payments
-             WHERE state IN (?1, ?2) AND epoch = ?3",
+             WHERE state IN (?1, ?2) AND epoch = ?3
+             UNION ALL
+             SELECT length(authorization), authorization FROM agent_pending_payment
+             WHERE replaceable = 1",
         )?;
-        let conclusions = statement.query_map(
+        let exclusions = statement.query_map(
             params![
-                PaymentState::Finalized as i64,
+                PaymentState::Retired as i64,
                 PaymentState::Abandoned as i64,
                 i64::try_from(context.epoch()).ok(),
             ],
             |row| read_fixed_blob(row, 0, 1, AUTHORIZATION_BYTES, "concluded authorization"),
         )?;
-        for encoded in conclusions {
+        for encoded in exclusions {
             let authorization = SendAuthorization::<Key, Digest>::decode(encoded?)?;
             ensure!(
                 authorization.body().anchor() != context.anchor(),
@@ -376,94 +401,54 @@ impl Store {
         self.finish_mutation(result)
     }
 
-    /// Clears a request whose irreversible settlement boundary and authenticated history exclude carriage.
-    pub(crate) fn discard_unused_withdrawal(
+    /// Retires the active signing authorization at a certified healthy deadline.
+    ///
+    /// Its deadline remains as a monotonic floor for future signing contexts.
+    pub(crate) fn retire_withdrawal(
         &mut self,
         request: &SignedWithdrawal<Key, Digest>,
     ) -> Result<()> {
         self.ensure_usable()?;
-        let result = (|| {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(
-                transaction.execute(
-                    "DELETE FROM agent_pending_claims
-                 WHERE singleton = 1 AND request = ?1 AND evidence IS NULL",
-                    [request.encode().as_ref()],
-                )? == 1,
-                "unused withdrawal differs from its pending intent"
-            );
-            transaction
-                .commit()
-                .map_err(|source| CommitUnknown::new("unused withdrawal", source))?;
-            Ok(())
-        })();
+        validate_pending_withdrawal(&self.connection, &self.account, request)?;
+        let result = retire_withdrawal_transaction(
+            &mut self.connection,
+            request.encode().as_ref(),
+            request.body().deadline(),
+        );
         self.finish_mutation(result)
     }
 
-    /// Opens the withdrawal-claim intent. Opening is idempotent.
-    #[cfg(test)]
-    pub(crate) fn open_withdrawal_claim(&mut self) -> Result<()> {
+    /// The highest deadline of any retired authorization.
+    pub(crate) fn retired_withdrawal_deadline(&self) -> Result<Option<u64>> {
         self.ensure_usable()?;
-        let result = open_claim_transaction(&mut self.connection);
-        self.finish_mutation(result)
+        let encoded = self.connection.query_row(
+            "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
+             FROM agent_meta WHERE singleton = 1",
+            [],
+            |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
+        )?;
+        let deadline = u64::decode(encoded)?;
+        Ok((deadline != 0).then_some(deadline))
     }
 
-    /// Replaces cached evidence after local validation, excluding completed positions.
+    /// Persists a payout candidate after verifying its finalized MMR opening.
     pub(crate) fn cache_withdrawal_claim(
         &mut self,
-        evidence: &operator_rpc::WithdrawalEvidenceResponse,
+        candidate: &PendingWithdrawalClaim,
     ) -> Result<()> {
         self.ensure_usable()?;
-        validate_withdrawal_evidence(&self.connection, evidence, &self.account)?;
-        let batch = evidence.batch_id().encode();
-        let position = i64::from(evidence.witness.claim.position());
-        let encoded = evidence.encode();
-        let request = evidence.witness.request.encode();
-        ensure_claim_bound(encoded.as_ref(), "withdrawal evidence")?;
-        let result = cache_claim_transaction(
-            &mut self.connection,
-            batch.as_ref(),
-            position,
-            encoded.as_ref(),
-            request.as_ref(),
-        );
+        validate_withdrawal_claim(candidate, &self.account)?;
+        let head = candidate.head.encode();
+        let claim = candidate.claim.encode();
+        ensure_claim_bound(claim.as_ref(), "withdrawal claim")?;
+        let result = cache_claim_transaction(&mut self.connection, head.as_ref(), claim.as_ref());
         self.finish_mutation(result)
     }
 
-    /// Whether a withdrawal claim against this exact (batch, position) already completed.
-    pub(crate) fn withdrawal_claim_completed(
-        &self,
-        batch_id: BatchId<Digest>,
-        position: u32,
-    ) -> Result<bool> {
+    pub(crate) fn complete_withdrawal_claim(&mut self, position: u64) -> Result<()> {
         self.ensure_usable()?;
-        claim_completed(
-            &self.connection,
-            batch_id.encode().as_ref(),
-            i64::from(position),
-        )
-    }
-
-    pub(crate) fn complete_withdrawal_claim(
-        &mut self,
-        evidence: &operator_rpc::WithdrawalEvidenceResponse,
-        result: &chain_state::WithdrawalResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        validate_withdrawal_evidence(&self.connection, evidence, &self.account)?;
-        validate_withdrawal_result(evidence, result)?;
-        let batch = evidence.batch_id().encode();
-        let position = i64::from(evidence.witness.claim.position());
-        let evidence = evidence.encode();
-        ensure_claim_bound(evidence.as_ref(), "withdrawal evidence")?;
-        let result = complete_claim_transaction(
-            &mut self.connection,
-            batch.as_ref(),
-            position,
-            evidence.as_ref(),
-        );
+        let position = position.encode();
+        let result = complete_claim_transaction(&mut self.connection, position.as_ref());
         self.finish_mutation(result)
     }
 
@@ -494,6 +479,7 @@ impl Store {
         read_vector_state(&self.connection, context.epoch(), context.anchor())
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_payment(
         &mut self,
         authorization: &SendAuthorization<Key, Digest>,
@@ -501,32 +487,267 @@ impl Store {
         recovery_root: &StateRoot<Digest>,
         previous_debit: u64,
     ) -> Result<()> {
-        self.ensure_usable()?;
-        validate_authorization(
-            authorization,
-            entries,
-            &self.account,
-            &self.operator,
+        self.stage_payments(
+            &[PendingPayment {
+                authorization: authorization.clone(),
+                entries: entries.to_vec(),
+                recovery_root: *recovery_root,
+                acceptance: None,
+                replaceable: false,
+            }],
             previous_debit,
-        )?;
-        self.merged_vector(authorization.body(), entries, previous_debit)?;
-        sql_u64(
-            authorization.body().cumulative_debit(),
-            "pending cumulative debit",
-        )?;
-        let encoded = authorization.encode();
-        let encoded_entries = encode_entries(entries)?;
+        )
+    }
+
+    /// Persists one complete ordered payer batch before any member is submitted.
+    pub(crate) fn stage_payments(
+        &mut self,
+        payments: &[PendingPayment],
+        previous_debit: u64,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            !payments.is_empty() && payments.len() <= MAX_SENDS_PER_BATCH,
+            "pending payment batch exceeds its bound"
+        );
+        ensure!(
+            payments.iter().all(|payment| payment.acceptance.is_none()),
+            "fresh pending payment batch already holds receipts"
+        );
+        ensure!(
+            payments.iter().all(|payment| !payment.replaceable),
+            "fresh pending payment batch is already replaceable"
+        );
+        self.validate_payment_sequence(payments, previous_debit)?;
+        let recovery_root = payments[0].recovery_root;
+        ensure!(
+            payments
+                .iter()
+                .all(|payment| payment.recovery_root == recovery_root),
+            "pending payments use different recovery roots"
+        );
+        let encoded = payments
+            .iter()
+            .map(|payment| {
+                sql_u64(
+                    payment.authorization.body().cumulative_debit(),
+                    "pending cumulative debit",
+                )?;
+                Ok((
+                    payment.authorization.encode(),
+                    encode_entries(&payment.entries)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let encoded_root = recovery_root.encode();
-        let result = stage_payment_transaction(
+        let result = stage_payments_transaction(
             &mut self.connection,
             &self.account,
-            recovery_root,
+            &recovery_root,
             previous_debit,
             encoded_root.as_ref(),
-            encoded.as_ref(),
-            encoded_entries.as_ref(),
+            &encoded,
         );
         self.finish_mutation(result)
+    }
+
+    /// Retains one verified receipt set while the surrounding batch remains unresolved.
+    pub(crate) fn retain_payment_acceptance(
+        &mut self,
+        pending: &PendingPayment,
+        verified: &VerifiedAcceptance,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        let acceptance = verified.acceptance();
+        validate_pending_acceptance_body(pending, acceptance)?;
+        let encoded = acceptance.encode();
+        ensure!(
+            encoded.len() <= MAX_ACCEPTANCE_BYTES,
+            "acceptance encoding exceeds its bound"
+        );
+        let receipts = u64::try_from(acceptance.entries.len())?;
+        let result = retain_payment_acceptance_transaction(
+            &mut self.connection,
+            pending.authorization.encode().as_ref(),
+            sql_u64(receipts, "pending receipt count")?,
+            encoded.as_ref(),
+        );
+        self.finish_mutation(result)
+    }
+
+    /// Retains a verified partial or reordered response in one SQLite transaction.
+    pub(crate) fn retain_indexed_payment_acceptances(
+        &mut self,
+        pending: &[PendingPayment],
+        acceptances: &[(usize, &VerifiedAcceptance)],
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        ensure!(!acceptances.is_empty(), "receipt evidence batch is empty");
+        ensure!(
+            acceptances.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "receipt evidence positions are not strictly ordered"
+        );
+        for (position, verified) in acceptances {
+            let payment = pending
+                .get(*position)
+                .context("receipt evidence position exceeds the pending batch")?;
+            let acceptance = verified.acceptance();
+            validate_pending_acceptance_body(payment, acceptance)?;
+            ensure!(
+                acceptance.encode().len() <= MAX_ACCEPTANCE_BYTES,
+                "acceptance encoding exceeds its bound"
+            );
+        }
+        let result =
+            retain_payment_acceptances_transaction(&mut self.connection, pending, acceptances);
+        self.finish_mutation(result)
+    }
+
+    /// Atomically concludes the authenticated included prefix and preserves any excluded
+    /// suffix as one durable, replaceable intent batch.
+    pub(crate) fn conclude_payment_prefix(
+        &mut self,
+        pending: &[PendingPayment],
+        conclusions: &[PaymentConclusion],
+        receipt_count: u64,
+        retire_context: bool,
+    ) -> Result<u64> {
+        self.ensure_usable()?;
+        ensure!(
+            !pending.is_empty()
+                && conclusions.len() <= pending.len()
+                && pending.iter().all(|payment| !payment.replaceable),
+            "pending prefix conclusion does not name one ambiguous batch"
+        );
+        let first_total = entry_total(&pending[0].entries)?;
+        let previous_debit = pending[0]
+            .authorization
+            .body()
+            .cumulative_debit()
+            .checked_sub(first_total)
+            .context("pending first delta exceeds its endpoint")?;
+        self.validate_payment_sequence(pending, previous_debit)?;
+
+        let mut added_receipts = 0_u64;
+        for (payment, conclusion) in pending.iter().zip(conclusions) {
+            match conclusion {
+                PaymentConclusion::Accepted(acceptance) => {
+                    let acceptance = acceptance.acceptance();
+                    validate_pending_acceptance_body(payment, acceptance)?;
+                    added_receipts = added_receipts
+                        .checked_add(u64::try_from(acceptance.entries.len())?)
+                        .context("agent receipt count overflow")?;
+                }
+                PaymentConclusion::Retired => ensure!(
+                    payment.acceptance.is_none(),
+                    "a held acceptance cannot be discarded at finality"
+                ),
+            }
+        }
+        let next_receipt_count = receipt_count
+            .checked_add(added_receipts)
+            .context("agent receipt count overflow")?;
+        sql_u64(next_receipt_count, "agent receipt count")?;
+        let vector = if conclusions.is_empty() {
+            None
+        } else {
+            let terminal = &pending[conclusions.len() - 1];
+            Some(VectorWrite {
+                epoch: terminal.authorization.body().epoch(),
+                anchor: *terminal.authorization.body().anchor(),
+                seq: terminal.authorization.body().seq(),
+                cumulative_debit: terminal.authorization.body().cumulative_debit(),
+                entries: validate_payment_sequence(
+                    &self.connection,
+                    &self.account,
+                    &self.operator,
+                    &pending[..conclusions.len()],
+                    previous_debit,
+                )?,
+            })
+        };
+        let result = conclude_payment_prefix_transaction(
+            &mut self.connection,
+            pending,
+            conclusions,
+            vector.as_ref(),
+            retire_context,
+        );
+        self.finish_mutation(result).map(|()| next_receipt_count)
+    }
+
+    /// Atomically archives a permanently excluded suffix and installs its freshly signed
+    /// successor-context replacement.
+    pub(crate) fn replace_payment_suffix(
+        &mut self,
+        excluded: &[PendingPayment],
+        replacement: &[PendingPayment],
+        previous_debit: u64,
+        receipt_count: u64,
+    ) -> Result<u64> {
+        self.ensure_usable()?;
+        ensure!(
+            !excluded.is_empty()
+                && excluded.iter().all(|payment| payment.replaceable)
+                && excluded.len() == replacement.len()
+                && excluded
+                    .iter()
+                    .zip(replacement)
+                    .all(|(old, new)| old.entries == new.entries),
+            "replacement does not preserve the excluded local intent"
+        );
+        ensure!(
+            replacement
+                .iter()
+                .all(|payment| !payment.replaceable && payment.acceptance.is_none()),
+            "replacement batch is not fresh"
+        );
+        self.validate_payment_sequence(replacement, previous_debit)?;
+        let added_receipts = excluded.iter().try_fold(0_u64, |sum, payment| {
+            sum.checked_add(payment.acceptance.as_ref().map_or(Ok(0), |acceptance| {
+                u64::try_from(acceptance.acceptance().entries.len())
+            })?)
+            .context("agent receipt count overflow")
+        })?;
+        let next_receipt_count = receipt_count
+            .checked_add(added_receipts)
+            .context("agent receipt count overflow")?;
+        sql_u64(next_receipt_count, "agent receipt count")?;
+        let result = replace_payment_suffix_transaction(
+            &mut self.connection,
+            &self.account,
+            excluded,
+            replacement,
+            previous_debit,
+        );
+        self.finish_mutation(result).map(|()| next_receipt_count)
+    }
+
+    /// Archives a permanently excluded batch when no successor context can accept its preserved
+    /// intent during the active request. The caller has already received an explicit failure;
+    /// retained operator receipts remain durable evidence.
+    pub(crate) fn archive_replaceable_payments(
+        &mut self,
+        excluded: &[PendingPayment],
+        receipt_count: u64,
+    ) -> Result<u64> {
+        self.ensure_usable()?;
+        ensure!(
+            !excluded.is_empty() && excluded.iter().all(|payment| payment.replaceable),
+            "only a permanently excluded payment batch can be archived"
+        );
+        let added_receipts = excluded.iter().try_fold(0_u64, |sum, payment| {
+            sum.checked_add(payment.acceptance.as_ref().map_or(Ok(0), |acceptance| {
+                u64::try_from(acceptance.acceptance().entries.len())
+            })?)
+            .context("agent receipt count overflow")
+        })?;
+        let next_receipt_count = receipt_count
+            .checked_add(added_receipts)
+            .context("agent receipt count overflow")?;
+        sql_u64(next_receipt_count, "agent receipt count")?;
+        let result = archive_replaceable_payments_transaction(&mut self.connection, excluded);
+        self.finish_mutation(result).map(|()| next_receipt_count)
     }
 
     /// Records a staged send proven never to have committed and frees the outstanding slot.
@@ -537,6 +758,7 @@ impl Store {
     /// deliberately left in place. It is keyed by full root, can be shared with an already
     /// committed sibling payment read at the same finalized head, and stays load-bearing
     /// for frozen-root recovery.
+    #[cfg(test)]
     pub(crate) fn abandon_payment(
         &mut self,
         authorization: &SendAuthorization<Key, Digest>,
@@ -560,6 +782,7 @@ impl Store {
     ///
     /// The caller must authenticate the exact signed body in finalized epoch activity.
     /// Finalized activity settles the debit even when its receipts cannot be fetched.
+    #[cfg(test)]
     pub(crate) fn finalize_payment_unheld(
         &mut self,
         authorization: &SendAuthorization<Key, Digest>,
@@ -599,6 +822,7 @@ impl Store {
 
     /// Merges the staged deltas into the durable prior vector state and requires the
     /// result to commit exactly the signed root, returning the merged entries.
+    #[cfg(test)]
     fn merged_vector(
         &self,
         body: &VectorSendBody<Key, Digest>,
@@ -636,6 +860,22 @@ impl Store {
         Ok(vector.entries().to_vec())
     }
 
+    /// Validates a complete staged sequence against the durable pre-batch vector and returns
+    /// the terminal cumulative vector.
+    fn validate_payment_sequence(
+        &self,
+        payments: &[PendingPayment],
+        previous_debit: u64,
+    ) -> Result<Vec<OutEntry<Key>>> {
+        validate_payment_sequence(
+            &self.connection,
+            &self.account,
+            &self.operator,
+            payments,
+            previous_debit,
+        )
+    }
+
     /// Sums retained payment deltas not covered by the authenticated floor epoch.
     pub(crate) fn debits_since(&self, epoch: u64) -> Result<u64> {
         self.ensure_usable()?;
@@ -658,6 +898,7 @@ impl Store {
 
     /// Durably commits one accepted send's receipts and advances the endpoint and the
     /// vector state.
+    #[cfg(test)]
     pub(crate) fn commit_payment(
         &mut self,
         acceptance: &Acceptance,
@@ -665,7 +906,7 @@ impl Store {
         entries: &[Entry],
         previous_debit: u64,
         receipt_count: u64,
-        finalized: bool,
+        retire_context: bool,
     ) -> Result<u64> {
         self.ensure_usable()?;
         validate_acceptance(acceptance, &self.account, &self.operator)?;
@@ -724,7 +965,7 @@ impl Store {
             encoded_authorization.as_ref(),
             encoded.as_ref(),
             &vector,
-            finalized,
+            retire_context,
         );
         self.finish_mutation(result).map(|()| next_receipt_count)
     }
@@ -961,15 +1202,10 @@ impl Store {
         read_last_reconciled(&self.connection)
     }
 
-    /// Durably records that the epoch's admitted close was invalidated before finalization.
-    pub(crate) fn record_protected(&mut self, epoch: u64) -> Result<()> {
-        self.record_outcome(epoch, ReconcileOutcome::Protected)
-    }
-
-    /// Durably records an epoch whose held credit can no longer be enforced: a finalized close
-    /// understated it past the window, or its close never admitted and settlement faulted.
-    pub(crate) fn record_unenforceable(&mut self, epoch: u64) -> Result<()> {
-        self.record_outcome(epoch, ReconcileOutcome::Unenforceable)
+    /// Durably suppresses a terminal non-clean epoch. The immediate reconciliation summary owns
+    /// whether the close was invalidated or the held credit became unenforceable.
+    pub(crate) fn record_terminal_nonclean(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::TerminalNonclean)
     }
 
     fn record_outcome(&mut self, epoch: u64, outcome: ReconcileOutcome) -> Result<()> {
@@ -993,6 +1229,23 @@ fn validate_acceptance(acceptance: &Acceptance, account: &Key, operator: &Key) -
     acceptance.verify(&context_for_body(acceptance.ack.body(), operator))
 }
 
+fn validate_pending_acceptance_body(
+    pending: &PendingPayment,
+    acceptance: &Acceptance,
+) -> Result<()> {
+    ensure!(
+        acceptance.ack.body() == pending.authorization.body()
+            && acceptance.entries.len() == pending.entries.len()
+            && acceptance
+                .entries
+                .iter()
+                .zip(&pending.entries)
+                .all(|(opened, delta)| opened.recipient == delta.recipient),
+        "acceptance does not open its staged authorization and recipients"
+    );
+    Ok(())
+}
+
 enum SchemaPresence {
     Empty,
     Complete,
@@ -1008,7 +1261,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_transfer = table_exists(connection, "agent_pending_transfer")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
-    let has_completed_claims = table_exists(connection, "agent_completed_claims")?;
     let has_payments = table_exists(connection, "agent_payments")?;
     let has_incoming_cursor = table_exists(connection, "agent_incoming_cursor")?;
     let has_incoming = table_exists(connection, "agent_incoming")?;
@@ -1022,7 +1274,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                         'agent_meta', 'agent_state_openings', 'agent_context',
                         'agent_vector', 'agent_vector_entries',
                         'agent_pending_payment', 'agent_pending_deposit', 'agent_pending_transfer',
-                        'agent_pending_claims', 'agent_completed_claims', 'agent_payments',
+                        'agent_pending_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
                     ))
                 OR type IN ('trigger', 'view')
@@ -1047,7 +1299,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         && !has_pending_deposit
         && !has_pending_transfer
         && !has_pending_claims
-        && !has_completed_claims
         && !has_payments
         && !has_incoming_cursor
         && !has_incoming
@@ -1066,7 +1317,6 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
             && has_pending_deposit
             && has_pending_transfer
             && has_pending_claims
-            && has_completed_claims
             && has_payments
             && has_incoming_cursor
             && has_incoming
@@ -1124,7 +1374,10 @@ fn initialize_schema(
              schema_version INTEGER NOT NULL,
              account BLOB NOT NULL CHECK (length(account) = {key_size}),
              deployment BLOB NOT NULL CHECK (length(deployment) = {digest_size}),
-             operator BLOB NOT NULL CHECK (length(operator) = {key_size})
+             operator BLOB NOT NULL CHECK (length(operator) = {key_size}),
+             retired_withdrawal_deadline BLOB NOT NULL CHECK (
+                 length(retired_withdrawal_deadline) = {u64_size}
+             )
          );
 
          CREATE TABLE agent_state_openings (
@@ -1162,13 +1415,20 @@ fn initialize_schema(
          );
 
          CREATE TABLE agent_pending_payment (
-             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             position INTEGER PRIMARY KEY CHECK (position >= 0 AND position < {max_sends}),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
-             authorization BLOB NOT NULL CHECK (length(authorization) = {authorization_size}),
+             authorization BLOB NOT NULL UNIQUE CHECK (
+                 length(authorization) = {authorization_size}
+             ),
              entries BLOB NOT NULL CHECK (
                  length(entries) BETWEEN 1 AND {max_delta_size}
              ),
-             FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE,
+             receipts INTEGER CHECK (receipts IS NULL OR receipts > 0),
+             acceptance BLOB CHECK (
+                 acceptance IS NULL OR length(acceptance) BETWEEN 1 AND {max_acceptance_size}
+             ),
+             replaceable INTEGER NOT NULL CHECK (replaceable IN (0, 1)),
+             CHECK ((receipts IS NULL) = (acceptance IS NULL)),
              FOREIGN KEY (recovery_root) REFERENCES agent_state_openings(root)
          );
 
@@ -1186,19 +1446,17 @@ fn initialize_schema(
 
          CREATE TABLE agent_pending_claims (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-             evidence BLOB CHECK (
-                 evidence IS NULL OR length(evidence) BETWEEN 1 AND {max_claim_size}
+             claim_head BLOB CHECK (
+                 claim_head IS NULL OR length(claim_head) = {log_head_size}
+             ),
+             claim BLOB CHECK (
+                 claim IS NULL OR length(claim) BETWEEN 1 AND {max_claim_size}
              ),
              request BLOB CHECK (
                  request IS NULL OR length(request) BETWEEN 1 AND {max_claim_size}
              ),
+             CHECK ((claim_head IS NULL) = (claim IS NULL)),
              FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
-         );
-
-         CREATE TABLE agent_completed_claims (
-             batch BLOB NOT NULL CHECK (length(batch) = {batch_id_size}),
-             position INTEGER NOT NULL CHECK (position >= 0),
-             PRIMARY KEY (batch, position)
          );
 
          CREATE TABLE agent_payments (
@@ -1218,7 +1476,6 @@ fn initialize_schema(
              ),
              CHECK ((receipts IS NULL) = (acceptance IS NULL)),
              CHECK (state != 3 OR acceptance IS NOT NULL),
-             CHECK (state != 5 OR acceptance IS NULL),
              FOREIGN KEY (recovery_root) REFERENCES agent_state_openings(root)
          );
 
@@ -1243,7 +1500,7 @@ fn initialize_schema(
 
          CREATE TABLE agent_reconciled (
              epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
-             status INTEGER NOT NULL CHECK (status IN (1, 2, 3))
+             status INTEGER NOT NULL CHECK (status IN (1, 2))
          );",
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,
@@ -1251,11 +1508,13 @@ fn initialize_schema(
         context_size = PaymentContext::<Key, Digest>::SIZE,
         authorization_size = AUTHORIZATION_BYTES,
         max_delta_size = MAX_DELTA_BYTES,
+        max_sends = MAX_SENDS_PER_BATCH,
         max_acceptance_size = MAX_ACCEPTANCE_BYTES,
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
-        batch_id_size = BatchId::<Digest>::SIZE,
+        log_head_size = LOG_HEAD_BYTES,
+        u64_size = u64::SIZE,
         max_receipt_size = MAX_RECEIPT_BYTES,
         deposit_event_size = DEPOSIT_REQUEST_BYTES,
         transfer_request_size = TRANSFER_REQUEST_BYTES,
@@ -1263,6 +1522,7 @@ fn initialize_schema(
     let encoded_account = account.encode();
     let encoded_deployment = deployment.encode();
     let encoded_operator = operator.encode();
+    let retired_withdrawal_deadline = 0_u64.encode();
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin SQLite agent initialization")?;
@@ -1271,13 +1531,15 @@ fn initialize_schema(
         .context("create SQLite agent schema")?;
     transaction.execute(
         "INSERT INTO agent_meta (
-             singleton, schema_version, account, deployment, operator
-         ) VALUES (1, ?1, ?2, ?3, ?4)",
+             singleton, schema_version, account, deployment, operator,
+             retired_withdrawal_deadline
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
         params![
             SCHEMA_VERSION,
             encoded_account.as_ref(),
             encoded_deployment.as_ref(),
             encoded_operator.as_ref(),
+            retired_withdrawal_deadline.as_ref(),
         ],
     )?;
     transaction.execute(
@@ -1295,7 +1557,8 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
         "SELECT singleton, schema_version,
                 length(account), account,
                 length(deployment), deployment,
-                length(operator), operator
+                length(operator), operator,
+                length(retired_withdrawal_deadline), retired_withdrawal_deadline
          FROM agent_meta
          ORDER BY singleton
          LIMIT 2",
@@ -1310,6 +1573,9 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
     let encoded_account = read_fixed_blob(row, 2, 3, Key::SIZE, "agent account")?;
     let encoded_deployment = read_fixed_blob(row, 4, 5, Digest::SIZE, "agent deployment")?;
     let encoded_operator = read_fixed_blob(row, 6, 7, Key::SIZE, "agent operator")?;
+    let retired_withdrawal_deadline =
+        read_fixed_blob(row, 8, 9, u64::SIZE, "retired withdrawal deadline")?;
+    u64::decode(retired_withdrawal_deadline)?;
     ensure!(
         rows.next()?.is_none(),
         "agent database has extra metadata rows"
@@ -1329,7 +1595,7 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
 fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<State> {
     let receipt_count = read_receipt_state(connection, account, operator)?;
     let cache = read_context_cache(connection, account, operator)?;
-    let pending_payment = read_pending_payment(connection, account)?;
+    let pending_payments = read_pending_payments(connection, account, operator)?;
     let pending_deposit = read_pending_deposit(connection, account)?;
     if let Some(request) = &pending_deposit {
         ensure!(
@@ -1338,18 +1604,21 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
         );
     }
     let (pending_withdrawal_claim, pending_withdrawal) = read_pending_claim(connection, account)?;
-    if let Some(pending) = &pending_payment {
-        validate_authorization(
-            &pending.authorization,
-            &pending.entries,
-            account,
-            operator,
-            context_debit(connection, pending.authorization.body())?,
-        )?;
-        sql_u64(
-            pending.authorization.body().cumulative_debit(),
-            "pending cumulative debit",
-        )?;
+    let mut previous_debit = pending_payments
+        .first()
+        .map(|pending| context_debit(connection, pending.authorization.body()))
+        .transpose()?
+        .unwrap_or(0);
+    validate_payment_sequence(
+        connection,
+        account,
+        operator,
+        &pending_payments,
+        previous_debit,
+    )?;
+    for pending in &pending_payments {
+        previous_debit = pending.authorization.body().cumulative_debit();
+        sql_u64(previous_debit, "pending cumulative debit")?;
     }
 
     let incoming = read_incoming_summary(connection)?;
@@ -1357,7 +1626,7 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
 
     Ok(State {
         cache,
-        pending_payment,
+        pending_payments,
         pending_withdrawal,
         pending_deposit,
         pending_transfer: read_pending_transfer(connection, account)?,
@@ -1403,8 +1672,8 @@ fn read_last_reconciled(connection: &Connection) -> Result<Option<u64>> {
 fn read_receipt_state(connection: &Connection, account: &Key, operator: &Key) -> Result<u64> {
     let receipt_count = from_sql_u64(
         connection.query_row(
-            "SELECT COALESCE(SUM(receipts), 0) FROM agent_payments WHERE state IN (?1, ?2)",
-            SETTLED_STATES,
+            "SELECT COALESCE(SUM(receipts), 0) FROM agent_payments WHERE receipts IS NOT NULL",
+            [],
             |row| row.get(0),
         )?,
         "agent receipt count",
@@ -1418,10 +1687,10 @@ fn read_receipt_state(connection: &Connection, account: &Key, operator: &Key) ->
                     length(authorization), authorization,
                     length(acceptance), acceptance
              FROM agent_payments
-             WHERE state IN (?1, ?2)
+             WHERE receipts IS NOT NULL
              ORDER BY rowid DESC
              LIMIT 1",
-            SETTLED_STATES,
+            [],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1531,47 +1800,97 @@ fn read_context_cache(
     }))
 }
 
-fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option<PendingPayment>> {
+fn read_pending_payments(
+    connection: &Connection,
+    account: &Key,
+    operator: &Key,
+) -> Result<Vec<PendingPayment>> {
     let mut statement = connection.prepare(
-        "SELECT singleton,
+        "SELECT position,
                 length(recovery_root), recovery_root,
                 length(authorization), authorization,
-                length(entries), entries
+                length(entries), entries,
+                receipts, length(acceptance), acceptance, replaceable
          FROM agent_pending_payment
-         ORDER BY singleton
-         LIMIT 2",
+         ORDER BY position
+         LIMIT ?1",
     )?;
-    let mut rows = statement.query([])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    ensure!(
-        row.get::<_, i64>(0)? == 1,
-        "agent database pending payment singleton is not canonical"
-    );
-    let encoded_root = read_fixed_blob(
-        row,
-        1,
-        2,
-        StateRoot::<Digest>::SIZE,
-        "pending recovery root",
-    )?;
-    let encoded_authorization =
-        read_fixed_blob(row, 3, 4, AUTHORIZATION_BYTES, "pending authorization")?;
-    let encoded_entries = read_bounded_blob(row, 5, 6, MAX_DELTA_BYTES, "pending entries")?;
-    ensure!(
-        rows.next()?.is_none(),
-        "agent database has multiple pending payments"
-    );
-    let recovery_root = StateRoot::decode(encoded_root).context("decode pending recovery root")?;
-    read_recovery_opening(connection, &recovery_root, account)?
-        .context("pending recovery opening is missing")?;
-    Ok(Some(PendingPayment {
-        authorization: SendAuthorization::decode(encoded_authorization)
-            .context("decode pending authorization")?,
-        entries: decode_entries(encoded_entries.as_slice())?,
-        recovery_root,
-    }))
+    let mut rows = statement.query([i64::try_from(MAX_SENDS_PER_BATCH + 1)?])?;
+    let mut pending = Vec::new();
+    while let Some(row) = rows.next()? {
+        ensure!(
+            row.get::<_, i64>(0)? == i64::try_from(pending.len())?,
+            "agent database pending payment positions are not contiguous"
+        );
+        let encoded_root = read_fixed_blob(
+            row,
+            1,
+            2,
+            StateRoot::<Digest>::SIZE,
+            "pending recovery root",
+        )?;
+        let encoded_authorization =
+            read_fixed_blob(row, 3, 4, AUTHORIZATION_BYTES, "pending authorization")?;
+        let encoded_entries = read_bounded_blob(row, 5, 6, MAX_DELTA_BYTES, "pending entries")?;
+        let receipts = row.get::<_, Option<i64>>(7)?;
+        let encoded_acceptance =
+            read_optional_bounded_blob(row, 8, 9, MAX_ACCEPTANCE_BYTES, "pending acceptance")?;
+        let replaceable = row.get::<_, bool>(10)?;
+        let recovery_root =
+            StateRoot::decode(encoded_root).context("decode pending recovery root")?;
+        read_recovery_opening(connection, &recovery_root, account)?
+            .context("pending recovery opening is missing")?;
+        let authorization = SendAuthorization::decode(encoded_authorization)
+            .context("decode pending authorization")?;
+        let acceptance = match (receipts, encoded_acceptance) {
+            (Some(receipts), Some(encoded)) => {
+                let acceptance =
+                    Acceptance::decode(encoded).context("decode pending acceptance")?;
+                validate_acceptance(&acceptance, account, operator)
+                    .context("verify pending acceptance")?;
+                ensure!(
+                    acceptance.ack.body() == authorization.body()
+                        && u64::try_from(acceptance.entries.len()).ok()
+                            == Some(from_sql_u64(receipts, "pending receipt count")?),
+                    "pending acceptance does not match its authorization"
+                );
+                Some(VerifiedAcceptance::from_verified(acceptance))
+            }
+            (None, None) => None,
+            _ => anyhow::bail!("pending receipt count and acceptance disagree"),
+        };
+        pending.push(PendingPayment {
+            authorization,
+            entries: decode_entries(encoded_entries.as_slice())?,
+            recovery_root,
+            acceptance,
+            replaceable,
+        });
+        ensure!(
+            pending.len() <= MAX_SENDS_PER_BATCH,
+            "pending payment batch exceeds its bound"
+        );
+    }
+    if let Some(first) = pending.first() {
+        let body = first.authorization.body();
+        ensure!(
+            pending.iter().all(|payment| {
+                let candidate = payment.authorization.body();
+                candidate.payer() == body.payer()
+                    && candidate.epoch() == body.epoch()
+                    && candidate.anchor() == body.anchor()
+                    && payment.recovery_root == first.recovery_root
+            }),
+            "pending payments do not form one payer and context batch"
+        );
+        ensure!(
+            pending
+                .iter()
+                .all(|payment| payment.replaceable == first.replaceable),
+            "pending batch mixes ambiguous and replaceable intents"
+        );
+    }
+    Ok(pending)
 }
 
 fn validate_transfer(request: &NativeTransferRequest, account: &Key) -> Result<()> {
@@ -1638,7 +1957,10 @@ fn read_pending_claim(
     Option<SignedWithdrawal<Key, Digest>>,
 )> {
     let mut statement = connection.prepare(
-        "SELECT singleton, length(evidence), evidence, length(request), request
+        "SELECT singleton,
+                length(claim_head), claim_head,
+                length(claim), claim,
+                length(request), request
          FROM agent_pending_claims ORDER BY singleton LIMIT 2",
     )?;
     let mut rows = statement.query([])?;
@@ -1649,38 +1971,35 @@ fn read_pending_claim(
         row.get::<_, i64>(0)? == 1,
         "agent database pending claim singleton is not canonical"
     );
-    let evidence = read_optional_bounded_blob(
-        row,
-        1,
-        2,
-        MAX_PENDING_CLAIM_BYTES,
-        "pending withdrawal evidence",
-    )?
-    .map(operator_rpc::WithdrawalEvidenceResponse::decode)
-    .transpose()?;
-    if let Some(evidence) = &evidence {
-        validate_withdrawal_evidence(connection, evidence, account)?;
-    }
+    let claim_head = read_optional_fixed_blob(row, 1, 2, LOG_HEAD_BYTES, "withdrawal claim head")?
+        .map(LogHead::decode)
+        .transpose()?;
+    let claim = read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "withdrawal claim")?
+        .map(|encoded| WithdrawalClaim::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into()))
+        .transpose()?;
+    let candidate = match (claim_head, claim) {
+        (Some(head), Some(claim)) => {
+            let candidate = PendingWithdrawalClaim { head, claim };
+            validate_withdrawal_claim(&candidate, account)?;
+            Some(candidate)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("withdrawal claim fields are incomplete"),
+    };
     let request =
-        read_optional_bounded_blob(row, 3, 4, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
+        read_optional_bounded_blob(row, 5, 6, MAX_PENDING_CLAIM_BYTES, "pending withdrawal")?
             .map(|encoded| {
                 SignedWithdrawal::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())
             })
             .transpose()?;
     if let Some(request) = &request {
         validate_pending_withdrawal(connection, account, request)?;
-        ensure!(
-            evidence
-                .as_ref()
-                .is_none_or(|evidence| evidence.witness.request == *request),
-            "withdrawal evidence differs from the pending request"
-        );
     }
     ensure!(
         rows.next()?.is_none(),
         "agent database has multiple pending withdrawal claims"
     );
-    Ok((Some(PendingWithdrawalClaim { evidence }), request))
+    Ok((candidate, request))
 }
 
 fn validate_pending_withdrawal(
@@ -1731,28 +2050,14 @@ fn validate_deposit(event: &DepositRequest, account: &Key) -> Result<()> {
     Ok(())
 }
 
-fn validate_withdrawal_evidence(
-    connection: &Connection,
-    evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    account: &Key,
-) -> Result<()> {
-    evidence.witness.verify(
-        &evidence.roots,
-        &read_binding(connection)?.deployment,
-        account,
-        account.as_ref(),
-    )?;
-    Ok(())
-}
-
-fn validate_withdrawal_result(
-    evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    result: &chain_state::WithdrawalResponse,
-) -> Result<()> {
+fn validate_withdrawal_claim(candidate: &PendingWithdrawalClaim, account: &Key) -> Result<()> {
+    let output = candidate
+        .claim
+        .verify::<Sha256>(&candidate.head)
+        .context("verify cached withdrawal proof")?;
     ensure!(
-        result.destination == *evidence.witness.claim.output().destination()
-            && result.amount == evidence.witness.claim.output().amount(),
-        "pending withdrawal result differs from its evidence"
+        output.destination().as_ref() == account.as_ref(),
+        "cached withdrawal proof has another destination"
     );
     Ok(())
 }
@@ -1812,6 +2117,95 @@ fn validate_authorization(
         "pending debit is not the exact successor"
     );
     Ok(total)
+}
+
+/// Verifies one bounded, context-scoped pending sequence against its durable vector base.
+fn validate_payment_sequence(
+    connection: &Connection,
+    account: &Key,
+    operator: &Key,
+    payments: &[PendingPayment],
+    previous_debit: u64,
+) -> Result<Vec<OutEntry<Key>>> {
+    if payments.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure!(
+        payments.len() <= MAX_SENDS_PER_BATCH,
+        "pending payment batch exceeds its bound"
+    );
+    ensure!(
+        payments
+            .iter()
+            .try_fold(0_usize, |sum, payment| sum
+                .checked_add(payment.entries.len()))
+            .is_some_and(|entries| entries <= MAX_BATCH_SEND_ENTRIES),
+        "pending payment batch exceeds its aggregate entry bound"
+    );
+    let first = &payments[0];
+    let first_body = first.authorization.body();
+    let prior = read_vector_state(connection, first_body.epoch(), first_body.anchor())?;
+    let (mut previous_seq, mut debit, mut entries) = match prior {
+        Some(state) => {
+            ensure!(
+                state.cumulative_debit == previous_debit,
+                "the durable vector state is not at the staging endpoint"
+            );
+            (Some(state.seq), state.cumulative_debit, state.entries)
+        }
+        None => {
+            ensure!(previous_debit == 0, "new context has nonzero prior debit");
+            (None, 0, Vec::new())
+        }
+    };
+    for payment in payments {
+        let body = payment.authorization.body();
+        ensure!(
+            body.payer() == first_body.payer()
+                && body.epoch() == first_body.epoch()
+                && body.anchor() == first_body.anchor()
+                && payment.recovery_root == first.recovery_root,
+            "pending payments do not form one payer, context, and recovery batch"
+        );
+        validate_authorization(
+            &payment.authorization,
+            &payment.entries,
+            account,
+            operator,
+            debit,
+        )?;
+        ensure!(
+            previous_seq.map_or(Some(1), |seq| seq.checked_add(1)) == Some(body.seq()),
+            "pending payment sequence is not contiguous"
+        );
+        entries = merge_entries(entries, &payment.entries)?;
+        let vector = OutVector::new(body.epoch(), account.clone(), entries)
+            .context("assemble pending out vector")?;
+        ensure!(
+            vector
+                .root::<Sha256, Digest>()
+                .context("commit pending out vector")?
+                == body.send_root(),
+            "pending payment does not extend the staged vector"
+        );
+        if let Some(acceptance) = &payment.acceptance {
+            let acceptance = acceptance.acceptance();
+            ensure!(
+                acceptance.ack.body() == body
+                    && acceptance.entries.len() == payment.entries.len()
+                    && acceptance
+                        .entries
+                        .iter()
+                        .zip(&payment.entries)
+                        .all(|(opened, delta)| opened.recipient == delta.recipient),
+                "pending acceptance does not open its staged recipients"
+            );
+        }
+        entries = vector.entries().to_vec();
+        previous_seq = Some(body.seq());
+        debit = body.cumulative_debit();
+    }
+    Ok(entries)
 }
 
 /// Validates the canonical delta-entry shape and returns the checked total.
@@ -2036,14 +2430,13 @@ fn cache_context_transaction(
     Ok(())
 }
 
-fn stage_payment_transaction(
+fn stage_payments_transaction(
     connection: &mut Connection,
     account: &Key,
     recovery_root: &StateRoot<Digest>,
     previous_debit: u64,
     encoded_root: &[u8],
-    encoded_authorization: &[u8],
-    encoded_entries: &[u8],
+    encoded: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2051,7 +2444,7 @@ fn stage_payment_transaction(
     ensure!(
         context_debit(
             &transaction,
-            SendAuthorization::<Key, Digest>::decode(Copying(encoded_authorization))?.body()
+            SendAuthorization::<Key, Digest>::decode(Copying(encoded[0].0.as_ref()))?.body()
         )? == previous_debit,
         "agent debit changed before payment staging"
     );
@@ -2063,19 +2456,344 @@ fn stage_payment_transaction(
         |row| row.get(0),
     )?;
     ensure!(!pending_exists, "another payment is already staged");
-    transaction.execute(
+    let mut insert = transaction.prepare_cached(
         "INSERT INTO agent_pending_payment (
-             singleton, recovery_root, authorization, entries
-         ) VALUES (1, ?1, ?2, ?3)",
-        params![encoded_root, encoded_authorization, encoded_entries,],
+             position, recovery_root, authorization, entries, replaceable
+         ) VALUES (?1, ?2, ?3, ?4, 0)",
     )?;
+    for (position, (authorization, entries)) in encoded.iter().enumerate() {
+        insert.execute(params![
+            sql_u64(u64::try_from(position)?, "pending payment position")?,
+            encoded_root,
+            authorization.as_ref(),
+            entries.as_ref(),
+        ])?;
+    }
+    drop(insert);
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("pending payment stage", source))?;
     Ok(())
 }
 
+fn ensure_pending_matches(connection: &Connection, expected: &[PendingPayment]) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT position, recovery_root, authorization, entries, acceptance, replaceable
+         FROM agent_pending_payment ORDER BY position",
+    )?;
+    let mut rows = statement.query([])?;
+    for (position, payment) in expected.iter().enumerate() {
+        let row = rows
+            .next()?
+            .context("pending payment batch was truncated")?;
+        let stored_position: i64 = row.get(0)?;
+        let stored_root: Vec<u8> = row.get(1)?;
+        let stored_authorization: Vec<u8> = row.get(2)?;
+        let stored_entries: Vec<u8> = row.get(3)?;
+        let stored_acceptance: Option<Vec<u8>> = row.get(4)?;
+        let stored_replaceable: bool = row.get(5)?;
+        ensure!(
+            stored_position == i64::try_from(position)?
+                && stored_root == payment.recovery_root.encode().as_ref()
+                && stored_authorization == payment.authorization.encode().as_ref()
+                && stored_entries == encode_entries(&payment.entries)?
+                && stored_acceptance
+                    == payment
+                        .acceptance
+                        .as_ref()
+                        .map(|acceptance| acceptance.acceptance().encode().to_vec())
+                && stored_replaceable == payment.replaceable,
+            "pending payment batch changed before mutation"
+        );
+    }
+    ensure!(
+        rows.next()?.is_none(),
+        "pending payment batch grew before mutation"
+    );
+    Ok(())
+}
+
+fn retain_payment_acceptance_transaction(
+    connection: &mut Connection,
+    encoded_authorization: &[u8],
+    receipts: i64,
+    encoded_acceptance: &[u8],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin pending receipt retention")?;
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_pending_payment SET receipts = ?1, acceptance = ?2
+             WHERE authorization = ?3
+               AND (acceptance IS NULL OR acceptance = ?2)",
+            params![receipts, encoded_acceptance, encoded_authorization],
+        )? == 1,
+        "pending payment changed before receipt retention"
+    );
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("pending receipt retention", source))?;
+    Ok(())
+}
+
+fn retain_payment_acceptances_transaction(
+    connection: &mut Connection,
+    pending: &[PendingPayment],
+    acceptances: &[(usize, &VerifiedAcceptance)],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin pending receipt batch retention")?;
+    ensure_pending_matches(&transaction, pending)?;
+    let mut update = transaction.prepare_cached(
+        "UPDATE agent_pending_payment SET receipts = ?1, acceptance = ?2
+         WHERE position = ?3 AND authorization = ?4
+           AND (acceptance IS NULL OR acceptance = ?2)",
+    )?;
+    for (position, verified) in acceptances {
+        let payment = &pending[*position];
+        let acceptance = verified.acceptance();
+        ensure!(
+            update.execute(params![
+                sql_u64(
+                    u64::try_from(acceptance.entries.len())?,
+                    "pending receipt count"
+                )?,
+                acceptance.encode().as_ref(),
+                i64::try_from(*position)?,
+                payment.authorization.encode().as_ref(),
+            ])? == 1,
+            "pending payment changed before receipt batch retention"
+        );
+    }
+    drop(update);
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("pending receipt batch retention", source))?;
+    Ok(())
+}
+
+fn insert_concluded_payment(
+    transaction: &rusqlite::Transaction<'_>,
+    position: usize,
+    payment: &PendingPayment,
+    state: PaymentState,
+    acceptance: Option<&Acceptance>,
+) -> Result<()> {
+    let body = payment.authorization.body();
+    let encoded_acceptance = acceptance.map(|acceptance| acceptance.encode());
+    let receipts = acceptance
+        .map(|acceptance| sql_u64(u64::try_from(acceptance.entries.len())?, "receipt count"))
+        .transpose()?;
+    ensure!(
+        transaction.execute(
+            "INSERT INTO agent_payments (
+                 id, cumulative_debit, recovery_root, authorization, entries,
+                 state, receipts, acceptance, epoch, total
+             )
+             SELECT ?1, ?2, recovery_root, authorization, entries, ?3, ?4, ?5, ?6, ?7
+             FROM agent_pending_payment
+             WHERE position = ?8 AND authorization = ?9",
+            params![
+                body_id(body).as_ref(),
+                sql_u64(body.cumulative_debit(), "concluded cumulative debit")?,
+                state as i64,
+                receipts,
+                encoded_acceptance.as_ref().map(AsRef::<[u8]>::as_ref),
+                sql_u64(body.epoch(), "payment epoch")?,
+                sql_u64(entry_total(&payment.entries)?, "payment total")?,
+                i64::try_from(position)?,
+                payment.authorization.encode().as_ref(),
+            ],
+        )? == 1,
+        "pending payment changed before conclusion"
+    );
+    Ok(())
+}
+
+fn conclude_payment_prefix_transaction(
+    connection: &mut Connection,
+    pending: &[PendingPayment],
+    conclusions: &[PaymentConclusion],
+    vector: Option<&VectorWrite>,
+    retire_context: bool,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin pending payment prefix conclusion")?;
+    ensure_pending_matches(&transaction, pending)?;
+    for (position, (payment, conclusion)) in pending.iter().zip(conclusions).enumerate() {
+        match conclusion {
+            PaymentConclusion::Accepted(acceptance) => insert_concluded_payment(
+                &transaction,
+                position,
+                payment,
+                if retire_context {
+                    PaymentState::Retired
+                } else {
+                    PaymentState::Accepted
+                },
+                Some(acceptance.acceptance()),
+            )?,
+            PaymentConclusion::Retired => insert_concluded_payment(
+                &transaction,
+                position,
+                payment,
+                PaymentState::Retired,
+                None,
+            )?,
+        }
+    }
+    let prefix = i64::try_from(conclusions.len())?;
+    let deleted = transaction.execute(
+        "DELETE FROM agent_pending_payment WHERE position < ?1",
+        [prefix],
+    )?;
+    ensure!(
+        deleted == conclusions.len(),
+        "pending prefix changed before conclusion"
+    );
+    for old_position in conclusions.len()..pending.len() {
+        ensure!(
+            transaction.execute(
+                "UPDATE agent_pending_payment
+                 SET position = ?1, replaceable = 1
+                 WHERE position = ?2",
+                params![
+                    i64::try_from(old_position - conclusions.len())?,
+                    i64::try_from(old_position)?,
+                ],
+            )? == 1,
+            "pending suffix changed before conclusion"
+        );
+    }
+    if retire_context
+        || pending.len() != conclusions.len()
+        || conclusions
+            .iter()
+            .any(|conclusion| matches!(conclusion, PaymentConclusion::Retired))
+    {
+        let context = context_for_body(
+            pending[0].authorization.body(),
+            &read_binding(&transaction)?.operator,
+        );
+        transaction.execute(
+            "DELETE FROM agent_context WHERE context = ?1",
+            [context.encode().as_ref()],
+        )?;
+    }
+    if let Some(vector) = vector {
+        replace_vector_rows(
+            &transaction,
+            vector.epoch,
+            &vector.anchor,
+            vector.seq,
+            vector.cumulative_debit,
+            &vector.entries,
+        )?;
+    }
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("pending payment prefix conclusion", source))?;
+    Ok(())
+}
+
+fn replace_payment_suffix_transaction(
+    connection: &mut Connection,
+    account: &Key,
+    excluded: &[PendingPayment],
+    replacement: &[PendingPayment],
+    previous_debit: u64,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin excluded payment suffix replacement")?;
+    ensure_pending_matches(&transaction, excluded)?;
+    ensure!(
+        context_debit(&transaction, replacement[0].authorization.body())? == previous_debit,
+        "agent debit changed before suffix replacement"
+    );
+    let recovery_root = replacement[0].recovery_root;
+    read_recovery_opening(&transaction, &recovery_root, account)?
+        .context("replacement recovery opening is missing")?;
+    for (position, payment) in excluded.iter().enumerate() {
+        insert_concluded_payment(
+            &transaction,
+            position,
+            payment,
+            PaymentState::Abandoned,
+            payment
+                .acceptance
+                .as_ref()
+                .map(VerifiedAcceptance::acceptance),
+        )?;
+    }
+    ensure!(
+        transaction.execute("DELETE FROM agent_pending_payment", [])? == excluded.len(),
+        "excluded payment suffix changed before replacement"
+    );
+    let encoded_root = recovery_root.encode();
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO agent_pending_payment (
+             position, recovery_root, authorization, entries, replaceable
+         ) VALUES (?1, ?2, ?3, ?4, 0)",
+    )?;
+    for (position, payment) in replacement.iter().enumerate() {
+        insert.execute(params![
+            i64::try_from(position)?,
+            encoded_root.as_ref(),
+            payment.authorization.encode().as_ref(),
+            encode_entries(&payment.entries)?,
+        ])?;
+    }
+    drop(insert);
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("excluded payment suffix replacement", source))?;
+    Ok(())
+}
+
+fn archive_replaceable_payments_transaction(
+    connection: &mut Connection,
+    excluded: &[PendingPayment],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin excluded payment batch archive")?;
+    ensure_pending_matches(&transaction, excluded)?;
+    for (position, payment) in excluded.iter().enumerate() {
+        insert_concluded_payment(
+            &transaction,
+            position,
+            payment,
+            PaymentState::Abandoned,
+            payment
+                .acceptance
+                .as_ref()
+                .map(VerifiedAcceptance::acceptance),
+        )?;
+    }
+    ensure!(
+        transaction.execute("DELETE FROM agent_pending_payment", [])? == excluded.len(),
+        "excluded payment batch changed before archive"
+    );
+    let context = context_for_body(
+        excluded[0].authorization.body(),
+        &read_binding(&transaction)?.operator,
+    );
+    transaction.execute(
+        "DELETE FROM agent_context WHERE context = ?1",
+        [context.encode().as_ref()],
+    )?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("excluded payment batch archive", source))?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn conclude_payment_transaction(
     connection: &mut Connection,
     operation: &'static str,
@@ -2100,7 +2818,7 @@ fn conclude_payment_transaction(
         );
     }
     let encoded_entries: Vec<u8> = transaction.query_row(
-        "SELECT entries FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?1",
+        "SELECT entries FROM agent_pending_payment WHERE position = 0 AND authorization = ?1",
         [encoded_authorization],
         |row| row.get(0),
     )?;
@@ -2112,7 +2830,7 @@ fn conclude_payment_transaction(
                  state, receipts, acceptance, epoch, total
              )
              SELECT ?1, ?2, recovery_root, authorization, entries, ?3, ?4, ?5, ?7, ?8
-             FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?6",
+             FROM agent_pending_payment WHERE position = 0 AND authorization = ?6",
             params![
                 id,
                 endpoint,
@@ -2128,7 +2846,7 @@ fn conclude_payment_transaction(
     );
     ensure!(
         transaction.execute(
-            "DELETE FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?1",
+            "DELETE FROM agent_pending_payment WHERE position = 0 AND authorization = ?1",
             [encoded_authorization],
         )? == 1,
         "pending payment changed before {operation}"
@@ -2152,6 +2870,7 @@ fn conclude_payment_transaction(
     Ok(())
 }
 
+#[cfg(test)]
 fn abandon_payment_transaction(
     connection: &mut Connection,
     id: &[u8],
@@ -2172,6 +2891,7 @@ fn abandon_payment_transaction(
     )
 }
 
+#[cfg(test)]
 fn finalize_payment_unheld_transaction(
     connection: &mut Connection,
     previous_debit: u64,
@@ -2186,7 +2906,7 @@ fn finalize_payment_unheld_transaction(
         Some(previous_debit),
         id,
         endpoint,
-        PaymentState::Finalized,
+        PaymentState::Retired,
         None,
         encoded_authorization,
         None,
@@ -2198,6 +2918,7 @@ fn finalize_payment_unheld_transaction(
     clippy::too_many_arguments,
     reason = "one durable commit, one call site"
 )]
+#[cfg(test)]
 fn commit_payment_transaction(
     connection: &mut Connection,
     previous_debit: u64,
@@ -2207,7 +2928,7 @@ fn commit_payment_transaction(
     encoded_authorization: &[u8],
     encoded_acceptance: &[u8],
     vector: &VectorWrite,
-    finalized: bool,
+    retire_context: bool,
 ) -> Result<()> {
     conclude_payment_transaction(
         connection,
@@ -2215,8 +2936,8 @@ fn commit_payment_transaction(
         Some(previous_debit),
         id,
         endpoint,
-        if finalized {
-            PaymentState::Finalized
+        if retire_context {
+            PaymentState::Retired
         } else {
             PaymentState::Accepted
         },
@@ -2359,10 +3080,17 @@ fn record_reconcile_transaction(
 
 fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute(
-        "INSERT INTO agent_pending_claims (singleton, evidence, request) VALUES (1, NULL, ?1)",
-        [request],
-    )?;
+    ensure!(
+        transaction.execute(
+            "INSERT INTO agent_pending_claims (
+                 singleton, claim_head, claim, request
+             ) VALUES (1, NULL, NULL, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET request = excluded.request
+             WHERE request IS NULL OR request = excluded.request",
+            [request],
+        )? == 1,
+        "another withdrawal authorization is active"
+    );
     transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
         .commit()
@@ -2370,44 +3098,57 @@ fn stage_withdrawal_transaction(connection: &mut Connection, request: &[u8]) -> 
     Ok(())
 }
 
-#[cfg(test)]
-fn open_claim_transaction(connection: &mut Connection) -> Result<()> {
+fn retire_withdrawal_transaction(
+    connection: &mut Connection,
+    request: &[u8],
+    deadline: u64,
+) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .context("begin claim intent open")?;
-    transaction.execute(
-        "INSERT INTO agent_pending_claims (singleton, evidence, request)
-         VALUES (1, NULL, NULL)
-         ON CONFLICT(singleton) DO NOTHING",
+        .context("begin withdrawal authorization retirement")?;
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_pending_claims SET request = NULL
+             WHERE singleton = 1 AND request = ?1",
+            [request],
+        )? == 1,
+        "withdrawal retirement does not match the active authorization"
+    );
+    let encoded = transaction.query_row(
+        "SELECT length(retired_withdrawal_deadline), retired_withdrawal_deadline
+         FROM agent_meta WHERE singleton = 1",
         [],
+        |row| read_fixed_blob(row, 0, 1, u64::SIZE, "retired withdrawal deadline"),
     )?;
+    let retired = u64::decode(encoded)?.max(deadline).encode();
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_meta SET retired_withdrawal_deadline = ?1 WHERE singleton = 1",
+            [retired.as_ref()],
+        )? == 1,
+        "agent metadata is missing"
+    );
+    transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
     transaction
         .commit()
-        .map_err(|source| CommitUnknown::new("claim intent open", source))?;
+        .map_err(|source| CommitUnknown::new("withdrawal authorization retirement", source))?;
     Ok(())
 }
 
-fn cache_claim_transaction(
-    connection: &mut Connection,
-    batch: &[u8],
-    position: i64,
-    evidence: &[u8],
-    request: &[u8],
-) -> Result<()> {
+fn cache_claim_transaction(connection: &mut Connection, head: &[u8], claim: &[u8]) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin claim evidence cache")?;
     ensure!(
-        !claim_completed(&transaction, batch, position)?,
-        "claim evidence names an already-completed (batch, position)"
-    );
-    ensure!(
         transaction.execute(
-            "UPDATE agent_pending_claims SET evidence = ?1
-             WHERE singleton = 1 AND (request IS NULL OR request = ?2)",
-            params![evidence, request],
+            "INSERT INTO agent_pending_claims (
+                 singleton, claim_head, claim, request
+             ) VALUES (1, ?1, ?2, NULL)
+             ON CONFLICT(singleton) DO UPDATE SET
+                 claim_head = ?1, claim = ?2",
+            params![head, claim],
         )? == 1,
-        "withdrawal evidence differs from the pending request"
+        "withdrawal payout candidate was not cached"
     );
     transaction
         .commit()
@@ -2415,49 +3156,36 @@ fn cache_claim_transaction(
     Ok(())
 }
 
-/// Completes the claim: the intent deletion and the durable record of the
-/// consumed `(batch, position)` commit in one transaction, so evidence
-/// against a spent release can never rebind to a later intent.
-fn complete_claim_transaction(
-    connection: &mut Connection,
-    batch: &[u8],
-    position: i64,
-    evidence: &[u8],
-) -> Result<()> {
+/// Clears the matching delivered payout without changing the active authorization.
+fn complete_claim_transaction(connection: &mut Connection, position: &[u8]) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin pending claim completion")?;
-    ensure!(
+    if let Some(encoded) = transaction
+        .query_row(
+            "SELECT claim FROM agent_pending_claims
+             WHERE singleton = 1 AND claim IS NOT NULL",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+    {
+        let claim =
+            WithdrawalClaim::<Digest>::decode_cfg(encoded, &(..=MAX_DESTINATION_BYTES).into())?;
+        ensure!(
+            claim.position().encode().as_ref() == position,
+            "claim completion conflicts with another cached payout candidate"
+        );
         transaction.execute(
-            "DELETE FROM agent_pending_claims
-             WHERE singleton = 1 AND evidence = ?1",
-            [evidence],
-        )? == 1,
-        "pending claim completion does not match durable evidence"
-    );
-
-    // The cache guard refuses completed evidence before it can pin an intent,
-    // so the deleted intent's key is never already recorded: a conflicting
-    // insert aborts the completion loudly instead of masking that breach.
-    transaction.execute(
-        "INSERT INTO agent_completed_claims (batch, position) VALUES (?1, ?2)",
-        params![batch, position],
-    )?;
+            "UPDATE agent_pending_claims SET claim_head = NULL, claim = NULL
+             WHERE singleton = 1",
+            [],
+        )?;
+    }
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("pending claim completion", source))?;
     Ok(())
-}
-
-fn claim_completed(connection: &Connection, batch: &[u8], position: i64) -> Result<bool> {
-    Ok(connection.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM agent_completed_claims
-             WHERE batch = ?1 AND position = ?2
-         )",
-        params![batch, position],
-        |row| row.get(0),
-    )?)
 }
 
 fn read_fixed_blob(
@@ -2521,6 +3249,25 @@ fn read_optional_bounded_blob(
     }
 }
 
+fn read_optional_fixed_blob(
+    row: &rusqlite::Row<'_>,
+    length_column: usize,
+    value_column: usize,
+    expected: usize,
+    field: &str,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    let value = read_optional_bounded_blob(row, length_column, value_column, expected, field)?;
+    if let Some(value) = &value
+        && value.len() != expected
+    {
+        return Err(to_sqlite_error(anyhow::anyhow!(
+            "invalid {field} length {}, expected {expected}",
+            value.len()
+        )));
+    }
+    Ok(value)
+}
+
 fn sql_u64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{field} exceeds SQLite INTEGER range"))
 }
@@ -2538,11 +3285,14 @@ mod tests {
     use super::{
         super::{
             fixtures::{StateFixture, TempDatabase},
-            tests::issued_receipt,
+            tests::{issue_acceptance, issued_receipt},
         },
         *,
     };
     use crate::protocol::{Wallet, deployment, identities, operator_key, wallets};
+    use commonware_clearing::bajillion::boundary::WithdrawalAction;
+    use std::num::NonZeroU64;
+
     fn open_error(path: &Path, account: &Key, deployment: &Digest, operator: &Key) -> String {
         match Store::open(path, account, deployment, operator) {
             Ok(_) => panic!("incompatible agent database was accepted"),
@@ -2593,9 +3343,102 @@ mod tests {
         (SendAuthorization::sign(body, wallet.signer()), entries)
     }
 
+    fn pending_batch(
+        context: &PaymentContext<Key, Digest>,
+        wallet: &Wallet,
+        root: StateRoot<Digest>,
+        amounts: &[u64],
+    ) -> Vec<PendingPayment> {
+        let recipient = identities().remove(1).key;
+        let mut cumulative = 0_u64;
+        amounts
+            .iter()
+            .enumerate()
+            .map(|(position, amount)| {
+                cumulative += amount;
+                let entries = vec![Entry {
+                    recipient: recipient.clone(),
+                    amount: *amount,
+                }];
+                let vector = OutVector::new(
+                    context.epoch(),
+                    wallet.public_key(),
+                    vec![OutEntry {
+                        recipient: recipient.clone(),
+                        cumulative,
+                        count: u64::try_from(position + 1).unwrap(),
+                    }],
+                )
+                .unwrap();
+                let body = VectorSendBody::new(
+                    context,
+                    wallet.public_key(),
+                    u64::try_from(position + 1).unwrap(),
+                    cumulative,
+                    vector.root::<Sha256, Digest>().unwrap(),
+                );
+                PendingPayment {
+                    authorization: SendAuthorization::sign(body, wallet.signer()),
+                    entries,
+                    recovery_root: root,
+                    acceptance: None,
+                    replaceable: false,
+                }
+            })
+            .collect()
+    }
+
     fn signed_send(wallet: &Wallet, anchor: &[u8]) -> (SendAuthorization<Key, Digest>, Vec<Entry>) {
         let context = PaymentContext::new(Sha256::hash(&[anchor]), 1, operator_key());
         sign_delta(&context, wallet, 1)
+    }
+
+    fn signed_withdrawal(
+        wallet: &Wallet,
+        root: &StateRoot<Digest>,
+        amount: u64,
+        deadline: u64,
+    ) -> SignedWithdrawal<Key, Digest> {
+        SignedWithdrawal::sign(
+            deployment(),
+            root.digest,
+            wallet.public_key().encode(),
+            WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
+            deadline,
+            wallet.signer(),
+        )
+    }
+
+    #[test]
+    fn withdrawal_authorization_floor_is_monotonic_across_reopen() {
+        let database = TempDatabase::new();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let (root, opening) = recovery_evidence(&account, 100);
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        let request = signed_withdrawal(&wallet, &root, 7, 10);
+        store.stage_withdrawal(&request).unwrap();
+        store.retire_withdrawal(&request).unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        assert!(state.pending_withdrawal.is_none());
+        assert!(state.pending_withdrawal_claim.is_none());
+        assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(10));
+
+        let later = signed_withdrawal(&wallet, &root, 7, 75);
+        store.stage_withdrawal(&later).unwrap();
+        store.retire_withdrawal(&later).unwrap();
+        let earlier = signed_withdrawal(&wallet, &root, 7, 20);
+        store.stage_withdrawal(&earlier).unwrap();
+        store.retire_withdrawal(&earlier).unwrap();
+        assert_eq!(store.retired_withdrawal_deadline().unwrap(), Some(75));
+        drop(store);
+
+        let (_, state) = open_store(database.path(), &account);
+        assert!(state.pending_withdrawal.is_none());
+        assert!(state.pending_withdrawal_claim.is_none());
     }
 
     #[test]
@@ -2639,10 +3482,370 @@ mod tests {
         );
         drop(store);
         let (_, state) = open_store(database.path(), &account);
-        let retained = state.pending_payment.unwrap();
+        let retained = state.pending_payments.into_iter().next().unwrap();
         assert_eq!(retained.authorization.encode(), original.encode());
         assert_eq!(retained.entries, entries);
         assert_eq!(retained.recovery_root, root);
+    }
+
+    #[test]
+    fn pending_payment_batch_stages_ordered_authorizations() {
+        let database = TempDatabase::new();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let recipient = identities().remove(1).key;
+        let (root, opening) = recovery_evidence(&account, 100);
+        let context = PaymentContext::new(Sha256::hash(&[b"pending-batch"]), 1, operator_key());
+        let (first, first_entries) = sign_delta(&context, &wallet, 7);
+        let second_entries = vec![Entry {
+            recipient: recipient.clone(),
+            amount: 3,
+        }];
+        let vector = OutVector::new(
+            context.epoch(),
+            account.clone(),
+            vec![OutEntry {
+                recipient,
+                cumulative: 10,
+                count: 2,
+            }],
+        )
+        .unwrap();
+        let second = SendAuthorization::sign(
+            VectorSendBody::new(
+                &context,
+                account,
+                2,
+                10,
+                vector.root::<Sha256, Digest>().unwrap(),
+            ),
+            wallet.signer(),
+        );
+
+        let (mut store, _) = open_store(database.path(), first.body().payer());
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        let expected = vec![
+            PendingPayment {
+                authorization: first,
+                entries: first_entries,
+                recovery_root: root,
+                acceptance: None,
+                replaceable: false,
+            },
+            PendingPayment {
+                authorization: second,
+                entries: second_entries,
+                recovery_root: root,
+                acceptance: None,
+                replaceable: false,
+            },
+        ];
+        store.stage_payments(&expected, 0).unwrap();
+
+        let count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM agent_pending_payment", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+        drop(store);
+
+        let (_, state) = open_store(database.path(), expected[0].authorization.body().payer());
+        assert_eq!(state.pending_payments.len(), 2);
+        for (reopened, expected) in state.pending_payments.iter().zip(expected) {
+            assert_eq!(reopened.authorization, expected.authorization);
+            assert_eq!(reopened.entries, expected.entries);
+            assert_eq!(reopened.recovery_root, expected.recovery_root);
+            assert!(reopened.acceptance.is_none());
+            assert!(!reopened.replaceable);
+        }
+    }
+
+    #[test]
+    fn accepted_payment_batch_commits_receipts_and_terminal_vector_atomically() {
+        let database = TempDatabase::new();
+        let payer = wallets().remove(0);
+        let operator = Wallet::from_seed("operator", 1);
+        let account = payer.public_key();
+        let (root, opening) = recovery_evidence(&account, 100);
+        let context = PaymentContext::new(Sha256::hash(&[b"accepted-batch"]), 1, operator_key());
+        let pending = pending_batch(&context, &payer, root, &[7, 3]);
+        let first = issue_acceptance(
+            &operator,
+            &[],
+            &pending[0].authorization,
+            &pending[0].entries,
+        );
+        let prior = vec![OutEntry {
+            recipient: pending[0].entries[0].recipient.clone(),
+            cumulative: 7,
+            count: 1,
+        }];
+        let second = issue_acceptance(
+            &operator,
+            &prior,
+            &pending[1].authorization,
+            &pending[1].entries,
+        );
+
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        store.stage_payments(&pending, 0).unwrap();
+        assert_eq!(
+            store
+                .conclude_payment_prefix(
+                    &pending,
+                    &[
+                        PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(
+                            first
+                        ),)),
+                        PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(
+                            second
+                        ),)),
+                    ],
+                    0,
+                    false,
+                )
+                .unwrap(),
+            2
+        );
+        drop(store);
+
+        let (store, state) = open_store(database.path(), &account);
+        assert!(state.pending_payments.is_empty());
+        assert_eq!(state.receipt_count, 2);
+        let vector = store.vector_state(&context).unwrap().unwrap();
+        assert_eq!(vector.seq, 2);
+        assert_eq!(vector.cumulative_debit, 10);
+        assert_eq!(vector.entries[0].count, 2);
+        assert_eq!(vector.entries[0].cumulative, 10);
+    }
+
+    #[test]
+    fn accepted_payment_batch_retirement_survives_reopen() {
+        for retire_context in [false, true] {
+            let database = TempDatabase::new();
+            let payer = wallets().remove(0);
+            let operator = Wallet::from_seed("operator", 1);
+            let account = payer.public_key();
+            let (root, opening) = recovery_evidence(&account, 100);
+            let context = PaymentContext::new(
+                Sha256::hash(&[b"accepted-batch-retirement"]),
+                1,
+                operator_key(),
+            );
+            let pending = pending_batch(&context, &payer, root, &[7, 3]);
+            let first = issue_acceptance(
+                &operator,
+                &[],
+                &pending[0].authorization,
+                &pending[0].entries,
+            );
+            let prior = vec![OutEntry {
+                recipient: pending[0].entries[0].recipient.clone(),
+                cumulative: 7,
+                count: 1,
+            }];
+            let second = issue_acceptance(
+                &operator,
+                &prior,
+                &pending[1].authorization,
+                &pending[1].entries,
+            );
+            let conclusions = [
+                PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(first))),
+                PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(second))),
+            ];
+
+            let (mut store, _) = open_store(database.path(), &account);
+            store.retain_recovery_opening(&root, &opening).unwrap();
+            store.stage_payments(&pending, 0).unwrap();
+            store
+                .conclude_payment_prefix(&pending, &conclusions, 0, retire_context)
+                .unwrap();
+            drop(store);
+
+            let (store, state) = open_store(database.path(), &account);
+            assert!(state.pending_payments.is_empty());
+            assert_eq!(state.receipt_count, 2);
+            assert_eq!(
+                store.check_signing_context(&context).is_err(),
+                retire_context
+            );
+            let expected_state = if retire_context {
+                PaymentState::Retired
+            } else {
+                PaymentState::Accepted
+            };
+            let retained: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_payments
+                     WHERE state = ?1 AND acceptance IS NOT NULL",
+                    [expected_state as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(retained, 2);
+        }
+    }
+
+    #[test]
+    fn prefix_conclusion_preserves_and_replaces_exact_suffix_across_reopen() {
+        let database = TempDatabase::new();
+        let payer = wallets().remove(0);
+        let account = payer.public_key();
+        let operator = Wallet::from_seed("operator", 1);
+        let (root, opening) = recovery_evidence(&account, 100);
+        let old_context = PaymentContext::new(Sha256::hash(&[b"old-batch"]), 1, operator_key());
+        let mut old = pending_batch(&old_context, &payer, root, &[7, 3, 2]);
+        let omitted = issue_acceptance(
+            &operator,
+            &[OutEntry {
+                recipient: old[2].entries[0].recipient.clone(),
+                cumulative: 10,
+                count: 2,
+            }],
+            &old[2].authorization,
+            &old[2].entries,
+        );
+        let omitted = VerifiedAcceptance::from_verified(omitted);
+
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        store.stage_payments(&old, 0).unwrap();
+        store.retain_payment_acceptance(&old[2], &omitted).unwrap();
+        old[2].acceptance = Some(omitted);
+        let excluded = old[1..].to_vec();
+        store
+            .conclude_payment_prefix(&old, &[PaymentConclusion::Retired], 0, true)
+            .unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        assert_eq!(state.pending_payments.len(), 2);
+        assert!(
+            state
+                .pending_payments
+                .iter()
+                .all(|payment| payment.replaceable)
+        );
+        assert_eq!(
+            state.pending_payments[0].authorization,
+            excluded[0].authorization
+        );
+        assert_eq!(
+            state.pending_payments[1].authorization,
+            excluded[1].authorization
+        );
+        let old_vector = store.vector_state(&old_context).unwrap().unwrap();
+        assert_eq!(old_vector.seq, 1);
+        assert_eq!(old_vector.cumulative_debit, 7);
+
+        let new_context = PaymentContext::new(Sha256::hash(&[b"new-batch"]), 2, operator_key());
+        let replacement = pending_batch(&new_context, &payer, root, &[3, 2]);
+        assert_eq!(
+            store
+                .replace_payment_suffix(&state.pending_payments, &replacement, 0, 0)
+                .unwrap(),
+            1
+        );
+        drop(store);
+
+        let (store, state) = open_store(database.path(), &account);
+        assert_eq!(state.pending_payments.len(), 2);
+        assert_eq!(state.receipt_count, 1);
+        assert!(
+            state
+                .pending_payments
+                .iter()
+                .all(|payment| !payment.replaceable)
+        );
+        assert_eq!(
+            state.pending_payments[0].authorization,
+            replacement[0].authorization
+        );
+        let abandoned: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_payments WHERE state = ?1",
+                [PaymentState::Abandoned as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(abandoned, 2);
+    }
+
+    #[test]
+    fn failed_batch_conclusion_rolls_back_every_member() {
+        let database = TempDatabase::new();
+        let payer = wallets().remove(0);
+        let operator = Wallet::from_seed("operator", 1);
+        let account = payer.public_key();
+        let (root, opening) = recovery_evidence(&account, 100);
+        let context = PaymentContext::new(Sha256::hash(&[b"rollback-batch"]), 1, operator_key());
+        let pending = pending_batch(&context, &payer, root, &[7, 3]);
+        let first = issue_acceptance(
+            &operator,
+            &[],
+            &pending[0].authorization,
+            &pending[0].entries,
+        );
+        let prior = vec![OutEntry {
+            recipient: pending[0].entries[0].recipient.clone(),
+            cumulative: 7,
+            count: 1,
+        }];
+        let second = issue_acceptance(
+            &operator,
+            &prior,
+            &pending[1].authorization,
+            &pending[1].entries,
+        );
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        store.stage_payments(&pending, 0).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_batch_conclusion
+                 BEFORE INSERT ON agent_payments
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected batch conclusion failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .conclude_payment_prefix(
+                    &pending,
+                    &[
+                        PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(
+                            first
+                        ),)),
+                        PaymentConclusion::Accepted(Box::new(VerifiedAcceptance::from_verified(
+                            second
+                        ),)),
+                    ],
+                    0,
+                    false,
+                )
+                .is_err()
+        );
+        assert!(store.poisoned);
+        let (pending_count, concluded_count): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM agent_pending_payment),
+                     (SELECT COUNT(*) FROM agent_payments)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((pending_count, concluded_count), (2, 0));
     }
 
     #[test]
@@ -2692,7 +3895,15 @@ mod tests {
         store.stage_payment(&next, &entries, &root, 0).unwrap();
         drop(store);
         let (mut store, state) = open_store(database.path(), &account);
-        assert_eq!(state.pending_payment.unwrap().authorization, next);
+        assert_eq!(
+            state
+                .pending_payments
+                .into_iter()
+                .next()
+                .unwrap()
+                .authorization,
+            next
+        );
         store.finalize_payment_unheld(&next, &entries, 0).unwrap();
         drop(store);
         let (store, _) = open_store(database.path(), &account);
@@ -2808,7 +4019,7 @@ mod tests {
         drop(store);
 
         let (store, state) = open_store(database.path(), &account);
-        assert!(state.pending_payment.is_none());
+        assert!(state.pending_payments.is_empty());
         let pending_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM agent_pending_payment", [], |row| {
@@ -2840,7 +4051,7 @@ mod tests {
         drop(store);
 
         let (store, state) = open_store(database.path(), &account);
-        let pending = state.pending_payment.unwrap();
+        let pending = state.pending_payments.into_iter().next().unwrap();
         assert_eq!(pending.authorization, send);
         assert_eq!(pending.entries, entries);
         assert_eq!(pending.recovery_root, original_root);
@@ -3041,7 +4252,7 @@ mod tests {
         let (mut store, _) =
             Store::open(pending.path(), &account, &deployment(), &operator_key()).unwrap();
         let context = PaymentContext::new(
-            Sha256::hash(&[b"noncanonical-pending-singleton"]),
+            Sha256::hash(&[b"noncanonical-pending-position"]),
             1,
             operator_key(),
         );
@@ -3055,14 +4266,13 @@ mod tests {
         let connection = Connection::open(pending.path()).unwrap();
         connection
             .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 PRAGMA ignore_check_constraints = ON;
-                 UPDATE agent_pending_payment SET singleton = 2 WHERE singleton = 1;",
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE agent_pending_payment SET position = 2 WHERE position = 0;",
             )
             .unwrap();
         drop(connection);
         let error = open_error(pending.path(), &account, &deployment(), &operator_key());
-        assert!(error.contains("pending payment singleton"));
+        assert!(error.contains("pending payment positions are not contiguous"));
     }
 
     #[test]

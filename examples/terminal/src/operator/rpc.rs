@@ -1,12 +1,14 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, CommittedEntry, Operator, SendOutcome},
+    actor::{CloseEvent, Operator, SendOutcome, SendsOutcome},
     store::MAX_INCOMING_PAGE,
 };
-pub(crate) use crate::protocol::WithdrawalEvidence as WithdrawalEvidenceResponse;
 use crate::{
-    protocol::{Acceptance, Entry, Key, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
+    protocol::{
+        Acceptance, Entry, Key, MAX_BATCH_SEND_ENTRIES, MAX_DESTINATION_BYTES, MAX_ENTRIES,
+        MAX_SENDS_PER_BATCH, Receipt,
+    },
     rpc,
 };
 use anyhow::{Context, Result, bail};
@@ -16,15 +18,15 @@ use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
     challenge::HigherEntryLookup,
-    commitment::VectorRoot,
+    logs::LogHead,
     payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
-    transition::{BatchId, EpochContext, WithdrawalClaim},
+    transition::{EpochContext, WithdrawalClaim},
     vector::OutEntry,
 };
 use commonware_codec::{
-    Buf, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
-    Write,
+    Buf, Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network};
@@ -41,11 +43,11 @@ pub(crate) const METHOD_WITHDRAWAL_OPENING: u8 = 4;
 pub(crate) const METHOD_APPLY_WITHDRAWAL: u8 = 5;
 pub(crate) const METHOD_START_CLOSE: u8 = 6;
 pub(crate) const METHOD_POLL_CLOSE: u8 = 7;
-pub(crate) const METHOD_WITHDRAWAL_EVIDENCE: u8 = 8;
-pub(crate) const METHOD_ACKNOWLEDGE_WITHDRAWAL: u8 = 9;
 pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 pub(crate) const METHOD_INCOMING_PAYMENTS: u8 = 13;
 pub(crate) const METHOD_COMMITTED_ENTRY: u8 = 14;
+pub(crate) const METHOD_PAYOUT_PROOF: u8 = 15;
+pub(crate) const METHOD_ACCEPT_SENDS: u8 = 16;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
@@ -167,7 +169,6 @@ impl Read for PollCloseRequest {
 
 key_request!(PaymentHeadRequest);
 key_request!(WithdrawalOpeningRequest);
-key_request!(WithdrawalEvidenceRequest);
 
 /// One submitted batch: the payer-signed vector endpoint and its per-batch delta entries,
 /// strictly recipient-sorted and unique.
@@ -198,6 +199,80 @@ impl Read for AcceptSendRequest {
             authorization: SendAuthorization::read(buf)?,
             entries: Vec::<Entry>::read_cfg(buf, &(RangeCfg::new(1..=MAX_ENTRIES), ()))?,
         })
+    }
+}
+
+/// Contiguous independently signed sends from one payer under one context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AcceptSendsRequest {
+    pub(crate) sends: Vec<AcceptSendRequest>,
+}
+
+impl AcceptSendsRequest {
+    pub(crate) fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.sends.is_empty() && self.sends.len() <= MAX_SENDS_PER_BATCH,
+            "payment batch has an invalid send count"
+        );
+        let first = self.sends[0].authorization.body();
+        let mut sequence = first.seq();
+        let mut entries = 0_usize;
+        for (position, send) in self.sends.iter().enumerate() {
+            let body = send.authorization.body();
+            anyhow::ensure!(
+                body.payer() == first.payer()
+                    && body.epoch() == first.epoch()
+                    && body.anchor() == first.anchor()
+                    && body.seq() == sequence,
+                "payment batch does not form one contiguous payer sequence"
+            );
+            anyhow::ensure!(
+                !send.entries.is_empty() && send.entries.len() <= MAX_ENTRIES,
+                "payment send has an invalid entry count"
+            );
+            entries = entries
+                .checked_add(send.entries.len())
+                .context("payment batch entry count overflow")?;
+            anyhow::ensure!(
+                entries <= MAX_BATCH_SEND_ENTRIES,
+                "payment batch has too many entries"
+            );
+            if position + 1 < self.sends.len() {
+                sequence = sequence
+                    .checked_add(1)
+                    .context("payment batch sequence overflow")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Write for AcceptSendsRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.sends.write(buf);
+    }
+}
+
+impl EncodeSize for AcceptSendsRequest {
+    fn encode_size(&self) -> usize {
+        self.sends.encode_size()
+    }
+}
+
+impl Read for AcceptSendsRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        let request = Self {
+            sends: Vec::<AcceptSendRequest>::read_cfg(
+                buf,
+                &(RangeCfg::new(1..=MAX_SENDS_PER_BATCH), ()),
+            )?,
+        };
+        request
+            .validate()
+            .map_err(|_| CodecError::Invalid("AcceptSendsRequest", "invalid payment sequence"))?;
+        Ok(request)
     }
 }
 
@@ -470,6 +545,119 @@ impl Read for AcceptSendResponse {
     }
 }
 
+/// The operator's atomic reply to one contiguous payer submission.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AcceptSendsResponse {
+    /// Every send, or its exact replay, is committed in request order.
+    Accepted(Vec<AcceptedBatchResponse>),
+    /// The submission does not extend the operator's live payer endpoint.
+    Stale {
+        context: PaymentContext<Key, Digest>,
+        cumulative_debit: u64,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
+    },
+}
+
+impl From<SendsOutcome> for AcceptSendsResponse {
+    fn from(outcome: SendsOutcome) -> Self {
+        match outcome {
+            SendsOutcome::Accepted(accepted) => {
+                Self::Accepted(accepted.into_iter().map(Into::into).collect())
+            }
+            SendsOutcome::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            },
+        }
+    }
+}
+
+impl Write for AcceptSendsResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Accepted(accepted) => {
+                0u8.write(buf);
+                accepted.write(buf);
+            }
+            Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => {
+                1u8.write(buf);
+                context.write(buf);
+                cumulative_debit.write(buf);
+                seq.write(buf);
+                entries.write(buf);
+            }
+        }
+    }
+}
+
+impl EncodeSize for AcceptSendsResponse {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Accepted(accepted) => accepted.encode_size(),
+            Self::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => {
+                context.encode_size()
+                    + cumulative_debit.encode_size()
+                    + seq.encode_size()
+                    + entries.encode_size()
+            }
+        }
+    }
+}
+
+impl Read for AcceptSendsResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => {
+                let accepted = Vec::<AcceptedBatchResponse>::read_cfg(
+                    buf,
+                    &(RangeCfg::new(1..=MAX_SENDS_PER_BATCH), ()),
+                )?;
+                let entries = accepted.iter().try_fold(0_usize, |total, response| {
+                    total.checked_add(response.acceptance.entries.len())
+                });
+                if !matches!(entries, Some(total) if total <= MAX_BATCH_SEND_ENTRIES) {
+                    return Err(CodecError::Invalid(
+                        "AcceptSendsResponse",
+                        "too many accepted entries",
+                    ));
+                }
+                Ok(Self::Accepted(accepted))
+            }
+            1 => Ok(Self::Stale {
+                context: PaymentContext::read(buf)?,
+                cumulative_debit: u64::read(buf)?,
+                seq: u64::read(buf)?,
+                entries: Vec::<OutEntry<Key>>::read_cfg(
+                    buf,
+                    &(RangeCfg::new(0..=MAX_ENTRIES), ()),
+                )?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
 /// Incremental fetch of the pairs crediting an account, from a stable acceptance cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingPaymentsRequest {
@@ -602,53 +790,6 @@ impl Read for CommittedEntryRequest {
     }
 }
 
-/// A locally certified close's identity, change root, and terminal-entry lookup.
-///
-/// Callers must bind `batch_id` and `change_root` to an authenticated admission before
-/// relying on `lookup`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedEntryResponse {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) change_root: VectorRoot<Digest>,
-    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
-}
-
-impl From<CommittedEntry> for CommittedEntryResponse {
-    fn from(evidence: CommittedEntry) -> Self {
-        Self {
-            batch_id: evidence.batch_id,
-            change_root: evidence.change_root,
-            lookup: evidence.lookup,
-        }
-    }
-}
-
-impl Write for CommittedEntryResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.change_root.write(buf);
-        self.lookup.write(buf);
-    }
-}
-
-impl EncodeSize for CommittedEntryResponse {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.change_root.encode_size() + self.lookup.encode_size()
-    }
-}
-
-impl Read for CommittedEntryResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            change_root: VectorRoot::read(buf)?,
-            lookup: HigherEntryLookup::read(buf)?,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalOpeningResponse {
     pub(crate) root: StateRoot<Digest>,
@@ -712,49 +853,6 @@ impl Read for WithdrawalAck {
 pub(crate) fn withdrawal_digest(request: &SignedWithdrawal<Key, Digest>) -> Digest {
     let encoded = request.encode();
     Sha256::hash(&[WITHDRAWAL_ACK_NAMESPACE, encoded.as_ref()])
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AcknowledgeWithdrawalRequest {
-    pub(crate) batch_id: BatchId<Digest>,
-    pub(crate) account: Key,
-    pub(crate) claim: WithdrawalClaim<Digest>,
-}
-
-impl Write for AcknowledgeWithdrawalRequest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.batch_id.write(buf);
-        self.account.write(buf);
-        self.claim.write(buf);
-    }
-}
-
-impl EncodeSize for AcknowledgeWithdrawalRequest {
-    fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.account.encode_size() + self.claim.encode_size()
-    }
-}
-
-impl Read for AcknowledgeWithdrawalRequest {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            account: Key::read(buf)?,
-            claim: WithdrawalClaim::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
-        })
-    }
-}
-
-impl From<&WithdrawalEvidenceResponse> for AcknowledgeWithdrawalRequest {
-    fn from(evidence: &WithdrawalEvidenceResponse) -> Self {
-        Self {
-            batch_id: evidence.batch_id(),
-            account: evidence.witness.request.account().clone(),
-            claim: evidence.witness.claim.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -942,17 +1040,43 @@ fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PayoutProofRequest {
+    pub(crate) head: LogHead<Digest>,
+    pub(crate) index: u64,
+}
+impl Write for PayoutProofRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.head.write(buf);
+        self.index.write(buf);
+    }
+}
+impl EncodeSize for PayoutProofRequest {
+    fn encode_size(&self) -> usize {
+        self.head.encode_size() + self.index.encode_size()
+    }
+}
+impl Read for PayoutProofRequest {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            head: LogHead::read(buf)?,
+            index: u64::read(buf)?,
+        })
+    }
+}
+
 pub(crate) enum OperatorRequest {
+    PayoutProof(PayoutProofRequest),
     Status,
     PaymentHead(PaymentHeadRequest),
     AcceptSend(AcceptSendRequest),
+    AcceptSends(AcceptSendsRequest),
     AcceptedBatch(AcceptSendRequest),
     WithdrawalOpening(WithdrawalOpeningRequest),
     ApplyWithdrawal(ApplyWithdrawalRequest),
     StartClose(StartCloseRequest),
     PollClose(PollCloseRequest),
-    WithdrawalEvidence(WithdrawalEvidenceRequest),
-    AcknowledgeWithdrawal(Box<AcknowledgeWithdrawalRequest>),
     IncomingPayments(IncomingPaymentsRequest),
     CommittedEntry(CommittedEntryRequest),
 }
@@ -960,6 +1084,9 @@ pub(crate) enum OperatorRequest {
 pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
     let body = request.body;
     match request.method {
+        METHOD_PAYOUT_PROOF => PayoutProofRequest::decode(body)
+            .map(OperatorRequest::PayoutProof)
+            .context("decode payout proof request"),
         METHOD_STATUS => StatusRequest::decode(body)
             .map(|_| OperatorRequest::Status)
             .context("decode status request"),
@@ -969,6 +1096,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_ACCEPT_SEND => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptSend)
             .context("decode accept-send request"),
+        METHOD_ACCEPT_SENDS => AcceptSendsRequest::decode(body)
+            .map(OperatorRequest::AcceptSends)
+            .context("decode accept-sends request"),
         METHOD_ACCEPTED_BATCH => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptedBatch)
             .context("decode accepted-batch request"),
@@ -990,19 +1120,15 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_POLL_CLOSE => PollCloseRequest::decode(body)
             .map(OperatorRequest::PollClose)
             .context("decode poll-close request"),
-        METHOD_WITHDRAWAL_EVIDENCE => WithdrawalEvidenceRequest::decode(body)
-            .map(OperatorRequest::WithdrawalEvidence)
-            .context("decode withdrawal-evidence request"),
-        METHOD_ACKNOWLEDGE_WITHDRAWAL => AcknowledgeWithdrawalRequest::decode(body)
-            .map(Box::new)
-            .map(OperatorRequest::AcknowledgeWithdrawal)
-            .context("decode withdrawal-acknowledgement request"),
         method => bail!("unknown operator RPC method {method}"),
     }
 }
 
 fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> {
     match request {
+        OperatorRequest::PayoutProof(request) => {
+            Ok(operator.payout_proof(request.head, request.index)?.encode())
+        }
         OperatorRequest::Status => Ok(build_status(operator)?.encode()),
         OperatorRequest::PaymentHead(request) => {
             let head = operator
@@ -1021,6 +1147,12 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
                 .accept_send(request.authorization, request.entries)
                 .context("accept payment send")?;
             Ok(AcceptSendResponse::from(outcome).encode())
+        }
+        OperatorRequest::AcceptSends(request) => {
+            let outcome = operator
+                .accept_sends(request)
+                .context("accept payment sends")?;
+            Ok(AcceptSendsResponse::from(outcome).encode())
         }
         OperatorRequest::AcceptedBatch(request) => {
             let batch = operator
@@ -1052,15 +1184,6 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
         OperatorRequest::PollClose(request) => {
             Ok(close_event(operator.poll_close(request.epoch).context("poll close")?)?.encode())
         }
-        OperatorRequest::WithdrawalEvidence(request) => {
-            let evidence = operator
-                .withdrawal_evidence(&request.account)
-                .context("read withdrawal evidence")?;
-            Ok(evidence.encode())
-        }
-        OperatorRequest::AcknowledgeWithdrawal(_) => {
-            bail!("settlement confirmation is required before acknowledging a withdrawal")
-        }
         OperatorRequest::IncomingPayments(request) => {
             let page = operator
                 .incoming_payments(&request.account, request.cursor, MAX_INCOMING_PAGE)
@@ -1081,7 +1204,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let evidence = operator
                 .committed_entry(&request.payer, &request.recipient, request.epoch)
                 .context("read committed entry evidence")?;
-            Ok(CommittedEntryResponse::from(evidence).encode())
+            Ok(evidence.encode())
         }
     }
 }
@@ -1136,19 +1259,6 @@ pub(crate) fn apply_withdrawal_confirmed(
     }
 }
 
-pub(crate) fn acknowledge_withdrawal_confirmed(
-    operator: &mut Operator,
-    request: &AcknowledgeWithdrawalRequest,
-) -> rpc::Response {
-    match operator
-        .acknowledge_withdrawal_claim(request.batch_id, &request.account, &request.claim)
-        .context("acknowledge withdrawal claim")
-    {
-        Ok(()) => rpc::Response::Success { body: Bytes::new() },
-        Err(error) => rpc::error_response(format!("{error:#}")),
-    }
-}
-
 async fn invoke<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
@@ -1192,6 +1302,18 @@ pub(crate) async fn accept_send<E: Network + Clock>(
     .context("decode accepted payment")
 }
 
+pub(crate) async fn accept_sends<E: Network + Clock>(
+    network: &E,
+    address: SocketAddr,
+    request: AcceptSendsRequest,
+) -> Result<AcceptSendsResponse> {
+    request.validate().context("validate payment sends")?;
+    AcceptSendsResponse::decode(
+        invoke(network, address, METHOD_ACCEPT_SENDS, request.encode()).await?,
+    )
+    .context("decode accepted payments")
+}
+
 /// Fetches the committed batch for one send, if the operator holds it.
 ///
 /// This is an optional receipts fetch for a wallet that already decided commitment from a
@@ -1227,14 +1349,13 @@ pub(crate) async fn incoming_payments<E: Network + Clock>(
 
 /// Fetches retained activity evidence for one payer-recipient edge.
 ///
-/// The caller authenticates the admission identity and verifies the returned lookup against
-/// its change root. The operator only supplies the evidence.
+/// The caller verifies the lookup against an independently authenticated activity range.
 pub(crate) async fn committed_entry<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
     request: CommittedEntryRequest,
-) -> Result<CommittedEntryResponse> {
-    CommittedEntryResponse::decode(
+) -> Result<HigherEntryLookup<Key, Digest>> {
+    HigherEntryLookup::decode(
         invoke(network, address, METHOD_COMMITTED_ENTRY, request.encode()).await?,
     )
     .context("decode committed entry evidence")
@@ -1302,45 +1423,27 @@ pub(crate) async fn poll_close<E: Network + Clock>(
     .context("decode close event")
 }
 
-pub(crate) async fn withdrawal_evidence<E: Network + Clock>(
+pub(crate) async fn payout_proof<E: Network + Clock>(
     network: &E,
     address: SocketAddr,
-    request: WithdrawalEvidenceRequest,
-) -> Result<WithdrawalEvidenceResponse> {
-    WithdrawalEvidenceResponse::decode(
-        invoke(
-            network,
-            address,
-            METHOD_WITHDRAWAL_EVIDENCE,
-            request.encode(),
-        )
-        .await?,
+    request: PayoutProofRequest,
+) -> Result<WithdrawalClaim<Digest>> {
+    WithdrawalClaim::decode_cfg(
+        invoke(network, address, METHOD_PAYOUT_PROOF, request.encode()).await?,
+        &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
     )
-    .context("decode withdrawal evidence")
-}
-
-pub(crate) async fn acknowledge_withdrawal<E: Network + Clock>(
-    network: &E,
-    address: SocketAddr,
-    request: AcknowledgeWithdrawalRequest,
-) -> Result<()> {
-    let response = invoke(
-        network,
-        address,
-        METHOD_ACKNOWLEDGE_WITHDRAWAL,
-        request.encode(),
-    )
-    .await?;
-    anyhow::ensure!(response.is_empty(), "operator returned an unexpected body");
-    Ok(())
+    .context("decode payout proof")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Protocol, identities, wallets};
+    use crate::protocol::{Protocol, Wallet, identities, wallets};
     use bytes::BytesMut;
-    use commonware_codec::Decode as _;
+    use commonware_clearing::bajillion::{
+        commitment::VectorRoot,
+        payment::{SendAuthorization, VectorSendBody},
+    };
     use commonware_cryptography::{Hasher, Sha256};
     use std::{
         num::{NonZeroU64, NonZeroUsize},
@@ -1358,6 +1461,41 @@ mod tests {
             method,
             body: body.into(),
         }
+    }
+
+    fn sends_request(count: usize, entries_per_send: usize) -> AcceptSendsRequest {
+        let payer = Wallet::from_seed("payer", 8_001);
+        let recipient = Wallet::from_seed("recipient", 8_002).public_key();
+        let context = PaymentContext::new(
+            Sha256::hash(&[b"rpc-batch-anchor"]),
+            12,
+            Wallet::from_seed("operator", 8_003).public_key(),
+        );
+        let sends = (0..count)
+            .map(|offset| {
+                let sequence = u64::try_from(offset).unwrap() + 1;
+                let body = VectorSendBody::new(
+                    &context,
+                    payer.public_key(),
+                    sequence,
+                    sequence,
+                    VectorRoot {
+                        digest: Sha256::hash(&[&sequence.to_be_bytes()]),
+                    },
+                );
+                AcceptSendRequest {
+                    authorization: SendAuthorization::sign(body, payer.signer()),
+                    entries: vec![
+                        Entry {
+                            recipient: recipient.clone(),
+                            amount: 1,
+                        };
+                        entries_per_send
+                    ],
+                }
+            })
+            .collect();
+        AcceptSendsRequest { sends }
     }
 
     #[test]
@@ -1554,6 +1692,31 @@ mod tests {
     }
 
     #[test]
+    fn accept_sends_request_codec_enforces_shape_and_bounds() {
+        let maximum = sends_request(MAX_SENDS_PER_BATCH, 1);
+        assert_eq!(
+            AcceptSendsRequest::decode(maximum.encode()).unwrap(),
+            maximum
+        );
+
+        let empty = AcceptSendsRequest { sends: Vec::new() };
+        assert!(AcceptSendsRequest::decode(empty.encode()).is_err());
+
+        let oversized = sends_request(MAX_SENDS_PER_BATCH + 1, 1);
+        assert!(AcceptSendsRequest::decode(oversized.encode()).is_err());
+
+        let sends = MAX_BATCH_SEND_ENTRIES / MAX_ENTRIES + 1;
+        let too_many_entries = sends_request(sends, MAX_ENTRIES);
+        assert!(too_many_entries.validate().is_err());
+        assert!(AcceptSendsRequest::decode(too_many_entries.encode()).is_err());
+
+        let mut non_contiguous = sends_request(2, 1);
+        let replacement = sends_request(1, 1).sends.into_iter().next().unwrap();
+        non_contiguous.sends[1] = replacement;
+        assert!(AcceptSendsRequest::decode(non_contiguous.encode()).is_err());
+    }
+
+    #[test]
     fn operator_methods_round_trip() {
         let mut operator = operator();
         let mut wallets = wallets();
@@ -1699,6 +1862,7 @@ mod tests {
                 PollCloseResponse::Finished(finished) => {
                     assert_eq!(finished.epoch, 0);
                     assert!(finished.rows > 0);
+                    assert_eq!(finished.withdrawal_total, 112);
                     break;
                 }
                 PollCloseResponse::Failed { error, .. } => {
@@ -1707,47 +1871,53 @@ mod tests {
             }
         }
 
-        let evidence = WithdrawalEvidenceResponse::decode(success_body(handle(
-            &mut operator,
-            request(
-                METHOD_WITHDRAWAL_EVIDENCE,
-                WithdrawalEvidenceRequest {
-                    account: payer_key.clone(),
-                }
-                .encode(),
-            ),
-        )))
-        .unwrap();
-        assert_eq!(evidence.witness.request.account().clone(), payer_key);
-        assert_eq!(evidence.witness.claim.output().amount(), 7);
-        assert_eq!(
-            evidence.witness.claim.output().destination().as_ref(),
-            payer_key.as_ref()
-        );
+        assert_eq!(operator.payment_head(&payer_key).unwrap().balance, 88);
     }
 
     #[test]
-    fn unconfirmed_withdrawal_acknowledgement_keeps_evidence() {
+    fn accept_sends_dispatches_an_ordered_replay_and_fresh_suffix() {
         let mut operator = operator();
-        let account = wallets()[0].public_key();
-        operator
-            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()))
+        let wallets = wallets();
+        let (first_authorization, first_entries) = operator
+            .sign_send(0, &[(wallets[1].public_key(), 2)])
             .unwrap();
-        operator.start_close(0).unwrap();
-        operator.wait_for_closes().unwrap();
-        let evidence = operator.withdrawal_evidence(&account).unwrap();
-        let acknowledgement = AcknowledgeWithdrawalRequest {
-            batch_id: evidence.batch_id(),
-            account: evidence.witness.request.account().clone(),
-            claim: evidence.witness.claim,
+        let first = AcceptSendRequest {
+            authorization: first_authorization,
+            entries: first_entries,
         };
-
-        let error = error_text(handle(
+        let first_response = AcceptSendResponse::decode(success_body(handle(
             &mut operator,
-            request(METHOD_ACKNOWLEDGE_WITHDRAWAL, acknowledgement.encode()),
-        ));
-        assert!(error.contains("settlement confirmation"));
-        assert!(operator.withdrawal_evidence(&account).is_ok());
+            request(METHOD_ACCEPT_SEND, first.encode()),
+        )))
+        .unwrap();
+        assert!(matches!(first_response, AcceptSendResponse::Accepted(_)));
+
+        let (second_authorization, second_entries) = operator
+            .sign_send(0, &[(wallets[2].public_key(), 3)])
+            .unwrap();
+        let batch = AcceptSendsRequest {
+            sends: vec![
+                first,
+                AcceptSendRequest {
+                    authorization: second_authorization,
+                    entries: second_entries,
+                },
+            ],
+        };
+        let response = AcceptSendsResponse::decode(success_body(handle(
+            &mut operator,
+            request(METHOD_ACCEPT_SENDS, batch.encode()),
+        )))
+        .unwrap();
+
+        let AcceptSendsResponse::Accepted(accepted) = response else {
+            panic!("contiguous batch was rejected as stale");
+        };
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].sequence, 1);
+        assert_eq!(accepted[1].sequence, 2);
+        assert_eq!(accepted[0].total, 2);
+        assert_eq!(accepted[1].total, 3);
     }
 
     #[test]
@@ -1827,7 +1997,7 @@ mod tests {
             }],
         };
 
-        for response in [accepted, stale] {
+        for response in [accepted.clone(), stale.clone()] {
             let encoded = response.encode();
             assert_eq!(
                 AcceptSendResponse::decode(encoded.clone()).unwrap(),
@@ -1842,6 +2012,45 @@ mod tests {
         }
         assert!(matches!(
             AcceptSendResponse::decode(Bytes::from_static(&[2u8])),
+            Err(CodecError::InvalidEnum(2))
+        ));
+
+        let accepted = match accepted {
+            AcceptSendResponse::Accepted(accepted) => accepted,
+            AcceptSendResponse::Stale { .. } => unreachable!(),
+        };
+        let stale = match stale {
+            AcceptSendResponse::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            } => AcceptSendsResponse::Stale {
+                context,
+                cumulative_debit,
+                seq,
+                entries,
+            },
+            AcceptSendResponse::Accepted(_) => unreachable!(),
+        };
+        let mut oversized = accepted.clone();
+        let entries_per_acceptance = MAX_BATCH_SEND_ENTRIES / MAX_SENDS_PER_BATCH + 1;
+        assert!(entries_per_acceptance <= MAX_ENTRIES);
+        oversized.acceptance.entries =
+            vec![oversized.acceptance.entries[0].clone(); entries_per_acceptance];
+        let oversized = AcceptSendsResponse::Accepted(vec![oversized; MAX_SENDS_PER_BATCH]);
+        assert!(AcceptSendsResponse::decode(oversized.encode()).is_err());
+
+        for response in [AcceptSendsResponse::Accepted(vec![accepted]), stale] {
+            let encoded = response.encode();
+            assert_eq!(AcceptSendsResponse::decode(encoded).unwrap(), response);
+        }
+        assert!(
+            AcceptSendsResponse::decode(AcceptSendsResponse::Accepted(Vec::new()).encode())
+                .is_err()
+        );
+        assert!(matches!(
+            AcceptSendsResponse::decode(Bytes::from_static(&[2u8])),
             Err(CodecError::InvalidEnum(2))
         ));
     }

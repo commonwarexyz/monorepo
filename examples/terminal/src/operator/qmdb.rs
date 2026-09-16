@@ -1,22 +1,32 @@
-//! Serial ownership of the operator's native balance proofs.
+//! Serial ownership of the operator's optional native proof replica.
 
 use super::{
     actor::{registration_for, replica_terminals},
     store::EpochReader,
 };
-use crate::protocol::{Account, Key, Protocol, state_config};
+use crate::{
+    chain::{
+        da::replica_config,
+        validator::{PAGE_CACHE_SIZE, PAGE_SIZE},
+    },
+    protocol::{Account, Key, Protocol},
+};
 use anyhow::{Context as _, Result, ensure};
 use commonware_clearing::bajillion::{
-    qmdb::{Config, Mutations, PreparedState, State, StateOpening, StateRoot, account_key},
+    challenge::HigherEntryLookup,
+    custody::Epoch,
+    logs::{Heads, LogHead},
+    qmdb::{Mutations, StateOpening, StateRoot, account_key},
+    replica::{Config, PreparedReplica, Replica, ReplicaHead},
     settlement::Genesis,
-    transition::prepare_close_with_strategy,
+    transition::{WithdrawalClaim, prepare_close_with_strategy},
 };
-use commonware_codec::{DecodeExt as _, Encode};
+use commonware_codec::{DecodeExt as _, Encode, FixedSize as _};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Rayon;
-use commonware_runtime::{Runner as _, Spawner, tokio};
+use commonware_runtime::{Runner as _, Spawner, buffer::paged::CacheRef, tokio};
 use commonware_storage::Context;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use std::{
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -28,9 +38,10 @@ use std::{
 };
 
 type Reply<T> = SyncSender<Result<T>>;
+type OperatorReplica<E> = Replica<E, Sha256, Key, Rayon>;
 
 #[derive(Debug, thiserror::Error)]
-#[error("balance storage is unavailable; restart the operator: {0:#}")]
+#[error("proof replica storage is unavailable; restart the operator: {0:#}")]
 pub(crate) struct Unavailable(anyhow::Error);
 
 fn unavailable(error: impl Into<anyhow::Error>) -> anyhow::Error {
@@ -45,6 +56,9 @@ pub(super) fn classify(error: anyhow::Error) -> anyhow::Error {
         ) || matches!(
             cause.downcast_ref::<commonware_clearing::bajillion::qmdb::Error>(),
             Some(commonware_clearing::bajillion::qmdb::Error::Storage(_))
+        ) || matches!(
+            cause.downcast_ref::<commonware_clearing::bajillion::logs::Error>(),
+            Some(commonware_clearing::bajillion::logs::Error::Storage(_))
         )
     }) {
         unavailable(error)
@@ -56,6 +70,8 @@ pub(super) fn classify(error: anyhow::Error) -> anyhow::Error {
 enum Request {
     Root(u64, Reply<StateRoot<Digest>>),
     Opening(u64, Key, Reply<StateOpening<Key, Digest>>),
+    CommittedEntry(u64, Key, Key, Reply<HigherEntryLookup<Key, Digest>>),
+    PayoutProof(LogHead<Digest>, u64, Reply<WithdrawalClaim<Digest>>),
     CatchUp(Option<Reply<()>>),
     #[cfg(test)]
     PauseNext(Reply<(Receiver<()>, SyncSender<()>)>),
@@ -64,7 +80,7 @@ enum Request {
 }
 
 struct Owner {
-    // The SQL source owns ephemeral paths and outlives the joined balance worker.
+    // The SQL source owns ephemeral paths and outlives the joined replica worker.
     _source: EpochReader,
     sender: Option<Sender<Request>>,
     thread: Option<JoinHandle<()>>,
@@ -118,7 +134,7 @@ impl Handle {
         let (ready, started) = mpsc::sync_channel(1);
         let worker_source = source.clone();
         let thread = thread::Builder::new()
-            .name("terminal-balances".into())
+            .name("terminal-proof-replica".into())
             .spawn(move || {
                 let runner =
                     tokio::Runner::new(tokio::Config::new().with_storage_directory(directory));
@@ -137,7 +153,7 @@ impl Handle {
             })?;
         if let Err(error) = started
             .recv()
-            .context("balance worker stopped during initialization")
+            .context("proof replica worker stopped during initialization")
             .and_then(|result| result)
         {
             let _ = thread.join();
@@ -157,7 +173,7 @@ impl Handle {
             .as_ref()
             .unwrap()
             .send(request(reply))
-            .map_err(|_| unavailable(anyhow::anyhow!("balance worker stopped")))?;
+            .map_err(|_| unavailable(anyhow::anyhow!("proof replica worker stopped")))?;
         receiver
             .recv()
             .map_err(|error| unavailable(anyhow::anyhow!(error)))?
@@ -170,6 +186,25 @@ impl Handle {
 
     pub(crate) fn opening(&self, epoch: u64, key: &Key) -> Result<StateOpening<Key, Digest>> {
         self.request(|reply| Request::Opening(epoch, key.clone(), reply))
+    }
+
+    pub(crate) fn committed_entry(
+        &self,
+        epoch: u64,
+        payer: &Key,
+        recipient: &Key,
+    ) -> Result<HigherEntryLookup<Key, Digest>> {
+        self.request(|reply| {
+            Request::CommittedEntry(epoch, payer.clone(), recipient.clone(), reply)
+        })
+    }
+
+    pub(crate) fn payout_proof(
+        &self,
+        head: LogHead<Digest>,
+        index: u64,
+    ) -> Result<WithdrawalClaim<Digest>> {
+        self.request(|reply| Request::PayoutProof(head, index, reply))
     }
 
     #[cfg(test)]
@@ -205,10 +240,11 @@ async fn run(
 ) {
     #[cfg(test)]
     let mut recovery = Recovery::default();
-    let initialized: Result<_> = async {
+    let initialized: Result<_> = Box::pin(async {
         initialize_checkpoints(&connection)?;
-        let config = state_config("operator-balances", &context, protocol.strategy().clone());
-        let state = recover(
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let config = replica_config("operator-proof", page_cache, protocol.strategy().clone());
+        let state = Box::pin(recover(
             context,
             config,
             &connection,
@@ -216,23 +252,23 @@ async fn run(
             configured,
             #[cfg(test)]
             &mut recovery,
-        )
+        ))
         .await?;
-        catch_up(
+        Box::pin(catch_up(
             state,
             &protocol,
             &source,
             &connection,
             #[cfg(test)]
             &mut recovery,
-        )
+        ))
         .await
-    }
+    })
     .await;
-    let mut state = match initialized {
-        Ok(state) => {
+    let mut replica = match initialized {
+        Ok(replica) => {
             let _ = ready.send(Ok(()));
-            state
+            replica
         }
         Err(error) => {
             source.fence_storage_failure(&error);
@@ -258,30 +294,36 @@ async fn run(
             }
             _ => {}
         }
-        state = match async {
+        replica = match Box::pin(async {
             let advance = match &request {
                 Request::Root(epoch, _) | Request::Opening(epoch, _, _) => {
-                    *epoch > sequence(&connection, &state)?
+                    *epoch > sequence(&connection, &replica)?
+                }
+                Request::CommittedEntry(epoch, _, _, _) => {
+                    *epoch >= sequence(&connection, &replica)?
+                }
+                Request::PayoutProof(head, _, _) => {
+                    head.operations > replica.head().logs.payouts.operations
                 }
                 _ => true,
             };
             if advance {
-                catch_up(
-                    state,
+                Box::pin(catch_up(
+                    replica,
                     &protocol,
                     &source,
                     &connection,
                     #[cfg(test)]
                     &mut recovery,
-                )
+                ))
                 .await
             } else {
-                Ok(state)
+                Ok(replica)
             }
-        }
+        })
         .await
         {
-            Ok(state) => state,
+            Ok(replica) => replica,
             Err(error) => {
                 source.fence_storage_failure(&error);
                 match request {
@@ -289,6 +331,12 @@ async fn run(
                         let _ = reply.send(Err(unavailable(error)));
                     }
                     Request::Opening(_, _, reply) => {
+                        let _ = reply.send(Err(unavailable(error)));
+                    }
+                    Request::CommittedEntry(_, _, _, reply) => {
+                        let _ = reply.send(Err(unavailable(error)));
+                    }
+                    Request::PayoutProof(_, _, reply) => {
                         let _ = reply.send(Err(unavailable(error)));
                     }
                     Request::CatchUp(Some(reply)) => {
@@ -301,16 +349,25 @@ async fn run(
         };
         match request {
             Request::Root(epoch, reply) => {
-                let _ = reply.send(checkpoint(&connection, epoch).map(|(root, _)| root));
+                let _ = reply.send(checkpoint(&connection, epoch).map(|head| head.state.root()));
             }
             Request::Opening(epoch, key, reply) => {
                 let result = match checkpoint(&connection, epoch) {
-                    Ok((root, operations)) => state
-                        .opening_at(root, operations, key)
+                    Ok(head) => replica
+                        .state()
+                        .opening_at(head.state.root(), head.state.operations(), key)
                         .await
                         .map_err(Into::into),
                     Err(error) => Err(error),
                 };
+                let _ = reply.send(result);
+            }
+            Request::CommittedEntry(epoch, payer, recipient, reply) => {
+                let result = committed_entry(&replica, &source, epoch, &payer, &recipient).await;
+                let _ = reply.send(result);
+            }
+            Request::PayoutProof(head, index, reply) => {
+                let result = payout_claim(&replica, &head, index).await;
                 let _ = reply.send(result);
             }
             Request::CatchUp(Some(reply)) => {
@@ -323,16 +380,67 @@ async fn run(
     }
 }
 
+async fn committed_entry<E: Context + Spawner>(
+    replica: &OperatorReplica<E>,
+    source: &EpochReader,
+    epoch: u64,
+    payer: &Key,
+    recipient: &Key,
+) -> Result<HigherEntryLookup<Key, Digest>> {
+    let result = source
+        .stored_result(epoch)?
+        .context("certified close is not retained")?;
+    ensure!(
+        result.header.verify::<Sha256, Key>(
+            &result.context,
+            &result.roots,
+            result.withdrawal_total
+        ),
+        "retained certified descriptor does not match its header"
+    );
+    let range = result.roots.activity_range(&result.context)?;
+    let retained = Epoch::at(replica.logs(), epoch, range).await?;
+    let lookup = retained
+        .higher_entry_lookup(replica.logs(), payer, recipient)
+        .await?;
+    Ok(lookup)
+}
+
+async fn payout_claim<E: Context + Spawner>(
+    replica: &OperatorReplica<E>,
+    head: &LogHead<Digest>,
+    index: u64,
+) -> Result<WithdrawalClaim<Digest>> {
+    let (opening, operations) = replica
+        .logs()
+        .payout_opening(head, index, NonZeroU64::MIN)
+        .await?;
+    let [commonware_storage::qmdb::keyless::Operation::Append(output)] = operations.as_slice()
+    else {
+        anyhow::bail!("the requested payout location is not an output");
+    };
+    let claim = WithdrawalClaim::new(output.clone(), opening);
+    ensure!(
+        claim.position() == index,
+        "generated payout claim has the wrong location"
+    );
+    claim
+        .verify::<Sha256>(head)
+        .context("verify generated payout claim")?;
+    Ok(claim)
+}
+
 fn initialize_checkpoints(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS proof_checkpoints (
+    connection.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS proof_replica_checkpoints (
              sequence INTEGER PRIMARY KEY CHECK(sequence >= 0),
-             root BLOB NOT NULL CHECK(length(root) = 32),
-             operations INTEGER NOT NULL CHECK(operations > 0)
+             head BLOB NOT NULL CHECK(length(head) = {}),
+             complete INTEGER NOT NULL CHECK(complete IN (0, 1))
          );
-         CREATE UNIQUE INDEX IF NOT EXISTS proof_checkpoint_head
-             ON proof_checkpoints(root, operations);",
-    )?;
+         CREATE UNIQUE INDEX IF NOT EXISTS proof_replica_checkpoint_head
+             ON proof_replica_checkpoints(head);",
+        ReplicaHead::<Digest>::SIZE,
+    ))?;
     Ok(())
 }
 
@@ -341,7 +449,9 @@ fn initialize_checkpoints(connection: &Connection) -> Result<()> {
 enum RecoveryCut {
     Checkpoint,
     Applied,
+    StateCommitted,
     Committed,
+    Completed,
 }
 
 #[cfg(test)]
@@ -368,7 +478,7 @@ async fn recover<E: Context + Spawner>(
     genesis: Mutations,
     configured: Option<Genesis<Digest>>,
     #[cfg(test)] recovery: &mut Recovery,
-) -> Result<State<E, Sha256, Rayon>> {
+) -> Result<OperatorReplica<E>> {
     if let Some(configured) = configured {
         let liability = genesis.iter().try_fold(0u64, |total, (_, balance)| {
             total
@@ -380,22 +490,49 @@ async fn recover<E: Context + Spawner>(
             "configured genesis liability mismatch"
         );
         let exists: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM proof_checkpoints WHERE sequence = 0)",
+            "SELECT EXISTS(SELECT 1 FROM proof_replica_checkpoints WHERE sequence = 0)",
             [],
             |row| row.get(0),
         )?;
         if exists {
+            let checkpoint = checkpoint(connection, 0)?;
             ensure!(
-                checkpoint(connection, 0)? == (configured.root(), configured.operations()),
+                checkpoint.state.root() == configured.root()
+                    && checkpoint.state.operations() == configured.operations(),
                 "configured genesis commitment mismatch"
             );
         }
     }
-    let state = State::open(context, config).await?;
-    if state.is_bootstrap() {
+    let mut replica = Replica::open(context, config).await?;
+
+    // The latest completed SQL head is the only mutable recovery anchor. Components may be at
+    // different later accepted heads when a prior native commit was interrupted.
+    if let Some((sequence, complete)) = latest_complete(connection)? {
+        replica = align(connection, replica, sequence, &complete).await?;
+        return Ok(replica);
+    }
+
+    // Genesis has no earlier application checkpoint. An exact durable candidate can be completed;
+    // otherwise the bootstrap owner deterministically reapplies the configured allocations.
+    let accepted = checkpoint_optional(connection, 0)?;
+    if accepted == Some(replica.head()) {
+        let replica = replica.commit().await?;
+        complete(connection, 0, &replica.head())?;
+        #[cfg(test)]
+        recovery.stop(RecoveryCut::Completed)?;
+        return Ok(replica);
+    }
+    ensure!(
+        replica.state().is_bootstrap() && replica.logs().head() == &Heads::empty::<Key, Sha256>(),
+        "native replica head has no completed checkpoint"
+    );
+    {
         #[cfg(test)]
         recovery.prepared.push(0);
-        let candidate = state.prepare(state.head(), genesis).await?;
+        let candidate = replica
+            .state()
+            .prepare(replica.state().head(), genesis)
+            .await?;
         if let Some(configured) = configured {
             ensure!(
                 candidate.root() == configured.root()
@@ -403,28 +540,41 @@ async fn recover<E: Context + Spawner>(
                 "configured genesis commitment mismatch"
             );
         }
-        return apply_checkpoint(
-            connection,
-            0,
-            state,
-            candidate,
-            #[cfg(test)]
-            recovery,
-        )
-        .await;
+        let head = ReplicaHead {
+            state: *candidate.head(),
+            logs: replica.head().logs,
+        };
+        if let Some(accepted) = accepted {
+            ensure!(accepted == head, "retained genesis checkpoint mismatch");
+        }
+        record(connection, 0, &head)?;
+        #[cfg(test)]
+        recovery.stop(RecoveryCut::Checkpoint)?;
+        #[cfg(test)]
+        recovery.applied.push(0);
+        let (state, logs) = replica.into_parts();
+        let state = state.apply(candidate).await?;
+        replica = Replica::from_parts(state, logs);
+        #[cfg(test)]
+        recovery.stop(RecoveryCut::Applied)?;
+        replica = replica.commit().await?;
+        #[cfg(test)]
+        recovery.stop(RecoveryCut::Committed)?;
+        complete(connection, 0, &replica.head())?;
+        #[cfg(test)]
+        recovery.stop(RecoveryCut::Completed)?;
     }
-    sequence(connection, &state)?;
-    Ok(state)
+    Ok(replica)
 }
 
 async fn catch_up<E: Context + Spawner>(
-    mut state: State<E, Sha256, Rayon>,
+    mut replica: OperatorReplica<E>,
     protocol: &Protocol,
     source: &EpochReader,
     connection: &Connection,
     #[cfg(test)] recovery: &mut Recovery,
-) -> Result<State<E, Sha256, Rayon>> {
-    let mut applied = sequence(connection, &state)?;
+) -> Result<OperatorReplica<E>> {
+    let mut applied = sequence(connection, &replica)?;
     let latest: Option<i64> = connection.query_row(
         "SELECT MAX(epoch) FROM close_jobs WHERE result IS NOT NULL",
         [],
@@ -435,19 +585,23 @@ async fn catch_up<E: Context + Spawner>(
     while latest.is_some_and(|latest| applied <= latest) {
         let result = source
             .stored_result(applied)?
-            .context("certified balance result prefix has a gap")?;
+            .context("certified result prefix has a gap")?;
         #[cfg(test)]
         if let Some((started, release)) = recovery.gate.take() {
             let _ = started.send(());
             release.recv().context("proof catch-up gate dropped")?;
         }
+
+        // Replay derives all three native batches from retained SQL activity using the
+        // immutable floors in the certified result.
         let data = source.load(applied)?;
         let registration = registration_for(protocol, &data)?;
         let terminals = replica_terminals(protocol, &data)?;
         let context = registration.context.bind::<Sha256, _, _>(
-            &state,
+            &replica,
             &registration.deposits,
             &registration.withdrawals,
+            result.context.floors(),
         )?;
         ensure!(
             context == result.context,
@@ -456,7 +610,7 @@ async fn catch_up<E: Context + Spawner>(
         #[cfg(test)]
         recovery.prepared.push(applied + 1);
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
-            &state,
+            &replica,
             &context,
             &registration.deposits,
             &registration.withdrawals,
@@ -469,14 +623,17 @@ async fn catch_up<E: Context + Spawner>(
             close.header == result.header
                 && close.roots == result.roots
                 && close.withdrawal_total == result.withdrawal_total
-                && candidate.root() == result.roots.successor,
+                && candidate.head().state.root() == result.roots.successor
+                && candidate.head().state.operations() == result.roots.successor_operations
+                && candidate.head().state.sync_boundary() == result.roots.successor_sync_boundary
+                && candidate.head().logs == result.roots.logs(),
             "certified close differs from locally derived native state"
         );
         applied = applied.checked_add(1).context("epoch overflow")?;
-        state = apply_checkpoint(
+        replica = apply_checkpoint(
             connection,
             applied,
-            state,
+            replica,
             candidate,
             #[cfg(test)]
             recovery,
@@ -485,87 +642,187 @@ async fn catch_up<E: Context + Spawner>(
         source.prune_proof_inputs(applied)?;
     }
     let ahead: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM proof_checkpoints WHERE sequence > ?1)",
+        "SELECT EXISTS(SELECT 1 FROM proof_replica_checkpoints WHERE sequence > ?1)",
         [i64::try_from(applied)?],
         |row| row.get(0),
     )?;
-    ensure!(!ahead, "balance checkpoint has no certified result");
-    Ok(state)
+    ensure!(!ahead, "replica checkpoint has no certified result");
+    Ok(replica)
 }
 
 fn sequence<E: Context + Spawner>(
     connection: &Connection,
-    state: &State<E, Sha256, Rayon>,
+    replica: &OperatorReplica<E>,
 ) -> Result<u64> {
     let sequence: i64 = connection
         .query_row(
-            "SELECT sequence FROM proof_checkpoints WHERE root = ?1 AND operations = ?2",
-            params![
-                state.root().encode().as_ref(),
-                i64::try_from(state.head().operations())?
-            ],
+            "SELECT sequence FROM proof_replica_checkpoints WHERE head = ?1 AND complete = 1",
+            [replica.head().encode().as_ref()],
             |row| row.get(0),
         )
-        .context("native balance head has no accepted checkpoint")?;
-    u64::try_from(sequence).context("negative balance checkpoint sequence")
+        .context("native replica head has no completed checkpoint")?;
+    u64::try_from(sequence).context("negative replica checkpoint sequence")
 }
 
-fn checkpoint(connection: &Connection, epoch: u64) -> Result<(StateRoot<Digest>, u64)> {
-    let (bytes, operations): (Vec<u8>, i64) = connection
+fn checkpoint(connection: &Connection, epoch: u64) -> Result<ReplicaHead<Digest>> {
+    let bytes: Vec<u8> = connection
         .query_row(
-            "SELECT root, operations FROM proof_checkpoints WHERE sequence = ?1",
+            "SELECT head FROM proof_replica_checkpoints WHERE sequence = ?1",
             [i64::try_from(epoch).context("epoch exceeds SQLite range")?],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
-        .context("the predecessor balance root is not available yet")?;
-    Ok((
-        StateRoot::decode(bytes).context("decode retained balance root")?,
-        u64::try_from(operations).context("negative balance checkpoint operation count")?,
-    ))
+        .context("the predecessor replica head is not available yet")?;
+    ReplicaHead::decode(bytes).context("decode retained replica head")
 }
 
-fn record(
+fn checkpoint_optional(
     connection: &Connection,
     sequence: u64,
-    candidate: &PreparedState<Digest, Rayon>,
-) -> Result<()> {
-    connection.execute(
-        "INSERT INTO proof_checkpoints(sequence, root, operations) VALUES(?1, ?2, ?3)
-         ON CONFLICT(sequence) DO NOTHING",
-        params![
-            i64::try_from(sequence)?,
-            candidate.root().encode().as_ref(),
-            i64::try_from(candidate.head().operations())?,
-        ],
+) -> Result<Option<ReplicaHead<Digest>>> {
+    let bytes = connection
+        .query_row(
+            "SELECT head FROM proof_replica_checkpoints WHERE sequence = ?1",
+            [i64::try_from(sequence).context("sequence exceeds SQLite range")?],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    bytes
+        .map(|bytes| ReplicaHead::decode(bytes).context("decode retained replica head"))
+        .transpose()
+}
+
+fn latest_complete(connection: &Connection) -> Result<Option<(u64, ReplicaHead<Digest>)>> {
+    let row = connection
+        .query_row(
+            "SELECT sequence, head FROM proof_replica_checkpoints
+             WHERE complete = 1 ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?;
+    row.map(|(sequence, bytes)| {
+        Ok((
+            u64::try_from(sequence).context("negative replica checkpoint sequence")?,
+            ReplicaHead::decode(bytes).context("decode completed replica head")?,
+        ))
+    })
+    .transpose()
+}
+
+fn accepted_heads(connection: &Connection, sequence: u64) -> Result<Vec<ReplicaHead<Digest>>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT head FROM proof_replica_checkpoints WHERE sequence >= ?1 ORDER BY sequence",
+    )?;
+    let rows = statement
+        .query_map(
+            [i64::try_from(sequence).context("sequence exceeds SQLite range")?],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|bytes| ReplicaHead::decode(bytes).context("decode accepted replica head"))
+        .collect()
+}
+
+async fn align<E: Context + Spawner>(
+    connection: &Connection,
+    replica: OperatorReplica<E>,
+    sequence: u64,
+    target: &ReplicaHead<Digest>,
+) -> Result<OperatorReplica<E>> {
+    if replica.head() == *target {
+        return Ok(replica);
+    }
+    let recovered = replica.head();
+    ensure!(
+        recovered.state.operations() >= target.state.operations()
+            && recovered.logs.activity.operations >= target.logs.activity.operations
+            && recovered.logs.payouts.operations >= target.logs.payouts.operations,
+        "native replica is behind its completed checkpoint"
+    );
+    let accepted = accepted_heads(connection, sequence)?;
+    ensure!(
+        accepted.iter().any(|head| head.state == recovered.state)
+            && accepted
+                .iter()
+                .any(|head| head.logs.activity == recovered.logs.activity)
+            && accepted
+                .iter()
+                .any(|head| head.logs.payouts == recovered.logs.payouts),
+        "native replica contains an unauthorized checkpoint component"
+    );
+    let replica = replica.rewind(target).await?;
+    ensure!(
+        replica.head() == *target,
+        "native rewind did not restore the completed checkpoint"
+    );
+    Ok(replica)
+}
+
+fn complete(connection: &Connection, sequence: u64, head: &ReplicaHead<Digest>) -> Result<()> {
+    ensure!(
+        checkpoint(connection, sequence)? == *head,
+        "completed native replica differs from its accepted checkpoint"
+    );
+    let changed = connection.execute(
+        "UPDATE proof_replica_checkpoints SET complete = 1 WHERE sequence = ?1 AND head = ?2",
+        params![i64::try_from(sequence)?, head.encode().as_ref()],
     )?;
     ensure!(
-        checkpoint(connection, sequence)? == (candidate.root(), candidate.head().operations()),
-        "retained balance checkpoint mismatch"
+        changed == 1,
+        "replica checkpoint completion was not recorded"
     );
     Ok(())
 }
 
+fn record(connection: &Connection, sequence: u64, head: &ReplicaHead<Digest>) -> Result<()> {
+    connection.execute(
+        "INSERT INTO proof_replica_checkpoints(sequence, head, complete) VALUES(?1, ?2, 0)
+         ON CONFLICT(sequence) DO NOTHING",
+        params![i64::try_from(sequence)?, head.encode().as_ref()],
+    )?;
+    ensure!(
+        checkpoint(connection, sequence)? == *head,
+        "retained replica checkpoint mismatch"
+    );
+    Ok(())
+}
+
+#[commonware_macros::boxed]
 async fn apply_checkpoint<E: Context + Spawner>(
     connection: &Connection,
     sequence: u64,
-    state: State<E, Sha256, Rayon>,
-    candidate: PreparedState<Digest, Rayon>,
+    replica: OperatorReplica<E>,
+    candidate: PreparedReplica<Key, Digest, Rayon>,
     #[cfg(test)] recovery: &mut Recovery,
-) -> Result<State<E, Sha256, Rayon>> {
-    // The identity is durable before native writes; the owning close result and retained SQL
-    // activity reconstruct this candidate if those writes do not survive a crash.
-    record(connection, sequence, &candidate)?;
+) -> Result<OperatorReplica<E>> {
+    // The accepted native head is durable before native writes. The owning close result and
+    // retained SQL activity reconstruct this candidate if those writes do not survive a crash.
+    record(connection, sequence, &candidate.head())?;
     #[cfg(test)]
     recovery.stop(RecoveryCut::Checkpoint)?;
     #[cfg(test)]
     recovery.applied.push(sequence);
-    let state = state.apply(candidate).await?;
+    #[cfg(test)]
+    if recovery.cut == Some(RecoveryCut::StateCommitted) {
+        let (state, _logs) = replica.into_parts();
+        let (state_candidate, _logs_candidate) = candidate.into_parts();
+        let _state = state.apply(state_candidate).await?.commit().await?;
+        recovery.stop(RecoveryCut::StateCommitted)?;
+        unreachable!("the matching recovery cut always stops")
+    }
+    let replica = replica.apply(candidate).await?;
     #[cfg(test)]
     recovery.stop(RecoveryCut::Applied)?;
-    let state = state.commit().await?;
+    let replica = replica.commit().await?;
     #[cfg(test)]
     recovery.stop(RecoveryCut::Committed)?;
-    Ok(state)
+
+    // Completion becomes visible only after every native operation journal is durable.
+    complete(connection, sequence, &replica.head())?;
+    #[cfg(test)]
+    recovery.stop(RecoveryCut::Completed)?;
+    Ok(replica)
 }
 
 #[cfg(test)]
@@ -578,9 +835,11 @@ mod tests {
     use bytes::Bytes;
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
+        logs::ActivityInput,
         qmdb::AccountKey,
+        transition::WithdrawalOutput,
     };
-    use commonware_codec::FixedSize as _;
+    use commonware_codec::{Decode as _, RangeCfg, Write as _};
     use commonware_runtime::{Supervisor as _, deterministic};
     use std::num::NonZeroUsize;
 
@@ -600,69 +859,129 @@ mod tests {
             RecoveryCut::Checkpoint,
             RecoveryCut::Applied,
             RecoveryCut::Committed,
+            RecoveryCut::Completed,
         ] {
             deterministic::Runner::default().start(|context| async move {
-                let mut config = state_config(
+                let mut config = replica_config(
                     "bootstrap-cut",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     Rayon::new(NonZeroUsize::MIN).unwrap(),
                 );
                 if cut == RecoveryCut::Applied {
-                    config.journal_config.items_per_blob = NonZeroU64::MIN;
-                    config.merkle_config.items_per_blob = NonZeroU64::MIN;
+                    config.state.journal_config.items_per_blob = NonZeroU64::MIN;
+                    config.state.merkle_config.items_per_blob = NonZeroU64::MIN;
                 }
                 let connection = checkpoints();
                 let mut trace = Recovery {
                     cut: Some(cut),
                     ..Recovery::default()
                 };
-                let error = recover(
+                let error = Box::pin(recover(
                     context.child("cut"),
                     config.clone(),
                     &connection,
                     genesis(),
                     None,
                     &mut trace,
-                )
+                ))
                 .await
                 .err()
                 .unwrap();
                 assert!(format!("{error:#}").contains("injected recovery cut"));
                 assert_eq!(trace.prepared, [0]);
                 let expected = checkpoint(&connection, 0).unwrap();
-                let native =
-                    State::<_, Sha256, Rayon>::open(context.child("inspect"), config.clone())
-                        .await
-                        .unwrap();
-                let missing = native.is_bootstrap();
+                let native = OperatorReplica::open(context.child("inspect"), config.clone())
+                    .await
+                    .unwrap();
+                let missing = native.state().is_bootstrap();
                 assert_eq!(missing, cut == RecoveryCut::Checkpoint);
                 drop(native);
                 let mut trace = Recovery::default();
-                let state = recover(
+                let state = Box::pin(recover(
                     context.child("recovered"),
                     config,
                     &connection,
                     genesis(),
                     None,
                     &mut trace,
-                )
+                ))
                 .await
                 .unwrap();
-                let work = if missing { vec![0] } else { vec![] };
+                let work = if cut == RecoveryCut::Checkpoint {
+                    vec![0]
+                } else {
+                    vec![]
+                };
                 assert_eq!(trace.prepared, work);
                 assert_eq!(trace.applied, work);
-                assert_eq!((state.root(), state.head().operations()), expected);
-                assert_eq!(state.liability(), 100);
-                assert_eq!(state.live_accounts(), 1);
+                assert_eq!(state.head(), expected);
+                assert_eq!(state.state().live_accounts(), 1);
                 assert_eq!(
                     connection
-                        .query_row("SELECT count(*) FROM proof_checkpoints", [], |row| row
-                            .get::<_, i64>(0))
+                        .query_row(
+                            "SELECT count(*) FROM proof_replica_checkpoints",
+                            [],
+                            |row| row.get::<_, i64>(0)
+                        )
                         .unwrap(),
                     1
                 );
             });
         }
+    }
+
+    #[test]
+    fn recovery_rejects_a_native_head_outside_the_certified_journal() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = replica_config(
+                "unauthorized-head",
+                crate::protocol::fixture_page_cache(&context),
+                Rayon::new(NonZeroUsize::MIN).unwrap(),
+            );
+            let connection = checkpoints();
+            let replica = Box::pin(recover(
+                context.child("genesis"),
+                config.clone(),
+                &connection,
+                genesis(),
+                None,
+                &mut Recovery::default(),
+            ))
+            .await
+            .unwrap();
+
+            // A locally durable but unjournaled state transition cannot become replay authority.
+            let (state, logs) = replica.into_parts();
+            let candidate = state
+                .prepare(
+                    state.head(),
+                    vec![(AccountKey::new([1; 32]), NonZeroU64::new(101))],
+                )
+                .await
+                .unwrap();
+            let state = state
+                .apply(candidate)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
+            drop(state);
+            drop(logs);
+
+            let error = Box::pin(recover(
+                context.child("recover"),
+                config,
+                &connection,
+                genesis(),
+                None,
+                &mut Recovery::default(),
+            ))
+            .await
+            .err()
+            .unwrap();
+            assert!(format!("{error:#}").contains("unauthorized checkpoint component"));
+        });
     }
 
     fn retain(connection: &Connection, result: &SettlementResult) {
@@ -680,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_derives_only_missing_result_suffix_from_sql_activity() {
+    fn restart_aligns_mixed_native_commits_and_replays_only_incomplete_certified_suffix() {
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let identities = identities();
         let accounts = identities
@@ -721,7 +1040,9 @@ mod tests {
         for cut in [
             RecoveryCut::Checkpoint,
             RecoveryCut::Applied,
+            RecoveryCut::StateCommitted,
             RecoveryCut::Committed,
+            RecoveryCut::Completed,
         ] {
             let store = Store::in_memory(&identities).unwrap();
             let source = store.epoch_reader();
@@ -732,42 +1053,55 @@ mod tests {
             let genesis = genesis.clone();
             let results = results.clone();
             deterministic::Runner::default().start(|context| async move {
-                let mut config = state_config("suffix", &context, protocol.strategy().clone());
+                let mut config = replica_config(
+                    "suffix",
+                    crate::protocol::fixture_page_cache(&context),
+                    protocol.strategy().clone(),
+                );
                 if cut == RecoveryCut::Applied {
-                    config.journal_config.items_per_blob = NonZeroU64::MIN;
-                    config.merkle_config.items_per_blob = NonZeroU64::MIN;
+                    config.state.journal_config.items_per_blob = NonZeroU64::MIN;
+                    config.state.merkle_config.items_per_blob = NonZeroU64::MIN;
                 }
-                let state = recover(
+                let state = Box::pin(recover(
                     context.child("genesis"),
                     config.clone(),
                     &connection,
                     genesis.clone(),
                     Some(configured),
                     &mut Recovery::default(),
-                )
+                ))
                 .await
                 .unwrap();
-                let mut result = results[0].clone();
-                result.evidence = Bytes::from_static(b"untrusted evidence metadata");
-                retain(&connection, &result);
+                retain(&connection, &results[0]);
                 let mut trace = Recovery {
                     cut: Some(cut),
                     ..Recovery::default()
                 };
-                let error = catch_up(state, &protocol, &source, &connection, &mut trace)
+                let error = Box::pin(catch_up(state, &protocol, &source, &connection, &mut trace))
                     .await
                     .err()
                     .unwrap();
                 assert!(format!("{error:#}").contains("injected recovery cut"));
                 assert_eq!(trace.prepared, [1]);
-                let native =
-                    State::<_, Sha256, Rayon>::open(context.child("inspect"), config.clone())
-                        .await
-                        .unwrap();
-                let survived = sequence(&connection, &native).unwrap() == 1;
-                assert_eq!(survived, cut != RecoveryCut::Checkpoint);
+                let native = OperatorReplica::open(context.child("inspect"), config.clone())
+                    .await
+                    .unwrap();
+                let genesis_head = checkpoint(&connection, 0).unwrap();
+                let candidate_head = checkpoint(&connection, 1).unwrap();
+                if cut == RecoveryCut::StateCommitted {
+                    assert_eq!(native.head().state, candidate_head.state);
+                    assert_eq!(native.head().logs, genesis_head.logs);
+                }
+                let survived = native.head() == candidate_head;
+                if cut == RecoveryCut::Checkpoint {
+                    assert!(!survived);
+                }
+                if matches!(cut, RecoveryCut::Committed | RecoveryCut::Completed) {
+                    assert!(survived);
+                }
                 drop(native);
-                if survived {
+                let completed = cut == RecoveryCut::Completed;
+                if completed {
                     // Applied activity is deliberately undecodable, so replaying its epoch fails.
                     connection
                         .execute(
@@ -783,52 +1117,76 @@ mod tests {
                 }
                 retain(&connection, &results[1]);
                 let mut trace = Recovery::default();
-                let state = recover(
+                let state = Box::pin(recover(
                     context.child("recover"),
                     config.clone(),
                     &connection,
                     genesis.clone(),
                     Some(configured),
                     &mut trace,
-                )
+                ))
                 .await
                 .unwrap();
-                let state = catch_up(state, &protocol, &source, &connection, &mut trace)
+                let state = Box::pin(catch_up(state, &protocol, &source, &connection, &mut trace))
                     .await
                     .unwrap();
-                let expected = if survived { vec![2] } else { vec![1, 2] };
+                let expected = if completed { vec![2] } else { vec![1, 2] };
                 assert_eq!(trace.prepared, expected);
                 assert_eq!(trace.applied, expected);
-                assert_eq!(state.root(), results[1].roots.successor);
+                assert_eq!(state.state().root(), results[1].roots.successor);
                 assert_eq!(sequence(&connection, &state).unwrap(), 2);
+                let entry = committed_entry(&state, &source, 0, &accounts[0].key, &accounts[1].key)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    entry
+                        .resolve::<Sha256>(
+                            &results[0]
+                                .roots
+                                .activity_range(&results[0].context)
+                                .unwrap(),
+                            &accounts[0].key,
+                            &accounts[1].key,
+                        )
+                        .unwrap(),
+                    (0, 0)
+                );
                 drop(state);
                 // Applied result blobs are deliberately undecodable; checkpoint identities own restart.
                 connection
                     .execute("UPDATE close_jobs SET result = x'ff' WHERE epoch < 2", [])
                     .unwrap();
                 let mut trace = Recovery::default();
-                let state = recover(
+                let state = Box::pin(recover(
                     context.child("current"),
                     config,
                     &connection,
                     genesis.clone(),
                     Some(configured),
                     &mut trace,
-                )
+                ))
                 .await
                 .unwrap();
-                let state = catch_up(state, &protocol, &source, &connection, &mut trace)
+                let state = Box::pin(catch_up(state, &protocol, &source, &connection, &mut trace))
                     .await
                     .unwrap();
                 assert!(trace.prepared.is_empty());
                 assert!(trace.applied.is_empty());
-                let (root, operations) = checkpoint(&connection, 0).unwrap();
+                let checkpoint = checkpoint(&connection, 0).unwrap();
                 let opening = state
-                    .opening_at(root, operations, accounts[0].key.clone())
+                    .state()
+                    .opening_at(
+                        checkpoint.state.root(),
+                        checkpoint.state.operations(),
+                        accounts[0].key.clone(),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(
-                    opening.verify::<Sha256>(&root).unwrap().get(),
+                    opening
+                        .verify::<Sha256>(&checkpoint.state.root())
+                        .unwrap()
+                        .get(),
                     INITIAL_BALANCE
                 );
             });
@@ -839,20 +1197,28 @@ mod tests {
     fn configured_genesis_mismatch_cannot_publish_or_reopen_native_state() {
         for changed in 0..3 {
             deterministic::Runner::default().start(|context| async move {
-                let config = state_config(
+                let config = replica_config(
                     "configured",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     Rayon::new(NonZeroUsize::MIN).unwrap(),
                 );
-                let state =
-                    State::<_, Sha256, Rayon>::open(context.child("derive"), config.clone())
-                        .await
-                        .unwrap();
-                let candidate = state.prepare(state.head(), genesis()).await.unwrap();
-                let expected = Genesis::from(candidate.head());
+                let state = OperatorReplica::open(context.child("derive"), config.clone())
+                    .await
+                    .unwrap();
+                let candidate = state
+                    .state()
+                    .prepare(state.state().head(), genesis())
+                    .await
+                    .unwrap();
+                let expected = Genesis::new(
+                    candidate.head().root(),
+                    candidate.head().operations(),
+                    &[(AccountKey::new([1; 32]), NonZeroU64::new(100).unwrap())],
+                )
+                .unwrap();
                 let wrong = Genesis::new(
                     if changed == 0 {
-                        state.root()
+                        state.state().root()
                     } else {
                         expected.root()
                     },
@@ -868,17 +1234,17 @@ mod tests {
                 let connection = checkpoints();
                 for (configured, succeeds) in [(wrong, false), (expected, true), (wrong, false)] {
                     let mut trace = Recovery::default();
-                    let result = recover(
+                    let result = Box::pin(recover(
                         context.child("attempt"),
                         config.clone(),
                         &connection,
                         genesis(),
                         Some(configured),
                         &mut trace,
-                    )
+                    ))
                     .await;
                     if succeeds {
-                        assert_eq!(result.unwrap().root(), expected.root());
+                        assert_eq!(result.unwrap().state().root(), expected.root());
                     } else {
                         let error = result.err().unwrap();
                         assert!(format!("{error:#}").contains("configured genesis"));
@@ -892,70 +1258,183 @@ mod tests {
     #[test]
     fn historical_openings_survive_later_bitmap_chunks_and_native_restart() {
         deterministic::Runner::default().start(|context| async move {
-            let config = state_config(
+            let config = replica_config(
                 "historical",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 Rayon::new(NonZeroUsize::MIN).unwrap(),
             );
             let account = wallets().remove(0).public_key();
             let key = account_key(&account).unwrap();
             let genesis = vec![(key.clone(), NonZeroU64::new(100))];
             let connection = checkpoints();
-            let mut state = recover(
+            let mut state = Box::pin(recover(
                 context.child("genesis"),
                 config.clone(),
                 &connection,
                 genesis.clone(),
                 None,
                 &mut Recovery::default(),
-            )
+            ))
             .await
             .unwrap();
             for sequence in 1..=160 {
+                let predecessor = state.head();
                 let candidate = state
                     .prepare(
-                        state.head(),
+                        &predecessor,
                         vec![(key.clone(), NonZeroU64::new(100 + sequence))],
+                        ActivityInput::new(Vec::new(), Vec::new()),
+                        Vec::new(),
+                        commonware_clearing::bajillion::logs::Floors {
+                            activity: predecessor.logs.activity.operations - 1,
+                            payouts: predecessor.logs.payouts.operations - 1,
+                        },
                     )
                     .await
                     .unwrap();
-                state = apply_checkpoint(
+                state = Box::pin(apply_checkpoint(
                     &connection,
                     sequence,
                     state,
                     candidate,
                     &mut Recovery::default(),
-                )
+                ))
                 .await
                 .unwrap();
             }
             drop(state);
             let mut trace = Recovery::default();
-            let state = recover(
+            let state = Box::pin(recover(
                 context.child("recovered"),
                 config,
                 &connection,
                 genesis,
                 None,
                 &mut trace,
-            )
+            ))
             .await
             .unwrap();
             assert!(trace.prepared.is_empty());
             assert!(trace.applied.is_empty());
-            assert!(state.head().operations() > 256);
+            assert!(state.state().head().operations() > 256);
             for sequence in [0, 1, 31, 32, 127, 128, 159, 160] {
-                let (root, operations) = checkpoint(&connection, sequence).unwrap();
+                let checkpoint = checkpoint(&connection, sequence).unwrap();
                 let opening = state
-                    .opening_at(root, operations, account.clone())
+                    .state()
+                    .opening_at(
+                        checkpoint.state.root(),
+                        checkpoint.state.operations(),
+                        account.clone(),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(
-                    opening.verify::<Sha256>(&root).unwrap().get(),
+                    opening
+                        .verify::<Sha256>(&checkpoint.state.root())
+                        .unwrap()
+                        .get(),
                     100 + sequence
                 );
             }
-            assert_eq!(state.liability(), 260);
+        });
+    }
+
+    #[test]
+    fn payout_proofs_are_generated_at_requested_retained_heads() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = replica_config(
+                "payout-proofs",
+                crate::protocol::fixture_page_cache(&context),
+                Rayon::new(NonZeroUsize::MIN).unwrap(),
+            );
+            let mut replica = OperatorReplica::open(context.child("replica"), config)
+                .await
+                .unwrap();
+            let destination = Bytes::from_static(b"destination");
+            let mut encoded = Vec::new();
+            destination.write(&mut encoded);
+            17_u64.write(&mut encoded);
+            let output = WithdrawalOutput::decode_cfg(
+                encoded,
+                &RangeCfg::new(0..=crate::protocol::MAX_DESTINATION_BYTES),
+            )
+            .unwrap();
+
+            // The first accepted range places its output at the predecessor operation count.
+            let predecessor = replica.head();
+            let index = predecessor.logs.payouts.operations;
+            let prepared = replica
+                .prepare(
+                    &predecessor,
+                    Vec::new(),
+                    ActivityInput::new(Vec::new(), Vec::new()),
+                    vec![output.clone()],
+                    commonware_clearing::bajillion::logs::Floors {
+                        activity: 0,
+                        payouts: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            let first = prepared.head();
+            replica = replica.apply(prepared).await.unwrap();
+            replica = Box::pin(replica.sync()).await.unwrap();
+            let claim = payout_claim(&replica, &first.logs.payouts, index)
+                .await
+                .unwrap();
+            assert_eq!(claim.verify::<Sha256>(&first.logs.payouts).unwrap(), output);
+            assert!(
+                payout_claim(
+                    &replica,
+                    &first.logs.payouts,
+                    first.logs.payouts.operations - 1,
+                )
+                .await
+                .is_err()
+            );
+
+            // A later empty range advances the root and supports a refreshed proof for the ID.
+            let predecessor = replica.head();
+            let prepared = replica
+                .prepare(
+                    &predecessor,
+                    Vec::new(),
+                    ActivityInput::new(Vec::new(), Vec::new()),
+                    Vec::new(),
+                    commonware_clearing::bajillion::logs::Floors {
+                        activity: predecessor.logs.activity.operations - 1,
+                        payouts: predecessor.logs.payouts.operations - 1,
+                    },
+                )
+                .await
+                .unwrap();
+            let second = prepared.head();
+            replica = replica.apply(prepared).await.unwrap();
+            replica = Box::pin(replica.sync()).await.unwrap();
+            let historical = payout_claim(&replica, &first.logs.payouts, index)
+                .await
+                .unwrap();
+            assert_eq!(
+                historical.verify::<Sha256>(&first.logs.payouts).unwrap(),
+                output
+            );
+            let refreshed = payout_claim(&replica, &second.logs.payouts, index)
+                .await
+                .unwrap();
+            assert_eq!(refreshed.position(), index);
+            assert_eq!(
+                refreshed.verify::<Sha256>(&second.logs.payouts).unwrap(),
+                output
+            );
+            assert!(
+                payout_claim(
+                    &replica,
+                    &second.logs.payouts,
+                    second.logs.payouts.operations - 1,
+                )
+                .await
+                .is_err()
+            );
         });
     }
 }

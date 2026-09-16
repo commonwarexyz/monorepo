@@ -65,7 +65,7 @@ pub(crate) struct Agent {
     /// Durable optimistic signing state: the cached operator-served context and its
     /// verified affordability floor. Absent for a fresh wallet and after invalidation.
     pub(super) cache: Option<ContextCache>,
-    pub(super) pending_payment: Option<PendingPayment>,
+    pub(super) pending_payments: Vec<PendingPayment>,
     pub(super) pending_deposit: Option<crate::chain::tx::DepositRequest>,
     pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
@@ -175,7 +175,7 @@ impl Agent {
             receivers,
             deposit_nonce,
             cache: state.cache,
-            pending_payment: state.pending_payment,
+            pending_payments: state.pending_payments,
             pending_deposit: state.pending_deposit,
             pending_transfer: state.pending_transfer,
             pending_withdrawal: state.pending_withdrawal,
@@ -202,9 +202,49 @@ impl Agent {
         self.operator.clone()
     }
 
-    /// Whether a withdrawal-claim intent from an interrupted run is still open.
+    /// Whether an active authorization or discovered payout candidate needs resumption.
     pub(crate) const fn has_pending_withdrawal_claim(&self) -> bool {
-        self.pending_withdrawal_claim.is_some()
+        self.pending_withdrawal.is_some() || self.pending_withdrawal_claim.is_some()
+    }
+
+    /// Rejects a certified view old enough to predate a retired withdrawal authorization.
+    pub(super) fn check_withdrawal_floor(&self, status: &StatusRecord) -> Result<()> {
+        if let Some(deadline) = self.store.retired_withdrawal_deadline()? {
+            ensure!(
+                status.height >= deadline,
+                "settlement head predates a retired withdrawal authorization"
+            );
+        }
+        Ok(())
+    }
+
+    /// Retires an expired authorization from a healthy certified view without creating a
+    /// replacement. Its archived discovery hint and any independent payout candidate survive.
+    pub(crate) async fn observe_withdrawal_expiry<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+    ) -> Result<()> {
+        let Some(request) = self.pending_withdrawal.clone() else {
+            return Ok(());
+        };
+        let status = chain.recent_status(ctx).await?;
+        ensure!(
+            status.deployment == self.deployment,
+            "withdrawal status has an unexpected deployment"
+        );
+        if status.height < request.body().deadline() {
+            return Ok(());
+        }
+        if status.hard_faulted {
+            return Ok(());
+        }
+        self.store
+            .retire_withdrawal(&request)
+            .context("retire expired withdrawal authorization")?;
+        self.pending_withdrawal = None;
+        self.cache = None;
+        Ok(())
     }
 
     pub(crate) const fn receiver_count(&self) -> usize {
@@ -248,17 +288,9 @@ impl Agent {
         self.store.has_receipt(payer, id)
     }
 
-    /// The exact unresolved send survives restarts and can only be retried or resolved.
+    /// The exact unresolved batch survives restarts and can only be retried or resolved.
     pub(crate) const fn has_pending_payment(&self) -> bool {
-        self.pending_payment.is_some()
-    }
-
-    pub(crate) async fn operator_status<E: Network + Clock>(
-        &self,
-        network: &E,
-        operator: SocketAddr,
-    ) -> Result<operator_rpc::StatusResponse> {
-        operator_rpc::status(network, operator).await
+        !self.pending_payments.is_empty()
     }
 
     /// Reads the account head against its finalized or admitted predecessor root.
@@ -281,6 +313,7 @@ impl Agent {
         chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<u64> {
+        self.observe_withdrawal_expiry(ctx, chain).await?;
         let operator_error =
             match operator_head(ctx, operator, self.account(), &self.operator).await {
                 Ok(head) => {
@@ -394,8 +427,10 @@ pub(super) enum ReceiptEpoch {
     Unresolved,
     /// The native challenge window remains live, with an optional immutable admitted close.
     Live(Option<AdmittedRootsResponse>),
-    /// Coverage must be verified under this immutable finalized close.
+    /// A retained admitted descriptor is finalized and can authenticate activity coverage.
     Finalized(AdmittedRootsResponse),
+    /// Finality retired the epoch, but no authenticated activity descriptor remains available.
+    Retired,
     /// The published fault does not establish whether this nonfinal admitted close survives.
     Faulted(AdmittedRootsResponse),
     /// The context can never settle: its anchor conflicts, it never admitted, or it was invalidated.
@@ -414,7 +449,18 @@ pub(super) async fn receipt_epoch<E: Env>(
         "settlement client has an unexpected deployment"
     );
     let epoch = context.epoch();
-    match chain.anchor(ctx, epoch).await? {
+    let anchor = match chain.anchor(ctx, epoch).await {
+        Ok(anchor) => anchor,
+        Err(anchor_error) => {
+            return match finalized_receipt(ctx, chain, deployment, context).await {
+                Ok(Some(verdict)) => Ok(verdict),
+                Ok(None) => Err(anchor_error),
+                Err(source_error) => Err(source_error
+                    .context(format!("receipt anchor is unavailable ({anchor_error:#})"))),
+            };
+        }
+    };
+    match anchor {
         Some(anchor) if anchor != *context.anchor() => return Ok(ReceiptEpoch::Invalidated),
         None => {
             let status = chain.recent_status(ctx).await?;
@@ -425,6 +471,9 @@ pub(super) async fn receipt_epoch<E: Env>(
             {
                 // The absence must follow the permanent boundary, since a registration
                 // can become visible between the initial anchor and boundary reads.
+                if let Some(verdict) = finalized_receipt(ctx, chain, deployment, context).await? {
+                    return Ok(verdict);
+                }
                 return Ok(match chain.anchor(ctx, epoch).await? {
                     Some(anchor) if anchor == *context.anchor() => ReceiptEpoch::Unresolved,
                     _ => ReceiptEpoch::Invalidated,
@@ -435,11 +484,22 @@ pub(super) async fn receipt_epoch<E: Env>(
         Some(_) => {}
     }
 
-    let admitted = chain.admitted(ctx, epoch).await?;
-    if let Some(record) = admitted
+    let admitted = match chain.admitted(ctx, epoch).await {
+        Ok(admitted) => admitted,
+        Err(admission_error) => {
+            return match finalized_receipt(ctx, chain, deployment, context).await {
+                Ok(Some(verdict)) => Ok(verdict),
+                Ok(None) => Err(admission_error),
+                Err(retirement_error) => Err(retirement_error.context(format!(
+                    "receipt admission is unavailable ({admission_error:#})"
+                ))),
+            };
+        }
+    };
+    if let Some(record) = admitted.as_ref()
         && record.finalized
     {
-        return Ok(ReceiptEpoch::Finalized(record));
+        return Ok(ReceiptEpoch::Finalized(*record));
     }
     let registration = if admitted.is_none() {
         chain.registration(ctx).await?
@@ -452,13 +512,22 @@ pub(super) async fn receipt_epoch<E: Env>(
             .fault(ctx)
             .await?
             .context("settlement fault is not visible yet")?;
+        let status = chain.recent_status(ctx).await?;
+        ensure!(
+            status.deployment == deployment,
+            "settlement status has an unexpected deployment"
+        );
 
         // Admission absence after the permanent fault proves the context never can admit.
         // An earlier absence could have preceded a successful admission and must be retried.
-        let Some(record) = chain.admitted(ctx, epoch).await? else {
+        let record = match admitted {
+            Some(record) => Some(record),
+            None => chain.admitted(ctx, epoch).await?,
+        };
+        let Some(record) = record else {
             return Ok(ReceiptEpoch::Invalidated);
         };
-        if record.finalized {
+        if record.finalized || status.last_finalized.is_some_and(|last| epoch <= last) {
             return Ok(ReceiptEpoch::Finalized(record));
         }
         if invalidated_epoch(ctx, chain, epoch, &status, &fault).await? {
@@ -467,12 +536,12 @@ pub(super) async fn receipt_epoch<E: Env>(
         return Ok(ReceiptEpoch::Faulted(record));
     }
     if status.last_finalized.is_some_and(|last| last >= epoch) {
-        let record = chain
-            .admitted(ctx, epoch)
+        if let Some(record) = admitted {
+            return Ok(ReceiptEpoch::Finalized(record));
+        }
+        return finalized_receipt(ctx, chain, deployment, context)
             .await?
-            .context("finalized close is not visible yet")?;
-        ensure!(record.finalized, "finalized close is not visible yet");
-        return Ok(ReceiptEpoch::Finalized(record));
+            .context("finalized receipt history is not visible yet");
     }
 
     // Native admission deadlines strictly increase, challenge duration is fixed, and each
@@ -490,6 +559,27 @@ pub(super) async fn receipt_epoch<E: Env>(
         return Ok(ReceiptEpoch::Live(None));
     }
     Ok(ReceiptEpoch::Unresolved)
+}
+
+/// Detects permanent epoch retirement without claiming unavailable activity coverage.
+async fn finalized_receipt<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    deployment: Digest,
+    context: &PaymentContext<Key, Digest>,
+) -> Result<Option<ReceiptEpoch>> {
+    let status = chain.recent_status(ctx).await?;
+    ensure!(
+        status.deployment == deployment,
+        "receipt checkpoint has another deployment"
+    );
+    if !status
+        .last_finalized
+        .is_some_and(|last| context.epoch() <= last)
+    {
+        return Ok(None);
+    }
+    Ok(Some(ReceiptEpoch::Retired))
 }
 
 /// Whether the published fault boundary permanently invalidates this nonfinal admitted epoch.

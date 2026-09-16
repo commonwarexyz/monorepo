@@ -376,13 +376,12 @@ fn preflight_compound_claim_uses_the_source_identity_without_consuming_it() {
                 ),
             })
         };
-        let release = crate::chain::state::withdrawal_release_key(
-            &deployment(),
-            &claim.batch_id,
-            claim.claim.position(),
-        );
+        let action = ProofAction::Payout {
+            deployment: deployment(),
+            index: claim.claim.position(),
+        };
         let expected = Preflight::Eligible {
-            action: Some(ProofAction::Effect(release.clone())),
+            action: Some(action.clone()),
         };
         let direct = SettlementTx::ClaimWithdrawal(claim.clone());
         assert_eq!(trial(&db, &finalized, &native, &direct).await, expected);
@@ -398,7 +397,7 @@ fn preflight_compound_claim_uses_the_source_identity_without_consuming_it() {
             .await,
             Preflight::Unavailable
         );
-        assert_eq!(read(&db, &release).await, None);
+        assert!(claimed(&db, claim.claim.position()).await.is_none());
         assert_eq!(status(&db).await.claimable, 7);
         apply(
             &db,
@@ -475,11 +474,10 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
                 ),
             });
             let direct = SettlementTx::ClaimWithdrawal(claim.clone());
-            let release = crate::chain::state::withdrawal_release_key(
-                &deployment(),
-                &claim.batch_id,
-                claim.claim.position(),
-            );
+            let action = ProofAction::Payout {
+                deployment: deployment(),
+                index: claim.claim.position(),
+            };
             let eligibility = trial(&db, &finalized, &native, &compound).await;
             assert_eq!(
                 eligibility,
@@ -487,7 +485,7 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
                     Preflight::Unavailable
                 } else {
                     Preflight::Eligible {
-                        action: Some(ProofAction::Effect(release.clone())),
+                        action: Some(action.clone()),
                     }
                 }
             );
@@ -514,7 +512,10 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
             );
             assert_eq!(status(&db).await.claimable, if blocked { 7 } else { 0 });
             assert_eq!(status(&db).await.custody, if blocked { 393 } else { 400 });
-            assert_eq!(read(&db, &release).await.is_some(), !blocked);
+            assert_eq!(
+                claimed(&db, claim.claim.position()).await.is_some(),
+                !blocked
+            );
             apply(&db, &finalized, &native, height + 1, &[direct, compound]).await;
             assert_eq!(
                 native_balance(&db, &native, &account).await.unwrap(),
@@ -678,17 +679,33 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
             context.child("preflight_withdrawal_validator"),
             crate::protocol::state_config(
                 "preflight-withdrawal-validator",
-                &context,
+                crate::protocol::fixture_page_cache(&context),
                 protocol.strategy().clone(),
             ),
             &state.history,
         )
         .await;
-        let (result, _) = protocol
+        let (result, candidate) = protocol
             .complete(
                 protocol.prepare(registration, Vec::new()).unwrap(),
                 &balance_state,
                 &mut TestRng::new(191),
+            )
+            .await
+            .unwrap();
+        let payout_position = result.context.predecessor_logs().payouts.operations;
+        let balance_state = balance_state.apply(candidate).await.unwrap();
+        let output = balance_state
+            .logs()
+            .payout_at(payout_position)
+            .await
+            .unwrap();
+        let (opening, _) = balance_state
+            .logs()
+            .payout_opening(
+                &result.roots.withdrawal_outputs,
+                payout_position,
+                NonZeroU64::MIN,
             )
             .await
             .unwrap();
@@ -707,8 +724,7 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
         let initial = native_balance(&db, &native, &account).await.unwrap();
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),
-            batch_id: result.header.batch_id::<Sha256>(),
-            claim: result.withdrawal_claims[0].clone(),
+            claim: WithdrawalClaim::new(output, opening),
         });
         apply(&db, &finalized, &native, 18, &[claim.clone(), claim]).await;
         assert_eq!(
@@ -789,7 +805,7 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 context.child("queued_zero_validator"),
                 crate::protocol::state_config(
                     "queued-zero-validator",
-                    &context,
+                    crate::protocol::fixture_page_cache(&context),
                     protocol.strategy().clone(),
                 ),
                 &genesis.history,
@@ -817,11 +833,16 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
             )
             .await;
             assert_eq!(
-                balances.get(&account_key(&account).unwrap()).await.unwrap(),
+                balances
+                    .state()
+                    .get(&account_key(&account).unwrap())
+                    .await
+                    .unwrap(),
                 NonZeroU64::new(100 - spent)
             );
             assert_eq!(
                 balances
+                    .state()
                     .opening(recipient.public_key())
                     .await
                     .unwrap()
@@ -866,15 +887,30 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
                 .await
                 .unwrap();
             assert_eq!(carried.withdrawal_total, 0);
-            assert_eq!(carried.withdrawal_claims.len(), 1);
-            assert_eq!(carried.withdrawal_claims[0].output().amount(), 0);
+            let payout_position = carried.context.predecessor_logs().payouts.operations;
             let balances = balances.apply(candidate).await.unwrap();
+            let output = balances.logs().payout_at(payout_position).await.unwrap();
+            assert_eq!(output.amount(), 0);
+            let (opening, _) = balances
+                .logs()
+                .payout_opening(
+                    &carried.roots.withdrawal_outputs,
+                    payout_position,
+                    NonZeroU64::MIN,
+                )
+                .await
+                .unwrap();
             assert_eq!(
-                balances.get(&account_key(&account).unwrap()).await.unwrap(),
+                balances
+                    .state()
+                    .get(&account_key(&account).unwrap())
+                    .await
+                    .unwrap(),
                 NonZeroU64::new(100 - spent)
             );
             assert_eq!(
                 balances
+                    .state()
                     .opening(recipient.public_key())
                     .await
                     .unwrap()
@@ -899,25 +935,17 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
             let initial = native_balance(&db, &native, &account).await.unwrap();
             let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
                 deployment: deployment(),
-                batch_id: carried.header.batch_id::<Sha256>(),
-                claim: carried.withdrawal_claims[0].clone(),
+                claim: WithdrawalClaim::new(output, opening),
             });
             apply(&db, &finalized, &native, 16, &[claim.clone(), claim]).await;
             assert_eq!(
                 native_balance(&db, &native, &account).await.unwrap(),
                 initial
             );
-            assert_eq!(
-                read(
-                    &db,
-                    &super::super::state::withdrawal_release_key(
-                        &deployment(),
-                        &carried.header.batch_id::<Sha256>(),
-                        0,
-                    )
-                )
-                .await,
-                None
+            assert!(
+                claimed(&db, carried.context.predecessor_logs().payouts.operations)
+                    .await
+                    .is_some()
             );
             assert_eq!(status(&db).await.claimable, 0);
             assert_supply(&db, &native, &[]).await;

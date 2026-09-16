@@ -19,7 +19,11 @@ struct Args {
     #[arg(long, default_value = "terminal-operator.sqlite")]
     database: PathBuf,
 
-    /// Workers for maintaining the local balance proof replica.
+    /// Disable the local native proof replica; clients fetch proofs from other replicas.
+    #[arg(long)]
+    no_proof_replica: bool,
+
+    /// Workers for maintaining the optional native proof replica.
     #[arg(long, default_value_t = default_workers())]
     workers: NonZeroUsize,
 }
@@ -30,5 +34,11 @@ fn default_workers() -> NonZeroUsize {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    commonware_terminal::run_operator(args.bind, args.node_dir, args.database, args.workers)
+    commonware_terminal::run_operator(
+        args.bind,
+        args.node_dir,
+        args.database,
+        args.workers,
+        !args.no_proof_replica,
+    )
 }

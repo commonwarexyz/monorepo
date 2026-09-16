@@ -97,6 +97,7 @@ async fn ready_operator(
             operator_signer(0),
             operator_ack_signer(0),
             epoch_fee,
+            true,
         )
         .unwrap(),
     ));

@@ -1,0 +1,2033 @@
+diff --git a/clearing/src/bajillion/benches/publication.py b/clearing/src/bajillion/benches/publication.py
+index 9e63a18e7..8a9e35cb7 100755
+--- a/clearing/src/bajillion/benches/publication.py
++++ b/clearing/src/bajillion/benches/publication.py
+@@ -320,12 +320,14 @@ def validate_ack(path: Path, case: tuple[int, ...], samples: int, warmup: int,
+         "runtime_workers": runtime_workers,
+         "public_store_concurrency": 3,
+         "private_control_after_public_commit": True,
+-        "native_page_bytes": 1024,
+-        "native_cache_pages_per_instance": 16,
+-        "native_cache_instances": 3,
+-        "log_and_private_io_buffer_bytes": 2048,
+-        "native_log_operations_per_section": 128,
+-        "native_log_merkle_nodes_per_blob": 1024,
++        "native_logical_page_bytes": 4084,
++        "native_physical_page_bytes": 4096,
++        "native_cache_pages": 262144,
++        "native_cache_budget_bytes": 1073741824,
++        "native_cache_instances": 1,
++        "native_all_owner_write_replay_buffer_bytes": 8388608,
++        "native_log_operations_per_section": 4096,
++        "native_log_merkle_nodes_per_blob": 4096,
+         "native_state_operations_per_blob": 4096,
+         "native_state_merkle_nodes_per_blob": 4096,
+     }
+diff --git a/examples/terminal/src/agent/fixtures.rs b/examples/terminal/src/agent/fixtures.rs
+index 7c078cd9e..9796c0f59 100644
+--- a/examples/terminal/src/agent/fixtures.rs
++++ b/examples/terminal/src/agent/fixtures.rs
+@@ -61,7 +61,11 @@ impl StateFixture {
+                     )
+                 })
+                 .collect();
+-            let config = state_config("wallet-fixture", &context, Sequential);
++            let config = state_config(
++                "wallet-fixture",
++                crate::protocol::fixture_page_cache(&context),
++                Sequential,
++            );
+             let state = State::<_, Sha256>::init(context, config, genesis)
+                 .await
+                 .unwrap();
+diff --git a/examples/terminal/src/chain/da.rs b/examples/terminal/src/chain/da.rs
+index 2cee7c64a..e43d32d22 100644
+--- a/examples/terminal/src/chain/da.rs
++++ b/examples/terminal/src/chain/da.rs
+@@ -45,7 +45,9 @@ use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVe
+ use commonware_macros::select;
+ use commonware_p2p::{Receiver, Recipients, Sender};
+ use commonware_parallel::Rayon;
+-use commonware_runtime::{ContextCell, Handle, IoBuf, Metrics, Network, Spawner, spawn_cell};
++use commonware_runtime::{
++    ContextCell, Handle, IoBuf, Metrics, Network, Spawner, buffer::paged::CacheRef, spawn_cell,
++};
+ use commonware_storage::Context as StorageContext;
+ use commonware_utils::channel::{fallible::OneshotExt as _, oneshot};
+ pub(crate) use config::replica_config;
+@@ -320,6 +322,7 @@ async fn discard<E: StorageContext + Spawner>(lane: &mut Lane<E>) -> Result<()>
+ 
+ pub(crate) struct Config<E: Spawner + StorageContext> {
+     pub(crate) strategy: Rayon,
++    pub(crate) page_cache: CacheRef,
+     pub(crate) scheme: bls12381::Scheme,
+     pub(crate) registry: RegistryView,
+     pub(crate) db: Database<E>,
+@@ -398,6 +401,7 @@ impl Mailbox {
+ pub(crate) struct Sealer<E: Spawner + Metrics + Network + StorageContext + CryptoRng> {
+     context: ContextCell<E>,
+     strategy: Rayon,
++    page_cache: CacheRef,
+     scheme: bls12381::Scheme,
+     registry: RegistryView,
+     db: Database<E>,
+@@ -415,6 +419,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
+             Self {
+                 context: ContextCell::new(context),
+                 strategy: config.strategy,
++                page_cache: config.page_cache,
+                 scheme: config.scheme,
+                 registry: config.registry,
+                 db: config.db,
+@@ -503,6 +508,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
+             self.context.child("checkpoint"),
+             &self.partition,
+             deployment.digest(),
++            self.page_cache.clone(),
+         )
+         .await?;
+         if let Some(generation) = checkpoints.get().and_then(|manifest| manifest.garbage) {
+@@ -545,7 +551,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
+     ) -> commonware_clearing::bajillion::replica::Config<Rayon> {
+         replica_config(
+             &format!("{}-replica-{deployment}-{generation}", self.partition),
+-            self.context.as_present(),
++            self.page_cache.clone(),
+             self.strategy.clone(),
+         )
+     }
+diff --git a/examples/terminal/src/chain/da/benches.rs b/examples/terminal/src/chain/da/benches.rs
+index e01e43118..a915cd869 100644
+--- a/examples/terminal/src/chain/da/benches.rs
++++ b/examples/terminal/src/chain/da/benches.rs
+@@ -9,7 +9,9 @@ use super::{
+     persist_candidate, recover, replica_config,
+ };
+ use crate::{
+-    chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
++    chain::validator::{
++        IO_BUFFER_SIZE, PAGE_CACHE_BUDGET, PAGE_CACHE_SIZE, PAGE_SIZE, PHYSICAL_PAGE_SIZE,
++    },
+     protocol::{
+         Account, Deployment, MAX_ACCEPTED_PAYMENTS, MAX_ACTIVITY_ROWS, MAX_GENESIS_ACCOUNTS,
+         MAX_WITHDRAWALS, STATE_MERKLE_NODES_PER_BLOB, STATE_OPERATIONS_PER_BLOB, genesis_balances,
+@@ -37,7 +39,9 @@ use commonware_cryptography::{
+ };
+ use commonware_cryptography_curve25519::signing::BatchVerifier;
+ use commonware_parallel::Rayon;
+-use commonware_runtime::{Runner as _, Spawner, Strategizer as _, Supervisor as _, tokio};
++use commonware_runtime::{
++    Runner as _, Spawner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, tokio,
++};
+ use commonware_storage::Context as StorageContext;
+ use rand_core::CryptoRng;
+ use serde_json::{Value, json};
+@@ -141,13 +145,13 @@ impl Options {
+ }
+ 
+ fn config(
+-    context: &impl commonware_runtime::BufferPooler,
+     deployment: &Digest,
++    page_cache: CacheRef,
+     strategy: Rayon,
+ ) -> commonware_clearing::bajillion::replica::Config<Rayon> {
+     replica_config(
+         &format!("{PREFIX}-replica-{deployment}-0"),
+-        context,
++        page_cache,
+         strategy,
+     )
+ }
+@@ -287,15 +291,21 @@ async fn measure<E: StorageContext + Spawner + CryptoRng>(
+ async fn open<E: StorageContext + Spawner>(
+     context: E,
+     deployment: Deployment,
++    page_cache: CacheRef,
+     strategy: Rayon,
+ ) -> Result<Lane<E>> {
+     let state = NativeReplica::open(
+         context.child("replica"),
+-        config(&context, deployment.digest(), strategy),
++        config(deployment.digest(), page_cache.clone(), strategy),
++    )
++    .await?;
++    let checkpoint = checkpoint::Store::open(
++        context.child("checkpoint"),
++        PREFIX,
++        deployment.digest(),
++        page_cache,
+     )
+     .await?;
+-    let checkpoint =
+-        checkpoint::Store::open(context.child("checkpoint"), PREFIX, deployment.digest()).await?;
+     Ok(Lane {
+         deployment,
+         pending: None,
+@@ -310,6 +320,7 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
+     options: &Options,
+     scheme: &bls12381::Scheme,
+     strategy: &Rayon,
++    page_cache: CacheRef,
+ ) -> Result<(Deployment, workload::Built)> {
+     let keys = workload::keys(options.accounts);
+     let digest = Sha256::hash(&[b"clearing-benchmark-deployment"]);
+@@ -329,7 +340,7 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
+     );
+     let replica = NativeReplica::open(
+         context.child("bootstrap"),
+-        config(&context, &digest, strategy.clone()),
++        config(&digest, page_cache.clone(), strategy.clone()),
+     )
+     .await?;
+     let (state, logs) = replica.into_parts();
+@@ -353,8 +364,13 @@ async fn setup<E: StorageContext + Spawner + CryptoRng>(
+         replica.state().root(),
+         replica.state().head().operations(),
+     )?;
+-    let checkpoint =
+-        checkpoint::Store::open(context.child("bootstrap_checkpoint"), PREFIX, &digest).await?;
++    let checkpoint = checkpoint::Store::open(
++        context.child("bootstrap_checkpoint"),
++        PREFIX,
++        &digest,
++        page_cache,
++    )
++    .await?;
+     let (replica, checkpoint) = recover(replica, &deployment, checkpoint).await?;
+     let mut lane = Lane {
+         deployment: deployment.clone(),
+@@ -509,7 +525,9 @@ pub fn run() -> Result<()> {
+     let (setup_options, setup_scheme) = (&options, &scheme);
+     let (deployment, input, strategy) = options.runner(&baseline).start(|context| async move {
+         let strategy = context.strategy(setup_options.workers);
+-        let (deployment, input) = setup(context, setup_options, setup_scheme, &strategy).await?;
++        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
++        let (deployment, input) =
++            setup(context, setup_options, setup_scheme, &strategy, page_cache).await?;
+         Ok::<_, anyhow::Error>((deployment, input, strategy))
+     })?;
+     let name = format!("{}::durable_ack/{}", module_path!(), options.case().label());
+@@ -532,8 +550,12 @@ pub fn run() -> Result<()> {
+             "payout_output_bytes": input.payout_output_bytes,
+             "withdrawal_output_bytes": input.withdrawal_output_bytes,
+             "encoded_dealing_bytes": input.encoded_dealing.len(), "encoded_dealing_sha256": Sha256::hash(&[&input.encoded_dealing]).to_string(),
+-            "native_page_bytes": PAGE_SIZE.get(), "native_cache_pages_per_instance": PAGE_CACHE_SIZE.get(),
+-            "native_cache_instances": 3, "log_and_private_io_buffer_bytes": IO_BUFFER_SIZE.get(),
++            "native_logical_page_bytes": PAGE_SIZE.get(),
++            "native_physical_page_bytes": PHYSICAL_PAGE_SIZE,
++            "native_cache_pages": PAGE_CACHE_SIZE.get(),
++            "native_cache_budget_bytes": PAGE_CACHE_BUDGET,
++            "native_cache_instances": 1,
++            "native_all_owner_write_replay_buffer_bytes": IO_BUFFER_SIZE.get(),
+             "native_log_operations_per_section": LOG_OPERATIONS_PER_SECTION.get(),
+             "native_log_merkle_nodes_per_blob": LOG_MERKLE_NODES_PER_BLOB.get(),
+             "native_state_operations_per_blob": STATE_OPERATIONS_PER_BLOB.get(),
+@@ -549,9 +571,11 @@ pub fn run() -> Result<()> {
+         copy_directory(&baseline, &directory)?;
+         fs::File::open(&root)?.sync_all()?;
+         let sample = options.runner(&directory).start(|mut context| async move {
++            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+             let mut lane = open(
+                 context.child("sample"),
+                 deployment.clone(),
++                page_cache.clone(),
+                 strategy.clone(),
+             )
+             .await?;
+@@ -563,6 +587,7 @@ pub fn run() -> Result<()> {
+             let lane = open(
+                 context.child("reopen"),
+                 deployment.clone(),
++                page_cache,
+                 strategy.clone(),
+             )
+             .await?;
+diff --git a/examples/terminal/src/chain/da/benches/tests.rs b/examples/terminal/src/chain/da/benches/tests.rs
+index dab2bde1d..94f9d5b21 100644
+--- a/examples/terminal/src/chain/da/benches/tests.rs
++++ b/examples/terminal/src/chain/da/benches/tests.rs
+@@ -1,10 +1,18 @@
+-use super::*;
++use super::{super::durability::controlled, *};
+ use commonware_macros::select;
+ use commonware_runtime::{
+     deterministic,
+-    mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
++    mocks::{
++        DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync,
++        release_pending_syncs,
++    },
+ };
+ use commonware_utils::channel::fallible::OneshotExt as _;
++use std::{
++    future::{Future as _, poll_fn},
++    num::NonZeroU64,
++    task::Poll,
++};
+ 
+ fn options(withdrawals: usize) -> Options {
+     Options {
+@@ -23,6 +31,117 @@ fn options(withdrawals: usize) -> Options {
+     }
+ }
+ 
++#[test]
++fn sparse_activity_batch_commits_without_serial_rollover_waits() {
++    let options = Options {
++        accounts: 1024,
++        senders: 1024,
++        recipients: 512,
++        out_degree: 1,
++        history: 0,
++        ..options(0)
++    };
++    let scheme = signer();
++    let (options, scheme) = (&options, &scheme);
++    let ((deployment, expected_head, expected_operations), crash) =
++        deterministic::Runner::default().start_and_recover(|mut context| async move {
++            let strategy = context.strategy(options.workers);
++            let page_cache = crate::protocol::fixture_page_cache(&context);
++            let (deployment, input) = setup(
++                context.child("baseline"),
++                options,
++                scheme,
++                &strategy,
++                page_cache.clone(),
++            )
++            .await
++            .unwrap();
++            assert_eq!(input.row_count, 1024);
++            assert_eq!(input.activity_append_operations, 2048);
++            let gates = std::array::from_fn(|_| PendingSyncs::default());
++            gates[0].unblock();
++            gates[2].unblock();
++            let activity = &gates[1];
++            let replica = drive_pending_syncs(
++                activity,
++                controlled(&context, PREFIX, &deployment, &gates, page_cache),
++            )
++            .await;
++            let (_, prepared) = seal::<Sha256, _, _, _, _, BatchVerifier, _>(
++                scheme,
++                &replica,
++                &input.context,
++                &deployment.operator_ack,
++                &input.deposits,
++                &input.withdrawals,
++                input.encoded_dealing.clone(),
++                &mut context,
++                &strategy,
++            )
++            .await
++            .unwrap();
++            let expected_operations = prepared.replica().logs().activity_operations().1.to_vec();
++            let entered = activity.entered();
++            let mut apply = Box::pin(replica.apply(prepared.into_parts().1));
++            let replica = poll_fn(|cx| {
++                let result = apply.as_mut().poll(cx);
++                assert_eq!(
++                    activity.entered(),
++                    entered,
++                    "activity apply waited for an intermediate rollover sync"
++                );
++                result
++            })
++            .await
++            .unwrap();
++
++            // The batch fits one data section. Its durability work can complete in one round,
++            // even though flushing its Merkle nodes starts an optional rollover sync.
++            let mut rounds = 0;
++            let mut commit = Box::pin(replica.commit());
++            let replica = poll_fn(|cx| match commit.as_mut().poll(cx) {
++                Poll::Ready(result) => Poll::Ready(result),
++                Poll::Pending => {
++                    if activity.entered() > activity.completions() {
++                        rounds += 1;
++                        assert_eq!(rounds, 1, "activity commit serialized rollover syncs");
++                        release_pending_syncs(activity);
++                    }
++                    cx.waker().wake_by_ref();
++                    Poll::Pending
++                }
++            })
++            .await
++            .unwrap();
++            assert_eq!(rounds, 1, "activity commit skipped its durability gate");
++            assert_eq!(replica.head(), input.expected_head);
++            (deployment, input.expected_head, expected_operations)
++        });
++    deterministic::Runner::from(crash).start(|context| async move {
++        let replica = NativeReplica::open(
++            context.child("reopened"),
++            config(
++                deployment.digest(),
++                crate::protocol::fixture_page_cache(&context),
++                context.strategy(options.workers),
++            ),
++        )
++        .await
++        .unwrap();
++        assert_eq!(replica.head(), expected_head);
++        let (_, operations) = replica
++            .logs()
++            .activity_opening(
++                &expected_head.logs.activity,
++                1,
++                NonZeroU64::new(expected_operations.len() as u64).unwrap(),
++            )
++            .await
++            .unwrap();
++        assert_eq!(operations, expected_operations);
++    });
++}
++
+ #[test]
+ fn measured_ack_advances_and_reopens_every_owner() {
+     for withdrawals in [0, 32] {
+@@ -32,10 +151,15 @@ fn measured_ack_advances_and_reopens_every_owner() {
+         let ((deployment, input, sample), crash) = deterministic::Runner::default()
+             .start_and_recover(|mut context| async move {
+                 let strategy = context.strategy(options.workers);
+-                let (deployment, input) =
+-                    setup(context.child("baseline"), options, scheme, &strategy)
+-                        .await
+-                        .unwrap();
++                let (deployment, input) = setup(
++                    context.child("baseline"),
++                    options,
++                    scheme,
++                    &strategy,
++                    crate::protocol::fixture_page_cache(&context),
++                )
++                .await
++                .unwrap();
+                 let mut lane = open(
+                     context.child("measurement"),
+                     deployment.clone(),
+@@ -76,7 +200,16 @@ fn measured_ack_waits_for_private_durability() {
+     let ((deployment, input, sample), crash) = deterministic::Runner::default()
+         .start_and_recover(|context| async move {
+             let strategy = context.strategy(options.workers);
+-            let (deployment, input) = setup(context.child("baseline"), options, scheme, &strategy).await.unwrap();
++            let page_cache = crate::protocol::fixture_page_cache(&context);
++            let (deployment, input) = setup(
++                context.child("baseline"),
++                options,
++                scheme,
++                &strategy,
++                page_cache.clone(),
++            )
++            .await
++            .unwrap();
+             let public = PendingSyncs::default();
+             public.unblock();
+             let private = PendingSyncs::default();
+@@ -85,10 +218,15 @@ fn measured_ack_waits_for_private_durability() {
+                 inner: context.child("measured"),
+                 pending: public,
+             };
+-            let state = NativeReplica::open(controlled.child("replica"), config(&controlled, deployment.digest(), strategy.clone())).await.unwrap();
++            let state = NativeReplica::open(
++                controlled.child("replica"),
++                config(deployment.digest(), page_cache.clone(), strategy.clone()),
++            )
++            .await
++            .unwrap();
+             let checkpoint = checkpoint::Store::open(DelayedSyncContext {
+                 inner: context.child("private"), pending: private.clone(),
+-            }, PREFIX, deployment.digest()).await.unwrap();
++            }, PREFIX, deployment.digest(), page_cache).await.unwrap();
+             let mut lane = Lane { deployment: deployment.clone(), pending: None, state: Some(state), checkpoint: Some(checkpoint) };
+             private.arm();
+             let gate = next_pending_sync(&private);
+diff --git a/examples/terminal/src/chain/da/checkpoint.rs b/examples/terminal/src/chain/da/checkpoint.rs
+index 26911d730..bf2066ec8 100644
+--- a/examples/terminal/src/chain/da/checkpoint.rs
++++ b/examples/terminal/src/chain/da/checkpoint.rs
+@@ -1,10 +1,7 @@
+ //! A private native QMDB owns the replica boundary and immutable signer decision.
+ 
+ use super::{Ballot, NativeReplica, sync::Transfer};
+-use crate::{
+-    chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
+-    protocol::Deployment,
+-};
++use crate::{chain::validator::IO_BUFFER_SIZE, protocol::Deployment};
+ use anyhow::{Context as _, Result, ensure};
+ use bytes::BufMut;
+ use commonware_clearing::bajillion::{qmdb::StateRoot, replica::ReplicaHead};
+@@ -223,7 +220,12 @@ type Native<E> =
+ 
+ pub(super) struct Store<E: Context>(Native<E>);
+ impl<E: Context> Store<E> {
+-    pub(super) async fn open(context: E, prefix: &str, deployment: &Digest) -> Result<Self> {
++    pub(super) async fn open(
++        context: E,
++        prefix: &str,
++        deployment: &Digest,
++        page_cache: CacheRef,
++    ) -> Result<Self> {
+         let cfg = keyless::variable::CompactConfig {
+             strategy: Sequential,
+             witness: contiguous::variable::Config {
+@@ -231,7 +233,7 @@ impl<E: Context> Store<E> {
+                 items_per_section: NZU64!(16),
+                 compression: None,
+                 codec_config: (),
+-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
++                page_cache,
+                 write_buffer: IO_BUFFER_SIZE,
+                 replay_buffer: IO_BUFFER_SIZE,
+             },
+diff --git a/examples/terminal/src/chain/da/checkpoint/tests.rs b/examples/terminal/src/chain/da/checkpoint/tests.rs
+index a188aa2e2..35ea45fa0 100644
+--- a/examples/terminal/src/chain/da/checkpoint/tests.rs
++++ b/examples/terminal/src/chain/da/checkpoint/tests.rs
+@@ -40,9 +40,14 @@ fn ack_control_uses_native_qmdb_with_bounded_history() {
+             (deployment, expected)
+         });
+     deterministic::Runner::from(crash).start(|context| async move {
+-        let store = Store::open(context.child("reopen"), "ack_native", deployment.digest())
+-            .await
+-            .unwrap();
++        let store = Store::open(
++            context.child("reopen"),
++            "ack_native",
++            deployment.digest(),
++            crate::protocol::fixture_page_cache(&context),
++        )
++        .await
++        .unwrap();
+         assert_eq!(store.get().unwrap().encode(), expected);
+         assert!(store.get().unwrap().decision.is_some());
+         assert!(store.get().unwrap().candidate.is_some());
+@@ -56,3 +61,23 @@ fn ack_control_uses_native_qmdb_with_bounded_history() {
+         assert!(blobs.len() <= 2);
+     });
+ }
++
++#[test]
++fn ack_control_uses_the_supplied_cache() {
++    deterministic::Runner::default().start(|context| async move {
++        let cache = crate::protocol::fixture_page_cache(&context);
++        let before = cache.next_id();
++        let deployment = Digest::from([0u8; 32]);
++        let store = Store::open(
++            context.child("checkpoint"),
++            "shared-cache",
++            &deployment,
++            cache.clone(),
++        )
++        .await
++        .unwrap();
++        let after = cache.next_id();
++        assert!(after > before + 1);
++        drop(store);
++    });
++}
+diff --git a/examples/terminal/src/chain/da/config.rs b/examples/terminal/src/chain/da/config.rs
+index 5ac6b70f5..6009b1230 100644
+--- a/examples/terminal/src/chain/da/config.rs
++++ b/examples/terminal/src/chain/da/config.rs
+@@ -1,19 +1,16 @@
+ //! Native partitions for a balance replica and its two cumulative logs.
+ 
+-use crate::{
+-    chain::validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
+-    protocol::{MAX_DESTINATION_BYTES, state_config},
+-};
++use crate::protocol::{MAX_DESTINATION_BYTES, state_config};
+ use commonware_clearing::bajillion::{logs, replica};
+ use commonware_codec::RangeCfg;
+ use commonware_parallel::Strategy;
+-use commonware_runtime::{BufferPooler, buffer::paged::CacheRef};
++use commonware_runtime::buffer::paged::CacheRef;
+ use commonware_storage::{journal::contiguous, merkle::full, qmdb::keyless};
+ use commonware_utils::NZU64;
+ use std::num::NonZeroU64;
+ 
+-pub(super) const LOG_OPERATIONS_PER_SECTION: NonZeroU64 = NZU64!(128);
+-pub(super) const LOG_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(1024);
++pub(super) const LOG_OPERATIONS_PER_SECTION: NonZeroU64 = NZU64!(4096);
++pub(super) const LOG_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(4096);
+ 
+ /// Remove a recorded generation when no intact native owner is available. Intact owners use
+ /// `destroy` to drain pending work. Repeating removal is safe when some partitions are absent.
+@@ -54,21 +51,25 @@ pub(super) async fn remove_generation<E: commonware_storage::Context, S: Strateg
+ 
+ pub(crate) fn replica_config<S: Strategy>(
+     prefix: &str,
+-    pooler: &impl BufferPooler,
++    cache: CacheRef,
+     strategy: S,
+ ) -> replica::Config<S> {
+-    let cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
++    let io_buffer = crate::chain::validator::IO_BUFFER_SIZE;
+     let merkle = |role: &str| full::Config {
+         journal_partition: format!("{prefix}-{role}-merkle"),
+         metadata_partition: format!("{prefix}-{role}-pins"),
+         items_per_blob: LOG_MERKLE_NODES_PER_BLOB,
+-        write_buffer: IO_BUFFER_SIZE,
+-        replay_buffer: IO_BUFFER_SIZE,
++        write_buffer: io_buffer,
++        replay_buffer: io_buffer,
+         strategy: strategy.clone(),
+         page_cache: cache.clone(),
+     };
+     replica::Config {
+-        state: state_config(&format!("{prefix}-balances"), pooler, strategy.clone()),
++        state: state_config(
++            &format!("{prefix}-balances"),
++            cache.clone(),
++            strategy.clone(),
++        ),
+         logs: logs::Config {
+             activity: keyless::variable::Config {
+                 merkle: merkle("activity"),
+@@ -78,8 +79,8 @@ pub(crate) fn replica_config<S: Strategy>(
+                     compression: None,
+                     codec_config: (),
+                     page_cache: cache.clone(),
+-                    write_buffer: IO_BUFFER_SIZE,
+-                    replay_buffer: IO_BUFFER_SIZE,
++                    write_buffer: io_buffer,
++                    replay_buffer: io_buffer,
+                 },
+             },
+             payouts: keyless::variable::Config {
+@@ -90,10 +91,36 @@ pub(crate) fn replica_config<S: Strategy>(
+                     compression: None,
+                     codec_config: RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+                     page_cache: cache,
+-                    write_buffer: IO_BUFFER_SIZE,
+-                    replay_buffer: IO_BUFFER_SIZE,
++                    write_buffer: io_buffer,
++                    replay_buffer: io_buffer,
+                 },
+             },
+         },
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use commonware_runtime::{Runner as _, Strategizer as _, deterministic};
++    use commonware_utils::NZUsize;
++
++    #[test]
++    fn replica_config_uses_one_cache() {
++        deterministic::Runner::default().start(|context| async move {
++            let cache = crate::protocol::fixture_page_cache(&context);
++            let config = replica_config("shared-cache", cache, context.strategy(NZUsize!(1)));
++            let caches = [
++                &config.state.merkle_config.page_cache,
++                &config.state.journal_config.page_cache,
++                &config.logs.activity.merkle.page_cache,
++                &config.logs.activity.log.page_cache,
++                &config.logs.payouts.merkle.page_cache,
++                &config.logs.payouts.log.page_cache,
++            ];
++            for (expected, cache) in caches.into_iter().enumerate() {
++                assert_eq!(cache.next_id(), expected as u64);
++            }
++        });
++    }
++}
+diff --git a/examples/terminal/src/chain/da/durability.rs b/examples/terminal/src/chain/da/durability.rs
+index c90caf85a..b2b2f2e08 100644
+--- a/examples/terminal/src/chain/da/durability.rs
++++ b/examples/terminal/src/chain/da/durability.rs
+@@ -22,15 +22,16 @@ async fn drive<T>(gates: &[PendingSyncs; 3], future: impl Future<Output = T>) ->
+     )
+     .await
+ }
+-async fn controlled(
++pub(super) async fn controlled(
+     context: &deterministic::Context,
+     prefix: &str,
+     deployment: &Deployment,
+     gates: &[PendingSyncs; 3],
++    page_cache: CacheRef,
+ ) -> NativeReplica<DelayedSyncContext<deterministic::Context>> {
+     let config = replica_config(
+         &format!("{prefix}-replica-{}-0", deployment.digest()),
+-        context,
++        page_cache,
+         context.strategy(NZUsize!(1)),
+     );
+     let state = qmdb::State::open(
+@@ -68,16 +69,21 @@ pub(super) async fn reopen(
+     prefix: &str,
+     deployment: &Deployment,
+ ) -> Lane<deterministic::Context> {
+-    let checkpoints =
+-        checkpoint::Store::open(context.child("checkpoint"), prefix, deployment.digest())
+-            .await
+-            .unwrap();
++    let page_cache = crate::protocol::fixture_page_cache(context);
++    let checkpoints = checkpoint::Store::open(
++        context.child("checkpoint"),
++        prefix,
++        deployment.digest(),
++        page_cache.clone(),
++    )
++    .await
++    .unwrap();
+     let generation = checkpoints.get().unwrap().canonical.checkpoint.generation;
+     let replica = NativeReplica::open(
+         context.child("replica"),
+         replica_config(
+             &format!("{prefix}-replica-{}-{generation}", deployment.digest()),
+-            context,
++            page_cache,
+             context.strategy(NZUsize!(1)),
+         ),
+     )
+@@ -97,8 +103,13 @@ async fn controlled_lane(
+     deployment: &Deployment,
+     gates: &[PendingSyncs; 3],
+     checkpoint_gate: PendingSyncs,
++    page_cache: CacheRef,
+ ) -> Lane<DelayedSyncContext<deterministic::Context>> {
+-    let state = drive(gates, controlled(context, prefix, deployment, gates)).await;
++    let state = drive(
++        gates,
++        controlled(context, prefix, deployment, gates, page_cache.clone()),
++    )
++    .await;
+     let checkpoints = checkpoint::Store::open(
+         DelayedSyncContext {
+             inner: context.child("controlled_checkpoint"),
+@@ -106,6 +117,7 @@ async fn controlled_lane(
+         },
+         prefix,
+         deployment.digest(),
++        page_cache,
+     )
+     .await
+     .unwrap();
+@@ -130,12 +142,18 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
+                     .await;
+                 let decision = ballot.encode();
+                 let candidate = prepared.close().roots;
++                let page_cache = fixture.page_cache.clone();
+                 drop(fixture);
+                 let gates = std::array::from_fn(|_| PendingSyncs::default());
+                 let metadata = PendingSyncs::default();
+                 metadata.unblock();
+                 let mut lane = controlled_lane(
+-                    &context, "ack_barrier", &deployment, &gates, metadata.clone(),
++                    &context,
++                    "ack_barrier",
++                    &deployment,
++                    &gates,
++                    metadata.clone(),
++                    page_cache,
+                 ).await;
+                 for gate in &gates { gate.unblock(); }
+                 metadata.arm();
+@@ -163,7 +181,7 @@ fn candidate_publication_waits_for_the_private_ack_commit() {
+                 context.child("raw_ack_candidate"),
+                 replica_config(
+                     &format!("ack_barrier-replica-{}-0", deployment.digest()),
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     context.strategy(NZUsize!(1)),
+                 ),
+             )
+@@ -195,11 +213,20 @@ fn incomplete_candidate_rewinds_all_three_without_a_body_journal() {
+             let deployment = fixture.lane.deployment.clone();
+             let target = fixture.lane.state.as_ref().unwrap().head();
+             let (ballot, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
++            let page_cache = fixture.page_cache.clone();
+             drop(fixture);
+             let gates = std::array::from_fn(|_| PendingSyncs::default());
+             let metadata = PendingSyncs::default();
+             metadata.unblock();
+-            let mut lane = controlled_lane(&context, "candidate_cut", &deployment, &gates, metadata.clone()).await;
++            let mut lane = controlled_lane(
++                &context,
++                "candidate_cut",
++                &deployment,
++                &gates,
++                metadata.clone(),
++                page_cache,
++            )
++            .await;
+             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
+             if role == 3 { metadata.arm(); }
+             let gate = next_pending_sync(if role == 3 { &metadata } else { &gates[role] });
+@@ -284,11 +311,12 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
+             });
+         let ((deployment, parent), crash) =
+             deterministic::Runner::from(crash).start_and_recover(move |context| async move {
++                let page_cache = crate::protocol::fixture_page_cache(&context);
+                 let replica = NativeReplica::open(
+                     context.child("raw_ahead"),
+                     replica_config(
+                         &format!("ahead-replica-{}-0", deployment.digest()),
+-                        &context,
++                        page_cache.clone(),
+                         context.strategy(NZUsize!(1)),
+                     ),
+                 )
+@@ -311,6 +339,7 @@ fn durable_components_ahead_of_the_manifest_rewind_without_replay() {
+                     context.child("checkpoint"),
+                     "ahead",
+                     deployment.digest(),
++                    page_cache,
+                 )
+                 .await
+                 .unwrap();
+@@ -400,10 +429,19 @@ fn candidate_disposal_selects_parent_before_each_native_rewind() {
+             let (decision, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
+             fixture.candidate(decision.clone(), prepared).await;
+             let deployment = fixture.lane.deployment.clone();
++            let page_cache = fixture.page_cache.clone();
+             drop(fixture);
+             let gates = std::array::from_fn(|_| PendingSyncs::default());
+             let metadata = PendingSyncs::default(); metadata.unblock();
+-            let mut lane = controlled_lane(&context, "discard", &deployment, &gates, metadata).await;
++            let mut lane = controlled_lane(
++                &context,
++                "discard",
++                &deployment,
++                &gates,
++                metadata,
++                page_cache,
++            )
++            .await;
+             for (index, gate) in gates.iter().enumerate() { if index == role { gate.arm(); } else { gate.unblock(); } }
+             let gate = next_pending_sync(&gates[role]);
+             let mut rollback = Box::pin(discard(&mut lane));
+@@ -437,7 +475,17 @@ fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
+             let (_, _, prepared) = fixture.prepare(3, 3, Floors { activity: 0, payouts: 0 }).await;
+             drop(fixture.lane.state.unwrap().apply(prepared.into_parts().1).await.unwrap().sync().await.unwrap());
+             let gates = std::array::from_fn(|_| PendingSyncs::default());
+-            let replica = drive(&gates, controlled(&context, "rewind_barrier", &deployment, &gates)).await;
++            let replica = drive(
++                &gates,
++                controlled(
++                    &context,
++                    "rewind_barrier",
++                    &deployment,
++                    &gates,
++                    fixture.page_cache.clone(),
++                ),
++            )
++            .await;
+             let (state, logs) = replica.into_parts();
+             // Every native head can match while its rewind is still volatile. The aggregate
+             // call must complete all durability barriers even on these native no-op paths.
+@@ -460,7 +508,7 @@ fn rewind_cannot_publish_volatile_alignment_before_all_native_syncs() {
+                 context.child("raw_reopen"),
+                 replica_config(
+                     &format!("rewind_barrier-replica-{}-0", deployment.digest()),
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     context.strategy(NZUsize!(1)),
+                 ),
+             )
+@@ -555,7 +603,11 @@ fn native_source_serves_admitted_parent_while_every_donor_has_an_unadmitted_chil
+             context.child("import"),
+             authority,
+             deployment.clone(),
+-            replica_config("parent-import", &context, context.strategy(NZUsize!(1))),
++            replica_config(
++                "parent-import",
++                crate::protocol::fixture_page_cache(&context),
++                context.strategy(NZUsize!(1)),
++            ),
+             fresh.lane.manifest().canonical.checkpoint.clone(),
+             1,
+             false,
+@@ -670,7 +722,7 @@ fn failed_source_preserves_other_lanes_and_imports_the_admitted_competing_candid
+     deterministic::Runner::from(crash).start(|context| async move {
+         let old_config = replica_config(
+             &format!("loser-replica-{}-0", deployment.digest()),
+-            &context,
++            crate::protocol::fixture_page_cache(&context),
+             context.strategy(NZUsize!(1)),
+         );
+         let old_partitions = [
+@@ -909,7 +961,11 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
+                     context.child("pruned_import"),
+                     authority,
+                     deployment.clone(),
+-                    replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
++                    replica_config(
++                        "fresh-after-prune",
++                        crate::protocol::fixture_page_cache(&context),
++                        context.strategy(NZUsize!(1)),
++                    ),
+                     fresh.lane.manifest().canonical.checkpoint.clone(),
+                     1,
+                     false,
+@@ -958,7 +1014,11 @@ fn physical_prune_and_recorded_prune_intent_preserve_native_transfer_and_old_hol
+         deterministic::Runner::from(crash).start(|context| async move {
+             let imported = NativeReplica::open(
+                 context.child("imported_reopen"),
+-                replica_config("fresh-after-prune", &context, context.strategy(NZUsize!(1))),
++                replica_config(
++                    "fresh-after-prune",
++                    crate::protocol::fixture_page_cache(&context),
++                    context.strategy(NZUsize!(1)),
++                ),
+             )
+             .await
+             .unwrap();
+@@ -1037,11 +1097,14 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+         Arc,
+         atomic::{AtomicUsize, Ordering},
+     };
+-    let ((deployment, expected), crash) =
+-        deterministic::Runner::default().start_and_recover(|context| async move {
++    let ((deployment, expected, finalized), crash) = deterministic::Runner::default()
++        .start_and_recover(|context| async move {
+             let mut fixture = Fixture::new(&context, "maintenance", 70).await;
++            // Advance the four-epoch retention window beyond a complete native section so
++            // maintenance must remove physical history while the other lane stays busy.
++            let finalized = config::LOG_OPERATIONS_PER_SECTION.get().div_ceil(71) as usize + 4;
+             let mut ballots: Vec<Ballot> = Vec::new();
+-            for epoch in 0..12 {
++            for epoch in 0..finalized + 4 {
+                 let floors = if epoch >= 4 {
+                     let roots = ballots[epoch - 4].roots;
+                     Floors {
+@@ -1098,12 +1161,12 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             });
+             context.sleep(Duration::from_millis(5)).await;
+             let mut batch = db.new_batches().await;
+-            for (epoch, ballot) in ballots.iter().enumerate().skip(8) {
++            for (epoch, ballot) in ballots.iter().enumerate().skip(finalized) {
+                 let admitted = AdmittedRootsResponse::new(
+                     ballot.header.batch_id::<Sha256>(),
+                     ballot.roots,
+                     ballot.context.predecessor_logs().activity.operations,
+-                    epoch == 8,
++                    epoch == finalized,
+                 );
+                 batch = batch.write(
+                     admitted_key(deployment.digest(), epoch as u64),
+@@ -1113,11 +1176,11 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             batch = batch.write(
+                 status_key(deployment.digest()),
+                 Some(Record::Status(StatusRecord {
+-                    height: 300,
+-                    timestamp: 300,
++                    height: ballots[finalized].context.challenge_deadline() + 1,
++                    timestamp: ballots[finalized].context.challenge_deadline() + 1,
+                     deployment: *deployment.digest(),
+-                    state_root: ballots[8].roots.successor,
+-                    last_finalized: Some(8),
++                    state_root: ballots[finalized].roots.successor,
++                    last_finalized: Some(finalized as u64),
+                     custody: 0,
+                     claimable: 0,
+                     hard_faulted: false,
+@@ -1132,12 +1195,15 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+             );
+             actor.abort();
+             busy.abort();
+-            (deployment, expected)
++            (deployment, expected, finalized)
+         });
+     deterministic::Runner::from(crash).start(|context| async move {
+         let lane = reopen(&context, "maintenance", &deployment).await;
+         assert_eq!(lane.state.as_ref().unwrap().head(), expected);
+-        assert_eq!(lane.manifest().canonical.checkpoint.retained.epoch, 8);
++        assert_eq!(
++            lane.manifest().canonical.checkpoint.retained.epoch,
++            finalized as u64
++        );
+         assert!(
+             lane.state
+                 .as_ref()
+@@ -1145,7 +1211,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+                 .logs()
+                 .retained_starts()
+                 .activity
+-                >= 128
++                >= config::LOG_OPERATIONS_PER_SECTION.get()
+         );
+         assert!(
+             lane.state
+@@ -1154,7 +1220,7 @@ fn finality_prunes_an_idle_lane_while_another_lane_keeps_the_mailbox_ready() {
+                 .logs()
+                 .retained_starts()
+                 .payouts
+-                >= 128
++                >= config::LOG_OPERATIONS_PER_SECTION.get()
+         );
+     });
+ }
+diff --git a/examples/terminal/src/chain/da/durability/retirement.rs b/examples/terminal/src/chain/da/durability/retirement.rs
+index 6febde532..00afd3b3a 100644
+--- a/examples/terminal/src/chain/da/durability/retirement.rs
++++ b/examples/terminal/src/chain/da/durability/retirement.rs
+@@ -2,11 +2,7 @@
+ 
+ use super::*;
+ use crate::{
+-    chain::{
+-        native::RegistryEntry,
+-        types::Database,
+-        validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
+-    },
++    chain::{native::RegistryEntry, types::Database, validator::db_config},
+     protocol::{clearing_private, committee, genesis_balances},
+ };
+ use commonware_cryptography::Signer as _;
+@@ -22,6 +18,7 @@ async fn delayed_sealer(
+     context: &deterministic::Context,
+     prefix: &str,
+     deployment: &Deployment,
++    page_cache: CacheRef,
+ ) -> Sealer<DelayedContext> {
+     let strategy = context.strategy(NZUsize!(1));
+     let pending = PendingSyncs::default();
+@@ -32,16 +29,14 @@ async fn delayed_sealer(
+     };
+     let db = <Database<DelayedContext> as DatabaseSet<_>>::init(
+         context.child("settlement"),
+-        db_config(
+-            &format!("{prefix}-settlement"),
+-            CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+-        ),
++        db_config(&format!("{prefix}-settlement"), page_cache.clone()),
+     )
+     .await;
+     Sealer::new(
+         context.child("sealer"),
+         Config {
+             strategy,
++            page_cache,
+             scheme: bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap())
+                 .unwrap(),
+             registry: RegistryView::new(vec![RegistryEntry {
+@@ -63,15 +58,16 @@ async fn replacement(
+     context: &deterministic::Context,
+     prefix: &str,
+     deployment: &Deployment,
+-    prepared: PreparedReplica<Key, Digest, Rayon>,
++    prepared: Vec<PreparedReplica<Key, Digest, Rayon>>,
++    page_cache: CacheRef,
+ ) -> NativeReplica<DelayedContext> {
+     let pending = PendingSyncs::default();
+     let config = replica_config(
+         &format!("{prefix}-replica-{}-1", deployment.digest()),
+-        context,
++        page_cache,
+         context.strategy(NZUsize!(1)),
+     );
+-    let replica = drive_pending_syncs(
++    let mut replica = drive_pending_syncs(
+         &pending,
+         Box::pin(tests::init_config(
+             DelayedSyncContext {
+@@ -83,45 +79,75 @@ async fn replacement(
+         )),
+     )
+     .await
+-    .unwrap()
+-    .apply(prepared)
+-    .await
+     .unwrap();
++    for prepared in prepared {
++        replica = drive_pending_syncs(&pending, replica.apply(prepared))
++            .await
++            .unwrap();
++    }
+     drive_pending_syncs(&pending, replica.sync()).await.unwrap()
+ }
+ 
+ #[test]
+-fn imported_retirement_waits_for_commit_optional_rollover_io() {
++fn imported_retirement_waits_for_commit_optional_merkle_rollover_io() {
+     for fail in [false, true] {
+         let prefix = if fail {
+             "retirement_error"
+         } else {
+             "retirement_success"
+         };
+-        let ((deployment, offset_partition), crash) = deterministic::Runner::default()
++        let ((deployment, merkle_partition), crash) = deterministic::Runner::default()
+             .start_and_recover(move |context| async move {
+-                let fixture = Fixture::new(&context, prefix, 126).await;
++                let mut fixture = Fixture::new(&context, prefix, 511).await;
+                 let deployment = fixture.lane.deployment.clone();
++                let mut replacement_prepared = Vec::new();
++                for outgoing in [510, 510] {
++                    let (history_ballot, _, old_history) = fixture
++                        .prepare(
++                            outgoing,
++                            0,
++                            Floors {
++                                activity: 0,
++                                payouts: 0,
++                            },
++                        )
++                        .await;
++                    let (_, _, replacement_history) = fixture
++                        .prepare(
++                            outgoing,
++                            0,
++                            Floors {
++                                activity: 0,
++                                payouts: 0,
++                            },
++                        )
++                        .await;
++                    replacement_prepared.push(replacement_history.into_parts().1);
++                    fixture.candidate(history_ballot, old_history).await;
++                    fixture.promote().await;
++                }
+                 let (ballot, _, old_prepared) = fixture
+                     .prepare(
++                        1,
+                         0,
+-                        126,
+                         Floors {
+                             activity: 0,
+                             payouts: 0,
+                         },
+                     )
+                     .await;
+-                let (_, _, replacement_prepared) = fixture
++                let (_, _, replacement_candidate) = fixture
+                     .prepare(
++                        1,
+                         0,
+-                        126,
+                         Floors {
+                             activity: 0,
+                             payouts: 0,
+                         },
+                     )
+                     .await;
++                replacement_prepared.push(replacement_candidate.into_parts().1);
++                let page_cache = fixture.page_cache.clone();
+                 drop(fixture);
+ 
+                 let gates = std::array::from_fn(|_| PendingSyncs::default());
+@@ -133,41 +159,44 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                     &deployment,
+                     &gates,
+                     checkpoint_gate,
++                    page_cache.clone(),
+                 )
+                 .await;
+                 gates[0].unblock();
+-                gates[1].unblock();
++                gates[2].unblock();
+ 
+                 let replacement = replacement(
+                     &context,
+                     prefix,
+                     &deployment,
+-                    replacement_prepared.into_parts().1,
++                    replacement_prepared,
++                    page_cache.clone(),
+                 )
+                 .await;
+                 let mut checkpoint = lane.manifest().canonical.checkpoint.clone();
+                 checkpoint.generation = 1;
+-                checkpoint.next = 1;
++                checkpoint.next = ballot.epoch.checked_add(1).unwrap();
+                 checkpoint.batch = Some(ballot.header.batch_id::<Sha256>().into_digest());
+                 checkpoint.head = replacement.head();
+                 let transfer = sync::Transfer::capture(&replacement, checkpoint)
+                     .await
+                     .unwrap();
+ 
+-                let payout_gate = &gates[2];
+-                let starts = payout_gate.starts();
+-                let entered = payout_gate.entered();
+-                let completions = payout_gate.completions();
+-                // At the exact variable-journal boundary, the offsets fixed journal seals first,
+-                // followed by the authoritative data journal. Commit then syncs the new data tail
+-                // and joins only the latter two completions.
++                let activity_gate = &gates[1];
++                let starts = activity_gate.starts();
++                let entered = activity_gate.entered();
++                let completions = activity_gate.completions();
++                // Two valid 511-row, 510-entry closes leave 2,045 activity leaves. The final
++                // two-row, one-entry close reaches 2,049 leaves and exactly 4,096 MMR nodes.
++                // Commit starts the authoritative data-tail sync first, then flushing those nodes
++                // starts an optional Merkle rollover that publication does not join.
+                 let mut publication = Box::pin(persist_candidate(
+                     &mut lane,
+                     old_prepared.into_parts().1,
+                     ballot.clone(),
+                 ));
+                 loop {
+-                    if payout_gate.starts() >= starts + 3 {
++                    if activity_gate.starts() >= starts + 2 {
+                         break;
+                     }
+                     select! {
+@@ -175,17 +204,17 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                         _ = commonware_runtime::reschedule() => {},
+                     }
+                 }
+-                assert_eq!(payout_gate.starts(), starts + 3);
+-                assert_eq!(payout_gate.entered(), entered + 2);
+-                assert_eq!(payout_gate.completions(), completions);
+-                assert_eq!(payout_gate.lock().len(), 3);
+-                let optional = next_pending_sync(payout_gate);
+-                assert_eq!(payout_gate.lock().len(), 2);
+-                release_next_pending_syncs(payout_gate, 2);
++                assert_eq!(activity_gate.starts(), starts + 2);
++                assert_eq!(activity_gate.entered(), entered + 1);
++                assert_eq!(activity_gate.completions(), completions);
++                assert_eq!(activity_gate.lock().len(), 2);
++                release_next_pending_syncs(activity_gate, 1);
+                 publication.await.unwrap();
+-                assert_eq!(payout_gate.starts(), starts + 3);
+-                assert_eq!(payout_gate.entered(), entered + 2);
+-                assert_eq!(payout_gate.completions(), completions + 2);
++                assert_eq!(activity_gate.starts(), starts + 2);
++                assert_eq!(activity_gate.entered(), entered + 1);
++                assert_eq!(activity_gate.completions(), completions + 1);
++                assert_eq!(activity_gate.lock().len(), 1);
++                let optional = next_pending_sync(activity_gate);
+                 assert_eq!(lane.state.as_ref().unwrap().head(), replacement.head());
+                 assert_eq!(
+                     lane.state
+@@ -193,9 +222,9 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                         .unwrap()
+                         .logs()
+                         .head()
+-                        .payouts
++                        .activity
+                         .operations,
+-                    128
++                    2049
+                 );
+                 assert_eq!(
+                     lane.manifest().candidate.as_ref().unwrap().checkpoint.head,
+@@ -209,14 +238,15 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+ 
+                 let old_config = replica_config(
+                     &format!("{prefix}-replica-{}-0", deployment.digest()),
+-                    &context,
++                    page_cache.clone(),
+                     context.strategy(NZUsize!(1)),
+                 );
+-                let offset_partition =
+-                    format!("{}_offsets-blobs", old_config.logs.payouts.log.partition);
+-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                let merkle_partition =
++                    format!("{}-blobs", old_config.logs.activity.merkle.journal_partition);
++                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+ 
+-                let mut sealer = delayed_sealer(&context, prefix, &deployment).await;
++                let mut sealer =
++                    delayed_sealer(&context, prefix, &deployment, page_cache.clone()).await;
+                 let operator = ed25519::PrivateKey::from_seed(88).public_key();
+                 let validator = ed25519::PrivateKey::from_seed(100).public_key();
+                 let (_, (mut sender, _)) =
+@@ -239,13 +269,14 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 ));
+                 select! {
+                     _ = &mut optional_blocked => {},
+-                    result = &mut retirement => panic!("retirement bypassed pending offset sync: {result:?}"),
++                    result = &mut retirement => panic!("retirement bypassed pending Merkle sync: {result:?}"),
+                 }
+ 
+                 let checkpoint = checkpoint::Store::open(
+                     context.child("pending_marker"),
+                     prefix,
+                     deployment.digest(),
++                    page_cache,
+                 )
+                 .await
+                 .unwrap();
+@@ -255,7 +286,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                     1
+                 );
+                 assert!(checkpoint.stage(2).await.is_err());
+-                assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+ 
+                 release.send_lossy(if fail {
+                     Err(commonware_runtime::Error::Closed)
+@@ -265,21 +296,21 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 let result = retirement.await;
+                 if fail {
+                     assert!(result.is_err());
+-                    assert_eq!(payout_gate.completions(), completions + 2);
++                    assert_eq!(activity_gate.completions(), completions + 1);
+                     assert_eq!(lanes[0].manifest().garbage, Some(0));
+-                    assert!(!context.scan(&offset_partition).await.unwrap().is_empty());
++                    assert!(!context.scan(&merkle_partition).await.unwrap().is_empty());
+                 } else {
+                     result.unwrap();
+-                    assert_eq!(payout_gate.completions(), completions + 3);
++                    assert_eq!(activity_gate.completions(), completions + 2);
+                     assert!(lanes[0].manifest().garbage.is_none());
+                     assert!(matches!(
+-                        context.scan(&offset_partition).await,
++                        context.scan(&merkle_partition).await,
+                         Err(commonware_runtime::Error::PartitionMissing(_))
+                     ));
+                 }
+                 drop(lanes);
+                 drop(sealer);
+-                (deployment, offset_partition)
++                (deployment, merkle_partition)
+             });
+ 
+         deterministic::Runner::from(crash).start(|context| async move {
+@@ -295,7 +326,7 @@ fn imported_retirement_waits_for_commit_optional_rollover_io() {
+                 assert_eq!(lane.manifest().canonical.checkpoint.generation, 1);
+             }
+             assert!(matches!(
+-                context.scan(&offset_partition).await,
++                context.scan(&merkle_partition).await,
+                 Err(commonware_runtime::Error::PartitionMissing(_))
+             ));
+         });
+diff --git a/examples/terminal/src/chain/da/tests.rs b/examples/terminal/src/chain/da/tests.rs
+index 4adf191d4..88fb35631 100644
+--- a/examples/terminal/src/chain/da/tests.rs
++++ b/examples/terminal/src/chain/da/tests.rs
+@@ -5,6 +5,7 @@ use crate::{
+     chain::tx::{RegisterEpochRequest, SettlementTx},
+     protocol::{
+         Account, MAX_GENESIS_ACCOUNTS, Protocol, Wallet, clearing_private, committee, deployments,
++        fixture_page_cache,
+     },
+ };
+ use commonware_clearing::bajillion::{
+@@ -44,6 +45,7 @@ pub(crate) async fn init_config<E: StorageContext + Spawner>(
+ 
+ pub(super) struct Fixture {
+     pub(super) lane: Lane<deterministic::Context>,
++    pub(super) page_cache: CacheRef,
+     strategy: Rayon,
+     liability: u64,
+     wallets: Vec<Wallet>,
+@@ -72,11 +74,12 @@ impl Fixture {
+             total.checked_add(account.balance).unwrap()
+         });
+         let strategy = context.strategy(NZUsize!(1));
++        let page_cache = fixture_page_cache(context);
+         let state = Box::pin(init_config(
+             context.child("fixture"),
+             replica_config(
+                 &format!("{prefix}-replica-{}-0", deployment.digest()),
+-                context,
++                page_cache.clone(),
+                 strategy.clone(),
+             ),
+             genesis_balances(&deployment).unwrap(),
+@@ -93,10 +96,14 @@ impl Fixture {
+             state.state().head().operations(),
+         )
+         .unwrap();
+-        let checkpoints =
+-            checkpoint::Store::open(context.child("checkpoint"), prefix, deployment.digest())
+-                .await
+-                .unwrap();
++        let checkpoints = checkpoint::Store::open(
++            context.child("checkpoint"),
++            prefix,
++            deployment.digest(),
++            page_cache.clone(),
++        )
++        .await
++        .unwrap();
+         let (state, checkpoints) = recover(state, &deployment, checkpoints).await.unwrap();
+         Self {
+             lane: Lane {
+@@ -105,6 +112,7 @@ impl Fixture {
+                 state: Some(state),
+                 checkpoint: Some(checkpoints),
+             },
++            page_cache,
+             strategy,
+             liability,
+             wallets,
+@@ -291,9 +299,10 @@ async fn vote_case(context: &deterministic::Context, prefix: &str) -> VoteCase {
+     deployment.generate(context.child("genesis")).await.unwrap();
+     let protocol = Protocol::new(NZUsize!(1)).unwrap();
+     let strategy = context.strategy(NZUsize!(1));
++    let page_cache = fixture_page_cache(context);
+     let state = init_config(
+         context.child("operator"),
+-        replica_config(&format!("{prefix}-operator"), context, strategy.clone()),
++        replica_config(&format!("{prefix}-operator"), page_cache, strategy.clone()),
+         genesis_balances(&deployment).unwrap(),
+     )
+     .await
+@@ -424,7 +433,7 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
+         for restart in 0..2 {
+             let run = context.child(if restart == 0 { "vote_initial" } else { "vote_restart" });
+             let ((mut sender, mut receiver), channel) = network(&run, &operator, &validator, true, true).await;
+-            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { strategy: run.strategy(NZUsize!(1)), scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
++            let (actor, mailbox) = Sealer::new(run.child("owner"), Config { strategy: run.strategy(NZUsize!(1)), page_cache: initial.page_cache.clone(), scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: db.clone(), partition: "saved-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false });
+             let handle = actor.start(channel);
+             let mut other = dealing.clone();
+             other.bytes = if restart == 0 { Bytes::from_static(&[0]) } else { alternate.bytes.clone() };
+@@ -451,7 +460,14 @@ fn saved_vote_reissues_after_restart_and_admission_promotes_without_apply() {
+             handle.abort();
+             let _ = handle.await;
+         }
+-        let saved = checkpoint::Store::open(context.child("inspect"), "saved-vote", deployment.digest()).await.unwrap();
++        let saved = checkpoint::Store::open(
++            context.child("inspect"),
++            "saved-vote",
++            deployment.digest(),
++            initial.page_cache.clone(),
++        )
++        .await
++        .unwrap();
+         assert_eq!(saved.get().unwrap().canonical.checkpoint.next, 1);
+         assert!(saved.get().unwrap().candidate.is_none());
+         assert!(saved.get().unwrap().decision.is_none());
+@@ -469,6 +485,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
+             let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
+             let (actor, _mailbox) = Sealer::new(context.child("initial_owner"), Config {
+                 strategy: context.strategy(NZUsize!(1)),
++                page_cache: initial.page_cache.clone(),
+                 scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
+                 partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
+             });
+@@ -529,6 +546,7 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
+         let ((mut sender, mut receiver), channel) = network(&context, &operator, &validator, true, true).await;
+         let (actor, mailbox) = Sealer::new(context.child("restarted_owner"), Config {
+             strategy: context.strategy(NZUsize!(1)),
++            page_cache: initial.page_cache.clone(),
+             scheme: initial.scheme.clone(), registry: initial.registry.clone(), db: initial.db.clone(),
+             partition: "discarded-vote".into(), validators: Vec::new(), fetch_timeout: Duration::from_secs(1), retain_history: false,
+         });
+@@ -542,7 +560,14 @@ fn discarded_vote_survives_private_pruning_and_crash_before_another_valid_propos
+         assert_eq!(metric(&context, "restarted_owner_replica_state_balances_apply_batch_calls_total"), 0);
+         handle.abort();
+         let _ = handle.await;
+-        let control = checkpoint::Store::open(context.child("inspect"), "discarded-vote", deployment.digest()).await.unwrap();
++        let control = checkpoint::Store::open(
++            context.child("inspect"),
++            "discarded-vote",
++            deployment.digest(),
++            initial.page_cache.clone(),
++        )
++        .await
++        .unwrap();
+         assert_eq!(control.get().unwrap().decision.as_ref().unwrap().encode(), saved);
+         assert!(control.get().unwrap().candidate.is_none());
+     });
+@@ -614,24 +639,19 @@ pub(super) async fn sealer(
+     prefix: &str,
+     deployment: &Deployment,
+ ) -> (Sealer<deterministic::Context>, Mailbox) {
+-    use crate::chain::{
+-        native::RegistryEntry,
+-        validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
+-    };
++    use crate::chain::{native::RegistryEntry, validator::db_config};
+     use commonware_glue::stateful::db::DatabaseSet;
+-    use commonware_runtime::buffer::paged::CacheRef;
++    let page_cache = fixture_page_cache(context);
+     let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
+         context.child("settlement"),
+-        db_config(
+-            &format!("{prefix}-settlement"),
+-            CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+-        ),
++        db_config(&format!("{prefix}-settlement"), page_cache.clone()),
+     )
+     .await;
+     Sealer::new(
+         context.child("sealer"),
+         Config {
+             strategy: context.strategy(NZUsize!(1)),
++            page_cache,
+             scheme: bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap())
+                 .unwrap(),
+             registry: RegistryView::new(vec![RegistryEntry {
+@@ -647,3 +667,28 @@ pub(super) async fn sealer(
+         },
+     )
+ }
++
++#[test]
++fn sealer_reuses_one_cache_across_replica_generations() {
++    deterministic::Runner::default().start(|context| async move {
++        let deployment = deployments().remove(0);
++        let (sealer, _) = sealer(&context, "cache-owner", &deployment).await;
++        let mut previous = sealer.page_cache.next_id();
++        for generation in [0, 1] {
++            let config = sealer.config(deployment.digest(), generation);
++            let caches = [
++                &config.state.merkle_config.page_cache,
++                &config.state.journal_config.page_cache,
++                &config.logs.activity.merkle.page_cache,
++                &config.logs.activity.log.page_cache,
++                &config.logs.payouts.merkle.page_cache,
++                &config.logs.payouts.log.page_cache,
++            ];
++            for cache in caches {
++                let current = cache.next_id();
++                assert_eq!(current, previous + 1);
++                previous = current;
++            }
++        }
++    });
++}
+diff --git a/examples/terminal/src/chain/query.rs b/examples/terminal/src/chain/query.rs
+index 2e2e198f1..9810bd918 100644
+--- a/examples/terminal/src/chain/query.rs
++++ b/examples/terminal/src/chain/query.rs
+@@ -1262,7 +1262,11 @@ mod tests {
+     #[test]
+     fn balance_evidence_codec_preserves_membership_absence_and_bounds() {
+         deterministic::Runner::default().start(|context| async move {
+-            let config = state_config("query-proofs", &context, Sequential);
++            let config = state_config(
++                "query-proofs",
++                crate::protocol::fixture_page_cache(&context),
++                Sequential,
++            );
+             let state = State::<_, Sha256>::init(
+                 context,
+                 config,
+diff --git a/examples/terminal/src/chain/registry.rs b/examples/terminal/src/chain/registry.rs
+index 5fc5d7ccc..b7625b653 100644
+--- a/examples/terminal/src/chain/registry.rs
++++ b/examples/terminal/src/chain/registry.rs
+@@ -155,7 +155,7 @@ mod tests {
+     use crate::{
+         chain::{
+             tx::{RegisterDeploymentRequest, SettlementTx},
+-            validator::{PAGE_CACHE_SIZE, PAGE_SIZE, db_config},
++            validator::db_config,
+         },
+         protocol::{self, Timing},
+     };
+@@ -165,9 +165,7 @@ mod tests {
+     use commonware_glue::stateful::db::DatabaseSet;
+     use commonware_macros::select;
+     use commonware_p2p::{PeerSetSubscription, Provider};
+-    use commonware_runtime::{
+-        Metrics as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+-    };
++    use commonware_runtime::{Metrics as _, Runner as _, Supervisor as _, deterministic};
+     use commonware_utils::channel::mpsc;
+ 
+     type Tracked = Arc<Mutex<Vec<(u64, TrackedPeers<ed25519::PublicKey>)>>>;
+@@ -216,10 +214,7 @@ mod tests {
+             }
+             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
+                 context.child("db"),
+-                db_config(
+-                    "registry-polls",
+-                    CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+-                ),
++                db_config("registry-polls", protocol::fixture_page_cache(&context)),
+             )
+             .await;
+             let known = native.deployments.len();
+@@ -306,7 +301,7 @@ mod tests {
+             native.deployments[0].network_key = old_peer.clone();
+             let view = RegistryView::new(native.deployments.clone());
+             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
+-                context.child("db"), db_config("registry-test", CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE)),
++                context.child("db"), db_config("registry-test", protocol::fixture_page_cache(&context)),
+             ).await;
+             let committee = Set::from_iter_dedup([ed25519::PrivateKey::from_seed(3).public_key()]);
+             let recorder = Recorder::default();
+@@ -372,7 +367,7 @@ mod tests {
+             let root = db.read().await.root();
+             drop(db);
+             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
+-                context.child("reopened"), db_config("registry-test", CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE)),
++                context.child("reopened"), db_config("registry-test", protocol::fixture_page_cache(&context)),
+             ).await;
+             assert_eq!(db.read().await.root(), root);
+             assert_eq!(state::registry(&db, &native).await.unwrap().len(), 4);
+diff --git a/examples/terminal/src/chain/setup.rs b/examples/terminal/src/chain/setup.rs
+index ecaace270..591330931 100644
+--- a/examples/terminal/src/chain/setup.rs
++++ b/examples/terminal/src/chain/setup.rs
+@@ -1674,7 +1674,7 @@ mod tests {
+                     context.child("generated_genesis"),
+                     crate::protocol::state_config(
+                         &format!("verify-{}", deployment.digest()),
+-                        &context,
++                        crate::protocol::fixture_page_cache(&context),
+                         commonware_parallel::Sequential,
+                     ),
+                     crate::protocol::genesis_balances(&deployment).unwrap(),
+diff --git a/examples/terminal/src/chain/tests.rs b/examples/terminal/src/chain/tests.rs
+index 6c6811eda..e3255fd80 100644
+--- a/examples/terminal/src/chain/tests.rs
++++ b/examples/terminal/src/chain/tests.rs
+@@ -353,9 +353,10 @@ async fn replay_state<S: Strategy>(
+     config: commonware_clearing::bajillion::qmdb::Config<S>,
+     history: &[(StateRoot<Digest>, Mutations, Option<SettlementResult>)],
+ ) -> Replica<deterministic::Context, Sha256, Key, S> {
++    let page_cache = config.journal_config.page_cache.clone();
+     let logs_config = da::replica_config(
+         &config.journal_config.partition,
+-        &context,
++        page_cache,
+         config.merkle_config.strategy.clone(),
+     )
+     .logs;
+@@ -426,7 +427,11 @@ impl TestState {
+         context: deterministic::Context,
+         history: Vec<(StateRoot<Digest>, Mutations, Option<SettlementResult>)>,
+     ) -> Self {
+-        let config = crate::protocol::state_config("checkpoint", &context, Sequential);
++        let config = crate::protocol::state_config(
++            "checkpoint",
++            crate::protocol::fixture_page_cache(&context),
++            Sequential,
++        );
+         let state = replay_state(context, config, &history).await;
+         let mut accounts = accounts();
+         accounts.sort_by(|a, b| a.key.cmp(&b.key));
+@@ -580,7 +585,11 @@ fn build_fixture(
+     let owned = protocol.clone();
+     let history = predecessor.history;
+     let (prepared, successor) = deterministic::Runner::default().start(move |context| async move {
+-        let config = crate::protocol::state_config("prepare", &context, owned.strategy().clone());
++        let config = crate::protocol::state_config(
++            "prepare",
++            crate::protocol::fixture_page_cache(&context),
++            owned.strategy().clone(),
++        );
+         let state = replay_state(context.child("state"), config, &history).await;
+         let prepared = owned.prepare(registration, Vec::new()).unwrap();
+         let (result, candidate) = owned
+@@ -629,7 +638,11 @@ fn close_fixture(
+     let owned = protocol.clone();
+     let history = predecessor.history;
+     let result = deterministic::Runner::default().start(move |context| async move {
+-        let config = crate::protocol::state_config("complete", &context, owned.strategy().clone());
++        let config = crate::protocol::state_config(
++            "complete",
++            crate::protocol::fixture_page_cache(&context),
++            owned.strategy().clone(),
++        );
+         let state = replay_state(context, config, &history).await;
+         owned
+             .complete(build.prepared, &state, &mut TestRng::new(91))
+@@ -1334,8 +1347,11 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
+         .registration_at(0, deposits, withdrawals, 400, 11, 12)
+         .unwrap();
+     let result = deterministic::Runner::default().start(move |context| async move {
+-        let config =
+-            crate::protocol::state_config("withdrawal", &context, protocol.strategy().clone());
++        let config = crate::protocol::state_config(
++            "withdrawal",
++            crate::protocol::fixture_page_cache(&context),
++            protocol.strategy().clone(),
++        );
+         let balances = replay_state(context, config, &state.history).await;
+         let prepared = protocol.prepare(registration, Vec::new()).unwrap();
+         let (result, candidate) = protocol
+@@ -2311,8 +2327,11 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
+             });
+             let owned = protocol.clone();
+             let result = deterministic::Runner::default().start(move |context| async move {
+-                let config =
+-                    crate::protocol::state_config("carrying", &context, owned.strategy().clone());
++                let config = crate::protocol::state_config(
++                    "carrying",
++                    crate::protocol::fixture_page_cache(&context),
++                    owned.strategy().clone(),
++                );
+                 let balances = replay_state(context, config, &state.history).await;
+                 let prepared = owned.prepare(registration, Vec::new()).unwrap();
+                 owned
+@@ -4202,7 +4221,7 @@ impl EngineDefinition for Distributed {
+         } else {
+             format!("validator-{index}")
+         };
+-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
++        let page_cache = crate::protocol::fixture_page_cache(&context);
+         let db_config = config(&partition_prefix, &context);
+ 
+         let mut channels = channels.into_iter();
+@@ -4517,6 +4536,7 @@ impl EngineDefinition for Distributed {
+                 context.child("sealer"),
+                 da::Config {
+                     strategy: context.strategy(NZUsize!(1)),
++                    page_cache: page_cache.clone(),
+                     retain_history: self.fetcher.is_some(),
+                     scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
+                         committee().unwrap(),
+@@ -6027,7 +6047,7 @@ impl EngineDefinition for Walkthrough {
+             || format!("validator-{index}"),
+             |op| format!("operator-{op}"),
+         );
+-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
++        let page_cache = crate::protocol::fixture_page_cache(&context);
+         let db_config = config(&partition_prefix, &context);
+ 
+         let mut channels = channels.into_iter();
+@@ -6446,6 +6466,7 @@ impl EngineDefinition for Walkthrough {
+             context.child("sealer"),
+             da::Config {
+                 strategy: context.strategy(NZUsize!(1)),
++                page_cache: page_cache.clone(),
+                 retain_history: false,
+                 scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
+                     committee().unwrap(),
+diff --git a/examples/terminal/src/chain/tests/flat_payouts.rs b/examples/terminal/src/chain/tests/flat_payouts.rs
+index 13ea90be0..093cdfd9d 100644
+--- a/examples/terminal/src/chain/tests/flat_payouts.rs
++++ b/examples/terminal/src/chain/tests/flat_payouts.rs
+@@ -89,7 +89,7 @@ fn proposals_refresh_claims_while_every_block_finalizes_and_consume_zero_outputs
+             context.child("replica"),
+             crate::protocol::state_config(
+                 "flat-payout-replica",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 protocol.strategy().clone(),
+             ),
+             &genesis.history,
+@@ -620,7 +620,7 @@ fn certified_payout_status_rejects_preissuance_splices_and_tracks_split_ranges()
+             context.child("payout_status_validator"),
+             crate::protocol::state_config(
+                 "payout_status_validator",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 protocol.strategy().clone(),
+             ),
+             &state.history,
+diff --git a/examples/terminal/src/chain/tests/preflight.rs b/examples/terminal/src/chain/tests/preflight.rs
+index d7d120661..d05f45bce 100644
+--- a/examples/terminal/src/chain/tests/preflight.rs
++++ b/examples/terminal/src/chain/tests/preflight.rs
+@@ -684,7 +684,7 @@ fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
+             context.child("preflight_withdrawal_validator"),
+             crate::protocol::state_config(
+                 "preflight-withdrawal-validator",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 protocol.strategy().clone(),
+             ),
+             &state.history,
+@@ -811,7 +811,7 @@ fn queued_withdrawal_carries_zero_after_accepted_spending() {
+                 context.child("queued_zero_validator"),
+                 crate::protocol::state_config(
+                     "queued-zero-validator",
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     protocol.strategy().clone(),
+                 ),
+                 &genesis.history,
+diff --git a/examples/terminal/src/chain/tests/proof_restart.rs b/examples/terminal/src/chain/tests/proof_restart.rs
+index 0ddcf2e09..ddee04a8b 100644
+--- a/examples/terminal/src/chain/tests/proof_restart.rs
++++ b/examples/terminal/src/chain/tests/proof_restart.rs
+@@ -171,6 +171,7 @@ async fn prepare_history(context: deterministic::Context) -> RestartExpected {
+         context.child("initial_sealer"),
+         da::Config {
+             strategy: strategy.clone(),
++            page_cache: crate::protocol::fixture_page_cache(&context),
+             retain_history: true,
+             scheme: clearing.clone(),
+             registry: fixture.registry.clone(),
+@@ -550,6 +551,7 @@ async fn verify_recovered(context: deterministic::Context, expected: RestartExpe
+         context.child("restarted_sealer"),
+         da::Config {
+             strategy: context.strategy(NZUsize!(1)),
++            page_cache: crate::protocol::fixture_page_cache(&context),
+             retain_history: true,
+             scheme: clearing,
+             registry: fixture.registry.clone(),
+diff --git a/examples/terminal/src/chain/tests/virtual_balances.rs b/examples/terminal/src/chain/tests/virtual_balances.rs
+index f88e24c10..86e1a5176 100644
+--- a/examples/terminal/src/chain/tests/virtual_balances.rs
++++ b/examples/terminal/src/chain/tests/virtual_balances.rs
+@@ -88,7 +88,7 @@ fn first_credit(invalidated: bool) {
+         let db = open(context.child("virtual_credit"), "virtual-credit").await;
+         let config = crate::protocol::state_config(
+             "virtual-balances",
+-            &context,
++            crate::protocol::fixture_page_cache(&context),
+             protocol.strategy().clone(),
+         );
+         let mut balances = replay_state(context.child("balances"), config, &genesis.history).await;
+diff --git a/examples/terminal/src/chain/tx.rs b/examples/terminal/src/chain/tx.rs
+index b2f307f56..227398c06 100644
+--- a/examples/terminal/src/chain/tx.rs
++++ b/examples/terminal/src/chain/tx.rs
+@@ -1027,7 +1027,7 @@ mod tests {
+                 let deployment = deployments().remove(0);
+                 let config = state_config(
+                     "queue-withdrawal-codec",
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     commonware_parallel::Sequential,
+                 );
+                 let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256>::init(
+diff --git a/examples/terminal/src/chain/validator.rs b/examples/terminal/src/chain/validator.rs
+index 1bf825353..7e7f50a0b 100644
+--- a/examples/terminal/src/chain/validator.rs
++++ b/examples/terminal/src/chain/validator.rs
+@@ -50,13 +50,15 @@ use commonware_macros::boxed;
+ use commonware_p2p::{Manager, TrackedPeers, authenticated::discovery};
+ use commonware_parallel::Sequential;
+ use commonware_runtime::{
+-    Handle, Quota, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, tokio,
++    Handle, Quota, Strategizer as _, Supervisor as _,
++    buffer::paged::{CacheRef, page_size},
++    tokio,
+ };
+ use commonware_storage::{
+     archive::prunable, journal::contiguous::variable::Config as VariableJournalConfig,
+     merkle::full::Config as MerkleConfig, translator::TwoCap,
+ };
+-use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, ordered::Set};
++use commonware_utils::{NZU32, NZU64, NZUsize, ordered::Set};
+ use std::{
+     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+     path::PathBuf,
+@@ -114,14 +116,22 @@ pub(crate) const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
+ /// Maximum P2P message size in bytes.
+ pub(crate) const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024;
+ 
+-/// Page size for storage page caches.
+-pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
++/// Physical bytes occupied by each checksum-bearing storage page.
++pub(crate) const PHYSICAL_PAGE_SIZE: u32 = 4_096;
+ 
+-/// Number of pages held by each page cache.
+-pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
++/// Logical payload bytes in each aligned storage page.
++pub(crate) const PAGE_SIZE: NonZeroU16 = page_size(PHYSICAL_PAGE_SIZE);
++
++/// Physical-page budget for the validator's shared cache.
++pub(crate) const PAGE_CACHE_BUDGET: usize = 1 << 30;
++
++/// Number of physical pages held by the validator's shared cache.
++pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize =
++    NonZeroUsize::new(PAGE_CACHE_BUDGET / PHYSICAL_PAGE_SIZE as usize)
++        .expect("page-cache budget must hold at least one complete page");
+ 
+ /// Buffer size for journal replay and writes.
+-pub(crate) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
++pub(crate) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(8_388_608);
+ 
+ /// Maximum transactions retained in each deployment's ingress class.
+ pub(crate) const INGRESS_CAPACITY: NonZeroUsize = NZUsize!(64);
+@@ -481,6 +491,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
+         context.child("sealer"),
+         da::Config {
+             strategy: context.strategy(args.workers),
++            page_cache: page_cache.clone(),
+             retain_history: args.retain_native_history,
+             scheme: clearing,
+             registry,
+diff --git a/examples/terminal/src/operator/qmdb.rs b/examples/terminal/src/operator/qmdb.rs
+index 529040204..888b58e86 100644
+--- a/examples/terminal/src/operator/qmdb.rs
++++ b/examples/terminal/src/operator/qmdb.rs
+@@ -5,7 +5,10 @@ use super::{
+     store::EpochReader,
+ };
+ use crate::{
+-    chain::da::replica_config,
++    chain::{
++        da::replica_config,
++        validator::{PAGE_CACHE_SIZE, PAGE_SIZE},
++    },
+     protocol::{Account, Key, Protocol},
+ };
+ use anyhow::{Context as _, Result, ensure};
+@@ -21,7 +24,7 @@ use commonware_clearing::bajillion::{
+ use commonware_codec::{DecodeExt as _, Encode, FixedSize as _};
+ use commonware_cryptography::{Sha256, sha256::Digest};
+ use commonware_parallel::Rayon;
+-use commonware_runtime::{Runner as _, Spawner, tokio};
++use commonware_runtime::{Runner as _, Spawner, buffer::paged::CacheRef, tokio};
+ use commonware_storage::Context;
+ use rusqlite::{Connection, OptionalExtension as _, params};
+ use std::{
+@@ -239,7 +242,8 @@ async fn run(
+     let mut recovery = Recovery::default();
+     let initialized: Result<_> = Box::pin(async {
+         initialize_checkpoints(&connection)?;
+-        let config = replica_config("operator-proof", &context, protocol.strategy().clone());
++        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
++        let config = replica_config("operator-proof", page_cache, protocol.strategy().clone());
+         let state = Box::pin(recover(
+             context,
+             config,
+@@ -860,7 +864,7 @@ mod tests {
+             deterministic::Runner::default().start(|context| async move {
+                 let mut config = replica_config(
+                     "bootstrap-cut",
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     Rayon::new(NonZeroUsize::MIN).unwrap(),
+                 );
+                 if cut == RecoveryCut::Applied {
+@@ -931,7 +935,7 @@ mod tests {
+         deterministic::Runner::default().start(|context| async move {
+             let config = replica_config(
+                 "unauthorized-head",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 Rayon::new(NonZeroUsize::MIN).unwrap(),
+             );
+             let connection = checkpoints();
+@@ -1049,7 +1053,11 @@ mod tests {
+             let genesis = genesis.clone();
+             let results = results.clone();
+             deterministic::Runner::default().start(|context| async move {
+-                let mut config = replica_config("suffix", &context, protocol.strategy().clone());
++                let mut config = replica_config(
++                    "suffix",
++                    crate::protocol::fixture_page_cache(&context),
++                    protocol.strategy().clone(),
++                );
+                 if cut == RecoveryCut::Applied {
+                     config.state.journal_config.items_per_blob = NonZeroU64::MIN;
+                     config.state.merkle_config.items_per_blob = NonZeroU64::MIN;
+@@ -1191,7 +1199,7 @@ mod tests {
+             deterministic::Runner::default().start(|context| async move {
+                 let config = replica_config(
+                     "configured",
+-                    &context,
++                    crate::protocol::fixture_page_cache(&context),
+                     Rayon::new(NonZeroUsize::MIN).unwrap(),
+                 );
+                 let state = OperatorReplica::open(context.child("derive"), config.clone())
+@@ -1252,7 +1260,7 @@ mod tests {
+         deterministic::Runner::default().start(|context| async move {
+             let config = replica_config(
+                 "historical",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 Rayon::new(NonZeroUsize::MIN).unwrap(),
+             );
+             let account = wallets().remove(0).public_key();
+@@ -1336,7 +1344,7 @@ mod tests {
+         deterministic::Runner::default().start(|context| async move {
+             let config = replica_config(
+                 "payout-proofs",
+-                &context,
++                crate::protocol::fixture_page_cache(&context),
+                 Rayon::new(NonZeroUsize::MIN).unwrap(),
+             );
+             let mut replica = OperatorReplica::open(context.child("replica"), config)
+diff --git a/examples/terminal/src/protocol.rs b/examples/terminal/src/protocol.rs
+index dab01c038..4008137f9 100644
+--- a/examples/terminal/src/protocol.rs
++++ b/examples/terminal/src/protocol.rs
+@@ -754,9 +754,14 @@ impl Deployment {
+     where
+         E: commonware_storage::Context + commonware_runtime::Spawner,
+     {
++        let page_cache = CacheRef::from_pooler(
++            &context,
++            crate::chain::validator::PAGE_SIZE,
++            TRANSIENT_PAGE_CACHE_SIZE,
++        );
+         let config = state_config(
+             &format!("setup-genesis-{}", self.digest),
+-            &context,
++            page_cache,
+             commonware_parallel::Sequential,
+         );
+         let state = State::<_, Sha256>::open(context, config).await?;
+@@ -844,25 +849,31 @@ pub(crate) fn genesis_balances(
+ 
+ pub(crate) const STATE_OPERATIONS_PER_BLOB: NonZeroU64 = NZU64!(4096);
+ pub(crate) const STATE_MERKLE_NODES_PER_BLOB: NonZeroU64 = NZU64!(4096);
++const TRANSIENT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
++
++/// Production page geometry with bounded capacity for deterministic fixtures.
++#[cfg(test)]
++pub(crate) fn fixture_page_cache(pooler: &impl commonware_runtime::BufferPooler) -> CacheRef {
++    CacheRef::from_pooler(
++        pooler,
++        crate::chain::validator::PAGE_SIZE,
++        TRANSIENT_PAGE_CACHE_SIZE,
++    )
++}
+ 
+ /// Partitions for the single account QMDB and its retained historical proofs.
+ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
+     prefix: &str,
+-    pooler: &impl commonware_runtime::BufferPooler,
++    page_cache: CacheRef,
+     strategy: S,
+ ) -> commonware_clearing::bajillion::qmdb::Config<S> {
+-    let page_cache = CacheRef::from_pooler(
+-        pooler,
+-        crate::chain::validator::PAGE_SIZE,
+-        crate::chain::validator::PAGE_CACHE_SIZE,
+-    );
+     FixedConfig {
+         merkle_config: MerkleConfig {
+             journal_partition: format!("{prefix}-merkle"),
+             metadata_partition: format!("{prefix}-metadata"),
+             items_per_blob: STATE_MERKLE_NODES_PER_BLOB,
+-            write_buffer: NZUsize!(65536),
+-            replay_buffer: NZUsize!(65536),
++            write_buffer: crate::chain::validator::IO_BUFFER_SIZE,
++            replay_buffer: crate::chain::validator::IO_BUFFER_SIZE,
+             strategy,
+             page_cache: page_cache.clone(),
+         },
+@@ -870,8 +881,8 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
+             partition: format!("{prefix}-journal"),
+             items_per_blob: STATE_OPERATIONS_PER_BLOB,
+             page_cache,
+-            write_buffer: NZUsize!(65536),
+-            replay_buffer: NZUsize!(65536),
++            write_buffer: crate::chain::validator::IO_BUFFER_SIZE,
++            replay_buffer: crate::chain::validator::IO_BUFFER_SIZE,
+         },
+         grafted_metadata_partition: format!("{prefix}-grafted"),
+         translator: EightCap,
+@@ -892,7 +903,12 @@ where
+     E: commonware_storage::Context + commonware_runtime::Spawner,
+     S: commonware_parallel::Strategy,
+ {
+-    let config = crate::chain::da::replica_config(prefix, &context, strategy);
++    let page_cache = CacheRef::from_pooler(
++        &context,
++        crate::chain::validator::PAGE_SIZE,
++        TRANSIENT_PAGE_CACHE_SIZE,
++    );
++    let config = crate::chain::da::replica_config(prefix, page_cache, strategy);
+     let state = State::init(context.child("state"), config.state, balances).await?;
+     let logs = Logs::open(context.child("logs"), config.logs).await?;
+     Ok(Replica::from_parts(state, logs))
+@@ -965,9 +981,14 @@ pub(crate) async fn empty_genesis<E>(context: E) -> Result<ConfiguredGenesis<Dig
+ where
+     E: commonware_storage::Context + commonware_runtime::Spawner,
+ {
++    let page_cache = CacheRef::from_pooler(
++        &context,
++        crate::chain::validator::PAGE_SIZE,
++        TRANSIENT_PAGE_CACHE_SIZE,
++    );
+     let config = state_config(
+         "setup-empty-genesis",
+-        &context,
++        page_cache,
+         commonware_parallel::Sequential,
+     );
+     let state = State::<_, Sha256>::open(context, config).await?;
+@@ -1576,7 +1597,8 @@ async fn fixture_state<E>(
+ where
+     E: commonware_storage::Context + commonware_runtime::Spawner + commonware_runtime::BufferPooler,
+ {
+-    let config = crate::chain::da::replica_config("fixture-validator", &context, Sequential);
++    let page_cache = fixture_page_cache(&context);
++    let config = crate::chain::da::replica_config("fixture-validator", page_cache, Sequential);
+     let logs = Logs::open(context.child("logs"), config.logs).await?;
+     let mut state = State::<_, Sha256>::open(context.child("state"), config.state).await?;
+     ensure!(

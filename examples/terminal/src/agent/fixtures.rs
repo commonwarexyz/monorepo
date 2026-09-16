@@ -61,7 +61,11 @@ impl StateFixture {
                     )
                 })
                 .collect();
-            let config = state_config("wallet-fixture", &context, Sequential);
+            let config = state_config(
+                "wallet-fixture",
+                crate::protocol::fixture_page_cache(&context),
+                Sequential,
+            );
             let state = State::<_, Sha256>::init(context, config, genesis)
                 .await
                 .unwrap();

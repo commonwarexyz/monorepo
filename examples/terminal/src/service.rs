@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod lifecycle;
+mod payments;
 
 use crate::{
     agent::Agent,
@@ -20,11 +21,15 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use commonware_actor::mailbox::Receiver as MailboxReceiver;
 use commonware_clearing::bajillion::boundary::WithdrawalBatch;
-use commonware_codec::{DecodeExt as _, Encode as _};
-use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
-use commonware_runtime::{
-    Clock, Handle, Listener, Network, Runner as _, Spawner as _, Supervisor as _, tokio,
-};
+use commonware_codec::DecodeExt as _;
+#[cfg(test)]
+use commonware_codec::Encode as _;
+use commonware_cryptography::sha256::Digest;
+#[cfg(test)]
+use commonware_cryptography::{Hasher as _, Sha256};
+#[cfg(test)]
+use commonware_runtime::{Clock, Listener};
+use commonware_runtime::{Handle, Network, Runner as _, Spawner as _, Supervisor as _, tokio};
 use commonware_utils::{Acknowledgement as _, sync::Mutex};
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
@@ -46,7 +51,8 @@ fn runtime() -> tokio::Runner {
         tokio::Config::new()
             .with_worker_threads(2)
             .with_connect_timeout(Duration::from_secs(5))
-            .with_read_write_timeout(Duration::from_secs(5)),
+            .with_read_write_timeout(Duration::from_secs(5))
+            .with_zero_linger(false),
     )
 }
 
@@ -55,12 +61,14 @@ pub(crate) fn run_operator(
     node_dir: PathBuf,
     database: PathBuf,
     workers: NonZeroUsize,
+    proof_replica: bool,
 ) -> Result<()> {
     let runtime = tokio::Runner::new(
         tokio::Config::new()
             .with_worker_threads(3)
             .with_connect_timeout(Duration::from_secs(5))
             .with_read_write_timeout(Duration::from_secs(5))
+            .with_zero_linger(false)
             .with_storage_directory(node_dir.join("runtime")),
     );
     runtime.start(move |context| async move {
@@ -114,9 +122,11 @@ pub(crate) fn run_operator(
                 config.clearing,
                 config.ack,
                 epoch_fee,
+                proof_replica,
             )
             .context("initialize SQLite operator")?,
         ));
+        let payment_strategy = operator.lock().payment_strategy();
 
         if let Some(observed) = held {
             observe(&context, &mut chain, &operator, observed).await?;
@@ -135,44 +145,71 @@ pub(crate) fn run_operator(
         let driver_handle =
             start_close_driver(&context, chain.clone(), operator.clone(), genesis.timing());
         handles.push(driver_handle);
-        let mut listener = context.bind(bind).await.context("bind operator RPC")?;
+        let timing = genesis.timing();
+        let (payment_sender, payment_handle) = payments::start(
+            context.child("payments"),
+            chain.clone(),
+            operator.clone(),
+            payment_strategy,
+        );
+        handles.push(payment_handle);
+        let listener = context.bind(bind).await.context("bind operator RPC")?;
         println!("Operator ready at {bind}");
         println!("Ready to accept payments; epochs close automatically.");
 
         // The agent-facing RPC loop, supervised alongside the node actors.
-        let timing = genesis.timing();
         let rpc_handle = context.child("rpc").spawn({
-            let mut chain = chain.clone();
+            let chain = chain.clone();
+            let operator = operator.clone();
             move |context| async move {
-                loop {
-                    // The runtime folds every accept failure into one error
-                    // class, so treat a failed accept as transient instead of
-                    // tearing down the operator.
-                    let (_, mut sink, mut stream) = match listener.accept().await {
-                        Ok(connection) => connection,
-                        Err(error) => {
-                            eprintln!("accept operator RPC failed; retrying: {error}");
-                            context.sleep(rpc::ACCEPT_RETRY_DELAY).await;
-                            continue;
-                        }
-                    };
-                    let Ok(request) = rpc::recv_request(&mut stream).await else {
-                        continue;
-                    };
-                    let response = match operator_rpc::decode_request(request) {
-                        Ok(request) => {
-                            match prepare_request(&context, &mut chain, &operator, &request, timing).await {
-                                Ok(Some(response)) => response,
-                                Ok(None) => {
-                                    operator_rpc::handle_decoded(&mut operator.lock(), request)
-                                }
-                                Err(error) => rpc::error_response(format!("{error:#}")),
+                let request_context = context.child("request");
+                payments::serve_connections(context, listener, move |request| {
+                    let mut chain = chain.clone();
+                    let operator = operator.clone();
+                    let payment_sender = payment_sender.clone();
+                    let context = request_context.child("connection");
+                    async move {
+                        match operator_rpc::decode_request(request) {
+                            Ok(operator_rpc::OperatorRequest::AcceptSends(request)) => {
+                                payments::submit(
+                                    &payment_sender,
+                                    request,
+                                    payments::ResponseKind::Batch,
+                                )
+                                .await
                             }
+                            Ok(operator_rpc::OperatorRequest::AcceptSend(request)) => {
+                                payments::submit(
+                                    &payment_sender,
+                                    operator_rpc::AcceptSendsRequest {
+                                        sends: vec![request],
+                                    },
+                                    payments::ResponseKind::Single,
+                                )
+                                .await
+                            }
+                            Ok(request) => {
+                                match prepare_request(
+                                    &context,
+                                    &mut chain,
+                                    &operator,
+                                    &request,
+                                    timing,
+                                )
+                                .await
+                                {
+                                    Ok(Some(response)) => response,
+                                    Ok(None) => {
+                                        operator_rpc::handle_decoded(&mut operator.lock(), request)
+                                    }
+                                    Err(error) => rpc::error_response(format!("{error:#}")),
+                                }
+                            }
+                            Err(error) => rpc::error_response(format!("{error:#}")),
                         }
-                        Err(error) => rpc::error_response(format!("{error:#}")),
-                    };
-                    let _ = rpc::send_response(&mut sink, &response).await;
-                }
+                    }
+                })
+                .await
             }
         });
         handles.push(rpc_handle);
@@ -287,7 +324,15 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
 ) -> Result<()> {
     operator.lock().advance_close()?;
     let fault_request = chain.request(Lookup::Fault);
-    let fault = match chain.recent(ctx, &fault_request).await?.record {
+    let verified = chain.recent(ctx, &fault_request).await?;
+    let finalized = verified
+        .payout_tip
+        .context("certified fault read omitted the finalization boundary")?
+        .finalized;
+    if let Some(finalized) = finalized {
+        operator.lock().observe_finalized(finalized)?;
+    }
+    let fault = match verified.record {
         Some(Record::Fault(fault)) => Some(fault),
         None => None,
         Some(_) => bail!("certified fault read returned a foreign record"),
@@ -302,6 +347,9 @@ pub(crate) async fn observe_closes<E: Env, C: Chain>(
     let epochs = operator.lock().pending_epochs()?;
     let mut invalid_from = None;
     for epoch in epochs {
+        if finalized.is_some_and(|finalized| epoch <= finalized) {
+            continue;
+        }
         match chain.admitted(ctx, epoch).await? {
             Some(record) if Some(record.batch_id) == invalid_batch => {
                 invalid_from = Some(epoch);
@@ -544,111 +592,84 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
     request: &operator_rpc::OperatorRequest,
     timing: Timing,
 ) -> Result<Option<rpc::Response>> {
-    match request {
-        operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
-            for attempt in 0..SUBMIT_ATTEMPTS {
-                if attempt > 0 {
-                    ctx.sleep(POLL).await;
-                }
-                if operator
-                    .lock()
-                    .staged_withdrawal(&request.request)?
-                    .is_some()
-                {
-                    return Ok(None);
-                }
-                let expected = operator.lock().registration_boundary()?.0;
-                let status = chain.recent_status(ctx).await?;
-                ensure!(
-                    !status.hard_faulted,
-                    "withdrawal deployment is hard-faulted"
-                );
-                request
-                    .request
-                    .verify_deployment(&status.deployment)
-                    .context("verify withdrawal authorization")?;
-                let inclusion = status
-                    .height
-                    .checked_add(1)
-                    .context("withdrawal inclusion height overflow")?;
-                let config = crate::protocol::settlement_config(&timing)?;
-                let minimum = inclusion
-                    .checked_add(config.minimum_withdrawal_notice.get())
-                    .context("withdrawal notice overflow")?;
-                let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
-                let deadline = request.request.body().deadline();
-                let current_root = request.request.body().state_root() == &status.state_root.digest;
-                let valid_notice = (minimum..=maximum).contains(&deadline);
-
-                let lookup = chain.request(Lookup::Withdrawal {
-                    account: request.request.account().clone(),
-                });
-                let queued = chain.recent(ctx, &lookup).await?;
-                ensure!(
-                    queued.height >= status.height && deadline > queued.height,
-                    "withdrawal has expired"
-                );
-                let queued = match queued.record {
-                    Some(Record::Withdrawal(accepted)) => accepted == request.request,
-                    None => false,
-                    Some(_) => bail!("certified withdrawal read returned a foreign record"),
-                };
-                if !queued {
-                    ensure!(
-                        current_root,
-                        "withdrawal reference root differs from the current finalized state"
-                    );
-                    ensure!(
-                        valid_notice,
-                        "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
-                        status.height
-                    );
-                }
-
-                // Publication fixes the current boundary. Keep this authorization intact
-                // until the close driver opens a successor boundary for it.
-                {
-                    let mut operator = operator.lock();
-                    if operator.registration_boundary()?.0 != expected {
-                        continue;
-                    }
-                    if !operator.withdrawals_frozen()? {
-                        return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
-                            &mut operator,
-                            request.clone(),
-                            queued,
-                        )));
-                    }
-                }
-                drive_closes(ctx, chain, operator, timing).await?;
+    if let operator_rpc::OperatorRequest::ApplyWithdrawal(request) = request {
+        for attempt in 0..SUBMIT_ATTEMPTS {
+            if attempt > 0 {
+                ctx.sleep(POLL).await;
             }
-            bail!("the next withdrawal boundary did not open in time; retry the saved request");
-        }
-        operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
-            // The reserve retires only against the certified release record
-            // at the claim's exact (batch, position), consumed by exactly
-            // this evidence. A proven absence means the batch has not
-            // released it yet.
-            let release = chain
-                .withdrawal_release(ctx, request.batch_id, request.claim.position())
-                .await
-                .context("confirm settlement withdrawal claim")?
-                .context("withdrawal batch is not claimable yet")?;
+            if operator
+                .lock()
+                .staged_withdrawal(&request.request)?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let expected = operator.lock().registration_boundary()?.0;
+            let status = chain.recent_status(ctx).await?;
             ensure!(
-                release.claim == Sha256::hash(&[&request.claim.encode()]),
-                "settlement rejected the withdrawal claim"
+                !status.hard_faulted,
+                "withdrawal deployment is hard-faulted"
             );
+            request
+                .request
+                .verify_deployment(&status.deployment)
+                .context("verify withdrawal authorization")?;
+            let inclusion = status
+                .height
+                .checked_add(1)
+                .context("withdrawal inclusion height overflow")?;
+            let config = crate::protocol::settlement_config(&timing)?;
+            let minimum = inclusion
+                .checked_add(config.minimum_withdrawal_notice.get())
+                .context("withdrawal notice overflow")?;
+            let maximum = inclusion.saturating_add(config.maximum_withdrawal_notice.get());
+            let deadline = request.request.body().deadline();
+            let current_root = request.request.body().state_root() == &status.state_root.digest;
+            let valid_notice = (minimum..=maximum).contains(&deadline);
+
+            let lookup = chain.request(Lookup::Withdrawal {
+                account: request.request.account().clone(),
+            });
+            let queued = chain.recent(ctx, &lookup).await?;
             ensure!(
-                release.released.destination == *request.claim.output().destination()
-                    && release.released.amount == request.claim.output().amount(),
-                "settlement returned another withdrawal output"
+                queued.height >= status.height && deadline > queued.height,
+                "withdrawal has expired"
             );
-            return Ok(Some(operator_rpc::acknowledge_withdrawal_confirmed(
-                &mut operator.lock(),
-                request,
-            )));
+            let queued = match queued.record {
+                Some(Record::Withdrawal(accepted)) => accepted == request.request,
+                None => false,
+                Some(_) => bail!("certified withdrawal read returned a foreign record"),
+            };
+            if !queued {
+                ensure!(
+                    current_root,
+                    "withdrawal reference root differs from the current finalized state"
+                );
+                ensure!(
+                    valid_notice,
+                    "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
+                    status.height
+                );
+            }
+
+            // Publication fixes the current boundary. Keep this authorization intact
+            // until the close driver opens a successor boundary for it.
+            {
+                let mut operator = operator.lock();
+                if operator.registration_boundary()?.0 != expected {
+                    continue;
+                }
+                if !operator.withdrawals_frozen()? {
+                    return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
+                        &mut operator,
+                        request.clone(),
+                        queued,
+                    )));
+                }
+            }
+            drive_closes(ctx, chain, operator, timing).await?;
         }
-        _ => {}
+        bail!("the next withdrawal boundary did not open in time; retry the saved request");
     }
 
     if !matches!(
@@ -757,12 +778,24 @@ async fn registration_request<E: Env, C: Chain>(
             Some(_) => bail!("certified withdrawal read returned a foreign record"),
         }
     }
+    let queued = WithdrawalBatch::new(queued)?;
+    let genesis = operator.lock().genesis();
+    let mut openings = Vec::new();
+    for request in expected.1.requests() {
+        if queued.request_for(request.account()).is_none() {
+            openings.push(
+                chain
+                    .predecessor_opening(ctx, epoch, request.account().clone(), genesis)
+                    .await?,
+            );
+        }
+    }
     let mut operator = operator.lock();
     ensure!(
         operator.registration_boundary()? == expected,
         "the withdrawal boundary moved during registration"
     );
-    operator.signed_registration(&WithdrawalBatch::new(queued)?)
+    operator.signed_registration_with_openings(&queued, openings)
 }
 
 /// Publishes the live boundary while its triggering request remains valid, then
@@ -845,7 +878,10 @@ mod tests {
         fs,
         num::NonZeroU64,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicBool, AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            mpsc,
+        },
     };
 
     /// The in-process chain's query address.
@@ -857,6 +893,30 @@ mod tests {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9_701);
 
     static TEMP_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct NoNetworkChain;
+
+    impl Chain for NoNetworkChain {
+        fn holders(&self) -> Result<Vec<SocketAddr>> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        fn deployment(&self) -> Digest {
+            crate::protocol::deployment()
+        }
+
+        async fn read<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+
+        async fn submit<E: Env>(&mut self, _: &E, _: &SettlementTx) -> Result<Submission> {
+            unreachable!("the registered payment fixture does not query the chain")
+        }
+    }
 
     struct TempDatabases {
         directory: PathBuf,
@@ -1522,7 +1582,12 @@ mod tests {
                             );
                             assert_eq!(chain.registration(&context).await.unwrap(), Some(first));
                             let first_close = operator.lock().complete_close(1).unwrap();
-                            assert!(first_close.withdrawals.requests().is_empty());
+                            assert_eq!(
+                                first_close.context.withdrawal_root(),
+                                &WithdrawalBatch::<crate::protocol::Key, Digest>::empty()
+                                    .root::<Sha256>()
+                                    .unwrap()
+                            );
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &first_close,
@@ -1590,15 +1655,8 @@ mod tests {
                                 WithdrawalAction::Close => tail,
                             };
                             assert_eq!(close.withdrawal_total, expected);
-                            assert_eq!(close.withdrawal_claims.len(), 1);
-                            let claim = &close.withdrawal_claims[0];
-                            assert_eq!(
-                                claim
-                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
-                                    .unwrap()
-                                    .amount(),
-                                expected
-                            );
+                            let position = close.context.predecessor_logs().payouts.operations;
+                            assert_eq!(close.roots.withdrawal_outputs.operations, position + 2);
                             control
                                 .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
                                     &close,
@@ -1614,32 +1672,48 @@ mod tests {
                                     .finalized
                             );
                             assert_eq!(status(&control).await.claimable, expected);
-                            if expected > 0 {
-                                let batch_id = close.header.batch_id::<Sha256>();
-                                let claim_tx = SettlementTx::ClaimWithdrawal(
-                                    crate::chain::tx::WithdrawalClaimRequest {
-                                        deployment: deployment(),
-                                        batch_id,
-                                        claim: claim.clone(),
-                                    },
-                                );
-                                control.submit(claim_tx.clone()).await;
-                                let release = chain
-                                    .withdrawal_release(&context, batch_id, claim.position())
+                            let claim = chain
+                                .payout_proof(&context, close.roots.withdrawal_outputs, position)
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                claim
+                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
+                                    .unwrap()
+                                    .amount(),
+                                expected
+                            );
+                            let before = chain
+                                .payout_status(&context, claim.position())
+                                .await
+                                .unwrap();
+                            assert!(before.claimed.is_none());
+                            assert!(claim.verify::<Sha256>(&before.head).is_ok());
+                            let claim_tx = SettlementTx::ClaimWithdrawal(
+                                crate::chain::tx::WithdrawalClaimRequest {
+                                    deployment: deployment(),
+                                    claim: claim.clone(),
+                                },
+                            );
+                            control.submit(claim_tx.clone()).await;
+                            assert!(
+                                chain
+                                    .payout_status(&context, claim.position())
                                     .await
                                     .unwrap()
-                                    .unwrap();
-                                assert_eq!(release.released.amount, expected);
-                                control.submit(claim_tx).await;
-                                assert_eq!(
-                                    chain
-                                        .withdrawal_release(&context, batch_id, claim.position())
-                                        .await
-                                        .unwrap(),
-                                    Some(release)
-                                );
-                                assert_eq!(status(&control).await.claimable, 0);
-                            }
+                                    .claimed
+                                    .is_some()
+                            );
+                            control.submit(claim_tx).await;
+                            assert!(
+                                chain
+                                    .payout_status(&context, claim.position())
+                                    .await
+                                    .unwrap()
+                                    .claimed
+                                    .is_some()
+                            );
+                            assert_eq!(status(&control).await.claimable, 0);
                             assert!(!status(&control).await.hard_faulted);
 
                             // Intake receipts outlive carriage. A replay after restart must
@@ -1891,6 +1965,273 @@ mod tests {
     }
 
     #[test]
+    fn payment_verification_runs_one_group_ahead_of_commits() {
+        fn payment(operator: &Mutex<Operator>, payer: usize) -> operator_rpc::AcceptSendsRequest {
+            let identities = wallets();
+            let recipient = identities[(payer + 1) % identities.len()].public_key();
+            let operator = operator.lock();
+            let (authorization, entries) = operator.sign_send(payer, &[(recipient, 1)]).unwrap();
+            operator_rpc::AcceptSendsRequest {
+                sends: vec![operator_rpc::AcceptSendRequest {
+                    authorization,
+                    entries,
+                }],
+            }
+        }
+
+        let databases = TempDatabases::new();
+        let operator_database = databases.operator().to_path_buf();
+        let (operator, first, second, third) = deterministic::Runner::timed(Duration::from_secs(
+            15,
+        ))
+        .start(move |context| async move {
+            let control = harness::start(&context, CHAIN, "chain").await;
+            let operator = Arc::new(Mutex::new(
+                Operator::open(&operator_database, NonZeroUsize::new(2).unwrap()).unwrap(),
+            ));
+            let mut chain = client(&context, &control);
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            let first = payment(&operator, 0);
+            let second = payment(&operator, 1);
+            let third = payment(&operator, 2);
+            (operator, first, second, third)
+        });
+
+        runtime().start(move |context| async move {
+            async fn wait_signal<E: Clock>(context: &E, receiver: &mpsc::Receiver<()>) {
+                for _ in 0..100 {
+                    if receiver.try_recv().is_ok() {
+                        return;
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                panic!("payment stage did not make progress");
+            }
+
+            struct Releases(Vec<mpsc::Sender<()>>);
+
+            impl Drop for Releases {
+                fn drop(&mut self) {
+                    for release in &self.0 {
+                        let _ = release.send(());
+                    }
+                }
+            }
+
+            let (first_entered, first_commit) = commonware_utils::channel::oneshot::channel();
+            let (release_first, first_release) = mpsc::channel();
+            let (second_entered, second_commit) = commonware_utils::channel::oneshot::channel();
+            let (release_second, second_release) = mpsc::channel();
+            let _releases = Releases(vec![release_first.clone(), release_second.clone()]);
+            {
+                let mut operator = operator.lock();
+                operator.gate_next_payment_commit(first_entered, first_release);
+                operator.gate_next_payment_commit(second_entered, second_release);
+            }
+
+            let (verifier_started, started) = mpsc::sync_channel(4);
+            let (verifier_finished, finished) = mpsc::sync_channel(4);
+            let hooks = payments::TestHooks {
+                verifier_started,
+                verifier_finished,
+            };
+            let strategy = operator.lock().payment_strategy();
+            let (sender, coordinator) = payments::start_with_hooks(
+                context.child("payments"),
+                NoNetworkChain,
+                operator,
+                strategy,
+                hooks,
+            );
+
+            let first_response = context.child("first").spawn({
+                let sender = sender.clone();
+                move |_| async move {
+                    payments::submit(&sender, first, payments::ResponseKind::Batch).await
+                }
+            });
+            wait_signal(&context, &started).await;
+            wait_signal(&context, &finished).await;
+            commonware_macros::select! {
+                result = first_commit => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("first payment writer did not reach the commit gate")
+                },
+            }
+
+            let mut second_response = context.child("second").spawn({
+                let sender = sender.clone();
+                move |_| async move {
+                    payments::submit(&sender, second, payments::ResponseKind::Batch).await
+                }
+            });
+            wait_signal(&context, &started).await;
+            wait_signal(&context, &finished).await;
+            let second_waited_for_first = futures::poll!(&mut second_response).is_pending();
+
+            let third_response =
+                payments::enqueue(&sender, third, payments::ResponseKind::Batch).await;
+            context.sleep(Duration::from_millis(100)).await;
+            let third_waited_for_ahead =
+                matches!(started.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+            release_first.send(()).unwrap();
+            let first_succeeded =
+                matches!(first_response.await.unwrap(), rpc::Response::Success { .. });
+            commonware_macros::select! {
+                result = second_commit => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("second payment writer did not reach the commit gate")
+                },
+            }
+            let second_waited_for_commit = futures::poll!(&mut second_response).is_pending();
+            release_second.send(()).unwrap();
+            let second_succeeded = matches!(
+                second_response.await.unwrap(),
+                rpc::Response::Success { .. }
+            );
+            let third_succeeded =
+                matches!(third_response.await.unwrap(), rpc::Response::Success { .. });
+
+            coordinator.abort();
+            let _ = coordinator.await;
+            assert!(first_succeeded && second_succeeded && third_succeeded);
+            assert!(
+                second_waited_for_first,
+                "the ahead group acknowledged before the current commit"
+            );
+            assert!(
+                third_waited_for_ahead,
+                "a third verifier started while the ahead slot was occupied"
+            );
+            assert!(
+                second_waited_for_commit,
+                "the ahead group acknowledged inside its own commit"
+            );
+        });
+    }
+
+    #[test]
+    fn native_large_response_survives_one_request_server_close() {
+        const CLIENTS: usize = 16;
+        const RESPONSE_BYTES: usize = 512 * 1024;
+
+        runtime().start(|context| async move {
+            let listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = Bytes::from(vec![0x5a; RESPONSE_BYTES]);
+            let expected = body.clone();
+            let (completed, completions) = mpsc::sync_channel(CLIENTS);
+            let server = context
+                .child("large_response")
+                .spawn(move |context| async move {
+                    payments::serve_connections_with_completion(
+                        context,
+                        listener,
+                        move |request| {
+                            assert_eq!(request.body, Bytes::from_static(b"large"));
+                            let body = body.clone();
+                            async move { rpc::Response::Success { body } }
+                        },
+                        completed,
+                    )
+                    .await;
+                });
+
+            let mut clients = Vec::with_capacity(CLIENTS);
+            for _ in 0..CLIENTS {
+                let (mut sink, stream) = context.dial(address).await.unwrap();
+                rpc::send_request(
+                    &mut sink,
+                    &rpc::Request {
+                        method: 1,
+                        body: Bytes::from_static(b"large"),
+                    },
+                )
+                .await
+                .unwrap();
+                clients.push((sink, stream));
+            }
+            for _ in 0..CLIENTS {
+                let mut observed = None;
+                for _ in 0..500 {
+                    match completions.try_recv() {
+                        Ok(sent) => {
+                            observed = Some(sent);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            context.sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("large-response completion failed: {error}"),
+                    }
+                }
+                assert_eq!(
+                    observed,
+                    Some(true),
+                    "server failed to send a large response"
+                );
+            }
+            for (_, mut stream) in clients {
+                assert_eq!(
+                    rpc::recv_response(&mut stream).await.unwrap(),
+                    rpc::Response::Success {
+                        body: expected.clone(),
+                    }
+                );
+            }
+            server.abort();
+            let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn registration_probe_recheck_error_cannot_admit_payment() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = Arc::new(Mutex::new(
+                Operator::open(Path::new(":memory:"), NonZeroUsize::new(2).unwrap()).unwrap(),
+            ));
+            let identities = wallets();
+            let request = {
+                let operator = operator.lock();
+                let (authorization, entries) = operator
+                    .sign_send(0, &[(identities[1].public_key(), 1)])
+                    .unwrap();
+                operator_rpc::AcceptSendsRequest {
+                    sends: vec![operator_rpc::AcceptSendRequest {
+                        authorization,
+                        entries,
+                    }],
+                }
+            };
+            let strategy = operator.lock().payment_strategy();
+            operator.lock().fail_registration_probe_after(1);
+            let (sender, coordinator) = payments::start(
+                context.child("payments"),
+                NoNetworkChain,
+                operator.clone(),
+                strategy,
+            );
+
+            let response = payments::submit(&sender, request, payments::ResponseKind::Batch).await;
+            let no_payment_committed = operator.lock().snapshot().unwrap().payments.is_empty();
+
+            coordinator.abort();
+            let _ = coordinator.await;
+            assert!(matches!(response, rpc::Response::Error { .. }));
+            assert!(
+                no_payment_committed,
+                "a failed registration recheck admitted an unregistered payment"
+            );
+        });
+    }
+
+    #[test]
     fn startup_observer_releases_catchup_before_fresh_rpc_readiness() {
         deterministic::Runner::default().start(|context| async move {
             let operator = Arc::new(Mutex::new(
@@ -2042,6 +2383,17 @@ mod tests {
                 _ => bail!("unexpected historical follower read"),
             };
             Ok(Verified {
+                claimed: None,
+                payout_tip: request.lookup.requires_payout_tip().then(|| {
+                    crate::protocol::PayoutTip {
+                        payouts: commonware_clearing::bajillion::logs::Heads::empty::<
+                            crate::protocol::Key,
+                            Sha256,
+                        >()
+                        .payouts,
+                        finalized: None,
+                    }
+                }),
                 height: 1,
                 timestamp: 0,
                 record,

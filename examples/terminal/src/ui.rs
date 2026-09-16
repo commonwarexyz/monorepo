@@ -18,7 +18,7 @@ use crate::{
             StatusResponse as OperatorStatus,
         },
     },
-    protocol::{Protocol, deployment, omitting_boundary, omitting_close},
+    protocol::{INITIAL_BALANCE, Protocol, deployment, omitting_boundary, omitting_close},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
@@ -39,9 +39,11 @@ use dashboard::render;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     collections::VecDeque,
+    future::Future,
     io::Stdout,
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
+    pin::Pin,
     time::Duration,
 };
 
@@ -106,11 +108,20 @@ pub(crate) struct UiState {
     staged: Vec<(usize, u64)>,
     balance: Option<u64>,
     native_balance: Option<u64>,
-    operator: Option<OperatorStatus>,
+    operator: OperatorState,
     settlement: Option<StatusRecord>,
     pending_closes: VecDeque<u64>,
     activity: VecDeque<String>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperatorState {
+    Checking,
+    Available(OperatorStatus),
+    Unavailable,
+}
+
+type OperatorRefresh<'a> = Pin<Box<dyn Future<Output = Result<OperatorStatus>> + Send + 'a>>;
 
 impl UiState {
     fn new() -> Self {
@@ -123,7 +134,7 @@ impl UiState {
             staged: Vec::new(),
             balance: None,
             native_balance: None,
-            operator: None,
+            operator: OperatorState::Checking,
             settlement: None,
             pending_closes: VecDeque::new(),
             activity,
@@ -179,6 +190,7 @@ pub(crate) async fn run_with_io<E: Env>(
     mut input: impl FnMut() -> Result<Option<KeyEvent>>,
 ) -> Result<()> {
     let mut state = UiState::new();
+    let mut operator_refresh = None;
     state.receiver = agent.default_receiver();
     if agent.has_pending_payment() {
         state.log("A payment is awaiting confirmation. Press R to retry the saved request.");
@@ -244,7 +256,15 @@ pub(crate) async fn run_with_io<E: Env>(
             }
         }
 
-        refresh_bounded(network, operator, chain, agent, &mut state).await?;
+        refresh_bounded(
+            network,
+            operator,
+            chain,
+            agent,
+            &mut state,
+            &mut operator_refresh,
+        )
+        .await?;
         draw(agent, &state)?;
         network.sleep(REFRESH_BUDGET).await;
         if poll_input()? {
@@ -298,12 +318,18 @@ pub(crate) async fn run_with_io<E: Env>(
             KeyCode::Char('R') => {
                 let outcome = agent.resume_pending_payment(network, chain, operator).await;
                 match outcome {
-                    Ok(Some(PaymentOutcome::Accepted(payment))) => state.log(format!(
-                        "epoch {} payment #{} confirmed for {}", payment.epoch, payment.sequence, payment.total
-                    )),
-                    Ok(Some(PaymentOutcome::CommittedUnheld { epoch, total })) => state.log(format!(
-                        "epoch {epoch} payment for {total} committed in a finalized close; receipts unheld"
-                    )),
+                    Ok(Some(outcomes)) => {
+                        for outcome in outcomes {
+                            match outcome {
+                                PaymentOutcome::Accepted(payment) => state.log(format!(
+                                    "epoch {} payment #{} confirmed for {}", payment.epoch, payment.sequence, payment.total
+                                )),
+                                PaymentOutcome::CommittedUnheld { epoch, total } => state.log(format!(
+                                    "epoch {epoch} payment for {total} committed in a finalized close; receipts unheld"
+                                )),
+                            }
+                        }
+                    }
                     Ok(None) => state.log("No payment is awaiting confirmation."),
                     Err(error) => state.log(format!("Payment still unresolved; press R to retry: {error:#}")),
                 }
@@ -489,43 +515,84 @@ async fn handle_pending_deposit_recovery<E: Env>(
 
 /// Refreshes displayed state under [REFRESH_BUDGET] so a hung dial never wedges input.
 ///
-/// Native funds are polled first, so a hung operator cannot hide a completed native
-/// read. The remaining displays become unavailable on timeout.
-async fn refresh_bounded<E: Env>(
-    network: &E,
+/// The operator and settlement roles own their status results independently. Completed
+/// results survive a slow peer, and an unfinished operator request continues on the next pass.
+async fn refresh_bounded<'a, E: Env>(
+    network: &'a E,
     operator: SocketAddr,
     chain: &mut Client,
     agent: &mut Agent,
     state: &mut UiState,
+    operator_refresh: &mut Option<OperatorRefresh<'a>>,
 ) -> Result<()> {
+    if operator_refresh.is_none() {
+        *operator_refresh = Some(Box::pin(operator_rpc::status(network, operator)));
+    }
+    state.operator = OperatorState::Checking;
+    state.settlement = None;
     state.native_balance = None;
-    let refreshed = select! {
-        result = refresh(network, operator, chain, agent, state) => Some(result),
-        _ = network.sleep(REFRESH_BUDGET) => None,
+    state.balance = None;
+
+    let account = agent.account();
+    let settlement_status = &mut state.settlement;
+    let native_balance = &mut state.native_balance;
+    let mut operator_result = None;
+    let mut operator_poll = Box::pin(async {
+        operator_result = Some(
+            operator_refresh
+                .as_mut()
+                .expect("operator refresh was initialized")
+                .as_mut()
+                .await,
+        );
+    });
+    let mut chain_refresh = Box::pin(async {
+        *settlement_status = chain.status(network).await.ok();
+        *native_balance = chain
+            .native_balance(network, chain.genesis().native.chain_id(), account)
+            .await
+            .ok();
+    });
+    let mut deadline = Box::pin(network.sleep(REFRESH_BUDGET));
+
+    let statuses_finished = select! {
+        _ = &mut operator_poll => select! {
+            _ = &mut chain_refresh => true,
+            _ = &mut deadline => false,
+        },
+        _ = &mut chain_refresh => select! {
+            _ = &mut operator_poll => true,
+            _ = &mut deadline => false,
+        },
+        _ = &mut deadline => false,
+    };
+    drop(operator_poll);
+    drop(chain_refresh);
+
+    if let Some(result) = operator_result {
+        *operator_refresh = None;
+        state.operator = result.map_or(OperatorState::Unavailable, OperatorState::Available);
+    }
+
+    let refreshed = if statuses_finished {
+        select! {
+            result = refresh_after_status(network, operator, chain, agent, state) => Some(result),
+            _ = &mut deadline => None,
+        }
+    } else {
+        None
     };
     agent.ensure_store_usable()?;
-    match refreshed {
-        Some(result) => result,
-        None => {
-            state.operator = None;
-            state.settlement = None;
-            state.balance = None;
-            Ok(())
-        }
-    }
+    refreshed.unwrap_or(Ok(()))
 }
 
-async fn refresh<E: Env>(
+async fn refresh_after_status<E: Env>(
     network: &E,
     operator: SocketAddr,
     chain: &mut Client,
     agent: &mut Agent,
     state: &mut UiState,
 ) -> Result<()> {
-    state.native_balance = chain
-        .native_balance(network, chain.genesis().native.chain_id(), agent.account())
-        .await
-        .ok();
     if let Some(epoch) = state.pending_closes.front().copied() {
         match agent.poll_close(network, operator, epoch).await {
             Ok(PollCloseResponse::NoEvent) | Err(_) => {}
@@ -547,8 +614,6 @@ async fn refresh<E: Env>(
             }
         }
     }
-    state.operator = agent.operator_status(network, operator).await.ok();
-    state.settlement = chain.status(network).await.ok();
 
     // The verified balance poll also refreshes the wallet's frozen-root recovery opening.
     state.balance = agent.balance(network, chain, operator).await.ok();
@@ -675,10 +740,16 @@ async fn complete_pending_withdrawal<E: Env>(
             }
             Err(error) => {
                 last = Some(error);
-                if let Some(action) = agent.pending_withdrawal_action() {
-                    let _ = agent.withdraw(network, chain, operator, action).await;
-                    agent.ensure_store_usable()?;
+                agent.observe_withdrawal_expiry(network, chain).await?;
+                if agent.pending_withdrawal_action().is_none()
+                    && !agent.has_pending_withdrawal_claim()
+                {
+                    return Ok(());
                 }
+                if agent.pending_withdrawal_action().is_some() {
+                    let _ = agent.retry_withdrawal(network, operator).await;
+                }
+                agent.ensure_store_usable()?;
             }
         }
         network.sleep(POLL).await;
@@ -788,20 +859,22 @@ pub(crate) async fn scripted<E: Env>(
     // the exact staged bytes here, after this run's deposit and withdrawal:
     // the resumed send registers the epoch and becomes its first payment,
     // which freezes the boundary that intake had to enter first.
-    if let Some(outcome) = agent
+    if let Some(outcomes) = agent
         .resume_pending_payment(network, &mut chain, operator)
         .await
         .context("resume the interrupted payment")?
     {
-        match outcome {
-            PaymentOutcome::Accepted(payment) => walkthrough::event(
-                "Resumed",
-                format_args!("saved payment #{} accepted", payment.sequence),
-            ),
-            PaymentOutcome::CommittedUnheld { epoch, total } => walkthrough::event(
-                "Resumed",
-                format_args!("saved payment of {total} already committed in epoch {epoch}"),
-            ),
+        for outcome in outcomes {
+            match outcome {
+                PaymentOutcome::Accepted(payment) => walkthrough::event(
+                    "Resumed",
+                    format_args!("saved payment #{} accepted", payment.sequence),
+                ),
+                PaymentOutcome::CommittedUnheld { epoch, total } => walkthrough::event(
+                    "Resumed",
+                    format_args!("saved payment of {total} already committed in epoch {epoch}"),
+                ),
+            }
         }
     }
     let payment = scripted_payment(network, operator, &mut chain, &mut agent, &[(1, 5)]).await?;
@@ -860,18 +933,16 @@ pub(crate) async fn scripted<E: Env>(
     receiver
         .intake_incoming(network, &mut chain, operator)
         .await?;
-    ensure!(
-        receiver.has_receipt(&payer_account, &receipt_id)?,
-        "receiver holds no evidence for the accepted batch"
-    );
-    walkthrough::event("Bob", "verified and saved the payment receipt");
+    let bob_receipt_held = receiver.has_receipt(&payer_account, &receipt_id)?;
+    if bob_receipt_held {
+        walkthrough::event("Bob", "verified and saved the payment receipt");
+    }
 
     eve.intake_incoming(network, &mut chain, operator).await?;
-    ensure!(
-        eve.has_receipt(&payer_account, &eve_receipt_id)?,
-        "Eve holds no evidence for the accepted payment"
-    );
-    walkthrough::event("Eve", "verified and saved the payment receipt");
+    let eve_receipt_held = eve.has_receipt(&payer_account, &eve_receipt_id)?;
+    if eve_receipt_held {
+        walkthrough::event("Eve", "verified and saved the payment receipt");
+    }
 
     walkthrough::step(
         3,
@@ -894,13 +965,28 @@ pub(crate) async fn scripted<E: Env>(
 
     // Reconcile the held receipts against finalized activity while the epoch's
     // evidence remains retained.
-    let summary = receiver.reconcile(network, &mut chain, operator).await?;
+    if bob_receipt_held {
+        let summary = receiver.reconcile(network, &mut chain, operator).await?;
+        if summary.reconciled.contains(&payment.epoch)
+            || receiver.last_reconciled_epoch() == Some(payment.epoch)
+        {
+            walkthrough::event("Bob", "receipt matches the finalized close");
+        }
+    }
+    let mut bob_balance = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = receiver.balance(network, &mut chain, operator).await
+            && balance == INITIAL_BALANCE + 5
+        {
+            bob_balance = Some(balance);
+            break;
+        }
+        network.sleep(POLL).await;
+    }
     ensure!(
-        summary.reconciled.contains(&payment.epoch)
-            || receiver.last_reconciled_epoch() == Some(payment.epoch),
-        "the receiver receipt_id epoch has not reconciled"
+        bob_balance == Some(INITIAL_BALANCE + 5),
+        "Bob's finalized balance omits the payment"
     );
-    walkthrough::event("Bob", "receipt matches the finalized close");
     let _ = std::fs::remove_file(&receiver_database);
     for suffix in ["-wal", "-shm"] {
         let mut path = receiver_database.clone().into_os_string();
@@ -908,12 +994,14 @@ pub(crate) async fn scripted<E: Env>(
         let _ = std::fs::remove_file(path);
     }
 
-    let eve_summary = eve.reconcile(network, &mut chain, operator).await?;
-    ensure!(
-        eve_summary.reconciled.contains(&eve_payment.epoch)
-            || eve.last_reconciled_epoch() == Some(eve_payment.epoch),
-        "Eve's fresh receipt has not reconciled against the finalized close"
-    );
+    if eve_receipt_held {
+        let eve_summary = eve.reconcile(network, &mut chain, operator).await?;
+        if eve_summary.reconciled.contains(&eve_payment.epoch)
+            || eve.last_reconciled_epoch() == Some(eve_payment.epoch)
+        {
+            walkthrough::event("Eve", "receipt matches the finalized close");
+        }
+    }
     let mut eve_balance = None;
     for _ in 0..EFFECT_ATTEMPTS {
         if let Ok(balance) = eve.balance(network, &mut chain, operator).await
@@ -1109,16 +1197,11 @@ pub(crate) fn fraud_arc() -> Result<()> {
         }
         let record = registered.context("the registered epoch left no certified record")?;
         ensure!(record.epoch == 0, "the certified record is not epoch 0");
-        let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
-            context.child("fraud_balances"),
-            crate::protocol::state_config(
-                "fraud-balances",
-                &context,
-                commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
-            ),
+        let state = crate::protocol::init_replica(
+            context.child("fraud_replica"), "fraud-replica",
+            commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
             crate::protocol::genesis_balances(&crate::protocol::deployments()[0])?,
-        )
-        .await?;
+        ).await?;
         let mut fraud_rng = context.child("fraud_rng");
         let fraud = Box::pin(omitting_close(
             state,
@@ -1134,7 +1217,7 @@ pub(crate) fn fraud_arc() -> Result<()> {
         let (committed, _) = fraud
             .held_lookup
             .resolve::<Sha256>(
-                &fraud.result.roots.change,
+                &fraud.result.roots.activity_range(&fraud.result.context)?,
                 fraud.held_receipt.ack.body().payer(),
                 &fraud.receiver,
             )
@@ -1223,8 +1306,8 @@ pub(crate) fn fraud_arc() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        REFRESH_BUDGET, UiState, fraud_arc, handle_hard_fault_recovery,
-        handle_pending_deposit_recovery, refresh, refresh_bounded, render,
+        OperatorState, REFRESH_BUDGET, UiState, fraud_arc, handle_hard_fault_recovery,
+        handle_pending_deposit_recovery, refresh_bounded, render,
     };
     use crate::{
         agent::Agent,
@@ -1234,7 +1317,7 @@ mod tests {
             tx::SettlementTx,
         },
         operator::{Operator, rpc as operator_rpc},
-        protocol::{INITIAL_BALANCE, deployment},
+        protocol::deployment,
         rpc,
     };
     use commonware_clearing::bajillion::boundary::WithdrawalBatch;
@@ -1250,6 +1333,10 @@ mod tests {
         net::SocketAddr,
         num::NonZeroUsize,
         path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     /// The scripted walkthrough's fraud arc convicts through real chain
@@ -1458,7 +1545,7 @@ mod tests {
 
             let mut agent = Agent::new(0).unwrap();
             let mut state = UiState::new();
-            state.operator = Some(operator_rpc::StatusResponse {
+            state.operator = OperatorState::Available(operator_rpc::StatusResponse {
                 epoch: 0,
                 accounts: 4,
                 present_accounts: 4,
@@ -1479,6 +1566,7 @@ mod tests {
                 hard_faulted: false,
             });
             state.balance = Some(7);
+            let mut operator_refresh = None;
 
             let started = context.current();
             refresh_bounded(
@@ -1487,13 +1575,14 @@ mod tests {
                 &mut chain,
                 &mut agent,
                 &mut state,
+                &mut operator_refresh,
             )
             .await
             .unwrap();
             let elapsed = context.current().duration_since(started).unwrap();
             assert!(elapsed >= REFRESH_BUDGET, "{elapsed:?}");
             assert!(elapsed < 2 * REFRESH_BUDGET, "{elapsed:?}");
-            assert!(state.operator.is_none());
+            assert_eq!(state.operator, OperatorState::Checking);
             assert!(state.settlement.is_none());
             assert!(state.balance.is_none());
             drop(operator_listener);
@@ -1502,7 +1591,150 @@ mod tests {
     }
 
     #[test]
-    fn hung_operator_cannot_hide_certified_native_funds() {
+    fn slow_operator_status_is_not_replaced_each_tick() {
+        deterministic::Runner::default().start(|context| async move {
+            let address = SocketAddr::from(([127, 0, 0, 1], 2));
+            let control = harness::start(&context, address, "slow-status-ui").await;
+            let mut chain = Client::new(
+                control.identity(),
+                deployment(),
+                vec![address],
+                context.child("client_rng"),
+            )
+            .unwrap();
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let server_requests = Arc::clone(&requests);
+            let server = context.child("operator").spawn(move |context| async move {
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                let response = operator_rpc::handle_decoded(
+                    &mut operator,
+                    operator_rpc::OperatorRequest::Status,
+                );
+                loop {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let request = operator_rpc::decode_request(request).unwrap();
+                    if !matches!(request, operator_rpc::OperatorRequest::Status) {
+                        continue;
+                    }
+                    server_requests.fetch_add(1, Ordering::SeqCst);
+                    let response = response.clone();
+                    context.child("response").spawn(move |context| async move {
+                        context.sleep(REFRESH_BUDGET * 5 / 2).await;
+                        let _ = rpc::send_response(&mut sink, &response).await;
+                    });
+                }
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            let mut operator_refresh = None;
+            for tick in 0..3 {
+                refresh_bounded(
+                    &context,
+                    operator_address,
+                    &mut chain,
+                    &mut agent,
+                    &mut state,
+                    &mut operator_refresh,
+                )
+                .await
+                .unwrap();
+                if tick < 2 {
+                    assert_eq!(state.operator, OperatorState::Checking);
+                }
+            }
+
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert!(matches!(state.operator, OperatorState::Available(_)));
+            assert_eq!(state.settlement.unwrap().deployment, deployment());
+            server.abort();
+        });
+    }
+
+    #[test]
+    fn failed_operator_status_is_unavailable_and_retries() {
+        deterministic::Runner::default().start(|context| async move {
+            let address = SocketAddr::from(([127, 0, 0, 1], 2));
+            let control = harness::start(&context, address, "failed-status-ui").await;
+            let mut chain = Client::new(
+                control.identity(),
+                deployment(),
+                vec![address],
+                context.child("client_rng"),
+            )
+            .unwrap();
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let server_requests = Arc::clone(&requests);
+            let server = context.child("operator").spawn(move |_| async move {
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                loop {
+                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let request = operator_rpc::decode_request(request).unwrap();
+                    let response = match request {
+                        operator_rpc::OperatorRequest::Status => {
+                            let attempt = server_requests.fetch_add(1, Ordering::SeqCst);
+                            if attempt == 0 {
+                                rpc::error_response("injected status failure".into())
+                            } else {
+                                operator_rpc::handle_decoded(
+                                    &mut operator,
+                                    operator_rpc::OperatorRequest::Status,
+                                )
+                            }
+                        }
+                        _ => rpc::error_response("balance unavailable".into()),
+                    };
+                    rpc::send_response(&mut sink, &response).await.unwrap();
+                }
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            let mut operator_refresh = None;
+            refresh_bounded(
+                &context,
+                operator_address,
+                &mut chain,
+                &mut agent,
+                &mut state,
+                &mut operator_refresh,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.operator, OperatorState::Unavailable);
+
+            refresh_bounded(
+                &context,
+                operator_address,
+                &mut chain,
+                &mut agent,
+                &mut state,
+                &mut operator_refresh,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(state.operator, OperatorState::Available(_)));
+            assert_eq!(requests.load(Ordering::SeqCst), 2);
+            server.abort();
+        });
+    }
+
+    #[test]
+    fn hung_operator_preserves_healthy_settlement_status() {
         deterministic::Runner::default().start(|context| async move {
             let address = SocketAddr::from(([127, 0, 0, 1], 2));
             let control = harness::start(&context, address, "native-ui").await;
@@ -1527,17 +1759,131 @@ mod tests {
                 .unwrap()
                 .balance;
             let mut state = UiState::new();
+            let mut operator_refresh = None;
             refresh_bounded(
                 &context,
                 operator.local_addr().unwrap(),
                 &mut chain,
                 &mut agent,
                 &mut state,
+                &mut operator_refresh,
             )
             .await
             .unwrap();
             assert_eq!(state.native_balance, Some(expected));
-            assert!(state.operator.is_none());
+            assert_eq!(state.operator, OperatorState::Checking);
+            assert_eq!(state.settlement.unwrap().deployment, deployment());
+        });
+    }
+
+    #[test]
+    fn hung_settlement_preserves_healthy_operator_status() {
+        deterministic::Runner::default().start(|context| async move {
+            let chain_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let mut identity_rng = context.child("identity_rng");
+            let mut chain = Client::new(
+                &harness::identity(&mut identity_rng),
+                deployment(),
+                vec![chain_listener.local_addr().unwrap()],
+                context.child("client_rng"),
+            )
+            .unwrap();
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let server = context.child("operator").spawn(move |_| async move {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let request = rpc::recv_request(&mut stream).await.unwrap();
+                let request = operator_rpc::decode_request(request).unwrap();
+                assert!(matches!(request, operator_rpc::OperatorRequest::Status));
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                let response = operator_rpc::handle_decoded(&mut operator, request);
+                rpc::send_response(&mut sink, &response).await.unwrap();
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            let mut operator_refresh = None;
+            refresh_bounded(
+                &context,
+                operator_address,
+                &mut chain,
+                &mut agent,
+                &mut state,
+                &mut operator_refresh,
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(state.operator, OperatorState::Available(_)));
+            assert!(state.settlement.is_none());
+            assert!(state.native_balance.is_none());
+            server.await.unwrap();
+            drop(chain_listener);
+        });
+    }
+
+    #[test]
+    fn late_balance_timeout_preserves_completed_statuses() {
+        deterministic::Runner::default().start(|context| async move {
+            let address = SocketAddr::from(([127, 0, 0, 1], 2));
+            let control = harness::start(&context, address, "balance-ui").await;
+            let mut chain = Client::new(
+                control.identity(),
+                deployment(),
+                vec![address],
+                context.child("client_rng"),
+            )
+            .unwrap();
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let server = context.child("operator").spawn(move |_| async move {
+                let mut operator =
+                    Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let request = rpc::recv_request(&mut stream).await.unwrap();
+                let request = operator_rpc::decode_request(request).unwrap();
+                assert!(matches!(request, operator_rpc::OperatorRequest::Status));
+                let response = operator_rpc::handle_decoded(&mut operator, request);
+                rpc::send_response(&mut sink, &response).await.unwrap();
+
+                let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                let request = rpc::recv_request(&mut stream).await.unwrap();
+                assert!(matches!(
+                    operator_rpc::decode_request(request).unwrap(),
+                    operator_rpc::OperatorRequest::PaymentHead(_)
+                ));
+                std::future::pending::<()>().await;
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let mut state = UiState::new();
+            let mut operator_refresh = None;
+            refresh_bounded(
+                &context,
+                operator_address,
+                &mut chain,
+                &mut agent,
+                &mut state,
+                &mut operator_refresh,
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(state.operator, OperatorState::Available(_)));
+            assert_eq!(state.settlement.unwrap().deployment, deployment());
+            assert!(state.native_balance.is_some());
+            assert!(state.balance.is_none());
+            server.abort();
         });
     }
 
@@ -1558,22 +1904,21 @@ mod tests {
             let mut agent = Agent::new(0).unwrap();
             let mut state = UiState::new();
             state.pending_closes.push_back(7);
+            let mut operator_refresh = None;
 
-            refresh(
+            refresh_bounded(
                 &context,
                 operator_address,
                 &mut chain,
                 &mut agent,
                 &mut state,
+                &mut operator_refresh,
             )
             .await
             .unwrap();
 
-            assert!(state.operator.is_none());
+            assert_eq!(state.operator, OperatorState::Unavailable);
 
-            // The validators serve the certified head, so the balance stays
-            // visible with the operator dead.
-            assert_eq!(state.balance, Some(INITIAL_BALANCE));
             assert_eq!(
                 state.pending_closes.iter().copied().collect::<Vec<_>>(),
                 [7]

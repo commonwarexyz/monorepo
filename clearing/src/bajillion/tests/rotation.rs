@@ -42,6 +42,7 @@ async fn prepare_epoch(
     state: &TestState,
     fixture: &Fixture,
     epoch: u64,
+    predecessor_liability: u64,
     committee: &Committee,
 ) -> Epoch {
     let deployment = *fixture.context.deployment();
@@ -50,7 +51,7 @@ async fn prepare_epoch(
     let withdrawals = WithdrawalBatch::new(if epoch == EPOCH {
         vec![SignedWithdrawal::sign(
             deployment,
-            state.root().digest,
+            state.state().root().digest,
             Bytes::from_static(b"rotation-withdrawal"),
             WithdrawalAction::Close,
             99,
@@ -66,14 +67,22 @@ async fn prepare_epoch(
         fixture.operator.public_key(),
         &deposits,
         &withdrawals,
-        state.liability(),
+        predecessor_liability,
         98,
         99,
         CloseLimits::protocol_maximum(),
         committee.commitment::<Sha256>(),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(state, &deposits, &withdrawals)
+    .bind::<Sha256, _, _>(
+        state,
+        &deposits,
+        &withdrawals,
+        Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    )
     .unwrap();
     let terminals = fixture.accounts[..3]
         .iter()
@@ -136,7 +145,14 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         committee_out.commitment::<Sha256>(),
         committee_in.commitment::<Sha256>()
     );
-    let first = prepare_epoch(&fixture.state, &fixture, EPOCH, &committee_out).await;
+    let first = prepare_epoch(
+        &fixture.state,
+        &fixture,
+        EPOCH,
+        fixture.context.predecessor_liability(),
+        &committee_out,
+    )
+    .await;
     let first_close = first.prepared.close();
     let genesis = vec![fixture.genesis.clone()];
     let mut rng = TestRng::new(41);
@@ -168,8 +184,10 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             prepared.state().mutations(),
             first.prepared.state().mutations()
         );
-        let (replica, _) = prepared.apply::<_, Sha256>(replica).await.unwrap();
-        outgoing_replicas.push(replica.commit().await.unwrap());
+        let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
+            .await
+            .unwrap();
+        outgoing_replicas.push(Box::pin(replica.sync()).await.unwrap());
         votes.push(vote);
     }
     let quorum_out = committee_out.quorum();
@@ -194,7 +212,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     ));
 
     let mut foreign_roots = first_close.roots;
-    foreign_roots.successor = fixture.state.root();
+    foreign_roots.successor = fixture.state.state().root();
     assert!(!first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &foreign_roots,
@@ -204,15 +222,19 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     // The accepted header authenticates the root used to check the transferred history.
     let accepted_root = first_close.roots.successor;
     let mut journal = genesis.clone();
-    journal.push(Accepted {
-        head: *first.prepared.state().head(),
-        mutations: first.prepared.state().mutations().to_vec(),
-    });
+    journal.push(Accepted::prepared(&first.prepared));
     for replica in &outgoing_replicas {
-        assert_eq!(replica.root(), accepted_root);
-        assert_eq!(replica.head(), &journal.last().unwrap().head);
+        assert_eq!(replica.state().root(), accepted_root);
+        assert_eq!(replica.state().head(), &journal.last().unwrap().head);
     }
-    let second = prepare_epoch(&outgoing_replicas[0], &fixture, EPOCH + 1, &committee_in).await;
+    let second = prepare_epoch(
+        &outgoing_replicas[0],
+        &fixture,
+        EPOCH + 1,
+        first.context.predecessor_liability() + 50 - first_close.withdrawal_total,
+        &committee_in,
+    )
+    .await;
     assert_eq!(*second.context.predecessor_root(), accepted_root);
 
     let mut incomplete = journal.clone();
@@ -223,12 +245,11 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     let balance = altered_balance[0].mutations[0].1.unwrap().get();
     altered_balance[0].mutations[0].1 = NonZeroU64::new(balance + 1);
     let mut extra_batch = journal.clone();
-    extra_batch.push(Accepted {
-        head: *first.prepared.state().head(),
-        mutations: Vec::new(),
-    });
+    let mut duplicate = Accepted::prepared(&first.prepared);
+    duplicate.mutations.clear();
+    extra_batch.push(duplicate);
     let mut altered_root = journal.clone();
-    altered_root.last_mut().unwrap().head = *fixture.state.head();
+    altered_root.last_mut().unwrap().head = *fixture.state.state().head();
     for (index, untrusted) in [
         incomplete,
         missing_account,
@@ -250,7 +271,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             continue;
         }
         let replica = replica.unwrap();
-        assert_ne!(replica.root(), accepted_root);
+        assert_ne!(replica.state().root(), accepted_root);
         assert!(
             seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
                 &schemes_in[0],
@@ -281,7 +302,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         let replica = if index == 0 {
             replica
         } else {
-            drop(replica.commit().await.unwrap());
+            drop(Box::pin(replica.sync()).await.unwrap());
 
             // Already-applied mutation bodies are unavailable to the restart owner. Their
             // authenticated heads still identify the native root and operation count.
@@ -295,37 +316,39 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 .unwrap()
         };
         if index != 0 {
-            assert_eq!(replica.root(), accepted_root);
-            assert_eq!(replica.head(), outgoing_replicas[0].head());
-            assert_eq!(replica.head(), &journal.last().unwrap().head);
+            assert_eq!(replica.state().root(), accepted_root);
+            assert_eq!(replica.state().head(), outgoing_replicas[0].state().head());
+            assert_eq!(replica.state().head(), &journal.last().unwrap().head);
             for (account, _) in &fixture.accounts {
                 let key = account_key(account).unwrap();
                 assert_eq!(
-                    replica.get(&key).await.unwrap(),
-                    outgoing_replicas[0].get(&key).await.unwrap()
+                    replica.state().get(&key).await.unwrap(),
+                    outgoing_replicas[0].state().get(&key).await.unwrap()
                 );
                 assert_eq!(
                     replica
+                        .state()
                         .lookup(&key)
                         .await
                         .unwrap()
                         .resolve::<Sha256>(&accepted_root, &key)
                         .unwrap(),
-                    replica.get(&key).await.unwrap(),
+                    replica.state().get(&key).await.unwrap(),
                 );
             }
             let closed = account_key(&fixture.accounts.last().unwrap().0).unwrap();
-            assert_eq!(replica.get(&closed).await.unwrap(), None);
+            assert_eq!(replica.state().get(&closed).await.unwrap(), None);
             assert_eq!(
                 replica
+                    .state()
                     .lookup_at(
-                        fixture.state.root(),
-                        fixture.state.head().operations(),
+                        fixture.state.state().root(),
+                        fixture.state.state().head().operations(),
                         &closed
                     )
                     .await
                     .unwrap()
-                    .resolve::<Sha256>(&fixture.state.root(), &closed)
+                    .resolve::<Sha256>(&fixture.state.state().root(), &closed)
                     .unwrap()
                     .unwrap()
                     .get(),
@@ -334,6 +357,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             let created = SigningKey::from_seed(40_000 + EPOCH).public_key();
             assert_eq!(
                 replica
+                    .state()
                     .opening(created)
                     .await
                     .unwrap()
@@ -369,7 +393,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                     .await
                     .is_err()
                 );
-                assert_eq!(replica.root(), accepted_root);
+                assert_eq!(replica.state().root(), accepted_root);
             }
             assert!(
                 seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
@@ -407,10 +431,15 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                     prepared.state().mutations(),
                     second.prepared.state().mutations()
                 );
-                let (replica, _) = prepared.apply::<_, Sha256>(replica).await.unwrap();
-                let replica = replica.commit().await.unwrap();
-                assert_eq!(replica.root(), second.prepared.close().roots.successor);
-                assert_eq!(replica.head(), second.prepared.state().head());
+                let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
+                    .await
+                    .unwrap();
+                let replica = Box::pin(replica.sync()).await.unwrap();
+                assert_eq!(
+                    replica.state().root(),
+                    second.prepared.close().roots.successor
+                );
+                assert_eq!(replica.state().head(), second.prepared.state().head());
                 incoming_votes.push(vote);
             }
             Err(_) => rejected.push(index),

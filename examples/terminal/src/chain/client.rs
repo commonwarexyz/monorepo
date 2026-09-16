@@ -24,28 +24,29 @@
 //!
 //! Mutations are submit-then-prove-by-effect: a flow submits a
 //! [`SettlementTx`] through [`Chain::deliver`] and completes only on a
-//! certified read of the variant's effect record (a deposit's custody
-//! record, the registration record, the admitted record, a claim's release
-//! record, the fault record). The advisory [`Submission`] answer is used only
+//! certified read of the effect: deposit custody, registration or admission,
+//! payout inclusion plus claimed-range coverage, or fault recovery. The advisory
+//! [`Submission`] answer is used only
 //! to reject oversized submissions and pace a full queue. An effect-free
 //! rejection is indistinguishable from not-yet-included: flows
 //! retry until the effect appears or a bounded budget ends, and only a
 //! certified record proving the input can never land (a consumed idempotence
 //! key bound to other bytes) discards a durable intent.
 
-#[cfg(test)]
-use crate::chain::query::{EvidenceLookup, EvidenceRequest, EvidenceResponse, METHOD_EVIDENCE};
 use crate::{
     chain::{
+        da::sync::{METHOD_NATIVE, NativeRequest, NativeResponse, Query as NativeQuery},
         ingress::Submission,
         light::{self, Latest, Verified},
         native::RegistryEntry,
-        query::{CertifiedRead, Lookup, METHOD_READ, METHOD_SUBMIT_TX, ReadRequest, ReadResponse},
+        query::{
+            CertifiedRead, Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, Lookup,
+            METHOD_EVIDENCE, METHOD_READ, METHOD_SUBMIT_TX, ReadRequest, ReadResponse,
+        },
         setup::Genesis,
         state::{
-            AdmittedRootsResponse, ClaimPendingDepositResponse, ClaimRootsResponse, FaultRecord,
+            AdmittedRootsResponse, ClaimPendingDepositResponse, FaultRecord,
             HardFaultReleaseRecord, Record, RegistrationRecord, StatusRecord,
-            WithdrawalReleaseRecord,
         },
         tx::{NativeTransferRequest, SettlementTx},
         types::now,
@@ -55,15 +56,113 @@ use crate::{
     rpc,
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use commonware_clearing::bajillion::{boundary::SignedWithdrawal, transition::BatchId};
-#[cfg(test)]
-use commonware_codec::DecodeExt as _;
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_clearing::bajillion::{
+    admission::bls12381,
+    boundary::SignedWithdrawal,
+    logs::{LogHead, PayoutOperation},
+    transition::CloseContext,
+};
+use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network, Spawner};
-use commonware_storage::Context as StorageContext;
+use commonware_storage::{
+    Context as StorageContext,
+    merkle::{Family as _, Location, mmr},
+    qmdb::{
+        self,
+        sync::{Request as NativeSyncRequest, Response as NativeSyncResponse},
+    },
+};
 use rand_core::CryptoRng;
-use std::{future::Future, net::SocketAddr, time::Duration};
+use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
+
+const PAYOUT_DISCOVERY_PAGE: u64 = 128;
+
+async fn fetch_payout_operations_at<E: Clock + Network>(
+    ctx: &E,
+    address: SocketAddr,
+    deployment: Digest,
+    head: LogHead<Digest>,
+    start: u64,
+) -> Result<Vec<PayoutOperation>> {
+    let size = Location::<mmr::Family>::new(head.operations);
+    let start = Location::<mmr::Family>::new(start);
+    ensure!(
+        start < size,
+        "payout discovery cursor is outside the authenticated head"
+    );
+    let count = (*size - *start).min(PAYOUT_DISCOVERY_PAGE);
+    let request = NativeRequest {
+        deployment,
+        query: NativeQuery::Payouts(NativeSyncRequest::Operations {
+            size,
+            start,
+            max_ops: NonZeroU64::new(count).expect("nonempty payout page"),
+        }),
+    };
+    let body = rpc::invoke(
+        ctx,
+        address,
+        "payout log custodian",
+        METHOD_NATIVE,
+        request.encode(),
+    )
+    .await?;
+    let NativeResponse::Data(body) = NativeResponse::decode(body)? else {
+        bail!("payout log page is unavailable")
+    };
+    let NativeSyncResponse::Operations { proof, operations } =
+        NativeSyncResponse::<mmr::Family, PayoutOperation, Digest>::decode_cfg(
+            body,
+            &(
+                usize::try_from(PAYOUT_DISCOVERY_PAGE).expect("payout page bound fits usize"),
+                RangeCfg::new(..=crate::protocol::MAX_DESTINATION_BYTES),
+            ),
+        )?
+    else {
+        bail!("custodian returned another payout response")
+    };
+    ensure!(
+        operations.len() == usize::try_from(count).expect("page count fits usize")
+            && proof.leaves == size
+            && proof.inactive_peaks == mmr::Family::inactive_peaks(size, Location::new(head.floor))
+            && qmdb::verify_proof::<Sha256, mmr::Family, _>(&proof, start, &operations, &head.root,),
+        "custodian returned an invalid payout-log page"
+    );
+    Ok(operations)
+}
+
+/// Tries each native custodian once and authenticates the requested output position and head.
+pub(crate) async fn fetch_payout_proof<E: Clock + Network>(
+    ctx: &E,
+    holders: &[SocketAddr],
+    deployment: Digest,
+    head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+    index: u64,
+) -> Result<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>> {
+    let request = EvidenceRequest::new(deployment, EvidenceLookup::Payout { head, index });
+    for address in holders {
+        let Ok(body) = rpc::invoke(
+            ctx,
+            *address,
+            "payout custodian",
+            METHOD_EVIDENCE,
+            request.encode(),
+        )
+        .await
+        else {
+            continue;
+        };
+        let Ok(EvidenceResponse::Served(Evidence::Payout(claim))) = EvidenceResponse::decode(body)
+        else {
+            continue;
+        };
+        if claim.position() == index && claim.verify::<Sha256>(&head).is_ok() {
+            return Ok(claim);
+        }
+    }
+    bail!("no custodian can open the payout at the authenticated head")
+}
 
 /// Pause between certified polls of a pending record.
 pub(crate) const POLL: Duration = Duration::from_millis(200);
@@ -101,7 +200,7 @@ impl<E: Clock + Network + Spawner + StorageContext> Env for E {}
 /// One settlement-chain backend: authenticated reads and transaction
 /// submission, plus the typed settlement helpers implemented once over them.
 ///
-/// Backends implement the three primitives and name the one deployment they
+/// Backends implement the read and submission primitives and name the deployment they
 /// are bound to. Every typed helper is a provided method reading that
 /// deployment's records, so the remote client and the operator's local node
 /// serve the identical settlement surface.
@@ -112,6 +211,161 @@ pub(crate) trait Chain: Send + 'static {
 
     /// Configured validator evidence endpoints for this chain.
     fn holders(&self) -> Result<Vec<SocketAddr>>;
+
+    /// Fetches a retained payout witness from any configured custodian.
+    fn payout_proof<E: Env>(
+        &self,
+        ctx: &E,
+        head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+        index: u64,
+    ) -> impl Future<
+        Output = Result<commonware_clearing::bajillion::transition::WithdrawalClaim<Digest>>,
+    > + Send {
+        let deployment = self.deployment();
+        let holders = self.holders();
+        async move { fetch_payout_proof(ctx, &holders?, deployment, head, index).await }
+    }
+
+    /// Fetches and authenticates one bounded page of the finalized payout operation log.
+    ///
+    /// `start` is a logical cursor, independent of the MMR inactivity floor. A pruned or
+    /// unavailable holder is skipped; its response never proves that the requested prefix is
+    /// absent.
+    fn payout_operations<E: Env>(
+        &self,
+        ctx: &E,
+        head: LogHead<Digest>,
+        start: u64,
+    ) -> impl Future<Output = Result<(u64, Vec<PayoutOperation>)>> + Send {
+        let deployment = self.deployment();
+        let holders = self.holders();
+        async move {
+            ensure!(
+                start < head.operations,
+                "payout discovery cursor is outside the authenticated head"
+            );
+            let holders = holders?;
+            for &address in &holders {
+                if let Ok(operations) =
+                    fetch_payout_operations_at(ctx, address, deployment, head, start).await
+                {
+                    return Ok((start, operations));
+                }
+            }
+
+            // A checkpoint retention cut is availability advice only. It may skip an unavailable
+            // prefix, but the returned suffix is still authenticated against the wallet's exact
+            // certified payout head. Exhaust the exact cursor at every holder before using it.
+            let mut best = None;
+            for address in holders {
+                let hint_request = NativeRequest {
+                    deployment,
+                    query: NativeQuery::Checkpoint { max_next: u64::MAX },
+                };
+                let Ok(body) = rpc::invoke(
+                    ctx,
+                    address,
+                    "payout log custodian",
+                    METHOD_NATIVE,
+                    hint_request.encode(),
+                )
+                .await
+                else {
+                    continue;
+                };
+                let Ok(NativeResponse::Checkpoint(transfer)) = NativeResponse::decode(body) else {
+                    continue;
+                };
+                let hint = transfer.checkpoint.retained.payouts;
+                if transfer.checkpoint.deployment != deployment
+                    || hint <= start
+                    || hint >= head.operations
+                {
+                    continue;
+                }
+                if let Ok(operations) =
+                    fetch_payout_operations_at(ctx, address, deployment, head, hint).await
+                    && best
+                        .as_ref()
+                        .is_none_or(|(best_start, _)| hint < *best_start)
+                {
+                    best = Some((hint, operations));
+                }
+            }
+            if let Some(page) = best {
+                return Ok(page);
+            }
+            bail!("no custodian can authenticate the requested payout-log page")
+        }
+    }
+
+    /// Opens the registration predecessor through independently verified validator evidence.
+    fn predecessor_opening<E: Env>(
+        &mut self,
+        ctx: &E,
+        epoch: u64,
+        account: Key,
+        genesis: commonware_clearing::bajillion::settlement::Genesis<Digest>,
+    ) -> impl Future<
+        Output = Result<commonware_clearing::bajillion::qmdb::StateOpening<Key, Digest>>,
+    > + Send {
+        async move {
+            let (root, operations) = if let Some(previous) = epoch.checked_sub(1) {
+                let admitted = self
+                    .admitted(ctx, previous)
+                    .await?
+                    .context("predecessor is not admitted")?;
+                (
+                    admitted.roots.successor,
+                    admitted.roots.successor_operations,
+                )
+            } else {
+                (genesis.root(), genesis.operations())
+            };
+            let lookup = EvidenceLookup::State {
+                root,
+                operations,
+                account: account.clone(),
+            };
+            for address in self.holders()? {
+                let request = EvidenceRequest::new(self.deployment(), lookup.clone());
+                let Ok(body) = rpc::invoke(
+                    ctx,
+                    address,
+                    "balance custodian",
+                    METHOD_EVIDENCE,
+                    request.encode(),
+                )
+                .await
+                else {
+                    continue;
+                };
+                let Ok(EvidenceResponse::Served(evidence)) = EvidenceResponse::decode(body) else {
+                    continue;
+                };
+                let Evidence::State(lookup) = evidence else {
+                    continue;
+                };
+                if lookup
+                    .resolve::<Sha256>(
+                        &root,
+                        &commonware_clearing::bajillion::qmdb::account_key(&account)?,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+                if let commonware_clearing::bajillion::qmdb::StateLookup::Present(value) = lookup {
+                    return Ok(commonware_clearing::bajillion::qmdb::StateOpening {
+                        account: account.clone(),
+                        balance: value.balance,
+                        proof: value.proof,
+                    });
+                }
+            }
+            bail!("no custodian can open the registration predecessor")
+        }
+    }
 
     /// Shared native balance proven at a recent finalized block.
     fn native_balance<E: Env>(
@@ -257,6 +511,22 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
+    /// The finalized payout identity authenticated at one recent checkpoint.
+    fn payout_checkpoint<E: Env>(
+        &mut self,
+        ctx: &E,
+    ) -> impl Future<Output = Result<crate::protocol::PayoutTip>> + Send {
+        async move {
+            let request = self.request(Lookup::PayoutHead);
+            let verified = self.recent(ctx, &request).await?;
+            match verified.record {
+                Some(Record::PayoutHead(tip)) => Ok(tip),
+                Some(_) => bail!("certified payout-head read returned a foreign record"),
+                None => bail!("the chain has not committed a payout head yet"),
+            }
+        }
+    }
+
     /// The registered payment anchor for `epoch`, or a proven absence.
     ///
     /// Recency-bounded: intake and reconciliation treat the absence as a
@@ -272,7 +542,14 @@ pub(crate) trait Chain: Send + 'static {
             match verified.record {
                 Some(Record::Anchor(anchor)) => Ok(Some(anchor)),
                 Some(_) => bail!("certified anchor read returned a foreign record"),
-                None => Ok(None),
+                None => {
+                    if let Some(tip) = verified.payout_tip
+                        && tip.finalized.is_some_and(|latest| epoch <= latest)
+                    {
+                        bail!("the epoch anchor is retired")
+                    }
+                    Ok(None)
+                }
             }
         }
     }
@@ -292,31 +569,34 @@ pub(crate) trait Chain: Send + 'static {
             match verified.record {
                 Some(Record::Admitted(admitted)) => Ok(Some(admitted)),
                 Some(_) => bail!("certified admitted read returned a foreign record"),
-                None => Ok(None),
+                None => {
+                    if let Some(tip) = verified.payout_tip
+                        && tip.finalized.is_some_and(|latest| epoch <= latest)
+                    {
+                        bail!("the admission is retired")
+                    }
+                    Ok(None)
+                }
             }
         }
     }
 
-    /// The claim roots of one finalized batch, or a proven absence (the batch
-    /// has not finalized: an availability signal, never a verdict).
-    fn claim_roots<E: Env>(
+    /// The finalized payout head and claimed coverage at one certified chain snapshot.
+    fn payout_status<E: Env>(
         &mut self,
         ctx: &E,
-        batch: BatchId<Digest>,
-    ) -> impl Future<Output = Result<Option<ClaimRootsResponse>>> + Send {
+        index: u64,
+    ) -> impl Future<Output = Result<PayoutStatus>> + Send {
         async move {
-            let request = self.request(Lookup::ClaimRoots {
-                batch: batch.into_digest(),
-            });
-            let verified = self.read(ctx, &request).await?;
-            match verified.record {
-                Some(Record::ClaimRoots(claims)) => Ok(Some(ClaimRootsResponse {
-                    withdrawal_outputs: claims.withdrawal_root(),
-                    batch_id: batch,
-                })),
-                Some(_) => bail!("certified claim-roots read returned a foreign record"),
-                None => Ok(None),
-            }
+            let request = self.request(Lookup::Claimed { index });
+            let verified = self.recent(ctx, &request).await?;
+            Ok(PayoutStatus {
+                head: verified
+                    .payout_tip
+                    .context("payout lookup omitted its certified head")?
+                    .payouts,
+                claimed: verified.claimed,
+            })
         }
     }
 
@@ -389,27 +669,6 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// The released withdrawal at (batch, position), if released.
-    fn withdrawal_release<E: Env>(
-        &mut self,
-        ctx: &E,
-        batch: BatchId<Digest>,
-        position: u32,
-    ) -> impl Future<Output = Result<Option<WithdrawalReleaseRecord>>> + Send {
-        async move {
-            let request = self.request(Lookup::WithdrawalRelease {
-                batch: batch.into_digest(),
-                position,
-            });
-            let verified = self.read(ctx, &request).await?;
-            match verified.record {
-                Some(Record::WithdrawalRelease(release)) => Ok(Some(release)),
-                Some(_) => bail!("certified withdrawal-release read returned a foreign record"),
-                None => Ok(None),
-            }
-        }
-    }
-
     /// The hard-fault release for `account`, if claimed.
     fn hard_fault<E: Env>(
         &mut self,
@@ -446,13 +705,19 @@ pub(crate) trait Chain: Send + 'static {
     }
 }
 
+/// A coherent certificate-backed payout state. Claimed coverage proves consumption;
+/// its absence requires a separate Append opening against this exact `head` before submission.
+pub(crate) struct PayoutStatus {
+    pub(crate) head: commonware_clearing::bajillion::logs::LogHead<Digest>,
+    pub(crate) claimed: Option<commonware_clearing::bajillion::settlement::ClaimedRange>,
+}
+
 /// The remote settlement-chain backend: an RPC client of the validators'
 /// certified query servers, used by wallet agents. Clearing reads bind the selected
 /// deployment; native reads share the chain identity across deployments.
 pub(crate) struct Client {
     scheme: Scheme,
-    /// The chain genesis: the validators' evidence-serving identities, so an
-    /// evidence request routes to the committee retaining the complete close.
+    /// The chain genesis and ordinary validator proof-serving identities.
     genesis: Genesis,
     /// The deployment this client reads.
     deployment: Digest,
@@ -504,20 +769,19 @@ impl Client {
     }
 
     /// The chain genesis this client was built over: the validators'
-    /// evidence-serving identities that route an evidence request to the
-    /// committee retaining the complete close.
+    /// evidence-serving identities that route a request to native replicas.
     pub(crate) const fn genesis(&self) -> &Genesis {
         &self.genesis
     }
 
     /// Fetches one piece of evidence for this deployment from the validators
-    /// retaining the complete close, asking each holder in ascending
+    /// retaining native proof sources, asking each holder in ascending
     /// participant order until one serves it or declares it absent. Every
     /// other answer is routing advice, and the last one is returned when no
     /// holder serves.
     ///
-    /// Nothing here is verified: the caller checks a served opening against
-    /// the certified admitted roots or the deployment's genesis state root.
+    /// The caller authenticates each served opening against its trusted state root
+    /// or paired log heads and the corresponding source range.
     ///
     /// The wallet routes through its own holder rotation (see the agent's
     /// evidence module), so this direct form serves the query tests only.
@@ -682,27 +946,61 @@ pub(crate) struct AdmissionPending;
 /// Space exact admission renewals to limit repeated gossip while ingress may evict pending work.
 const ADMISSION_RESUBMIT_POLLS: usize = 25;
 
-/// Submits a completed close and returns its certified admission.
+/// Submits an exactly certified close and observes admission or FIFO finalization.
 ///
-/// The admitted record must name the exact batch and every committed root.
-/// Clearing finalization is observed separately, so successor certification
-/// can proceed while this close remains challengeable.
+/// A retained admission must name the exact batch and roots. After that record
+/// retires, the finalized epoch boundary authenticates the unique certified close.
+/// Successor certification can proceed while an admitted close remains challengeable.
 pub(crate) async fn admit<C: Chain, E: Env>(
     ctx: &E,
     chain: &mut C,
+    close: &CloseContext<Key, Digest>,
     request: crate::chain::tx::AdmitRequest,
 ) -> Result<()> {
+    let committee = crate::protocol::committee()?;
+    ensure!(
+        request.deployment == chain.deployment()
+            && close.deployment() == &request.deployment
+            && close.payment().epoch() == request.epoch
+            && close.committee() == &committee.commitment::<Sha256>()
+            && request
+                .header
+                .verify::<Sha256, _>(close, &request.roots, request.withdrawal_total),
+        "certified close does not match its admission context"
+    );
+    ensure!(
+        bls12381::Scheme::verifier(committee).verify_exact(&request.header, &request.certificate),
+        "close admission lacks its exact committee certificate"
+    );
     let epoch = request.epoch;
     let batch_id = request.header.batch_id::<Sha256>();
     let roots = request.roots;
     let tx = SettlementTx::Admit(request);
     for attempt in 0..SUBMIT_ATTEMPTS {
-        if let Ok(Some(admitted)) = chain.admitted(ctx, epoch).await {
-            ensure!(
-                admitted.batch_id == batch_id && admitted.roots == roots,
-                "the chain admitted a different close for this epoch"
-            );
-            return Ok(());
+        let read = chain.request(Lookup::Admitted { epoch });
+        if let Ok(verified) = chain.recent(ctx, &read).await {
+            match verified.record {
+                Some(Record::Admitted(admitted)) => {
+                    ensure!(
+                        admitted.batch_id == batch_id && admitted.roots == roots,
+                        "the chain admitted a different close for this epoch"
+                    );
+                    return Ok(());
+                }
+                None => {
+                    // The fixed committee's durable vote decisions make the certified
+                    // Header unique for each deployment and epoch. FIFO finality
+                    // confirms that close after its admission record retires.
+                    if verified
+                        .payout_tip
+                        .and_then(|tip| tip.finalized)
+                        .is_some_and(|finalized| epoch <= finalized)
+                    {
+                        return Ok(());
+                    }
+                }
+                Some(_) => bail!("certified admission read returned a foreign record"),
+            }
         }
 
         // A proven challenge against this batch invalidates the admitted

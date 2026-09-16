@@ -21,9 +21,10 @@ use commonware_storage::{
         current::ordered::{proof::constant, variable},
         sync::Target,
     },
-    translator::TwoCap,
+    translator::Translator,
 };
 use commonware_utils::{range::NonEmptyRange, sequence::FixedBytes};
+use std::hash::{BuildHasher, DefaultHasher};
 
 /// Milliseconds since the Unix epoch on the runtime clock.
 ///
@@ -63,21 +64,40 @@ const _: () = assert!(MAX_BLOCK_BYTES >= MAX_TX_BYTES);
 /// Bitmap chunk size (bytes) for the current database's activity bitmap.
 const CHUNK: usize = 64;
 
-/// Bytes in one state key: 32 entropy bytes then one domain tag byte.
+/// Bytes in one state key: 32 entropy bytes, an ordered u64, and a domain tag.
 ///
-/// The translator indexes a key prefix, so the entropy comes first and the
-/// tag last (see [`crate::chain::state`] for the key derivation).
-pub(crate) const KEY_BYTES: usize = 33;
+/// Claimed ranges share the entropy bytes and sort by their complete native index.
+pub(crate) const KEY_BYTES: usize = 41;
 
 /// One settlement state key.
 pub(crate) type StateKey = FixedBytes<KEY_BYTES>;
+
+/// Exact ordered keys keep all starts in a deployment's claimed map independently indexed.
+#[derive(Clone, Default)]
+pub(crate) struct StateTranslator;
+
+impl Translator for StateTranslator {
+    type Key = [u8; KEY_BYTES];
+
+    fn transform(&self, key: &[u8]) -> Self::Key {
+        key.try_into().expect("settlement keys have a fixed width")
+    }
+}
+
+impl BuildHasher for StateTranslator {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        DefaultHasher::new()
+    }
+}
 
 /// Ordered current QMDB holding the settlement state.
 ///
 /// Ordered so both presence (key-value proofs) and absence (exclusion proofs)
 /// of any state key are provable against the canonical root.
 pub(crate) type Qmdb<E> =
-    variable::Db<mmr::Family, E, StateKey, Record, Sha256, TwoCap, CHUNK, Sequential>;
+    variable::Db<mmr::Family, E, StateKey, Record, Sha256, StateTranslator, CHUNK, Sequential>;
 
 /// Shared handle to the settlement QMDB, usable as a glue database set.
 pub(crate) type Database<E> = Shared<Qmdb<E>>;

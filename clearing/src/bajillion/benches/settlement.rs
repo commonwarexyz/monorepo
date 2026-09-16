@@ -5,7 +5,7 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     posted,
     qmdb::{self, State, StateHead, StateOpening, account_key},
-    settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
+    settlement::{EpochDeadlinePolicy, Genesis, SettlementChain, SettlementConfig},
     transition::{
         CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
         prepare_close_with_strategy, validate_close_with_strategy,
@@ -23,8 +23,9 @@ use commonware_cryptography::{
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
-use commonware_parallel::Sequential;
-use commonware_runtime::{Runner as _, deterministic, utils::buffer::paged::CacheRef};
+use commonware_runtime::{
+    Runner as _, Supervisor as _, deterministic, utils::buffer::paged::CacheRef,
+};
 use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
     qmdb::current::FixedConfig, translator::EightCap,
@@ -63,7 +64,7 @@ const HARD_FAULT_PROFILES: &[(usize, usize)] = &[
     (1_000_000, 1_024),
 ];
 
-type TestState = State<deterministic::Context, Sha256>;
+type TestState = super::fixtures::BenchState;
 type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestHeader = Header<Digest>;
@@ -99,6 +100,7 @@ struct AdmitInput {
 
 struct ChainSource {
     head: StateHead<Digest>,
+    genesis: Genesis<Digest>,
     validators: Validators,
 }
 
@@ -156,7 +158,7 @@ fn operator_bls() -> OperatorKey {
     compute_public::<MinSig>(&Private::new(Scalar::from(OPERATOR_BLS_SEED)))
 }
 
-fn state_config(context: &deterministic::Context) -> qmdb::Config<Sequential> {
+fn state_config(context: &deterministic::Context) -> qmdb::Config<commonware_parallel::Rayon> {
     let cache = CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(64));
     FixedConfig {
         merkle_config: MerkleConfig {
@@ -165,7 +167,7 @@ fn state_config(context: &deterministic::Context) -> qmdb::Config<Sequential> {
             items_per_blob: NZU64!(1024),
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(4096),
-            strategy: Sequential,
+            strategy: super::fixtures::strategy().clone(),
             page_cache: cache.clone(),
         },
         journal_config: JournalConfig {
@@ -208,7 +210,13 @@ async fn state_fixture(
         })
         .collect();
     let config = state_config(&runtime);
-    let state = TestState::open(runtime, config)
+    let logs = commonware_clearing::bajillion::logs::Logs::open(
+        runtime.child("logs"),
+        super::fixtures::logs_config(&runtime, "settlement"),
+    )
+    .await
+    .unwrap();
+    let state = State::open(runtime, config)
         .await
         .expect("open native state");
     assert!(state.is_bootstrap());
@@ -217,7 +225,10 @@ async fn state_fixture(
         .await
         .expect("prepare canonical genesis");
     let state = state.apply(genesis).await.expect("apply canonical genesis");
-    (state, accounts)
+    (
+        commonware_clearing::bajillion::replica::Replica::from_parts(state, logs),
+        accounts,
+    )
 }
 
 impl ChainSource {
@@ -227,9 +238,22 @@ impl ChainSource {
         validator_count: usize,
     ) -> (Self, TestState, Vec<Account>) {
         let (state, accounts) = state_fixture(runtime, live_accounts).await;
+        let head = *state.state().head();
+        let allocations = accounts
+            .iter()
+            .map(|account| {
+                (
+                    account_key(&account.public).expect("benchmark account key is canonical"),
+                    NonZeroU64::new(OPENING_BALANCE).expect("opening balance is positive"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let genesis = Genesis::new(head.root(), head.operations(), &allocations)
+            .expect("benchmark genesis is canonical");
         (
             Self {
-                head: *state.head(),
+                head,
+                genesis,
                 validators: Validators::new(validator_count),
             },
             state,
@@ -242,7 +266,7 @@ impl ChainSource {
             deployment(),
             SigningKey::from_seed(OPERATOR_SEED).public_key(),
             self.validators.committee().clone(),
-            &(&self.head).into(),
+            &self.genesis,
             0,
             settlement_config(
                 usize::try_from(self.head.live_accounts())
@@ -270,14 +294,25 @@ async fn admission_fixture(
         SigningKey::from_seed(OPERATOR_SEED).public_key(),
         &deposits,
         &withdrawals,
-        state.liability(),
+        u64::try_from(LIVE_ACCOUNTS)
+            .expect("benchmark account count fits u64")
+            .checked_mul(OPENING_BALANCE)
+            .expect("benchmark liability fits u64"),
         admission_deadline,
         admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE),
         CloseLimits::protocol_maximum(),
         validators.committee().commitment::<Sha256>(),
     )
     .expect("benchmark epoch is valid")
-    .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+    .bind::<Sha256, _, _>(
+        &state,
+        &deposits,
+        &withdrawals,
+        commonware_clearing::bajillion::logs::Floors {
+            activity: 0,
+            payouts: 0,
+        },
+    )
     .expect("benchmark close context is valid");
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -285,7 +320,7 @@ async fn admission_fixture(
         &deposits,
         &withdrawals,
         Vec::new(),
-        &Sequential,
+        super::fixtures::strategy(),
     )
     .await
     .expect("benchmark close is valid");
@@ -299,17 +334,16 @@ async fn admission_fixture(
         &withdrawals,
         dealing,
         &mut TestRng::new(0),
-        &Sequential,
+        super::fixtures::strategy(),
     )
     .await
     .expect("benchmark complete dealing validates");
     assert_eq!(prepared.close().header, validated.close().header);
     drop(prepared);
-    let (state, close) = validated
-        .apply(state)
+    let (state, close) = Box::pin(validated.apply(state))
         .await
         .expect("benchmark close applies");
-    assert_eq!(state.root(), close.roots.successor);
+    assert_eq!(state.state().root(), close.roots.successor);
     let certificate = validators
         .signer(Participant::new(0))
         .assemble_exact(validators.attestations(&close.header))
@@ -351,7 +385,7 @@ fn signed_withdrawal(
 ) -> SignedWithdrawal<VerifyingKey, Digest> {
     SignedWithdrawal::sign(
         deployment(),
-        state.root().digest,
+        state.state().root().digest,
         Bytes::from_static(b"benchmark-destination"),
         WithdrawalAction::Amount(NonZeroU64::MIN),
         deadline,
@@ -368,11 +402,15 @@ async fn withdrawal_sources(
     let mut withdrawals = Vec::with_capacity(count);
     for account in accounts.iter().take(count) {
         let opening = state
+            .state()
             .opening(account.public.clone())
             .await
             .expect("benchmark account can be opened");
         assert_eq!(
-            opening.verify::<Sha256>(&state.root()).unwrap().get(),
+            opening
+                .verify::<Sha256>(&state.state().root())
+                .unwrap()
+                .get(),
             OPENING_BALANCE
         );
         withdrawals.push(WithdrawalSource {
@@ -395,8 +433,13 @@ fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
 async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSource {
     let (chain, mut state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, 1).await;
     let request = signed_withdrawal(&state, &accounts[0], WITHDRAWAL_DEADLINE);
-    let opening = state.opening(accounts[0].public.clone()).await.unwrap();
+    let opening = state
+        .state()
+        .opening(accounts[0].public.clone())
+        .await
+        .unwrap();
     let mut admissions = Vec::with_capacity(depth);
+
     for epoch in 0..depth {
         let (next, admission) = admission_fixture(
             state,
@@ -406,6 +449,7 @@ async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSou
         )
         .await;
         state = next;
+
         admissions.push(admission);
     }
     let source = QueueSource {
