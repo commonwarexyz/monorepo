@@ -146,6 +146,7 @@ mod tests {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
@@ -2189,6 +2190,203 @@ mod tests {
                 assert!(!store.has(2));
                 assert!(!store.has(4));
             }
+        });
+    }
+
+    /// Config with two records per section.
+    fn small_cfg() -> Config {
+        Config {
+            partition: "test-ordinal".into(),
+            items_per_blob: NZU64!(2),
+            write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+        }
+    }
+
+    /// Fill sections 0 and 1 with two records each and sync.
+    async fn seed_two_sections(context: &deterministic::Context, cfg: &Config) {
+        let mut store =
+            Ordinal::<_, FixedBytes<32>>::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .expect("Failed to initialize store");
+        for i in 0..4 {
+            store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+        }
+        store.sync().await.expect("Failed to sync data");
+    }
+
+    /// Tear the last byte off a stored section so its length is no longer record-aligned.
+    async fn tear_tail(context: &impl Storage, cfg: &Config, section: u64) {
+        let (blob, len) = context
+            .open(&cfg.partition, &section.to_be_bytes())
+            .await
+            .expect("Failed to open blob");
+        blob.resize(len - 1).await.expect("Failed to tear tail");
+        blob.sync().await.expect("Failed to sync torn tail");
+    }
+
+    #[test_traced]
+    fn test_init_clean_sections_sync_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = small_cfg();
+            seed_two_sections(&context, &cfg).await;
+
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let none = None;
+            let mut bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+            bits.insert(0, &none);
+            bits.insert(1, &none);
+            let store = drive_pending_syncs(
+                &pending,
+                Ordinal::<_, FixedBytes<32>>::init(delayed.child("second"), cfg, Some(bits)),
+            )
+            .await
+            .expect("Failed to initialize store");
+
+            // Both sections are retained as stored, so recovery has nothing to write
+            assert_eq!(pending.calls(), 0);
+            for i in 0..4 {
+                assert!(store.has(i));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_removes_uncovered_torn_section_unopened() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = small_cfg();
+            seed_two_sections(&context, &cfg).await;
+            tear_tail(&context, &cfg, 1).await;
+
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let none = None;
+            let mut bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+            bits.insert(0, &none);
+            let store = drive_pending_syncs(
+                &pending,
+                Ordinal::<_, FixedBytes<32>>::init(
+                    delayed.child("second"),
+                    cfg.clone(),
+                    Some(bits),
+                ),
+            )
+            .await
+            .expect("Failed to initialize store");
+
+            // Section 0 is retained as stored, so the only durability work possible would be
+            // repairing the torn section the bits discard. It must be removed without being
+            // opened.
+            assert_eq!(pending.calls(), 0);
+            assert!(store.has(0));
+            assert!(store.has(1));
+            assert!(!store.has(2));
+            assert!(!store.has(3));
+            assert_eq!(
+                store.get(1).await.unwrap().unwrap(),
+                FixedBytes::new([1u8; 32])
+            );
+            assert_eq!(
+                delayed.scan(&cfg.partition).await.unwrap(),
+                vec![0u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_init_ignores_uncovered_torn_section_sync_fault() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = small_cfg();
+            seed_two_sections(&context, &cfg).await;
+            tear_tail(&context, &cfg, 1).await;
+
+            // Repairing the discarded section would need a sync on the index partition, which
+            // this context refuses. The retained section needs none, so init must succeed.
+            let faulty = SyncFaultContext {
+                inner: context,
+                fail_partition: cfg.partition.clone(),
+            };
+            let none = None;
+            let mut bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+            bits.insert(0, &none);
+            let store =
+                Ordinal::<_, FixedBytes<32>>::init(faulty.child("second"), cfg.clone(), Some(bits))
+                    .await
+                    .expect("Failed to initialize store");
+            assert!(store.has(0));
+            assert!(store.has(1));
+            assert!(!store.has(2));
+            assert_eq!(
+                faulty.scan(&cfg.partition).await.unwrap(),
+                vec![0u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_init_repairs_covered_torn_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = small_cfg();
+            seed_two_sections(&context, &cfg).await;
+            tear_tail(&context, &cfg, 0).await;
+
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let mut bitmap = BitMap::zeroes(2);
+            bitmap.set(0, true);
+            let partial = Some(bitmap);
+            let none = None;
+            let mut bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+            bits.insert(0, &partial);
+            bits.insert(1, &none);
+            let store = drive_pending_syncs(
+                &pending,
+                Ordinal::<_, FixedBytes<32>>::init(
+                    delayed.child("second"),
+                    cfg.clone(),
+                    Some(bits),
+                ),
+            )
+            .await
+            .expect("Failed to initialize store");
+
+            // The torn section is covered, so its tail is repaired (one sync). The clearing pass
+            // writes nothing, since truncation removed the unmarked record, but still syncs the
+            // section (one sync).
+            assert_eq!(pending.calls(), 2);
+            assert!(store.has(0));
+            assert!(!store.has(1));
+            assert!(store.has(2));
+            assert!(store.has(3));
+            assert_eq!(
+                store.get(0).await.unwrap().unwrap(),
+                FixedBytes::new([0u8; 32])
+            );
+            drop(store);
+
+            // The repaired blob holds exactly the surviving record
+            let (_, len) = delayed
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(len, (FixedBytes::<32>::SIZE + u32::SIZE) as u64);
         });
     }
 }

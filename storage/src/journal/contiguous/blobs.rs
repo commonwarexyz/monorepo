@@ -79,12 +79,26 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan a partition's blob names, treating a missing partition as empty.
-    async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
+    pub(super) async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(name).await {
             Ok(names) => Ok(names),
             Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
             Err(err) => Err(Error::Runtime(err)),
         }
+    }
+
+    /// Parse blob names into sorted indices.
+    pub(super) fn indices(names: Vec<Vec<u8>>) -> Result<Vec<u64>, Error> {
+        let mut indices = Vec::with_capacity(names.len());
+        for name in names {
+            let bytes: [u8; 8] = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidBlobName(hex(&name)))?;
+            indices.push(u64::from_be_bytes(bytes));
+        }
+        indices.sort_unstable();
+        Ok(indices)
     }
 
     /// Open every blob in `names` as a [`Writer`], keyed by blob index.
@@ -121,12 +135,7 @@ impl<E: Context> Partition<E> {
         let names = Self::scan_names(&self.context, &self.name).await?;
         let mut pending = BTreeMap::new();
         let mut discarded = Vec::new();
-        for name in names {
-            let bytes: [u8; 8] = name
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidBlobName(hex(&name)))?;
-            let index = u64::from_be_bytes(bytes);
+        for index in Self::indices(names)? {
             let first = super::blob_first_position(index, items_per_blob)?;
             if first >= max_size {
                 discarded.push(index);
