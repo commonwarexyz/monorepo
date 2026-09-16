@@ -41,7 +41,7 @@ use crate::{
     merkle::{self, Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
@@ -259,7 +259,7 @@ where
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::batch_chain`] for more details).
+    ///   [`crate::qmdb::chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
@@ -633,9 +633,9 @@ where
         E: Context,
     {
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -658,7 +658,7 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = batch_chain::collect_ancestor_bounds(
+        let ancestors = chain::collect_ancestor_bounds(
             live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
@@ -692,7 +692,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, O: Operation<F>, S: Strategy> {
 
 impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O, S> {
     fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, O, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
