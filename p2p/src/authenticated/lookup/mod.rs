@@ -16,7 +16,7 @@
 //!
 //! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
 //! authenticates peers and supplies their message streams. Peer identities come from
-//! its [`commonware_cryptography::AsyncSigner`] scheme.
+//! its scheme's [`commonware_stream::Identity`] implementation.
 //! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
 //! and handshake transcript.
 //!
@@ -229,7 +229,7 @@ mod tests {
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_codec::{Decode as _, Encode as _, FixedSize};
-    use commonware_cryptography::{self as cryptography, Signer, Verifier as _, ed25519};
+    use commonware_cryptography::{Signer, Verifier as _, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -237,7 +237,7 @@ mod tests {
         telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_stream::{
-        Handshake, Receiver as StreamReceiver, Sender as StreamSender, encrypted,
+        Handshake, Identity, Receiver as StreamReceiver, Sender as StreamSender, encrypted,
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
@@ -2312,20 +2312,20 @@ mod tests {
     #[error("application signer unavailable")]
     struct TestSigningError;
 
-    impl cryptography::AsyncSigner for TestScheme {
-        type Signature = ed25519::Signature;
+    impl Identity for TestScheme {
         type PublicKey = ed25519::PublicKey;
-        type Error = TestSigningError;
 
         fn identity(&self) -> Self::PublicKey {
             Signer::public_key(&self.application_signer)
         }
+    }
 
-        async fn sign_async(
+    impl TestScheme {
+        async fn sign(
             &self,
             namespace: &[u8],
             message: &[u8],
-        ) -> Result<Self::Signature, Self::Error> {
+        ) -> Result<ed25519::Signature, TestSigningError> {
             self.observations
                 .signing_calls
                 .fetch_add(1, Ordering::Relaxed);
@@ -2408,17 +2408,8 @@ mod tests {
             namespace: &[u8],
         ) -> Result<ApplicationProof, TestSigningError> {
             let transport_key = Signer::public_key(&self.transport_signer);
-            let signature = cryptography::AsyncSigner::sign_async(
-                &self.scheme,
-                namespace,
-                transport_key.as_ref(),
-            )
-            .await?;
-            Ok((
-                cryptography::AsyncSigner::identity(&self.scheme),
-                transport_key,
-                signature,
-            ))
+            let signature = self.scheme.sign(namespace, transport_key.as_ref()).await?;
+            Ok((self.scheme.identity(), transport_key, signature))
         }
 
         fn verify_application_proof(
@@ -2710,8 +2701,8 @@ mod tests {
         listener_handshake: TestHandshake,
         dialer_handshake: TestHandshake,
     ) -> Pair {
-        let listener_key = cryptography::AsyncSigner::identity(listener_handshake.scheme());
-        let dialer_key = cryptography::AsyncSigner::identity(dialer_handshake.scheme());
+        let listener_key = listener_handshake.scheme().identity();
+        let dialer_key = dialer_handshake.scheme().identity();
         let listener_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
         let dialer_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
         let (mut listener_network, mut listener_oracle) = Network::new(
@@ -2943,9 +2934,9 @@ mod tests {
             .stall_next_signature
             .store(true, Ordering::Relaxed);
 
-        let central_key = cryptography::AsyncSigner::identity(central_handshake.scheme());
-        let blocked_key = cryptography::AsyncSigner::identity(blocked_handshake.scheme());
-        let healthy_key = cryptography::AsyncSigner::identity(healthy_handshake.scheme());
+        let central_key = central_handshake.scheme().identity();
+        let blocked_key = blocked_handshake.scheme().identity();
+        let healthy_key = healthy_handshake.scheme().identity();
         let central_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_300);
         let blocked_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_301);
         let healthy_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_302);

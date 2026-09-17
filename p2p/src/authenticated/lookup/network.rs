@@ -13,13 +13,12 @@ use crate::{
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::AsyncSigner;
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Handshake, PublicKeyOf};
+use commonware_stream::{Handshake, Identity, PublicKeyOf};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use tracing::{debug, info};

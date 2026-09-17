@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::AsyncSigner;
+    use commonware_cryptography::{PublicKey, Signer};
     use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
@@ -18,19 +18,35 @@ commonware_macros::stability_scope!(BETA {
     pub mod encrypted;
     pub mod utils;
 
-    /// Public identity key authenticated by a handshake's signing scheme.
-    pub type PublicKeyOf<H> = <<H as Handshake>::Scheme as AsyncSigner>::PublicKey;
+    /// Provides a handshake's local identity.
+    pub trait Identity {
+        /// Public key identifying the local peer.
+        type PublicKey: PublicKey;
+
+        /// Returns the local identity.
+        fn identity(&self) -> Self::PublicKey;
+    }
+
+    impl<S: Signer> Identity for S {
+        type PublicKey = S::PublicKey;
+
+        fn identity(&self) -> Self::PublicKey {
+            self.public_key()
+        }
+    }
+
+    /// Public identity key authenticated by a handshake's scheme.
+    pub type PublicKeyOf<H> = <<H as Handshake>::Scheme as Identity>::PublicKey;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
     /// Implementations own their authentication mechanism, which may be asynchronous and fallible.
     /// They must prove each peer's declared identity according to their configured authority and
-    /// bind the supplied
-    /// application namespace, both peer identities, and both message directions to the established
-    /// session. The returned sender and receiver must preserve message boundaries and provide
-    /// confidentiality and integrity. A successful dial must authenticate the expected peer. A
-    /// listen may succeed only if the bouncer returns `true` for the same authenticated peer that
-    /// is returned.
+    /// bind the supplied application namespace, both peer identities, and both message directions
+    /// to the established session. The returned sender and receiver must preserve message boundaries
+    /// and provide confidentiality and integrity. A successful dial must authenticate the expected
+    /// peer. A listen may succeed only if the bouncer returns `true` for the same authenticated peer
+    /// that is returned.
     ///
     /// `max_message_size` limits plaintext messages. Callers must supply a limit no greater than
     /// [`Self::MAX_SIZE`]. Implementations must reject larger outbound messages and enforce the
@@ -43,8 +59,8 @@ commonware_macros::stability_scope!(BETA {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
 
-        /// Signing scheme that owns the local authenticated identity.
-        type Scheme: AsyncSigner;
+        /// Authority that owns the local authenticated identity.
+        type Scheme: Identity;
 
         /// Error returned when authentication or stream setup fails.
         type Error: Error + Send + Sync + 'static;
@@ -55,7 +71,9 @@ commonware_macros::stability_scope!(BETA {
         /// Receiver returned for a connection using `I` as its raw stream.
         type Receiver<I: Stream>: Receiver;
 
-        /// Returns the signing scheme for the local authenticated identity.
+        /// Returns the authority for the local authenticated identity.
+        ///
+        /// Its identity must remain stable across attempts and clones of this handshake.
         fn scheme(&self) -> &Self::Scheme;
 
         /// Authenticates an outbound connection to `peer`.

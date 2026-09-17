@@ -127,52 +127,6 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// Produces [Signature]s asynchronously over messages that can be verified with a
-    /// corresponding [PublicKey].
-    ///
-    /// Supports signing authorities that require asynchronous I/O or can fail. Every [Signer]
-    /// also implements this trait.
-    ///
-    /// Implementations must follow the namespace and message handling contract of [`Signer::sign`].
-    pub trait AsyncSigner: Clone + Send + Sync + 'static {
-        /// The type of [Signature] produced by this [AsyncSigner].
-        type Signature: Signature;
-
-        /// The corresponding [PublicKey] type.
-        type PublicKey: PublicKey<Signature = Self::Signature>;
-
-        /// The error returned when signing fails.
-        type Error: core::error::Error + Send + Sync + 'static;
-
-        /// Returns the [PublicKey] corresponding to this [AsyncSigner].
-        fn identity(&self) -> Self::PublicKey;
-
-        /// Signs a message with the given namespace.
-        fn sign_async(
-            &self,
-            namespace: &[u8],
-            message: &[u8],
-        ) -> impl Future<Output = Result<Self::Signature, Self::Error>> + Send;
-    }
-
-    impl<T: Signer> AsyncSigner for T {
-        type Signature = T::Signature;
-        type PublicKey = T::PublicKey;
-        type Error = core::convert::Infallible;
-
-        fn identity(&self) -> Self::PublicKey {
-            Signer::public_key(self)
-        }
-
-        fn sign_async(
-            &self,
-            namespace: &[u8],
-            message: &[u8],
-        ) -> impl Future<Output = Result<Self::Signature, Self::Error>> + Send {
-            core::future::ready(Ok(Signer::sign(self, namespace, message)))
-        }
-    }
-
     /// A [Signer] that can be serialized/deserialized.
     pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
 
@@ -351,29 +305,6 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
-
-    #[test]
-    fn test_async_signer_delegates_to_signer() {
-        let private_key = ed25519::PrivateKey::from_seed(0);
-        let namespace = b"test_namespace";
-        let message = b"test_message";
-        let expected = private_key.sign(namespace, message);
-        let public_key = private_key.identity();
-        assert_eq!(public_key, private_key.public_key());
-        let mut future = core::pin::pin!(private_key.sign_async(namespace, message));
-        let result = core::future::Future::poll(
-            future.as_mut(),
-            &mut core::task::Context::from_waker(core::task::Waker::noop()),
-        );
-        let core::task::Poll::Ready(result) = result else {
-            panic!("blanket signer must be ready immediately");
-        };
-        let signature = result.unwrap();
-
-        assert_eq!(signature, expected);
-        assert!(public_key.verify(namespace, message, &signature));
-        assert!(!public_key.verify(b"wrong_namespace", message, &signature));
-    }
 
     fn test_validate<C: PrivateKey>() {
         let private_key = C::random(test_rng());

@@ -14,7 +14,7 @@ use crate::{
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::{AsyncSigner, Signer};
+use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
@@ -79,7 +79,7 @@ where
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
-        let local = cfg.handshake.scheme().identity();
+        let local = cfg.handshake.scheme().public_key();
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers
                 .iter()
