@@ -1033,7 +1033,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(self.finish_append())
     }
 
-    // Commit appended bounds and rotate a full tail. Both append paths use the same ordering.
+    // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
     async fn advance_tail(&mut self, new_size: u64) -> Result<(), Error> {
         self.bounds.end = new_size;
         if new_size.is_multiple_of(self.items_per_blob.get()) {

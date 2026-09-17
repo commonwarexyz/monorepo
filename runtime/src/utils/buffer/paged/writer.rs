@@ -295,9 +295,9 @@ impl<B: Blob> Writer<B> {
     ///
     /// Panics if the encoder writes a different number of bytes than [`FixedSize::SIZE`].
     /// If the encoder panics, the writer's logical contents and size remain unchanged.
-    #[commonware_macros::stability(BETA)]
     pub fn try_append_encoded<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
-        if T::SIZE > self.buffer.capacity - self.buffer.len() {
+        let available = self.buffer.capacity.checked_sub(self.buffer.len())?;
+        if T::SIZE > available {
             return None;
         }
         let offset = self.buffer.size();
@@ -1364,6 +1364,16 @@ mod tests {
     #[test_traced]
     fn test_encoded_append_capacity_snapshot_and_recovery() {
         deterministic::Runner::default().start(|context| async move {
+            struct MustNotEncode<const SIZE: usize>;
+            impl<const SIZE: usize> FixedSize for MustNotEncode<SIZE> {
+                const SIZE: usize = SIZE;
+            }
+            impl<const SIZE: usize> Write for MustNotEncode<SIZE> {
+                fn write(&self, _: &mut impl BufMut) {
+                    panic!("insufficient capacity must not invoke the encoder");
+                }
+            }
+
             let (blob, size) = context.open("encoded_append", b"blob").await.unwrap();
             let cache = CacheRef::from_pooler(&context, NZU16!(16), NZUsize!(4));
             let mut writer = Writer::new(blob, size, 32, cache.clone()).await.unwrap();
@@ -1374,15 +1384,6 @@ mod tests {
                 assert_eq!(writer.try_append_encoded(&i), Some(i * 8));
             }
 
-            struct MustNotEncode<const SIZE: usize>;
-            impl<const SIZE: usize> FixedSize for MustNotEncode<SIZE> {
-                const SIZE: usize = SIZE;
-            }
-            impl<const SIZE: usize> Write for MustNotEncode<SIZE> {
-                fn write(&self, _: &mut impl BufMut) {
-                    panic!("a full writer must not invoke the encoder");
-                }
-            }
             assert_eq!(writer.try_append_encoded(&MustNotEncode::<8>), None);
             assert_eq!(writer.size(), 32);
             assert_eq!(
