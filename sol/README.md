@@ -1,6 +1,6 @@
 # commonware-sol
 
-Verify Commonware proofs and certificates in Solidity.
+Verify proofs and certificates in Solidity.
 
 ## Status
 

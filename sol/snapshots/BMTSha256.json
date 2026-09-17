@@ -1,0 +1,8 @@
+{
+  "multi-256-16": "72549",
+  "multi-256-16-calldata": "65148",
+  "range-256-32": "35283",
+  "range-256-32-calldata": "32062",
+  "single-256": "5277",
+  "single-256-calldata": "4453"
+}

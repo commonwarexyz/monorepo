@@ -56,6 +56,9 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
 
+    pub mod keccak256;
+    pub use crate::keccak256::{CoreKeccak256, Keccak256};
+
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
@@ -595,6 +598,11 @@ mod tests {
         let (_, digest_mars) = hasher.finalize();
         assert!(H::Digest::decode(commonware_codec::Copying(digest_mars.as_ref())).is_ok());
         assert_ne!(digest, digest_mars);
+    }
+
+    #[test]
+    fn test_keccak256_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Keccak256>();
     }
 
     #[test]

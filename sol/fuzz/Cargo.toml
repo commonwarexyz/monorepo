@@ -22,4 +22,3 @@ commonware-utils = { workspace = true, features = ["std"] }
 const-hex = { workspace = true, features = ["std"] }
 futures.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
-sha3.workspace = true

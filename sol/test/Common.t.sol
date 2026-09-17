@@ -1,10 +1,44 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
+import { Common } from "../src/merkle/Common.sol";
+import { LibBMT } from "../src/merkle/LibBMT.sol";
 import { LibMMR } from "../src/merkle/LibMMR.sol";
 import { LibMMB } from "../src/merkle/LibMMB.sol";
 import { LibMerkle } from "../src/merkle/LibMerkle.sol";
+
+/// @dev Virtual constants specialize verifier callers without a runtime hasher parameter.
+abstract contract HashSelection {
+    /// @dev Select native Keccak hashing.
+    function _hasher() internal pure virtual returns (address) {
+        return address(0);
+    }
+
+    /// @dev Build reference digests independently of the verifier's hashing implementation.
+    function _hash(bytes memory input) internal pure returns (bytes32) {
+        return _hasher() == address(0) ? keccak256(input) : sha256(input);
+    }
+}
+
+abstract contract HashTest is Test, HashSelection {
+    /// @dev Ask the Rust oracle to use the same hash algorithm as the verifier.
+    function _ffi(string[] memory args) internal returns (bytes memory) {
+        if (_hasher() == address(0)) return vm.ffi(args);
+        string[] memory selected = new string[](args.length + 2);
+        for (uint256 i; i < args.length; ++i) {
+            selected[i] = args[i];
+        }
+        selected[args.length] = "--hash";
+        selected[args.length + 1] = "sha256";
+        return vm.ffi(selected);
+    }
+
+    /// @dev Keep gas snapshots for distinct hashing algorithms in separate groups.
+    function _group(string memory family) internal pure returns (string memory) {
+        return _hasher() == address(0) ? family : string.concat(family, "Sha256");
+    }
+}
 
 struct CompatibilityCase {
     bytes32 root;
@@ -21,14 +55,14 @@ struct CompatibilityCase {
 }
 
 /// @dev Exercises policy-aware memory and calldata entrypoints with caller-owned inputs and reusable scratch.
-abstract contract CompatibilityHarness is Test {
+abstract contract CompatibilityHarness is HashTest {
     function memoryVerify(
         CompatibilityCase calldata c,
         uint256[] memory indices,
         uint256[] memory positions,
         bytes32[] memory elements,
         bytes32[] memory proof
-    ) internal pure returns (bool) {
+    ) internal view returns (bool) {
         if (c.mode == 2) {
             return c.belt
                 ? LibMMB.verifyMulti(
@@ -39,7 +73,8 @@ abstract contract CompatibilityHarness is Test {
                     positions,
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 )
                 : LibMMR.verifyMulti(
                     c.root,
@@ -49,7 +84,8 @@ abstract contract CompatibilityHarness is Test {
                     positions,
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 );
         }
         if (c.mode == 1) {
@@ -61,7 +97,8 @@ abstract contract CompatibilityHarness is Test {
                     elements[0],
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 )
                 : LibMMR.verify(
                     c.root,
@@ -70,7 +107,8 @@ abstract contract CompatibilityHarness is Test {
                     elements[0],
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 );
         }
         return c.belt
@@ -81,7 +119,8 @@ abstract contract CompatibilityHarness is Test {
                 elements,
                 proof,
                 c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive
+                c.inactive,
+                _hasher()
             )
             : LibMMR.verifyRange(
                 c.root,
@@ -90,7 +129,8 @@ abstract contract CompatibilityHarness is Test {
                 elements,
                 proof,
                 c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive
+                c.inactive,
+                _hasher()
             );
     }
 
@@ -100,7 +140,7 @@ abstract contract CompatibilityHarness is Test {
         uint256[] calldata positions,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) internal pure returns (bool) {
+    ) internal view returns (bool) {
         if (c.mode == 2) {
             return c.belt
                 ? LibMMB.verifyMultiCalldata(
@@ -111,7 +151,8 @@ abstract contract CompatibilityHarness is Test {
                     positions,
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 )
                 : LibMMR.verifyMultiCalldata(
                     c.root,
@@ -121,7 +162,8 @@ abstract contract CompatibilityHarness is Test {
                     positions,
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 );
         }
         if (c.mode == 1) {
@@ -133,7 +175,8 @@ abstract contract CompatibilityHarness is Test {
                     elements[0],
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 )
                 : LibMMR.verifyCalldata(
                     c.root,
@@ -142,7 +185,8 @@ abstract contract CompatibilityHarness is Test {
                     elements[0],
                     proof,
                     c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive
+                    c.inactive,
+                    _hasher()
                 );
         }
         return c.belt
@@ -153,7 +197,8 @@ abstract contract CompatibilityHarness is Test {
                 elements,
                 proof,
                 c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive
+                c.inactive,
+                _hasher()
             )
             : LibMMR.verifyRangeCalldata(
                 c.root,
@@ -162,11 +207,12 @@ abstract contract CompatibilityHarness is Test {
                 elements,
                 proof,
                 c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive
+                c.inactive,
+                _hasher()
             );
     }
 
-    function verify(CompatibilityCase calldata c, bool direct, bool sliced) external pure returns (bool) {
+    function verify(CompatibilityCase calldata c, bool direct, bool sliced) external view returns (bool) {
         uint256[] calldata indices = c.indices;
         uint256[] calldata positions = c.positions;
         bytes32[] calldata elements = c.elements;
@@ -182,7 +228,7 @@ abstract contract CompatibilityHarness is Test {
             : memoryVerify(c, indices, positions, elements, proof);
     }
 
-    function checked(CompatibilityCase calldata c, bool direct) external pure returns (bool valid) {
+    function checked(CompatibilityCase calldata c, bool direct) external view returns (bool valid) {
         CompatibilityCase memory inputs = c;
         bytes memory allocated = new bytes(97);
         for (uint256 i; i < allocated.length; ++i) {
@@ -252,19 +298,19 @@ abstract contract CompatibilityHarness is Test {
 }
 
 /// @dev The reference builder simulates append/merge operations without using verifier geometry.
-abstract contract VerifierHarness is Test {
+abstract contract VerifierHarness is HashTest {
     function referenceRoot(bytes32[] memory elements, bool belt) internal pure returns (bytes32) {
         bytes32[] memory peaks = new bytes32[](elements.length + 1);
         uint256[] memory heights = new uint256[](elements.length + 1);
         uint256 count;
         uint64 position;
         for (uint256 i; i < elements.length; ++i) {
-            peaks[count] = keccak256(abi.encodePacked(position++, elements[i]));
+            peaks[count] = _hash(abi.encodePacked(position++, elements[i]));
             heights[count++] = 0;
             // Delayed merging chooses the newest equal-height pair first.
             for (uint256 j = count - 1; j > 0; --j) {
                 if (heights[j - 1] != heights[j]) continue;
-                peaks[j - 1] = keccak256(abi.encodePacked(position++, peaks[j - 1], peaks[j]));
+                peaks[j - 1] = _hash(abi.encodePacked(position++, peaks[j - 1], peaks[j]));
                 ++heights[j - 1];
                 for (uint256 k = j; k + 1 < count; ++k) {
                     peaks[k] = peaks[k + 1];
@@ -275,12 +321,12 @@ abstract contract VerifierHarness is Test {
                 j = count;
             }
         }
-        if (count == 0) return keccak256(abi.encodePacked(uint64(0)));
+        if (count == 0) return _hash(abi.encodePacked(uint64(0)));
         bytes32 acc = peaks[0];
         for (uint256 i = 1; i < count; ++i) {
-            acc = keccak256(abi.encodePacked(acc, peaks[i]));
+            acc = _hash(abi.encodePacked(acc, peaks[i]));
         }
-        return keccak256(abi.encodePacked(uint64(elements.length), acc));
+        return _hash(abi.encodePacked(uint64(elements.length), acc));
     }
 
     function verifyRange(
@@ -292,8 +338,8 @@ abstract contract VerifierHarness is Test {
         bytes32[] memory proof
     ) public view returns (bool valid) {
         valid = belt
-            ? LibMMB.verifyRange(root, leaves, start, elements, proof)
-            : LibMMR.verifyRange(root, leaves, start, elements, proof);
+            ? LibMMB.verifyRange(root, leaves, start, elements, proof, _hasher())
+            : LibMMR.verifyRange(root, leaves, start, elements, proof, _hasher());
         assertEq(valid, this.calldataRange(belt, root, leaves, start, elements, proof), "range calldata disagreement");
     }
 
@@ -306,8 +352,8 @@ abstract contract VerifierHarness is Test {
         bytes32[] memory proof
     ) public view returns (bool valid) {
         valid = belt
-            ? LibMMB.verify(root, leaves, index, element, proof)
-            : LibMMR.verify(root, leaves, index, element, proof);
+            ? LibMMB.verify(root, leaves, index, element, proof, _hasher())
+            : LibMMR.verify(root, leaves, index, element, proof, _hasher());
         assertEq(valid, this.calldataSingle(belt, root, leaves, index, element, proof), "single calldata disagreement");
     }
 
@@ -318,10 +364,10 @@ abstract contract VerifierHarness is Test {
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) external pure returns (bool) {
+    ) external view returns (bool) {
         return belt
-            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof)
-            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof);
+            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
+            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
     }
 
     function calldataSingle(
@@ -331,10 +377,10 @@ abstract contract VerifierHarness is Test {
         uint256 index,
         bytes32 element,
         bytes32[] calldata proof
-    ) external pure returns (bool) {
+    ) external view returns (bool) {
         return belt
-            ? LibMMB.verifyCalldata(root, leaves, index, element, proof)
-            : LibMMR.verifyCalldata(root, leaves, index, element, proof);
+            ? LibMMB.verifyCalldata(root, leaves, index, element, proof, _hasher())
+            : LibMMR.verifyCalldata(root, leaves, index, element, proof, _hasher());
     }
 
     function slicedCalldata(
@@ -345,17 +391,17 @@ abstract contract VerifierHarness is Test {
         bytes32[] calldata elements,
         bytes32[] calldata proof,
         bool single
-    ) external pure returns (bool) {
+    ) external view returns (bool) {
         elements = elements[1:elements.length - 1];
         proof = proof[1:proof.length - 1];
         if (single) {
             return belt
-                ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof)
-                : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof);
+                ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof, _hasher())
+                : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof, _hasher());
         }
         return belt
-            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof)
-            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof);
+            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
+            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
     }
 
     function checkedVerification(
@@ -371,7 +417,7 @@ abstract contract VerifierHarness is Test {
         assertEq(valid, this.checkedMemoryVerification(belt, root, leaves, start, elements, proof, single, true));
     }
 
-    /// @dev Caller-owned arrays precede fresh DFS scratch; inspect scratch before any subsequent allocation.
+    /// @dev Caller-owned arrays precede fresh DFS scratch. Inspect scratch before any subsequent allocation.
     function checkedMemoryVerification(
         bool belt,
         bytes32 root,
@@ -404,21 +450,21 @@ abstract contract VerifierHarness is Test {
         if (calldataMode) {
             if (single) {
                 valid = belt
-                    ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof)
-                    : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof);
+                    ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof, _hasher())
+                    : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof, _hasher());
             } else {
                 valid = belt
-                    ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof)
-                    : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof);
+                    ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
+                    : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
             }
         } else if (single) {
             valid = belt
-                ? LibMMB.verify(root, leaves, start, memoryElements[0], memoryProof)
-                : LibMMR.verify(root, leaves, start, memoryElements[0], memoryProof);
+                ? LibMMB.verify(root, leaves, start, memoryElements[0], memoryProof, _hasher())
+                : LibMMR.verify(root, leaves, start, memoryElements[0], memoryProof, _hasher());
         } else {
             valid = belt
-                ? LibMMB.verifyRange(root, leaves, start, memoryElements, memoryProof)
-                : LibMMR.verifyRange(root, leaves, start, memoryElements, memoryProof);
+                ? LibMMB.verifyRange(root, leaves, start, memoryElements, memoryProof, _hasher())
+                : LibMMR.verifyRange(root, leaves, start, memoryElements, memoryProof, _hasher());
         }
         uint256 afterPointer;
         uint256 zero;
@@ -459,17 +505,17 @@ abstract contract VerifierHarness is Test {
 interface IMerkleGasHarness {
     function verify(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool);
 
     function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool);
 
     function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
         external
-        pure
+        view
         returns (bool);
 
     function verifyRangeCalldata(
@@ -478,7 +524,7 @@ interface IMerkleGasHarness {
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) external pure returns (bool);
+    ) external view returns (bool);
 }
 
 /// @dev Shared scenarios receive a fixed family from each concrete test entrypoint.
@@ -504,7 +550,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         elements[0] = proof[0] = bytes32(type(uint256).max);
         elements[2] = proof[2] = bytes32(type(uint256).max - 1);
         elements[1] = a;
-        proof[1] = keccak256(abi.encodePacked(uint64(1), b));
+        proof[1] = _hash(abi.encodePacked(uint64(1), b));
         for (uint256 mode; mode < 2; ++mode) {
             assertTrue(this.slicedCalldata(belt, root, 2, 0, elements, proof, mode != 0));
             assertFalse(this.slicedCalldata(belt, root ^ bytes32(uint256(1)), 2, 0, elements, proof, mode != 0));
@@ -524,7 +570,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
     }
 
     function checkSingleLeaf(bool belt, bytes32 element) internal view {
-        bytes32 root = keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), element))));
+        bytes32 root = _hash(abi.encodePacked(uint64(1), _hash(abi.encodePacked(uint64(0), element))));
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(verifySingle(belt, root, 1, 0, element, proof));
         assertFalse(verifySingle(belt, root, 1, 1, element, proof));
@@ -538,9 +584,9 @@ abstract contract MerkleTestCommon is VerifierHarness {
         elements[1] = b;
         bytes32 root = referenceRoot(elements, belt);
         bytes32[] memory proof = new bytes32[](1);
-        proof[0] = keccak256(abi.encodePacked(uint64(1), b));
+        proof[0] = _hash(abi.encodePacked(uint64(1), b));
         assertTrue(verifySingle(belt, root, 2, 0, a, proof));
-        proof[0] = keccak256(abi.encodePacked(uint64(0), a));
+        proof[0] = _hash(abi.encodePacked(uint64(0), a));
         assertTrue(verifySingle(belt, root, 2, 1, b, proof));
         proof[0] ^= bytes32(uint256(1));
         assertFalse(verifySingle(belt, root, 2, 1, b, proof));
@@ -558,7 +604,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
 
     function checkEmptyTree(bool belt) internal view {
         bytes32[] memory empty = new bytes32[](0);
-        bytes32 root = keccak256(abi.encodePacked(uint64(0)));
+        bytes32 root = _hash(abi.encodePacked(uint64(0)));
         assertTrue(verifyRange(belt, root, 0, 0, empty, empty));
         assertFalse(verifyRange(belt, root, 1, 0, empty, empty));
     }
@@ -578,7 +624,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
             assertFalse(checkedVerification(belt, root, type(uint256).max, 0, elements, empty, single));
             assertFalse(checkedVerification(belt, root, 1, type(uint256).max, elements, empty, single));
         }
-        assertTrue(checkedVerification(belt, keccak256(abi.encodePacked(uint64(0))), 0, 0, empty, empty, false));
+        assertTrue(checkedVerification(belt, _hash(abi.encodePacked(uint64(0))), 0, 0, empty, empty, false));
         assertFalse(checkedVerification(belt, root, 1, 0, empty, empty, false));
     }
 
@@ -605,7 +651,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[5] = vm.toString(start);
         args[6] = vm.toString(length);
         args[7] = vm.toString(uint256(seed));
-        (c.root, c.elements, c.proof, c.leaves) = abi.decode(vm.ffi(args), (bytes32, bytes32[], bytes32[], uint256));
+        (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         assertEq(c.leaves, leaves);
     }
 
@@ -616,7 +662,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[2] = "check";
         args[3] = belt ? "mmb" : "mmr";
         args[4] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
-        return abi.decode(vm.ffi(args), (bool));
+        return abi.decode(_ffi(args), (bool));
     }
 
     function compare(bool belt, Case memory c, uint256 start) internal returns (bool accepted) {
@@ -743,7 +789,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
 
     function checkDifferentialEmpty(bool belt) internal {
         bytes32[] memory empty = new bytes32[](0);
-        Case memory c = Case(keccak256(abi.encodePacked(uint64(0))), empty, empty, 0);
+        Case memory c = Case(_hash(abi.encodePacked(uint64(0))), empty, empty, 0);
         assertTrue(compare(belt, c, 0));
         assertFalse(compare(belt, c, 1));
         c.leaves = 1;
@@ -756,17 +802,17 @@ abstract contract MerkleTestCommon is VerifierHarness {
     function checkDifferentialGas(bool belt, IMerkleGasHarness gasHarness) internal {
         Case memory c = generate(belt, 1024, 1023, 1, 7, false);
         bool valid = gasHarness.verify(c.root, c.leaves, 1023, c.elements[0], c.proof);
-        vm.snapshotGasLastFrame(belt ? "MMB" : "MMR", "individual-1024-last");
+        vm.snapshotGasLastFrame(_group(belt ? "MMB" : "MMR"), "individual-1024-last");
         assertTrue(valid);
         valid = gasHarness.verifyCalldata(c.root, c.leaves, 1023, c.elements[0], c.proof);
-        vm.snapshotGasLastFrame(belt ? "MMB" : "MMR", "individual-1024-last-calldata");
+        vm.snapshotGasLastFrame(_group(belt ? "MMB" : "MMR"), "individual-1024-last-calldata");
         assertTrue(valid);
         c = generate(belt, 1024, 480, 64, 7, false);
         valid = gasHarness.verifyRange(c.root, c.leaves, 480, c.elements, c.proof);
-        vm.snapshotGasLastFrame(belt ? "MMB" : "MMR", "range-1024-middle-64");
+        vm.snapshotGasLastFrame(_group(belt ? "MMB" : "MMR"), "range-1024-middle-64");
         assertTrue(valid);
         valid = gasHarness.verifyRangeCalldata(c.root, c.leaves, 480, c.elements, c.proof);
-        vm.snapshotGasLastFrame(belt ? "MMB" : "MMR", "range-1024-middle-64-calldata");
+        vm.snapshotGasLastFrame(_group(belt ? "MMB" : "MMR"), "range-1024-middle-64-calldata");
         assertTrue(valid);
     }
 
@@ -787,7 +833,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[9] = c.backward ? "backward" : "forward";
         args[10] = "--inactive-peaks";
         args[11] = vm.toString(c.inactive);
-        (c.root, c.elements, c.proof, c.leaves) = abi.decode(vm.ffi(args), (bytes32, bytes32[], bytes32[], uint256));
+        (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         return c;
     }
 
@@ -812,7 +858,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[9] = "--inactive-peaks";
         args[10] = vm.toString(c.inactive);
         (c.root, c.elements, c.proof, c.leaves, c.positions) =
-            abi.decode(vm.ffi(args), (bytes32, bytes32[], bytes32[], uint256, uint256[]));
+            abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256, uint256[]));
         c.mode = 2;
         return c;
     }
@@ -830,7 +876,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[6] = c.backward ? "backward" : "forward";
         args[7] = "--inactive-peaks";
         args[8] = vm.toString(c.inactive);
-        return abi.decode(vm.ffi(args), (bool));
+        return abi.decode(_ffi(args), (bool));
     }
 
     function compare(CompatibilityCase memory c, bool expected) internal {
@@ -1031,7 +1077,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.belt = belt;
                 c.backward = bagging != 0;
                 c.mode = mode;
-                c.root = keccak256(abi.encodePacked(uint64(0)));
+                c.root = _hash(abi.encodePacked(uint64(0)));
                 compare(c, true);
                 slices(c, true);
                 c.inactive = 1;
@@ -1137,7 +1183,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    function checkCompatibilityGas(bool belt) internal {
+    function checkRootPolicyGas(bool belt) internal {
         for (uint256 bagging; bagging < 2; ++bagging) {
             CompatibilityCase memory c;
             c.belt = belt;
@@ -1146,21 +1192,21 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.start = 480;
             c.inactive = 2;
             c = generate(c, 64, 7, false);
-            string memory group = string.concat("Compatibility", c.belt ? "MMB" : "MMR");
+            string memory group = string.concat(c.belt ? "MMB" : "MMR", "RootPolicy");
             string memory fold = c.backward ? "backward" : "forward";
             assertTrue(harness.verify(c, false, false));
-            vm.snapshotGasLastFrame(group, string.concat(fold, "-inactive-range-memory"));
+            vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-range-memory"));
             assertTrue(harness.verify(c, true, false));
-            vm.snapshotGasLastFrame(group, string.concat(fold, "-inactive-range-calldata"));
+            vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-range-calldata"));
             c.indices = new uint256[](3);
             c.indices[0] = 0;
             c.indices[1] = 511;
             c.indices[2] = 1022;
             c = generateMulti(c, 7, false);
             assertTrue(harness.verify(c, false, false));
-            vm.snapshotGasLastFrame(group, string.concat(fold, "-inactive-sparse-memory"));
+            vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-sparse-memory"));
             assertTrue(harness.verify(c, true, false));
-            vm.snapshotGasLastFrame(group, string.concat(fold, "-inactive-sparse-calldata"));
+            vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-sparse-calldata"));
         }
     }
 
@@ -1237,5 +1283,292 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.backward = !c.backward;
             compare(c, false);
         }
+    }
+}
+
+/// @dev Accept raw preimages and return exactly one SHA-256 digest without ABI framing.
+contract RawSha256Hasher {
+    /// @dev Hash the complete calldata, including its first four bytes.
+    fallback(bytes calldata input) external returns (bytes memory) {
+        return abi.encodePacked(sha256(input));
+    }
+}
+
+/// @dev Supply malformed return data or a revert to exercise the hasher boundary.
+contract InvalidHasher {
+    uint256 internal immutable length;
+    bool internal immutable fails;
+
+    /// @dev Configure the raw response length and call outcome.
+    constructor(uint256 responseLength, bool reverts) {
+        length = responseLength;
+        fails = reverts;
+    }
+
+    /// @dev Return raw bytes of the configured size, or revert.
+    fallback(bytes calldata) external returns (bytes memory) {
+        require(!fails);
+        return new bytes(length);
+    }
+}
+
+/// @dev A hasher cannot mutate storage when the verifier invokes it with STATICCALL.
+contract WritingHasher {
+    uint256 public writes;
+
+    /// @dev Attempt a state change before returning a correctly sized digest.
+    fallback(bytes calldata input) external returns (bytes memory) {
+        ++writes;
+        return abi.encodePacked(sha256(input));
+    }
+}
+
+contract RawCompatibilityHarness is CompatibilityHarness {
+    /// @dev Select the raw adapter installed by the test at a fixed non-precompile address.
+    function _hasher() internal pure override returns (address) {
+        return address(0x123400);
+    }
+}
+
+/// @dev Test raw external hash targets through the same proof and memory contracts as precompiles.
+contract HashAddressTest is MerkleTestCommon {
+    /// @dev Select the fixed raw adapter address for verifier calls and SHA-256 reference roots.
+    function _hasher() internal pure override returns (address) {
+        return address(0x123400);
+    }
+
+    /// @dev Install a selector-free SHA-256 adapter and its compatibility harness.
+    function setUp() public {
+        vm.etch(_hasher(), address(new RawSha256Hasher()).code);
+        harness = new RawCompatibilityHarness();
+    }
+
+    /// @dev Cover positioned leaf, parent, root and peak preimages with caller memory checks.
+    function test_RawAdapterMemorySafety() public {
+        for (uint256 family; family < 2; ++family) {
+            checkMemoryExitPaths(family != 0);
+            checkMemorySafety(family != 0, 30, bytes32(uint256(79)), false);
+            checkMemorySafety(family != 0, 30, bytes32(uint256(79)), true);
+        }
+    }
+
+    /// @dev Compare external hashing with Rust across both bagging policies and inactive peaks.
+    function test_DifferentialRawAdapterPolicies() public {
+        for (uint256 family; family < 2; ++family) {
+            checkCompatibilityRange(family != 0, false, 30, 3, 9, 2, 71);
+            checkCompatibilityRange(family != 0, true, 30, 3, 9, 2, 71);
+            checkCompatibilitySparse(family != 0, false, 30, 71);
+            checkCompatibilitySparse(family != 0, true, 30, 71);
+        }
+    }
+
+    /// @dev Build a one-leaf proof shared by the three verification shapes.
+    function singleCase(bool belt, bool bmt) internal pure returns (CompatibilityCase memory c) {
+        c.belt = belt;
+        c.leaves = 1;
+        c.elements = new bytes32[](1);
+        c.elements[0] = bytes32(uint256(42));
+        c.indices = new uint256[](1);
+        c.root = bmt
+            ? sha256(abi.encodePacked(uint32(1), sha256(abi.encodePacked(uint32(0), c.elements[0]))))
+            : sha256(abi.encodePacked(uint64(1), sha256(abi.encodePacked(uint64(0), c.elements[0]))));
+    }
+
+    /// @dev Exercise each BMT shape and input location against a raw hash address.
+    function bmtVerify(CompatibilityCase calldata c, bool direct) external view returns (bool) {
+        if (c.mode == 1) {
+            return direct
+                ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, c.elements[0], c.proof, _hasher())
+                : LibBMT.verify(c.root, c.leaves, c.start, c.elements[0], c.proof, _hasher());
+        }
+        if (c.mode == 2) {
+            return direct
+                ? LibBMT.verifyMultiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher())
+                : LibBMT.verifyMulti(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher());
+        }
+        return direct
+            ? LibBMT.verifyRangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof, _hasher())
+            : LibBMT.verifyRange(c.root, c.leaves, c.start, c.elements, c.proof, _hasher());
+    }
+
+    /// @dev Raw adapters accept valid proofs. Using the other algorithm rejects the same root.
+    function test_RawAdapterAndCrossHashRejection() public view {
+        for (uint256 family; family < 3; ++family) {
+            CompatibilityCase memory c = singleCase(family == 1, family == 2);
+            for (uint8 mode; mode < 3; ++mode) {
+                c.mode = mode;
+                for (uint256 location; location < 2; ++location) {
+                    assertTrue(family == 2 ? this.bmtVerify(c, location != 0) : harness.checked(c, location != 0));
+                }
+            }
+            bytes32[] memory empty = new bytes32[](0);
+            assertFalse(
+                family == 2
+                    ? LibBMT.verify(c.root, 1, 0, c.elements[0], empty, address(0))
+                    : family == 1
+                        ? LibMMB.verify(c.root, 1, 0, c.elements[0], empty, address(0))
+                        : LibMMR.verify(c.root, 1, 0, c.elements[0], empty, address(0))
+            );
+            c.root = family == 2
+                ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
+                : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
+            for (uint8 mode; mode < 3; ++mode) {
+                c.mode = mode;
+                for (uint256 location; location < 2; ++location) {
+                    assertFalse(family == 2 ? this.bmtVerify(c, location != 0) : harness.checked(c, location != 0));
+                }
+            }
+        }
+    }
+
+    /// @dev External hashing covers BMT parent preimages, odd duplication, and the empty inner root.
+    function test_RawAdapterBmtOddAndEmpty() public view {
+        CompatibilityCase memory c;
+        c.leaves = 3;
+        c.elements = new bytes32[](1);
+        c.elements[0] = bytes32(uint256(42));
+        c.indices = new uint256[](1);
+        c.indices[0] = c.start = 2;
+        c.proof = new bytes32[](1);
+        c.proof[0] = sha256(
+            abi.encodePacked(
+                sha256(abi.encodePacked(uint32(0), bytes32(uint256(11)))),
+                sha256(abi.encodePacked(uint32(1), bytes32(uint256(22))))
+            )
+        );
+        bytes32 leaf = sha256(abi.encodePacked(uint32(2), c.elements[0]));
+        c.root = sha256(
+            abi.encodePacked(uint32(3), sha256(abi.encodePacked(c.proof[0], sha256(abi.encodePacked(leaf, leaf)))))
+        );
+        for (uint8 mode; mode < 3; ++mode) {
+            c.mode = mode;
+            assertTrue(this.bmtVerify(c, false));
+            assertTrue(this.bmtVerify(c, true));
+        }
+        c.leaves = c.start = 0;
+        c.elements = c.proof = new bytes32[](0);
+        c.indices = new uint256[](0);
+        c.root = sha256(abi.encodePacked(uint32(0), sha256("")));
+        for (uint8 mode; mode < 3; mode += 2) {
+            c.mode = mode;
+            assertTrue(this.bmtVerify(c, false));
+            assertTrue(this.bmtVerify(c, true));
+        }
+    }
+
+    /// @dev Compare every slice of two preimage words with independently encoded bytes.
+    function testFuzz_HashPreimage(bytes32 a, bytes32 b, uint8 offsetSeed, uint8 lengthSeed) public view {
+        uint256 offset = uint256(offsetSeed) % 65;
+        uint256 length = uint256(lengthSeed) % (65 - offset);
+        bytes memory words = abi.encodePacked(a, b);
+        bytes memory input = new bytes(length);
+        for (uint256 i; i < length; ++i) {
+            input[i] = words[offset + i];
+        }
+        for (uint256 algorithm; algorithm < 3; ++algorithm) {
+            address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
+            bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
+            assertEq(Common.hash(a, b, offset, length, target), expected);
+        }
+    }
+
+    /// @dev Hash target selection depends only on the address's low 160 bits.
+    function test_DirtyHasherAddress() public view {
+        for (uint256 algorithm; algorithm < 3; ++algorithm) {
+            address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
+            assembly ("memory-safe") { target := or(target, shl(160, not(0))) }
+            bytes memory input = hex"00112233445566778899";
+            bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
+            assertEq(Common.hash(hex"00112233445566778899", 0, 0, input.length, target), expected);
+            for (uint256 family; family < 3; ++family) {
+                CompatibilityCase memory c = singleCase(family == 1, family == 2);
+                if (algorithm == 0) {
+                    c.root = family == 2
+                        ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
+                        : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
+                }
+                if (family == 2) {
+                    assertTrue(LibBMT.verify(c.root, 1, 0, c.elements[0], c.proof, target));
+                    assertTrue(LibBMT.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
+                    assertTrue(LibBMT.verifyMulti(c.root, 1, c.indices, c.elements, c.proof, target));
+                } else if (family == 1) {
+                    assertTrue(LibMMB.verify(c.root, 1, 0, c.elements[0], c.proof, target));
+                    assertTrue(LibMMB.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
+                    assertTrue(
+                        LibMMB.verifyMulti(
+                            c.root,
+                            1,
+                            c.indices,
+                            c.elements,
+                            c.positions,
+                            c.proof,
+                            LibMerkle.Bagging.ForwardFold,
+                            0,
+                            target
+                        )
+                    );
+                } else {
+                    assertTrue(LibMMR.verify(c.root, 1, 0, c.elements[0], c.proof, target));
+                    assertTrue(LibMMR.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
+                    assertTrue(
+                        LibMMR.verifyMulti(
+                            c.root,
+                            1,
+                            c.indices,
+                            c.elements,
+                            c.positions,
+                            c.proof,
+                            LibMerkle.Bagging.ForwardFold,
+                            0,
+                            target
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    /// @dev Every hashing entrypoint rejects call failure and responses other than exactly 32 bytes.
+    function test_InvalidHasherResponses() public {
+        for (uint256 response; response < 6; ++response) {
+            bytes memory code;
+            if (response != 0) {
+                uint256 length = response == 1 ? 0 : response == 2 ? 31 : response == 3 ? 33 : 64;
+                code = address(new InvalidHasher(length, response == 5)).code;
+            }
+            vm.etch(_hasher(), code);
+            for (uint256 family; family < 3; ++family) {
+                CompatibilityCase memory c = singleCase(family == 1, family == 2);
+                for (uint8 mode; mode < 3; ++mode) {
+                    c.mode = mode;
+                    for (uint256 location; location < 2; ++location) {
+                        vm.expectRevert(Common.HashFailed.selector);
+                        if (family == 2) this.bmtVerify(c, location != 0);
+                        else harness.verify(c, location != 0, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// @dev STATICCALL forbids a hasher from changing storage even when its output would be valid.
+    function test_HasherCannotWriteStorage() public {
+        vm.etch(_hasher(), address(new WritingHasher()).code);
+        for (uint256 family; family < 3; ++family) {
+            CompatibilityCase memory c = singleCase(family == 1, family == 2);
+            for (uint8 mode; mode < 3; ++mode) {
+                c.mode = mode;
+                for (uint256 location; location < 2; ++location) {
+                    bytes memory input = family == 2
+                        ? abi.encodeCall(this.bmtVerify, (c, location != 0))
+                        : abi.encodeCall(harness.verify, (c, location != 0, false));
+                    (bool success, bytes memory result) =
+                        (family == 2 ? address(this) : address(harness)).staticcall{ gas: 200000 }(input);
+                    assertFalse(success);
+                    assertEq(result, abi.encodeWithSelector(Common.HashFailed.selector));
+                }
+            }
+        }
+        assertEq(WritingHasher(_hasher()).writes(), 0);
     }
 }
