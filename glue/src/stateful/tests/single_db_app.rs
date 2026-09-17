@@ -27,7 +27,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::{ForwardPolicy, SkipPolicy},
+        config::{ForwardPolicy, HandoffPublication, SkipPolicy},
         elector::RoundRobin,
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
@@ -599,7 +599,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // Simplex engine
         let simplex_config = simplex::Config {
-            pipelined_handoff: false,
+            handoff_publication: HandoffPublication::AfterCertification,
             scheme,
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),

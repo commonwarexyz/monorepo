@@ -6,7 +6,7 @@ use super::{
 use crate::{
     CertifiableAutomaton, HandoffProposal, LATENCY, Relay, Reporter, Viewable,
     simplex::{
-        Floor, Plan,
+        Floor, HandoffPublication, Plan,
         actors::{Kind, batcher, resolver},
         elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
@@ -165,7 +165,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
     floor: Option<Floor<S, D>>,
-    pipelined_handoff: bool,
+    handoff_publication: HandoffPublication,
 
     certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
@@ -228,7 +228,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 floor: Some(cfg.floor),
-                pipelined_handoff: cfg.pipelined_handoff,
+                handoff_publication: cfg.handoff_publication,
 
                 certificate_config,
                 partition: cfg.partition,
@@ -1265,7 +1265,7 @@ impl<
 
                 // Keep an unpublished build outside the round proposal slot. The
                 // captured request and build latch remain live until promotion.
-                if !self.pipelined_handoff
+                if self.handoff_publication == HandoffPublication::AfterCertification
                     && matches!(&request, ProposalRequest::Handoff(_))
                     && !self.state.proposal_parent_certified(request.context())
                     && let Ok(ProposalResponse::Proposed(payload)) = &proposed

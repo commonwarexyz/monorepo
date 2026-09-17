@@ -5,7 +5,7 @@ use commonware_bridge::{
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
-        self, Engine, Floor, ForwardPolicy, SkipPolicy, elector::RoundRobin,
+        self, Engine, Floor, ForwardPolicy, HandoffPublication, SkipPolicy, elector::RoundRobin,
         scheme::bls12381_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},
@@ -254,7 +254,7 @@ fn main() {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forward: ForwardPolicy::Disabled,
-                pipelined_handoff: false,
+                handoff_publication: HandoffPublication::AfterCertification,
                 track_historical_votes: false,
             },
         );

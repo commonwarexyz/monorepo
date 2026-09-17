@@ -32,7 +32,7 @@ impl crate::Application<Runtime> for PipelineApp {
 
     fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Build
+        HandoffPolicy::Prepare
     }
 
     async fn propose(
@@ -202,7 +202,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
                 fetch_timeout: Duration::from_secs(1),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
-                pipelined_handoff: false,
+                handoff_publication: HandoffPublication::AfterCertification,
             },
         );
         let _engine = engine.start(vote_network, certificate_network, resolver_network);

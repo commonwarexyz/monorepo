@@ -5033,7 +5033,7 @@ mod tests {
             // recovery staging.
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
-            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Build);
+            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),

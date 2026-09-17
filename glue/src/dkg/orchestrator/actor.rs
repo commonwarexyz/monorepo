@@ -13,7 +13,8 @@ use commonware_consensus::{
     CertifiableAutomaton, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
+        self, Floor, ForwardPolicy, HandoffPublication, Plan, SkipPolicy,
+        elector::Config as Elector, scheme,
         types::Context,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
@@ -740,7 +741,7 @@ where
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
-                pipelined_handoff: false,
+                handoff_publication: HandoffPublication::AfterCertification,
                 scheme: scheme.as_ref().clone(),
                 elector: self.simplex.elector.clone(),
                 blocker: self.oracle.clone(),

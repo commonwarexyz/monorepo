@@ -193,7 +193,7 @@ where
 /// verification, and reporting calls are forwarded to the actor.
 /// Handoff policy is evaluated on an application clone retained by the mailbox,
 /// independently of the actor lifecycle, including after actor shutdown. A
-/// [`HandoffPolicy::Build`] decision does not guarantee proposal availability.
+/// [`HandoffPolicy::Prepare`] decision does not guarantee proposal availability.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,

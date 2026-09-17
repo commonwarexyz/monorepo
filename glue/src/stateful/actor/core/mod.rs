@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn forwards_handoff_policy_and_reuses_recovered_proposal() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let application = TestApp::with_handoff_policy(HandoffPolicy::Build);
+            let application = TestApp::with_handoff_policy(HandoffPolicy::Prepare);
             let (mailbox, marshal, _marshal, actor) =
                 spawn_test_stateful(&context, "stateful-handoff-policy", application).await;
             let _databases = mailbox.subscribe_databases().await;
