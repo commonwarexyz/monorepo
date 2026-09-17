@@ -13,10 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{
-                find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains,
-                span_contains_prev,
-            },
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -2619,12 +2616,7 @@ where
 
             // Successor queries use [start, end). Predecessor queries use (start, end].
             // Match the cyclic owner before the public methods suppress linear wraparound.
-            let contains = if NEXT {
-                span_contains(&data.key, &data.next_key, key)
-            } else {
-                span_contains_prev(&data.key, &data.next_key, key)
-            };
-            if contains {
+            if span_contains(&data.key, &data.next_key, key, NEXT) {
                 return Some(if NEXT {
                     data.next_key.clone()
                 } else {

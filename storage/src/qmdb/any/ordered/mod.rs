@@ -21,25 +21,21 @@ pub mod variable;
 
 pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 
-/// Whether the cyclic span from `span_start` (inclusive) to `span_end` (exclusive) contains `key`.
+/// Whether the cyclic span from `span_start` to `span_end` contains `key`.
 ///
+/// When `inclusive_start` is `true`, the span is `[span_start, span_end)`; otherwise it is
+/// `(span_start, span_end]`.
 /// Equal endpoints define a span containing every key.
-pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
-    if span_start >= span_end {
-        key >= span_start || key < span_end
+pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K, inclusive_start: bool) -> bool {
+    let (after_start, before_end) = if inclusive_start {
+        (key >= span_start, key < span_end)
     } else {
-        key >= span_start && key < span_end
-    }
-}
-
-/// Whether the cyclic span from `span_start` (exclusive) to `span_end` (inclusive) contains `key`.
-///
-/// Equal endpoints define a span containing every key.
-pub(crate) fn span_contains_prev<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
+        (key > span_start, key <= span_end)
+    };
     if span_start >= span_end {
-        key > span_start || key <= span_end
+        after_start || before_end
     } else {
-        key > span_start && key <= span_end
+        after_start && before_end
     }
 }
 
@@ -79,7 +75,7 @@ where
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
-            if span_contains(&data.key, &data.next_key, key) {
+            if span_contains(&data.key, &data.next_key, key, true) {
                 return Ok(Some((loc, data)));
             }
         }
@@ -155,7 +151,7 @@ where
         for loc in locs {
             // A cyclic owner is a strict linear predecessor only when its key is smaller.
             let data = Self::get_update_op(&self.log, loc).await?;
-            if data.key < *key && span_contains_prev(&data.key, &data.next_key, key) {
+            if data.key < *key && span_contains(&data.key, &data.next_key, key, false) {
                 return Ok(Some(data.key));
             }
         }
@@ -393,38 +389,22 @@ mod test {
 
     #[test]
     fn span_contains_boundaries() {
-        assert!(!span_contains(&2, &6, &1));
-        assert!(span_contains(&2, &6, &2));
-        assert!(span_contains(&2, &6, &5));
-        assert!(!span_contains(&2, &6, &6));
+        for inclusive_start in [true, false] {
+            assert!(!span_contains(&2, &6, &1, inclusive_start));
+            assert_eq!(span_contains(&2, &6, &2, inclusive_start), inclusive_start);
+            assert!(span_contains(&2, &6, &5, inclusive_start));
+            assert_eq!(span_contains(&2, &6, &6, inclusive_start), !inclusive_start);
 
-        assert!(span_contains(&6, &2, &1));
-        assert!(!span_contains(&6, &2, &2));
-        assert!(!span_contains(&6, &2, &5));
-        assert!(span_contains(&6, &2, &6));
-        assert!(span_contains(&6, &2, &7));
+            assert!(span_contains(&6, &2, &1, inclusive_start));
+            assert_eq!(span_contains(&6, &2, &2, inclusive_start), !inclusive_start);
+            assert!(!span_contains(&6, &2, &5, inclusive_start));
+            assert_eq!(span_contains(&6, &2, &6, inclusive_start), inclusive_start);
+            assert!(span_contains(&6, &2, &7, inclusive_start));
 
-        assert!(span_contains(&3, &3, &2));
-        assert!(span_contains(&3, &3, &3));
-        assert!(span_contains(&3, &3, &4));
-    }
-
-    #[test]
-    fn span_contains_prev_boundaries() {
-        assert!(!span_contains_prev(&2, &6, &1));
-        assert!(!span_contains_prev(&2, &6, &2));
-        assert!(span_contains_prev(&2, &6, &5));
-        assert!(span_contains_prev(&2, &6, &6));
-
-        assert!(span_contains_prev(&6, &2, &1));
-        assert!(span_contains_prev(&6, &2, &2));
-        assert!(!span_contains_prev(&6, &2, &5));
-        assert!(!span_contains_prev(&6, &2, &6));
-        assert!(span_contains_prev(&6, &2, &7));
-
-        assert!(span_contains_prev(&3, &3, &2));
-        assert!(span_contains_prev(&3, &3, &3));
-        assert!(span_contains_prev(&3, &3, &4));
+            assert!(span_contains(&3, &3, &2, inclusive_start));
+            assert!(span_contains(&3, &3, &3, inclusive_start));
+            assert!(span_contains(&3, &3, &4, inclusive_start));
+        }
     }
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
