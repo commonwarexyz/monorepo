@@ -343,9 +343,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         );
         let blob = self.manager.get_or_create(section).await?;
 
-        // Encode the item
-        let buf = item.encode_mut();
-        let offset = blob.append(&buf).await?;
+        let offset = match blob.try_append_encoded(item) {
+            Some(offset) => offset,
+            None => blob.append_owned(item.encode_mut().into()).await?,
+        };
         if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, offset));
         }
@@ -1200,6 +1201,57 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy");
         });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_append_buffer_boundaries() {
+        // A digest exceeds the two-page buffer, fills it exactly, or crosses it after
+        // buffered appends.
+        for page_size in [NZU16!(8), NZU16!(16), PAGE_SIZE] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = Config {
+                    partition: "buffer-boundaries".into(),
+                    page_cache: CacheRef::from_pooler(&context, page_size, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1),
+                };
+                let mut journal = Journal::init(context.child("initial"), cfg.clone())
+                    .await
+                    .unwrap();
+                for section in [1, 3] {
+                    for position in 0..10 {
+                        let item = test_digest(section * 100 + position);
+                        let appended;
+                        (journal, appended) = journal.append(section, &item).await.unwrap();
+                        assert_eq!(appended, position);
+                        assert_eq!(journal.section_len(section).unwrap(), position + 1);
+                        assert_eq!(journal.get(section, position).await.unwrap(), item);
+                    }
+                }
+                journal = journal.sync_all().await.unwrap();
+                drop(journal);
+
+                let journal = Journal::<_, Digest>::init(context, cfg).await.unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(128), ReadOptions::default())
+                    .await
+                    .unwrap();
+                for section in [1, 3] {
+                    for position in 0..10 {
+                        assert_eq!(
+                            replay.next().await.unwrap().unwrap(),
+                            (section, position, test_digest(section * 100 + position))
+                        );
+                    }
+                }
+                assert!(replay.next().await.is_none());
+                let mut journal = replay.finish().unwrap();
+                let position;
+                (journal, position) = journal.append(3, &test_digest(310)).await.unwrap();
+                assert_eq!(position, 10);
+                assert_eq!(journal.get(3, 10).await.unwrap(), test_digest(310));
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]
