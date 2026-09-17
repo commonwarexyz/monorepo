@@ -1,36 +1,36 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { Test } from "forge-std/Test.sol";
+import { HashSelection, HashTest } from "./Common.t.sol";
 import { LibBMT } from "../src/merkle/LibBMT.sol";
 
 /// @dev External entry points isolate gas measurements and expose calldata slices.
-contract BMTHarness {
+contract BMTHarness is HashSelection {
     /// @dev Verify a memory single proof.
     function single(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibBMT.verify(root, leaves, index, element, proof);
+        return LibBMT.verify(root, leaves, index, element, proof, _hasher());
     }
 
     /// @dev Verify a calldata single proof.
     function singleCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibBMT.verifyCalldata(root, leaves, index, element, proof);
+        return LibBMT.verifyCalldata(root, leaves, index, element, proof, _hasher());
     }
 
     /// @dev Verify a memory range proof.
     function range(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibBMT.verifyRange(root, leaves, start, elements, proof);
+        return LibBMT.verifyRange(root, leaves, start, elements, proof, _hasher());
     }
 
     /// @dev Verify a calldata range proof.
@@ -40,8 +40,8 @@ contract BMTHarness {
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) external pure returns (bool) {
-        return LibBMT.verifyRangeCalldata(root, leaves, start, elements, proof);
+    ) external view returns (bool) {
+        return LibBMT.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
     }
 
     /// @dev Verify a memory sparse proof.
@@ -51,8 +51,8 @@ contract BMTHarness {
         uint256[] memory indices,
         bytes32[] memory elements,
         bytes32[] memory proof
-    ) external pure returns (bool) {
-        return LibBMT.verifyMulti(root, leaves, indices, elements, proof);
+    ) external view returns (bool) {
+        return LibBMT.verifyMulti(root, leaves, indices, elements, proof, _hasher());
     }
 
     /// @dev Verify a calldata sparse proof.
@@ -62,12 +62,12 @@ contract BMTHarness {
         uint256[] calldata indices,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) external pure returns (bool) {
-        return LibBMT.verifyMultiCalldata(root, leaves, indices, elements, proof);
+    ) external view returns (bool) {
+        return LibBMT.verifyMultiCalldata(root, leaves, indices, elements, proof, _hasher());
     }
 }
 
-contract LibBMTTest is Test {
+contract LibBMTTest is HashTest {
     struct Case {
         bytes32 root;
         uint256 leaves;
@@ -90,7 +90,7 @@ contract LibBMTTest is Test {
         c.proof = new bytes32[](size * 2);
         for (uint256 i; i < size; ++i) {
             bytes32 element = keccak256(abi.encode(seed, i));
-            nodes[i] = keccak256(abi.encodePacked(uint32(i), element));
+            nodes[i] = _hash(abi.encodePacked(uint32(i), element));
         }
         for (uint256 i; i < indices.length; ++i) {
             c.elements[i] = keccak256(abi.encode(seed, indices[i]));
@@ -103,11 +103,11 @@ contract LibBMTTest is Test {
                 if (right != i && selected[i] != selected[right]) {
                     c.proof[used++] = selected[i] ? nodes[right] : nodes[i];
                 }
-                nodes[i / 2] = keccak256(abi.encodePacked(nodes[i], nodes[right]));
+                nodes[i / 2] = _hash(abi.encodePacked(nodes[i], nodes[right]));
                 selected[i / 2] = selected[i] || selected[right];
             }
         }
-        c.root = keccak256(abi.encodePacked(uint32(size), size == 0 ? keccak256("") : nodes[0]));
+        c.root = _hash(abi.encodePacked(uint32(size), size == 0 ? _hash("") : nodes[0]));
         bytes32[] memory proof = c.proof;
         assembly ("memory-safe") { mstore(proof, used) }
     }
@@ -137,7 +137,12 @@ contract LibBMTTest is Test {
     /// @dev Cover empty roots and strict empty range bounds.
     function test_Empty() public view {
         Case memory c = fixture(0, new uint256[](0), 0);
-        assertEq(c.root, 0x784a1ebc13dd1197cb82f60cccc7608f891abcef018f1a85e484ebcb61a31d73);
+        assertEq(
+            c.root,
+            _hasher() == address(0)
+                ? bytes32(0x784a1ebc13dd1197cb82f60cccc7608f891abcef018f1a85e484ebcb61a31d73)
+                : sha256(abi.encodePacked(uint32(0), sha256("")))
+        );
         assertTrue(verifyCase(c, 1));
         assertTrue(verifyCase(c, 2));
         c.start = 1;
@@ -160,8 +165,13 @@ contract LibBMTTest is Test {
     /// @dev Assert literal single-leaf hashing and odd duplication without a witness.
     function test_KnownRootsAndOddDuplication() public view {
         bytes32 element = bytes32(uint256(42));
-        bytes32 root = keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), element))));
-        assertEq(root, 0x1f2bc41fa71f825a0e9c8d2a4dfe9dbb6020f92e176931ec2b170cea60ad768c);
+        bytes32 root = _hash(abi.encodePacked(uint32(1), _hash(abi.encodePacked(uint32(0), element))));
+        assertEq(
+            root,
+            _hasher() == address(0)
+                ? bytes32(0x1f2bc41fa71f825a0e9c8d2a4dfe9dbb6020f92e176931ec2b170cea60ad768c)
+                : sha256(abi.encodePacked(uint32(1), sha256(abi.encodePacked(uint32(0), element))))
+        );
         assertTrue(harness.single(root, 1, 0, element, new bytes32[](0)));
         for (uint256 n = 1; n <= 17; ++n) {
             Case memory c = fixture(n, consecutive(n - 1, 1), 0);
@@ -266,32 +276,37 @@ contract LibBMTTest is Test {
         }
     }
 
-    /// @dev Check input immutability, zero slot, allocated scratch cleanup and subsequent allocations.
-    function checked(Case calldata c, uint256 mode, bool cd) external pure returns (bool result) {
+    /// @dev Check input immutability, zero slot, private scratch cleanup and subsequent allocations.
+    function checked(Case calldata c, uint256 mode, bool cd) external view returns (bool result) {
         uint256[] memory indices = c.indices;
         bytes32[] memory elements = c.elements;
         bytes32[] memory proof = c.proof;
         bytes32 beforeHash = keccak256(abi.encode(indices, elements, proof));
         uint256 beforePointer;
         assembly ("memory-safe") { beforePointer := mload(0x40) }
+        uint256 scratchEnd = beforePointer;
+        if (mode == 1 && c.leaves <= type(uint32).max && c.start <= c.leaves && elements.length <= c.leaves - c.start) {
+            scratchEnd += elements.length * 32;
+        }
         if (mode == 0) {
             result = cd
-                ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[0], c.proof)
-                : LibBMT.verify(c.root, c.leaves, c.start, elements[0], proof);
+                ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[0], c.proof, _hasher())
+                : LibBMT.verify(c.root, c.leaves, c.start, elements[0], proof, _hasher());
         } else if (mode == 1) {
             result = cd
-                ? LibBMT.verifyRangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof)
-                : LibBMT.verifyRange(c.root, c.leaves, c.start, elements, proof);
+                ? LibBMT.verifyRangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof, _hasher())
+                : LibBMT.verifyRange(c.root, c.leaves, c.start, elements, proof, _hasher());
         } else {
             result = cd
-                ? LibBMT.verifyMultiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof)
-                : LibBMT.verifyMulti(c.root, c.leaves, indices, elements, proof);
+                ? LibBMT.verifyMultiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher())
+                : LibBMT.verifyMulti(c.root, c.leaves, indices, elements, proof, _hasher());
         }
         assembly ("memory-safe") {
             if mload(0x60) { revert(0, 0) }
             let afterPointer := mload(0x40)
             if or(lt(afterPointer, beforePointer), and(afterPointer, 31)) { revert(0, 0) }
-            for { let p := beforePointer } lt(p, afterPointer) { p := add(p, 32) } {
+            if lt(scratchEnd, afterPointer) { scratchEnd := afterPointer }
+            for { let p := beforePointer } lt(p, scratchEnd) { p := add(p, 32) } {
                 if mload(p) { revert(0, 0) }
             }
         }
@@ -328,16 +343,16 @@ contract LibBMTTest is Test {
     }
 
     /// @dev Shared element and proof arrays remain readable and unchanged.
-    function test_AliasedInputs() public pure {
+    function test_AliasedInputs() public view {
         bytes32[] memory shared = new bytes32[](1);
-        shared[0] = keccak256(abi.encodePacked(uint32(1), bytes32(uint256(42))));
+        shared[0] = _hash(abi.encodePacked(uint32(1), bytes32(uint256(42))));
         bytes32 before = shared[0];
-        bytes32 left = keccak256(abi.encodePacked(uint32(0), shared[0]));
-        bytes32 root = keccak256(abi.encodePacked(uint32(2), keccak256(abi.encodePacked(left, shared[0]))));
+        bytes32 left = _hash(abi.encodePacked(uint32(0), shared[0]));
+        bytes32 root = _hash(abi.encodePacked(uint32(2), _hash(abi.encodePacked(left, shared[0]))));
         uint256[] memory indices = consecutive(0, 1);
-        assertTrue(LibBMT.verify(root, 2, 0, shared[0], shared));
-        assertTrue(LibBMT.verifyRange(root, 2, 0, shared, shared));
-        assertTrue(LibBMT.verifyMulti(root, 2, indices, shared, shared));
+        assertTrue(LibBMT.verify(root, 2, 0, shared[0], shared, _hasher()));
+        assertTrue(LibBMT.verifyRange(root, 2, 0, shared, shared, _hasher()));
+        assertTrue(LibBMT.verifyMulti(root, 2, indices, shared, shared, _hasher()));
         assertEq(shared[0], before);
     }
 
@@ -377,15 +392,20 @@ contract LibBMTTest is Test {
     /// @dev Verify arrays whose calldata offsets begin after unrelated sentinels.
     function sliced(Case calldata c, uint256[] calldata indices, bytes32[] calldata elements, bytes32[] calldata proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[1], proof[1:proof.length - 1])
+        return LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[1], proof[1:proof.length - 1], _hasher())
             && LibBMT.verifyRangeCalldata(
-            c.root, c.leaves, c.start, elements[1:elements.length - 1], proof[1:proof.length - 1]
+            c.root, c.leaves, c.start, elements[1:elements.length - 1], proof[1:proof.length - 1], _hasher()
         )
             && LibBMT.verifyMultiCalldata(
-            c.root, c.leaves, indices[1:indices.length - 1], elements[1:elements.length - 1], proof[1:proof.length - 1]
+            c.root,
+            c.leaves,
+            indices[1:indices.length - 1],
+            elements[1:elements.length - 1],
+            proof[1:proof.length - 1],
+            _hasher()
         );
     }
 
@@ -410,23 +430,23 @@ contract LibBMTTest is Test {
     function testGas_Verification() public {
         Case memory c = fixture(256, consecutive(127, 1), 0);
         assertTrue(harness.single(c.root, c.leaves, c.start, c.elements[0], c.proof));
-        vm.snapshotGasLastFrame("BMT", "single-256");
+        vm.snapshotGasLastFrame(_group("BMT"), "single-256");
         assertTrue(harness.singleCalldata(c.root, c.leaves, c.start, c.elements[0], c.proof));
-        vm.snapshotGasLastFrame("BMT", "single-256-calldata");
+        vm.snapshotGasLastFrame(_group("BMT"), "single-256-calldata");
         c = fixture(256, consecutive(93, 32), 0);
         assertTrue(harness.range(c.root, c.leaves, c.start, c.elements, c.proof));
-        vm.snapshotGasLastFrame("BMT", "range-256-32");
+        vm.snapshotGasLastFrame(_group("BMT"), "range-256-32");
         assertTrue(harness.rangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof));
-        vm.snapshotGasLastFrame("BMT", "range-256-32-calldata");
+        vm.snapshotGasLastFrame(_group("BMT"), "range-256-32-calldata");
         uint256[] memory indices = new uint256[](16);
         for (uint256 i; i < 16; ++i) {
             indices[i] = 255 - i * 16;
         }
         c = fixture(256, indices, 0);
         assertTrue(harness.multi(c.root, c.leaves, c.indices, c.elements, c.proof));
-        vm.snapshotGasLastFrame("BMT", "multi-256-16");
+        vm.snapshotGasLastFrame(_group("BMT"), "multi-256-16");
         assertTrue(harness.multiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof));
-        vm.snapshotGasLastFrame("BMT", "multi-256-16-calldata");
+        vm.snapshotGasLastFrame(_group("BMT"), "multi-256-16-calldata");
     }
 
     /// @dev Invoke Commonware's actual BMT generator.
@@ -442,7 +462,7 @@ contract LibBMTTest is Test {
         args[4] = vm.toString(start);
         if (!synthetic) args[5] = vm.toString(count);
         args[args.length - 1] = vm.toString(uint256(seed));
-        return decodeCase(vm.ffi(args));
+        return decodeCase(_ffi(args));
     }
 
     /// @dev Decode the flat ABI tuple shared by the generator and Rust checker.
@@ -460,7 +480,7 @@ contract LibBMTTest is Test {
         args[3] = mode == 0 ? "single" : mode == 1 ? "range" : "multi";
         args[4] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
         result = verifyCase(c, mode);
-        assertEq(result, abi.decode(vm.ffi(args), (bool)), "Rust disagreement");
+        assertEq(result, abi.decode(_ffi(args), (bool)), "Rust disagreement");
     }
 
     /// @dev Differentially fuzz real range proofs and a corrupted witness or element.
@@ -497,7 +517,7 @@ contract LibBMTTest is Test {
         args[3] = vm.toString(size);
         args[4] = csv;
         args[5] = vm.toString(uint256(seed));
-        Case memory c = decodeCase(vm.ffi(args));
+        Case memory c = decodeCase(_ffi(args));
         assertTrue(compare(c, 2));
         if (c.proof.length > 1) {
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
@@ -597,5 +617,26 @@ contract LibBMTTest is Test {
         for (uint256 mode; mode < 3; ++mode) {
             assertTrue(compare(c, mode));
         }
+    }
+}
+
+/// @dev SHA-256 specialization keeps the verifier's hasher constant at each call site.
+contract BMTSha256Harness is BMTHarness {
+    /// @dev Select the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+}
+
+/// @dev Exercise the full BMT suite with SHA-256 and the Rust SHA-256 oracle.
+contract LibBMTSha256Test is LibBMTTest {
+    /// @dev Select the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+
+    /// @dev Install the SHA-256 harness for memory and calldata verification.
+    function setUp() public {
+        harness = new BMTSha256Harness();
     }
 }

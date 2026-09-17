@@ -1,0 +1,10 @@
+{
+  "backward-inactive-range-calldata": "103657",
+  "backward-inactive-range-memory": "98995",
+  "backward-inactive-sparse-calldata": "51619",
+  "backward-inactive-sparse-memory": "57840",
+  "forward-inactive-range-calldata": "102811",
+  "forward-inactive-range-memory": "98711",
+  "forward-inactive-sparse-calldata": "51603",
+  "forward-inactive-sparse-memory": "57824"
+}
