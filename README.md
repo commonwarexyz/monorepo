@@ -54,6 +54,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
+* [sol](./sol/README.md): Verify Commonware proofs and certificates in Solidity.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Stability

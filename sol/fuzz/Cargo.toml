@@ -1,0 +1,25 @@
+[package]
+name = "commonware-sol-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-sol-macro = "1.7.2"
+alloy-sol-types = "1.7.2"
+blst.workspace = true
+clap = { workspace = true, features = ["derive"] }
+commonware-codec = { workspace = true, features = ["std"] }
+commonware-consensus.workspace = true
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std"] }
+commonware-storage = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
+const-hex = { workspace = true, features = ["std"] }
+futures.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+sha3.workspace = true

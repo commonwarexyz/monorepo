@@ -1,0 +1,49 @@
+name: Forge
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  FOUNDRY_ISOLATE: "false"
+
+jobs:
+  Forge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: sol
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      with:
+        submodules: recursive
+        persist-credentials: false
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+    - name: Check Solidity formatting
+      run: forge fmt --check
+    - name: Build Solidity contracts
+      run: forge build --sizes --deny warnings
+    - name: Test Solidity contracts
+      run: forge test
+    - name: Build fuzz input generator
+      run: cargo build --release --locked -p commonware-sol-fuzz
+    - name: Differential tests
+      run: FOUNDRY_PROFILE=differential forge test --match-test 'test(Fuzz)?_Differential'
