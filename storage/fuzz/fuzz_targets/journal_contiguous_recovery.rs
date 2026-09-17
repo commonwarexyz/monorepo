@@ -1453,6 +1453,8 @@ mod tests {
     fn regression_params(write_config: deterministic::WriteConfig) -> Params {
         Params {
             page_size: NonZeroU16::new(44).unwrap(),
+            // A one-page cache evicts page 0, so the position-0 probe reaches disk rather than
+            // the cached bytes of the failed flush.
             page_cache_size: NZUsize!(1),
             items_per_section: 1_000,
             write_buffer: NZUsize!(2_048),

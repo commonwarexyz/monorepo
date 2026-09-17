@@ -769,9 +769,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // Direct blob writes must not overtake an earlier started sync barrier.
         self.sync_state.wait_for_pending().await?;
 
-        // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
-        // served from the cache while the blob write is still in flight. Insert in
-        // write-buffer-sized chunks. The capacity is a whole number of pages (see
+        // Cache the pages before the write. Nothing reads during the write itself, but inserting
+        // first replaces pages a recovery truncation left cached before any read can see them.
+        // Insert in write-buffer-sized chunks. The capacity is a whole number of pages (see
         // [adjusted_capacity]), so each chunk is page-aligned.
         let chunk_len = self.buffer.capacity;
         let mut cache_offset = boundary;
@@ -915,8 +915,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         }
         let new_offset = self.buffer.offset;
 
-        // Cache full pages before publishing the new blob state so reads don't observe stale
-        // persisted bytes during the handoff from tip to cache.
+        // Cache full pages before the write. Nothing reads during the write itself, but inserting
+        // first replaces pages a recovery truncation left cached before any read can see them.
         if let Some((cache_offset, pages)) = cache_pages {
             let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
             assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
