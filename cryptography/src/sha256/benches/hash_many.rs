@@ -1,5 +1,4 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -27,7 +26,7 @@ fn bench_hash_many(c: &mut Criterion) {
             );
             c.bench_function(
                 &format!("{}::batch/count={count} len={len}", module_path!()),
-                |b| b.iter(|| Sha256::hash_many(messages, &Sequential)),
+                |b| b.iter(|| Sha256::hash_many(messages)),
             );
         }
     }

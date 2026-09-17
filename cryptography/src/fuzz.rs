@@ -9,7 +9,6 @@
 
 use crate::Hasher;
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_parallel::Sequential;
 use core::{fmt::Debug, marker::PhantomData};
 
 /// Pick a contiguous message length biased toward the boundaries of
@@ -196,7 +195,7 @@ impl<H: Hasher> BatchPlan<H> {
                 hasher.finalize().1
             })
             .collect::<Vec<_>>();
-        assert_eq!(H::hash_many(&self.messages, &Sequential), expected);
+        assert_eq!(H::hash_many(&self.messages), expected);
     }
 }
 
@@ -205,6 +204,7 @@ mod tests {
     use super::*;
     use crate::{Blake3, Sha256};
     use commonware_invariants::minifuzz;
+    use std::rc::Rc;
 
     fn test_fuzz<H: Hasher>() {
         // The generators below always emit at least one part, so pin the
@@ -272,12 +272,20 @@ mod tests {
 
     #[test]
     fn test_hash_many_default_matches_individual_hashes() {
-        let messages = (0..33).map(|lane| vec![lane as u8; lane + 1]).collect();
-        BatchPlan::<Blake3> {
-            messages,
-            _hasher: PhantomData,
+        let messages = (0..33)
+            .map(|lane| Rc::<[u8]>::from(vec![lane as u8; lane]))
+            .collect::<Vec<_>>();
+        let expected = messages
+            .iter()
+            .map(|message| {
+                let mut hasher = Blake3::default();
+                hasher.update(message);
+                hasher.finalize().1
+            })
+            .collect::<Vec<_>>();
+        for count in 0..=messages.len() {
+            assert_eq!(Blake3::hash_many(&messages[..count]), expected[..count]);
         }
-        .run();
     }
 
     #[test]

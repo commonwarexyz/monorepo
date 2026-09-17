@@ -1,16 +1,25 @@
 use super::K;
-use crate::sha256::{DIGEST_LENGTH, IV};
+use crate::sha256::{DIGEST_LENGTH, Digest, IV};
 use core::arch::asm;
 
+/// Independent 32-bit message lanes in a 512-bit vector.
 const LANES: usize = 16;
+
+/// Bytes in one SHA-256 compression block per message.
 const BLOCK_LENGTH: usize = 64;
+
+/// 32-bit words in each message's SHA-256 chaining state.
 const DIGEST_WORDS: usize = 8;
 
+/// Keeps vector data on 64-byte boundaries to avoid split cache-line accesses.
 #[repr(align(64))]
 struct Align64<T>(T);
 
+/// Word-major chaining state: each row holds one state word across all messages.
 type StateWords = [[u32; LANES]; DIGEST_WORDS];
 
+/// Reverses bytes within each 32-bit word to load SHA-256's big-endian words.
+/// The 128-bit shuffle pattern is repeated and broadcast across the vector.
 static BYTE_SWAP_MASK: Align64<[u8; 32]> = Align64([
     3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15,
     14, 13, 12,
@@ -25,9 +34,7 @@ static BYTE_SWAP_MASK: Align64<[u8; 32]> = Align64([
 /// The caller must establish AVX512F, AVX512BW, and AVX512VL availability and
 /// ensure every input has the same length.
 #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
-pub(in crate::sha256::simd) unsafe fn hash_x16_equal(
-    inputs: [&[u8]; LANES],
-) -> [[u8; DIGEST_LENGTH]; LANES] {
+pub(in crate::sha256::simd) unsafe fn hash_x16_equal(inputs: [&[u8]; LANES]) -> [Digest; LANES] {
     let len = inputs[0].len();
     assert!(
         inputs[1..].iter().all(|input| input.len() == len),
@@ -69,16 +76,28 @@ pub(in crate::sha256::simd) unsafe fn hash_x16_equal(
     // `padding_blocks` is one or two. The function establishes all features.
     unsafe { compress_blocks(&mut state, &mut padding_pointers, padding_blocks) };
 
-    let mut output = [[0u8; DIGEST_LENGTH]; LANES];
+    let mut output = [Digest([0u8; DIGEST_LENGTH]); LANES];
     for (lane, digest) in output.iter_mut().enumerate() {
         for word in 0..DIGEST_WORDS {
             let offset = word * 4;
-            digest[offset..offset + 4].copy_from_slice(&state.0[word][lane].to_be_bytes());
+            digest.0[offset..offset + 4].copy_from_slice(&state.0[word][lane].to_be_bytes());
         }
     }
     output
 }
 
+/// Compress `blocks` consecutive blocks per lane into the word-major state.
+///
+/// Advances every input pointer by `blocks * BLOCK_LENGTH` bytes. Zero blocks
+/// leave the state and pointers unchanged; padding is the caller's responsibility.
+///
+/// # Safety
+///
+/// AVX512F, AVX512BW, and AVX512VL must be available. For nonzero `blocks`,
+/// each input pointer must address `blocks * BLOCK_LENGTH` initialized, readable
+/// bytes for the duration of the call. Input ranges may overlap one another,
+/// but must not overlap the mutable state or pointer table. Input alignment is
+/// unrestricted.
 #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
 unsafe fn compress_blocks(
     state: &mut Align64<StateWords>,

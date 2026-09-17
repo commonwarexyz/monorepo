@@ -78,7 +78,7 @@ fn supports_hash_x16() -> bool {
 ///
 /// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
 /// message on the software fallback. These are initial tuning choices for the
-/// local batch, independent of the number of strategy workers.
+/// local batch.
 ///
 /// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
 #[cfg(target_arch = "x86_64")]
@@ -118,7 +118,7 @@ pub(super) fn hash_x16(messages: [&[u8]; 16]) -> Option<[Digest; 16]> {
             // SAFETY: `supports_hash_x16` established every required target
             // feature and equal lengths were established above.
             let digests = unsafe { x86_64::hash_x16_equal(messages) };
-            Some(digests.map(Digest))
+            Some(digests)
         } else {
             None
         }

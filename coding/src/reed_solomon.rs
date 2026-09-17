@@ -51,14 +51,40 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
-fn check_chunk<H: Hasher>(
-    total: u16,
-    commitment: &H::Digest,
-    index: u16,
-    shard: &Chunk<H::Digest>,
-    digest: impl FnOnce() -> H::Digest,
-) -> Result<CheckedChunk<H::Digest>, Error> {
-    // Reject inconsistent indices and tree sizes before requesting the shard digest.
+/// Hash ordered, equal-width payloads, keeping each worker's SIMD batches and tail together.
+#[track_caller]
+fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
+    shards: &[M],
+    strategy: &impl Strategy,
+) -> Vec<H::Digest> {
+    if shards.is_empty() {
+        return Vec::new();
+    }
+    let work = shards.iter().fold(0usize, |sum, shard| {
+        sum.saturating_add(shard.as_ref().len().saturating_add(1))
+    });
+    strategy.run(
+        work,
+        || H::hash_many(shards),
+        || {
+            let manual = strategy.manual();
+            let workers = manual.parallelism().min(shards.len());
+            let per_worker = shards.len() / workers;
+            let extra = shards.len() % workers;
+            manual
+                .map_collect_vec(0..workers, |worker| {
+                    let start = worker * per_worker + worker.min(extra);
+                    let end = start + per_worker + usize::from(worker < extra);
+                    H::hash_many(&shards[start..end])
+                })
+                .into_iter()
+                .flatten()
+                .collect()
+        },
+    )
+}
+
+fn check_metadata<D: Digest>(total: u16, index: u16, shard: &Chunk<D>) -> Result<(), Error> {
     if index >= total {
         return Err(Error::InvalidIndex(index));
     }
@@ -68,6 +94,17 @@ fn check_chunk<H: Hasher>(
     if shard.index != index {
         return Err(Error::InvalidIndex(shard.index));
     }
+    Ok(())
+}
+
+fn check_chunk<H: Hasher>(
+    total: u16,
+    commitment: &H::Digest,
+    index: u16,
+    shard: &Chunk<H::Digest>,
+    digest: impl FnOnce() -> H::Digest,
+) -> Result<CheckedChunk<H::Digest>, Error> {
+    check_metadata(total, index, shard)?;
 
     // Bind the shard digest to its requested position and commitment.
     let digest = digest();
@@ -387,7 +424,7 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes = H::hash_many(&shard_slices, strategy);
+    let shard_hashes = hash_shards::<H, _>(&shard_slices, strategy);
     for hash in &shard_hashes {
         builder.add(hash);
     }
@@ -768,7 +805,7 @@ fn verify_root<H: Hasher, S: Strategy>(
         .unzip();
     for (i, digest) in missing_indices
         .into_iter()
-        .zip(H::hash_many(&missing_payloads, strategy))
+        .zip(hash_shards::<H, _>(&missing_payloads, strategy))
     {
         shard_digests[i] = Some(digest);
     }
@@ -1195,11 +1232,23 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
                 .map(|&(index, shard)| Self::check(config, commitment, index, shard))
                 .collect();
         };
+
+        // Per-shard checks reject invalid metadata before hashing and let the strategy
+        // distribute uneven payloads independently.
+        let width = shards.first().map_or(0, |(_, shard)| shard.shard.len());
+        if shards.iter().any(|&(index, shard)| {
+            shard.shard.len() != width || check_metadata(total, index, shard).is_err()
+        }) {
+            return strategy.map_collect_vec(shards, |&(index, shard)| {
+                Self::check(config, commitment, index, shard)
+            });
+        }
+
         let payloads = shards
             .iter()
             .map(|(_, shard)| shard.shard.as_ref())
             .collect::<Vec<_>>();
-        let digests = H::hash_many(&payloads, strategy);
+        let digests = hash_shards::<H, _>(&payloads, strategy);
         strategy.map_collect_vec(
             shards.iter().copied().zip(digests),
             |((index, shard), digest)| check_chunk::<H>(total, commitment, index, shard, || digest),
@@ -1244,6 +1293,7 @@ mod tests {
 
     std::thread_local! {
         static HASH_MANY_CALLS: RefCell<Vec<Vec<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
+        static HASH_INPUTS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     }
 
     #[derive(Default)]
@@ -1253,6 +1303,9 @@ mod tests {
         type Digest = <Sha256 as Hasher>::Digest;
 
         fn hash(parts: &[&[u8]]) -> Self::Digest {
+            if let [message] = parts {
+                HASH_INPUTS.with(|inputs| inputs.borrow_mut().push(message.to_vec()));
+            }
             Sha256::hash(parts)
         }
 
@@ -1260,10 +1313,12 @@ mod tests {
             Sha256::hash_pair(left, right)
         }
 
-        fn hash_many<M: AsRef<[u8]> + Sync>(
-            messages: &[M],
-            _strategy: &impl Strategy,
-        ) -> Vec<Self::Digest> {
+        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+            HASH_INPUTS.with(|inputs| {
+                inputs
+                    .borrow_mut()
+                    .extend(messages.iter().map(|message| message.as_ref().to_vec()));
+            });
             HASH_MANY_CALLS.with(|calls| {
                 calls.borrow_mut().push(
                     messages
@@ -1290,6 +1345,7 @@ mod tests {
     }
 
     fn reset_hash_many_calls() {
+        HASH_INPUTS.with(|inputs| inputs.borrow_mut().clear());
         HASH_MANY_CALLS.with(|calls| calls.borrow_mut().clear());
     }
 
@@ -1328,6 +1384,51 @@ mod tests {
             .collect();
 
         (root, chunks)
+    }
+
+    #[test]
+    fn test_hash_shards_parallel_preserves_order() {
+        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
+        for count in [0, 1, 7, 9, 15, 16, 17, 128, 129, 144] {
+            let shards = (0..count)
+                .map(|index| vec![index as u8; index * 13])
+                .collect::<Vec<_>>();
+            let expected = shards
+                .iter()
+                .map(|shard| Sha256::hash(&[shard]))
+                .collect::<Vec<_>>();
+            assert_eq!(hash_shards::<Sha256, _>(&shards, &strategy), expected);
+        }
+    }
+
+    #[test]
+    fn test_hash_shards_keeps_balanced_batches_per_worker() {
+        // One execution thread makes the recorder observable while planning eight workers.
+        let strategy = Rayon::new(NZUsize!(1))
+            .unwrap()
+            .with_parallelism(NZUsize!(8))
+            .manual();
+        strategy.join(
+            || {
+                for count in [0, 1, 7, 9, 17, 128, 129, 144] {
+                    let shards = (0..count)
+                        .map(|index| vec![index as u8; 128])
+                        .collect::<Vec<_>>();
+                    reset_hash_many_calls();
+                    hash_shards::<InstrumentedSha256, _>(&shards, &strategy);
+                    let mut calls = take_hash_many_calls();
+                    assert_eq!(calls.len(), count.min(8));
+                    assert!(calls.iter().all(|batch| !batch.is_empty()));
+                    if let Some(min) = calls.iter().map(Vec::len).min() {
+                        let max = calls.iter().map(Vec::len).max().unwrap();
+                        assert!(max - min <= 1);
+                    }
+                    calls.sort_by_key(|batch| batch[0][0]);
+                    assert_eq!(calls.into_iter().flatten().collect::<Vec<_>>(), shards);
+                }
+            },
+            || (),
+        );
     }
 
     #[test]
@@ -1428,6 +1529,116 @@ mod tests {
                 chunks[5].shard.to_vec(),
             ]]
         );
+    }
+
+    #[test]
+    fn test_check_many_rejects_metadata_before_hashing() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(3),
+        };
+        let data = (0..192).map(|i| i as u8).collect::<Vec<_>>();
+        let (root, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+        let mut invalid_index = chunks[1].clone();
+        invalid_index.index = 5;
+        invalid_index.shard = vec![0xa1; chunks[1].shard.len()].into();
+        let mut invalid_leaf_count = chunks[2].clone();
+        invalid_leaf_count.proof.leaf_count -= 1;
+        invalid_leaf_count.shard = vec![0xb2; chunks[2].shard.len()].into();
+        let mut out_of_range = chunks[3].clone();
+        out_of_range.shard = vec![0xc3; chunks[3].shard.len()].into();
+        let mut invalid_proof = chunks[4].clone();
+        invalid_proof.shard = vec![0xd4; chunks[4].shard.len()].into();
+        let shards = [
+            (1, &invalid_index),
+            (0, &chunks[0]),
+            (2, &invalid_leaf_count),
+            (6, &out_of_range),
+            (4, &invalid_proof),
+        ];
+        let expected = shards
+            .iter()
+            .map(|&(index, shard)| format!("{:?}", RS::check(&config, &root, index, shard)))
+            .collect::<Vec<_>>();
+
+        reset_hash_many_calls();
+        let actual = InstrumentedRS::check_many(&config, &root, &shards, &STRATEGY)
+            .into_iter()
+            .map(|result| format!("{result:?}"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        let inputs = HASH_INPUTS.with(|inputs| std::mem::take(&mut *inputs.borrow_mut()));
+        for rejected in [&invalid_index, &invalid_leaf_count, &out_of_range] {
+            assert!(
+                !inputs
+                    .iter()
+                    .any(|input| input.as_slice() == rejected.shard)
+            );
+        }
+        for eligible in [&chunks[0], &invalid_proof] {
+            assert!(
+                inputs
+                    .iter()
+                    .any(|input| input.as_slice() == eligible.shard)
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_many_distributes_independent_mixed_widths() {
+        let config = Config {
+            minimum_shards: NZU16!(32),
+            extra_shards: NZU16!(32),
+        };
+        let payloads = (0..64)
+            .map(|i| vec![i as u8; if i < 8 { 8192 - i * 64 } else { 0 }])
+            .collect::<Vec<_>>();
+        let (root, chunks) = build_chunks(&payloads);
+        let shards = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| (index as u16, chunk))
+            .collect::<Vec<_>>();
+        let expected = shards
+            .iter()
+            .map(|&(index, shard)| RS::check(&config, &root, index, shard).unwrap())
+            .collect::<Vec<_>>();
+        // Observe indivisible batches on one thread while planning eight workers.
+        let strategy = Rayon::new(NZUsize!(1))
+            .unwrap()
+            .with_parallelism(NZUsize!(8))
+            .manual();
+        let (actual, calls) = strategy
+            .join(
+                || {
+                    reset_hash_many_calls();
+                    let actual = InstrumentedRS::check_many(&config, &root, &shards, &strategy)
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    (actual, take_hash_many_calls())
+                },
+                || (),
+            )
+            .0;
+        assert_eq!(actual, expected);
+        let total_work = payloads
+            .iter()
+            .map(|payload| payload.len() + 1)
+            .sum::<usize>();
+        let largest = payloads
+            .iter()
+            .map(|payload| payload.len() + 1)
+            .max()
+            .unwrap();
+        for batch in calls {
+            let work = batch.iter().map(|payload| payload.len() + 1).sum::<usize>();
+            assert!(work <= total_work.div_ceil(8) + largest);
+        }
+        assert!(matches!(
+            RS::decode(&config, &root, actual.iter(), &STRATEGY),
+            Err(Error::Inconsistent)
+        ));
     }
 
     #[test]
