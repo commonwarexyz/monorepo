@@ -59,8 +59,8 @@ where
         locs: impl Iterator<Item = Location<F>> + Send,
         key: &K,
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
+        // Collision order is arbitrary, so check each candidate's cyclic span.
         for loc in locs {
-            // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
             if contains_cyclic(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
@@ -88,6 +88,8 @@ where
                 return Ok(Some(span));
             }
 
+            // The remaining span owner is in the previous translated key. Allow wrapping because
+            // spans connect the last active key back to the first.
             let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
                 // DB is empty.
                 return Ok(None);
@@ -121,7 +123,7 @@ where
         key: &K,
     ) -> impl Future<Output = Result<Option<K>, crate::qmdb::Error<F>>> + Send {
         async move {
-            // Distinct keys can share the query's translated key, including its predecessor.
+            // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
                 .find_strict_prev_key(self.snapshot.get(key).copied(), key)
                 .await?
@@ -129,6 +131,8 @@ where
                 return Ok(Some(prev));
             }
 
+            // The previous translated key is the only remaining candidate. Reject wrapping so
+            // queries at or below the first active key have no predecessor.
             let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
                 return Ok(None);
             };
@@ -143,8 +147,9 @@ where
         locs: impl Iterator<Item = Location<F>> + Send,
         key: &K,
     ) -> Result<Option<K>, crate::qmdb::Error<F>> {
+        // Predecessor ownership includes the next key, so an active query finds the prior key.
+        // The owner's key must still be smaller to exclude cyclic wraparound.
         for loc in locs {
-            // A cyclic owner is a strict linear predecessor only when its key is smaller.
             let data = Self::get_update_op(&self.log, loc).await?;
             if data.key < *key
                 && contains_cyclic((Excluded(&data.key), Included(&data.next_key)), key)
@@ -171,6 +176,7 @@ where
     ) -> impl Future<Output = Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>>> + Send
     {
         async move {
+            // Resolve translated-key collisions before returning an update and its location.
             for loc in self.snapshot.get(key).copied() {
                 let op = self.log.read(*loc).await?;
                 assert!(
@@ -206,6 +212,7 @@ where
         V: 'a,
     {
         async move {
+            // The starting collision bucket can also contain keys below the requested bound.
             let mut init_pending = self
                 .fetch_all_updates(self.snapshot.get(&start).copied())
                 .await?;
@@ -214,11 +221,13 @@ where
             Ok(stream::unfold(
                 (start, init_pending),
                 move |(driver_key, mut pending): (K, Vec<Update<K, V>>)| async move {
+                    // Drain this bucket in ascending order before moving to another translated key.
                     if !pending.is_empty() {
                         let item = pending.pop().expect("pending is not empty");
                         return Some((Ok((item.key, item.value)), (driver_key, pending)));
                     }
 
+                    // Wrapping to the first translated key marks the end of the range.
                     let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
                     else {
                         return None; // DB is empty
@@ -231,10 +240,13 @@ where
                     // fetch a much larger batch of "pending" keys.
                     match self.fetch_all_updates(iter.copied()).await {
                         Ok(mut pending) => {
+                            // Any key in this bucket can drive the next translated-key lookup.
                             let item = pending.pop().expect("pending is not empty");
                             let key = item.key.clone();
                             Some((Ok((item.key, item.value)), (key, pending)))
                         }
+
+                        // Keep the driver unchanged so a later poll retries this bucket.
                         Err(e) => Some((Err(e), (driver_key, pending))),
                     }
                 },
@@ -248,8 +260,11 @@ where
         &self,
         locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
+        // Conflicting entries are independent, so their journal reads can run concurrently.
         let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
         let mut updates = try_join_all(futures).await?;
+
+        // Descending order lets the stream emit ascending keys with constant-time pops.
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
         Ok(updates)

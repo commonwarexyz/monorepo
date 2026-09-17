@@ -217,6 +217,8 @@ where
             let _timer = self.metrics.get_timer();
             self.metrics.get_calls.inc();
             self.metrics.lookups_requested.inc();
+
+            // Translated keys can collide, so read candidates until the full key matches.
             let mut result = None;
             for loc in self.snapshot.get(key).copied() {
                 let op = self.log.read(*loc).await?;

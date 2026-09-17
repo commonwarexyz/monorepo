@@ -41,6 +41,7 @@ where
     ) -> impl Future<Output = Result<Option<(V::Value, Location<F>)>, crate::qmdb::Error<F>>> + Send
     {
         async move {
+            // Resolve translated-key collisions before returning a value and its location.
             for loc in self.snapshot.get(key).copied() {
                 let op = self.log.read(*loc).await?;
                 match op {
