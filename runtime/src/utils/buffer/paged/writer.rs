@@ -925,10 +925,11 @@ impl<B: Blob> Writer<B> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob first wait for any outstanding start_sync handles.
+    /// mutate the blob first wait for any outstanding start_sync handles. A flush failure is
+    /// retained the same way: the handle reports it, and so does the next such call.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if let Err(err) = self.flush_internal(true, false).await {
-            return Handle::ready(Err(err));
+            return self.sync_state.fail(err);
         }
         self.sync_state.start_sync(&self.blob).await
     }
@@ -947,7 +948,7 @@ impl<B: Blob> Writer<B> {
     /// `proven` is a logical byte offset already known valid (a durability watermark or a
     /// replay-validated prefix). Pages wholly below it are accepted without reading, and the
     /// scan starts at the page containing it. A proof past the blob's content clamps to the
-    /// full pages that exist, so a partial tail is still read rather than credited as full.
+    /// full pages that exist. A partial tail must be read to determine its valid length.
     pub async fn recoverable_prefix_len(
         &self,
         proven: u64,
@@ -964,9 +965,9 @@ impl<B: Blob> Writer<B> {
         let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
             .map_err(|_| Error::OffsetOverflow)?;
 
-        // Pages below the proof are accepted without reading. An overshooting proof clamps to
-        // the full pages: a partial tail backs fewer logical bytes than a skipped page would
-        // credit, so it must always be read.
+        // Pages below the proof are accepted without reading. Clamp the starting page to the
+        // full pages present: the partial tail must be read to determine how many bytes it adds
+        // to the valid prefix.
         let start_page = (proven / logical_page_size).min(self.current_page);
         let mut valid_len = start_page
             .checked_mul(logical_page_size)
@@ -1322,7 +1323,9 @@ mod tests {
         Storage as _, Supervisor as _,
         buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
         deterministic,
-        mocks::{DelayedSyncBlob, RecordingContext, next_pending_sync},
+        mocks::{
+            DelayedSyncBlob, RecordingContext, WriteFaultContext, WriteFaults, next_pending_sync,
+        },
         telemetry::metrics::Registry,
     };
     use commonware_codec::{Copying, ReadExt};
@@ -2786,6 +2789,41 @@ mod tests {
                 .unwrap();
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_flush_failure_is_retained() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, size) = context
+                .open("test_partition", b"retained_flush_failure")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Make a partial page durable, then extend it so the next flush rewrites the page.
+            writer.append(&[1u8; 24]).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.append(&[2u8; 8]).await.unwrap();
+
+            // The rewrite inside start_sync fails. The handle reports it, and the writer must too,
+            // because a caller may drop the handle unobserved.
+            faults.arm();
+            let handle = writer.start_sync().await;
+            faults.disarm();
+            assert!(handle.await.is_err());
+
+            // The writer retains the flush failure and reports it on the next sync.
+            assert!(writer.sync().await.is_err());
         });
     }
 
