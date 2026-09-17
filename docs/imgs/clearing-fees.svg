@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 420" role="img" aria-labelledby="title description">
   <title id="title">A fee is another entry in the signed batch</title>
-  <desc id="description">In a fresh epoch, payer a signs a batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated account. Sequence 1 and cumulative debit 29 are bound to the epoch and the payment root. The operator countersigns this payer state. Recipient b receives that countersigned state and an opening for its entry, amount 20 and payment count 1. The same acknowledgment binds all three entries, including the fee.</desc>
+  <desc id="description">In a fresh epoch, payer a signs a batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. Sequence 1 and cumulative debit 29 are bound to the epoch and the payment root. The operator countersigns this payer state. Recipient b receives that countersigned state and an opening for its entry, amount 20 and payment count 1. The same acknowledgment binds all three entries, including the fee.</desc>
   <rect width="1080" height="420" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -35,7 +35,7 @@
   <text class="label right" x="468" y="253">20</text>
   <text class="label" x="80" y="293">to c</text>
   <text class="label right" x="468" y="293">7</text>
-  <text class="label blue" x="80" y="333">to operator fee account</text>
+  <text class="label blue" x="80" y="333">to designated fee recipient</text>
   <text class="label right blue" x="468" y="333">2</text>
 
   <path class="flow" d="M528 247 H568"/>

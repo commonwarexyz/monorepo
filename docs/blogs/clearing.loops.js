@@ -572,7 +572,7 @@ function buildRolloverMinimal(mount) {
     'stroke-width': 1.2,
     'stroke-dasharray': '5 5',
   });
-  s.label(205, 490, 'successor registered', {
+  s.label(205, 490, 'epoch e+1 registered', {
     'text-anchor': 'middle',
     'font-size': 11.5,
     fill: GRAY,
@@ -583,7 +583,7 @@ function buildRolloverMinimal(mount) {
     'font-weight': 700,
     fill: GOLD,
   });
-  s.label(383, 410, 'live head in e+1', {
+  s.label(383, 410, 'spendable in e+1', {
     'text-anchor': 'end',
     'font-size': 13,
     'font-weight': 700,
@@ -604,7 +604,7 @@ function buildRolloverMinimal(mount) {
     label: 'a→b 20',
     labelY: 260,
     labelSize: 13.5,
-    sub: 'head 100→80',
+    sub: 'balance 100→80',
     subY: 345,
     subSize: 11.5,
   });
@@ -612,7 +612,7 @@ function buildRolloverMinimal(mount) {
     at: 0.78,
     duration: 0.58,
     style: 'ctl',
-    label: 'rotate the head',
+    label: 'carry 80 into e+1',
     labelY: 285,
     labelSize: 12.5,
   });
@@ -634,7 +634,7 @@ function buildRolloverMinimal(mount) {
       fill: options.textFill || BLUE,
     });
     if (options.label) {
-      s.revealText(x, y + size / 2 + 24, options.label, {
+      s.revealText(x, y + size / 2 + 36, options.label, {
         at,
         size: 11.8,
         weight: 600,
@@ -643,7 +643,7 @@ function buildRolloverMinimal(mount) {
     }
   }
 
-  balanceNode(290, 305, 80, 1.2, { label: 'preserved head' });
+  balanceNode(290, 305, 80, 1.2, { label: 'spendable balance' });
   s.edge(310, 289, 395, 222, {
     at: 1.42,
     duration: 0.45,
@@ -720,13 +720,13 @@ function buildRolloverMinimal(mount) {
   });
   balanceNode(870, 405, 50, 3.98);
 
-  s.revealText(570, 520, 'reconcile: live ← live + ρₐ', {
+  s.revealText(570, 520, 'add ρₐ to spendable balance', {
     at: 4.3,
     size: 13.5,
     weight: 700,
     fill: GREEN,
   });
-  s.revealText(860, 520, 'never: live ← 85', {
+  s.revealText(860, 520, 'do not replace balance with 85', {
     at: 4.3,
     size: 13.5,
     weight: 700,

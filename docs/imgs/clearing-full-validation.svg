@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
   <title id="title">Every Validator Checks the Same Close</title>
-  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate. Each validator durably commits the three public candidates in parallel, then durably records its private control-QMDB checkpoint and signing decision before acknowledging. The certified candidate contains the three shared roots.</desc>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -172,7 +172,7 @@
   <path class="leader" d="M900 260 V463" stroke="#087a32"/>
   <circle cx="900" cy="260" r="4" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
   <rect x="700" y="463" width="586" height="417" rx="6" fill="#f2faf4" stroke="#087a32" stroke-width="1.5"/>
-  <text class="heading green" x="724" y="497">Certified candidate</text>
+  <text class="heading green" x="724" y="497">Certified close</text>
   <text class="note right" x="1262" y="497">Onchain</text>
   <path d="M724 515 H1262" stroke="#c7dfce"/>
   <rect x="724" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
