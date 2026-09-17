@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain the account state, activity, payouts, and local signing decisions in [QMDB](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/) databases and apply only the changes at each settlement.*
+*Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators keep account balances and settlement records in [QMDB](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/), updating only what changes at each settlement.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -23,11 +23,11 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 One payment or a bajillion, each account settles once.
 
-## Payments as Fast as Browsing the Web
+## Payments as Frequent and Fast as Browsing the Web
 
-If an API responds in milliseconds, no one will wait seconds to pay for it. With Bajillion, a user can pay an API provider as fast as they can load a webpage.
+When payments are as common as web requests, they need to be just as fast and dirt cheap. With Bajillion, a user can pay an API provider as fast as they can load a web page.
 
-The user's chosen **operator**, a service that processes payments and later settles them onchain, provides a binding receipt promising to pay the API provider.
+The user chooses an **operator** to handle payments and settle them onchain later. For each payment, the operator issues a binding receipt promising to pay the API provider.
 
 The user receives it in one round trip and sends it with the API request, or the operator delivers it directly to the provider to save a hop. The provider can serve the response knowing the receipt gives it evidence to hold the operator accountable if settlement omits or contradicts the payment.
 

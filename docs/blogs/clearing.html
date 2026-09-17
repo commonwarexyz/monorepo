@@ -103,11 +103,10 @@ O’Grady</a></div>
         </div>
         <p><em>Update (9/16/26): Operators can process payments to the
         same recipient in parallel across payers, with one signature
-        check covering each payer’s batch. Validators retain the account
-        state, activity, payouts, and local signing decisions in <a
-        href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/">QMDB</a>
-        databases and apply only the changes at each
-        settlement.</em></p>
+        check covering each payer’s batch. Validators keep account
+        balances and settlement records in <a
+        href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/">QMDB</a>,
+        updating only what changes at each settlement.</em></p>
         <p><em>Update (8/20/26): Clearing now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
@@ -137,14 +136,16 @@ O’Grady</a></div>
         can force recovery onchain without its cooperation. And the
         protocol requires only signatures and Merkle openings.</p>
         <p>One payment or a bajillion, each account settles once.</p>
-        <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
-        as Browsing the Web</h2>
-        <p>If an API responds in milliseconds, no one will wait seconds
-        to pay for it. With Bajillion, a user can pay an API provider as
-        fast as they can load a webpage.</p>
-        <p>The user’s chosen <strong>operator</strong>, a service that
-        processes payments and later settles them onchain, provides a
-        binding receipt promising to pay the API provider.</p>
+        <h2
+        id="payments-as-frequent-and-fast-as-browsing-the-web">Payments
+        as Frequent and Fast as Browsing the Web</h2>
+        <p>When payments are as common as web requests, they need to be
+        just as fast and dirt cheap. With Bajillion, a user can pay an
+        API provider as fast as they can load a web page.</p>
+        <p>The user chooses an <strong>operator</strong> to handle
+        payments and settle them onchain later. For each payment, the
+        operator issues a binding receipt promising to pay the API
+        provider.</p>
         <p>The user receives it in one round trip and sends it with the
         API request, or the operator delivers it directly to the
         provider to save a hop. The provider can serve the response
