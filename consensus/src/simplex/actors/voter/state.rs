@@ -900,6 +900,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|round| round.elapsed_since_start(now))
     }
 
+    /// Returns time since first local view entry, or None if no entry was recorded.
+    pub fn elapsed_since_entry(&self, view: View) -> Option<Duration> {
+        let now = self.context.current();
+        self.views
+            .get(&view)
+            .and_then(|round| round.elapsed_since_entry(now))
+    }
+
     /// Immediately expires `view` on its first timeout when skip budget is
     /// available, forcing a timeout to fire on the next tick. Otherwise, the
     /// timeout remains latched until budget becomes available.
