@@ -65,7 +65,7 @@ commonware_macros::stability_scope!(ALPHA {
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
-    use alloc::sync::Arc;
+    use alloc::{sync::Arc, vec::Vec};
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
@@ -73,7 +73,7 @@ commonware_macros::stability_scope!(BETA {
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
-    use std::sync::Arc;
+    use std::{sync::Arc, vec::Vec};
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -290,6 +290,18 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
         fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
+
+        /// Hash multiple independent byte slices.
+        ///
+        /// Returns one digest per input in the same order. Inputs may be empty,
+        /// differ in length, or overlap. Output position `i` is equivalent to
+        /// `Self::hash(&[messages[i].as_ref()])`.
+        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+            messages
+                .iter()
+                .map(|message| Self::hash(&[message.as_ref()]))
+                .collect()
+        }
 
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
