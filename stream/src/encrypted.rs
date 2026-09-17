@@ -60,8 +60,8 @@ use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
     handshake::{
-        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
-        dial_start, listen_end, listen_start,
+        self as cryptographic_handshake, Ack, Context, Error as HandshakeError, RecvCipher,
+        SendCipher, Syn, SynAck, dial_end, dial_start, listen_end, listen_start,
     },
 };
 use commonware_formatting::hex;
@@ -76,8 +76,8 @@ use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
 const TAG_SIZE: u32 = {
-    assert!(handshake::TAG_SIZE <= u32::MAX as usize);
-    handshake::TAG_SIZE as u32
+    assert!(cryptographic_handshake::TAG_SIZE <= u32::MAX as usize);
+    cryptographic_handshake::TAG_SIZE as u32
 };
 
 /// Maximum supported plaintext message size.
@@ -98,6 +98,8 @@ pub enum Error {
     RecvTooLarge(usize),
     #[error("invalid varint length prefix")]
     InvalidVarint,
+    #[error("maximum message size too large: {0} bytes")]
+    MaxMessageSizeTooLarge(u32),
     #[error("send failed")]
     SendFailed(RuntimeError),
     #[error("send zero size")]
@@ -160,15 +162,43 @@ pub struct Config<S> {
 impl<S> Config<S> {
     /// Computes current time and acceptable timestamp range.
     pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
-        fn duration_to_u64(d: Duration) -> u64 {
-            u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
-        }
-        let current_time_ms = duration_to_u64(ctx.current().epoch());
-        let ok_timestamps = (current_time_ms
-            .saturating_sub(duration_to_u64(self.max_handshake_age)))
-            ..(current_time_ms.saturating_add(duration_to_u64(self.synchrony_bound)));
-        (current_time_ms, ok_timestamps)
+        time_information(ctx, self.synchrony_bound, self.max_handshake_age)
     }
+}
+
+fn time_information(
+    ctx: &impl Clock,
+    synchrony_bound: Duration,
+    max_handshake_age: Duration,
+) -> (u64, Range<u64>) {
+    fn duration_to_u64(d: Duration) -> u64 {
+        u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
+    }
+
+    let current_time_ms = duration_to_u64(ctx.current().epoch());
+    let ok_timestamps = (current_time_ms.saturating_sub(duration_to_u64(max_handshake_age)))
+        ..(current_time_ms.saturating_add(duration_to_u64(synchrony_bound)));
+    (current_time_ms, ok_timestamps)
+}
+
+const fn validate_max_message_size(max_message_size: u32) -> Result<(), Error> {
+    if max_message_size > MAX_SIZE {
+        return Err(Error::MaxMessageSizeTooLarge(max_message_size));
+    }
+    Ok(())
+}
+
+/// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
+#[derive(Clone)]
+pub struct Handshake<S> {
+    /// Private key used to authenticate the local peer.
+    pub signing_key: S,
+
+    /// Maximum time drift allowed for future timestamps.
+    pub synchrony_bound: Duration,
+
+    /// Maximum age of handshake messages before rejection.
+    pub max_handshake_age: Duration,
 }
 
 // Handshake frames are fixed-size protocol messages, so we cap receives to
@@ -186,58 +216,204 @@ where
     Ok(M::decode(frame)?)
 }
 
+async fn listen_inner<C, S, I, O, B, F>(
+    handshake: Handshake<S>,
+    context: C,
+    namespace: Vec<u8>,
+    max_message_size: u32,
+    bouncer: B,
+    mut stream: I,
+    mut sink: O,
+) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error>
+where
+    C: BufferPooler + Clock + CryptoRng,
+    S: Signer,
+    I: Stream,
+    O: Sink,
+    B: FnOnce(S::PublicKey) -> F,
+    F: Future<Output = bool>,
+{
+    validate_max_message_size(max_message_size)?;
+    let pool = context.network_buffer_pool().clone();
+    let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
+    if !bouncer(peer.clone()).await {
+        return Err(Error::PeerRejected(peer.encode().to_vec()));
+    }
+
+    let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
+
+    let (current_time, ok_timestamps) = time_information(
+        &context,
+        handshake.synchrony_bound,
+        handshake.max_handshake_age,
+    );
+    let (state, syn_ack) = listen_start(
+        context,
+        Context::new(
+            &namespace,
+            current_time,
+            ok_timestamps,
+            handshake.signing_key,
+            peer.clone(),
+        ),
+        msg1,
+    )?;
+    send_frame(&mut sink, syn_ack.encode(), max_message_size).await?;
+
+    let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
+
+    let (send, recv) = listen_end(state, ack)?;
+
+    Ok((
+        peer,
+        Sender {
+            cipher: send,
+            sink,
+            max_message_size,
+            pool: pool.clone(),
+        },
+        Receiver {
+            cipher: recv,
+            stream,
+            max_message_size,
+            pool,
+        },
+    ))
+}
+
+impl<S: Signer> crate::Handshake for Handshake<S> {
+    type PublicKey = S::PublicKey;
+    type Signer = S;
+    type Error = Error;
+    type Sender<O: Sink> = Sender<O>;
+    type Receiver<I: Stream> = Receiver<I>;
+
+    fn public_key(&self) -> Self::PublicKey {
+        self.signing_key.public_key()
+    }
+
+    fn signer(&self) -> &Self::Signer {
+        &self.signing_key
+    }
+
+    async fn dial<C, I, O>(
+        self,
+        context: C,
+        namespace: Vec<u8>,
+        max_message_size: u32,
+        peer: Self::PublicKey,
+        mut stream: I,
+        mut sink: O,
+    ) -> Result<(Self::Sender<O>, Self::Receiver<I>), Self::Error>
+    where
+        C: BufferPooler + Clock + CryptoRng,
+        I: Stream,
+        O: Sink,
+    {
+        validate_max_message_size(max_message_size)?;
+        let pool = context.network_buffer_pool().clone();
+        send_frame(
+            &mut sink,
+            self.signing_key.public_key().encode(),
+            max_message_size,
+        )
+        .await?;
+
+        let (current_time, ok_timestamps) =
+            time_information(&context, self.synchrony_bound, self.max_handshake_age);
+        let (state, syn) = dial_start(
+            context,
+            Context::new(
+                &namespace,
+                current_time,
+                ok_timestamps,
+                self.signing_key,
+                peer,
+            ),
+        );
+        send_frame(&mut sink, syn.encode(), max_message_size).await?;
+
+        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
+
+        let (ack, send, recv) = dial_end(state, syn_ack)?;
+        send_frame(&mut sink, ack.encode(), max_message_size).await?;
+
+        Ok((
+            Sender {
+                cipher: send,
+                sink,
+                max_message_size,
+                pool: pool.clone(),
+            },
+            Receiver {
+                cipher: recv,
+                stream,
+                max_message_size,
+                pool,
+            },
+        ))
+    }
+
+    async fn listen<C, I, O, B, F>(
+        self,
+        context: C,
+        namespace: Vec<u8>,
+        max_message_size: u32,
+        bouncer: B,
+        stream: I,
+        sink: O,
+    ) -> Result<(Self::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
+    where
+        C: BufferPooler + Clock + CryptoRng,
+        I: Stream,
+        O: Sink,
+        B: FnOnce(Self::PublicKey) -> F + Send,
+        F: Future<Output = bool> + Send,
+    {
+        listen_inner(
+            self,
+            context,
+            namespace,
+            max_message_size,
+            bouncer,
+            stream,
+            sink,
+        )
+        .await
+    }
+}
+
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
 pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
     ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
-    mut stream: I,
-    mut sink: O,
+    stream: I,
+    sink: O,
 ) -> Result<(Sender<O>, Receiver<I>), Error> {
-    let pool = ctx.network_buffer_pool().clone();
-    let timeout = ctx.sleep(config.handshake_timeout);
-    let inner_routine = async move {
-        send_frame(
-            &mut sink,
-            config.signing_key.public_key().encode(),
-            config.max_message_size,
-        )
-        .await?;
-
-        let (current_time, ok_timestamps) = config.time_information(&ctx);
-        let (state, syn) = dial_start(
-            ctx,
-            Context::new(
-                &config.namespace,
-                current_time,
-                ok_timestamps,
-                config.signing_key,
-                peer,
-            ),
-        );
-        send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
-
-        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
-
-        let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
-
-        Ok((
-            Sender {
-                cipher: send,
-                sink,
-                max_message_size: config.max_message_size,
-                pool: pool.clone(),
-            },
-            Receiver {
-                cipher: recv,
-                stream,
-                max_message_size: config.max_message_size,
-                pool,
-            },
-        ))
-    };
+    let Config {
+        signing_key,
+        namespace,
+        max_message_size,
+        synchrony_bound,
+        max_handshake_age,
+        handshake_timeout,
+    } = config;
+    let timeout = ctx.sleep(handshake_timeout);
+    let inner_routine = crate::Handshake::dial(
+        Handshake {
+            signing_key,
+            synchrony_bound,
+            max_handshake_age,
+        },
+        ctx,
+        namespace,
+        max_message_size,
+        peer,
+        stream,
+        sink,
+    );
 
     select! {
         x = inner_routine => x,
@@ -258,53 +434,31 @@ pub async fn listen<
     ctx: R,
     bouncer: F,
     config: Config<S>,
-    mut stream: I,
-    mut sink: O,
+    stream: I,
+    sink: O,
 ) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
-    let pool = ctx.network_buffer_pool().clone();
-    let timeout = ctx.sleep(config.handshake_timeout);
-    let inner_routine = async move {
-        let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
-        if !bouncer(peer.clone()).await {
-            return Err(Error::PeerRejected(peer.encode().to_vec()));
-        }
-
-        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
-
-        let (current_time, ok_timestamps) = config.time_information(&ctx);
-        let (state, syn_ack) = listen_start(
-            ctx,
-            Context::new(
-                &config.namespace,
-                current_time,
-                ok_timestamps,
-                config.signing_key,
-                peer.clone(),
-            ),
-            msg1,
-        )?;
-        send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
-
-        let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
-
-        let (send, recv) = listen_end(state, ack)?;
-
-        Ok((
-            peer,
-            Sender {
-                cipher: send,
-                sink,
-                max_message_size: config.max_message_size,
-                pool: pool.clone(),
-            },
-            Receiver {
-                cipher: recv,
-                stream,
-                max_message_size: config.max_message_size,
-                pool,
-            },
-        ))
-    };
+    let Config {
+        signing_key,
+        namespace,
+        max_message_size,
+        synchrony_bound,
+        max_handshake_age,
+        handshake_timeout,
+    } = config;
+    let timeout = ctx.sleep(handshake_timeout);
+    let inner_routine = listen_inner(
+        Handshake {
+            signing_key,
+            synchrony_bound,
+            max_handshake_age,
+        },
+        ctx,
+        namespace,
+        max_message_size,
+        bouncer,
+        stream,
+        sink,
+    );
 
     select! {
         x = inner_routine => x,
@@ -491,6 +645,31 @@ pub struct Receiver<I> {
     pool: BufferPool,
 }
 
+impl<O: Sink> crate::Sender for Sender<O> {
+    type Error = Error;
+
+    async fn send(&mut self, message: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        Self::send(self, message).await
+    }
+
+    async fn send_many<B, I>(&mut self, messages: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs> + Send,
+        I: IntoIterator<Item = B> + Send,
+        I::IntoIter: Send,
+    {
+        Self::send_many(self, messages).await
+    }
+}
+
+impl<I: Stream> crate::Receiver for Receiver<I> {
+    type Error = Error;
+
+    async fn recv(&mut self) -> Result<IoBufs, Error> {
+        Self::recv(self).await
+    }
+}
+
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
     ///
@@ -553,6 +732,12 @@ mod test {
     #[test]
     fn test_max_message_size_bounds() {
         assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+        assert!(validate_max_message_size(0).is_ok());
+        assert!(validate_max_message_size(MAX_SIZE).is_ok());
+        assert!(matches!(
+            validate_max_message_size(MAX_SIZE + 1),
+            Err(Error::MaxMessageSizeTooLarge(size)) if size == MAX_SIZE + 1
+        ));
     }
 
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {

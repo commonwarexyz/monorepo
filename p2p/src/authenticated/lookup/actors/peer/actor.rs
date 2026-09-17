@@ -10,10 +10,10 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    telemetry::metrics::CounterFamily,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
@@ -92,7 +92,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// already ready (via `try_recv`), so this reduces runtime write calls
     /// without introducing a per-connection timer or extra buffering latency.
     #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V>(
+    fn extend_send_many<V, S, R>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -101,7 +101,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S, R>> {
         while batch.len() < batch_size {
             if let Some(msg) = Self::try_recv_control(control) {
                 match msg {
@@ -139,12 +139,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         }
     }
 
-    pub async fn run<Si: Sink, St: Stream>(
+    pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
-        (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
+        (mut conn_sender, mut conn_receiver): (S, R),
         channels: Channels<C>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S::Error, R::Error>> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -169,7 +169,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+        let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
@@ -247,73 +247,72 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> =
-            self.context
-                .child("receiver")
-                .spawn(move |context| async move {
-                    loop {
-                        // Receive a message from the peer
-                        let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+        let mut receive_handler = self
+            .context
+            .child("receiver")
+            .spawn(move |context| async move {
+                loop {
+                    // Receive a message from the peer
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                        // Parse the message
-                        let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                        let msg = match types::Message::decode_cfg(msg, &max_data_length) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                debug!(?err, ?peer, "failed to decode message");
+                    // Parse the message
+                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            debug!(?err, ?peer, "failed to decode message");
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_invalid(&peer))
+                                .inc();
+                            return Err(Error::DecodeFailed(err));
+                        }
+                    };
+
+                    // Validate channel and resolve rate limiter before emitting
+                    // any channel-labeled metrics (to avoid unbounded cardinality
+                    // from attacker-controlled channel values).
+                    let (metric, rate_limiter) = match &msg {
+                        types::Message::Data(data) => match rate_limits.get(&data.channel) {
+                            Some(rate_limit) => {
+                                (metrics::Message::new_data(&peer, data.channel), rate_limit)
+                            }
+                            None => {
+                                debug!(?peer, channel = data.channel, "invalid channel");
                                 self.received_messages
                                     .get_or_create(&metrics::Message::new_invalid(&peer))
                                     .inc();
-                                return Err(Error::DecodeFailed(err));
+                                return Err(Error::InvalidChannel);
                             }
-                        };
-
-                        // Validate channel and resolve rate limiter before emitting
-                        // any channel-labeled metrics (to avoid unbounded cardinality
-                        // from attacker-controlled channel values).
-                        let (metric, rate_limiter) = match &msg {
-                            types::Message::Data(data) => match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => {
-                                    (metrics::Message::new_data(&peer, data.channel), rate_limit)
-                                }
-                                None => {
-                                    debug!(?peer, channel = data.channel, "invalid channel");
-                                    self.received_messages
-                                        .get_or_create(&metrics::Message::new_invalid(&peer))
-                                        .inc();
-                                    return Err(Error::InvalidChannel);
-                                }
-                            },
-                            types::Message::Ping => {
-                                (metrics::Message::new_ping(&peer), &ping_rate_limiter)
-                            }
-                        };
-                        self.received_messages.get_or_create(&metric).inc();
-                        if let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
-                            let wait_duration = wait_until.wait_time_from(context.now());
-                            context.sleep(wait_duration).await;
+                        },
+                        types::Message::Ping => {
+                            (metrics::Message::new_ping(&peer), &ping_rate_limiter)
                         }
+                    };
+                    self.received_messages.get_or_create(&metric).inc();
+                    if let Err(wait_until) = rate_limiter.check() {
+                        self.rate_limited.get_or_create(&metric).inc();
+                        let wait_duration = wait_until.wait_time_from(context.now());
+                        context.sleep(wait_duration).await;
+                    }
 
-                        match msg {
-                            types::Message::Data(data) => {
-                                // Send message to application without blocking.
-                                //
-                                // We intentionally drop messages when the application buffer is
-                                // full rather than blocking. Blocking here would also block
-                                // processing of Ping messages, causing the peer connection to
-                                // stall and potentially disconnect.
-                                let sender = senders.get_mut(&data.channel).unwrap();
-                                let _ =
-                                    sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                            }
-                            types::Message::Ping => {
-                                // We ignore ping messages, they are only used to keep
-                                // the connection alive
-                            }
+                    match msg {
+                        types::Message::Data(data) => {
+                            // Send message to application without blocking.
+                            //
+                            // We intentionally drop messages when the application buffer is
+                            // full rather than blocking. Blocking here would also block
+                            // processing of Ping messages, causing the peer connection to
+                            // stall and potentially disconnect.
+                            let sender = senders.get_mut(&data.channel).unwrap();
+                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                        }
+                        types::Message::Ping => {
+                            // We ignore ping messages, they are only used to keep
+                            // the connection alive
                         }
                     }
-                });
+                }
+            });
 
         // Wait for one of the handlers to finish or shutdown
         let mut shutdown = self.context.stopped();

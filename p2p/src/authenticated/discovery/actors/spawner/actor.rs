@@ -15,17 +15,18 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream, spawn_cell,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
+use commonware_stream::{Receiver, Sender};
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    O: Sink,
-    I: Stream,
+    O: Sender,
+    I: Receiver,
     C: PublicKey,
 > {
     context: ContextCell<E>,
@@ -44,7 +45,7 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
@@ -266,7 +267,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<mocks::Sink, mocks::Stream, PublicKey>>,
+        Mailbox<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -286,10 +287,12 @@ mod tests {
         let router_mailbox = router::Mailbox::new(router_sender);
 
         let (spawner, spawner_mailbox) =
-            Actor::<deterministic::Context, mocks::Sink, mocks::Stream, PublicKey>::new(
-                context.child("spawner"),
-                spawner_config(local),
-            );
+            Actor::<
+                deterministic::Context,
+                EncryptedSender<mocks::Sink>,
+                EncryptedReceiver<mocks::Stream>,
+                PublicKey,
+            >::new(context.child("spawner"), spawner_config(local));
         let handle = spawner.start(tracker_mailbox, router_mailbox);
 
         (

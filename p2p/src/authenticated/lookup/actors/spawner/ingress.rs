@@ -1,24 +1,23 @@
 use crate::authenticated::{Mailbox, lookup::actors::tracker::Reservation};
 use commonware_actor::{Feedback, Unreliable, mailbox::UnreliablePolicy};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
-pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
+pub enum Message<Si: Sender, St: Receiver, P: PublicKey> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Sender<Si>, Receiver<St>),
+        connection: (Si, St),
         /// The reservation for the peer.
         reservation: Reservation<P>,
     },
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P> {
+impl<Si: Sender, St: Receiver, P: PublicKey> UnreliablePolicy for Message<Si, St, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -29,14 +28,14 @@ impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P>
     }
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
+impl<Si: Sender, St: Receiver, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
     /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
     /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
-        connection: (Sender<Si>, Receiver<St>),
+        connection: (Si, St),
         reservation: Reservation<P>,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
@@ -139,7 +138,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<mocks::Sink, mocks::Stream, PublicKey>>::new(
+                Mailbox::<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );

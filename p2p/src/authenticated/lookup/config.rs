@@ -1,5 +1,6 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
+use commonware_stream::{Handshake, encrypted};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -10,17 +11,17 @@ use std::{
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
-/// It is recommended to synchronize this configuration across peers in the network (with
-/// the exception of `crypto`, `listen`, `allow_private_ips`, `max_peers_per_set`, `mailbox_size`,
+/// It is recommended to synchronize network and handshake settings across peers (with
+/// the exception of local signing credentials, `listen`, `allow_private_ips`, `max_peers_per_set`, `mailbox_size`,
 /// `send_batch_size`, and `dial_timeout`). If this is not synchronized, connections could
 /// be unnecessarily dropped, messages could be parsed incorrectly, and/or peers will rate
 /// limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<C: Signer> {
-    /// Cryptographic primitives.
-    pub crypto: C,
+pub struct Config<H: Handshake> {
+    /// Authenticates peers and establishes their message streams.
+    pub handshake: H,
 
-    /// Prefix for all signed messages to avoid replay attacks.
+    /// Namespace used to isolate connections for this application.
     pub namespace: Vec<u8>,
 
     /// Address to listen on.
@@ -41,7 +42,8 @@ pub struct Config<C: Signer> {
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::MAX_SIZE`].
+    /// The default encrypted stream supports up to [`crate::authenticated::MAX_SIZE`].
+    /// Custom handshakes must support the configured value plus [`crate::authenticated::MAX_PAYLOAD_OVERHEAD`].
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
@@ -71,12 +73,6 @@ pub struct Config<C: Signer> {
     ///
     /// Set this to `1` to disable batching.
     pub send_batch_size: NonZeroUsize,
-
-    /// Time into the future that a timestamp can be and still be considered valid.
-    pub synchrony_bound: Duration,
-
-    /// Duration after which a handshake message is considered stale.
-    pub max_handshake_age: Duration,
 
     /// Timeout for the handshake process.
     ///
@@ -128,17 +124,17 @@ pub struct Config<C: Signer> {
     pub block_duration: Duration,
 }
 
-impl<C: Signer> Config<C> {
+impl<H: Handshake> Config<H> {
     /// Generates a configuration with reasonable defaults for usage in production.
-    pub fn recommended(
-        crypto: C,
+    pub fn recommended_with_handshake(
+        handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
-            crypto,
+            handshake,
             namespace: namespace.to_vec(),
             listen,
 
@@ -149,8 +145,6 @@ impl<C: Signer> Config<C> {
             max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(60),
@@ -170,15 +164,15 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local(
-        crypto: C,
+    pub fn local_with_handshake(
+        handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
-            crypto,
+            handshake,
             namespace: namespace.to_vec(),
             listen,
 
@@ -189,8 +183,6 @@ impl<C: Signer> Config<C> {
             max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(1),
@@ -205,9 +197,9 @@ impl<C: Signer> Config<C> {
     }
 
     #[cfg(test)]
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
+    fn test_with_handshake(handshake: H, listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
-            crypto,
+            handshake,
             namespace: b"test_namespace".to_vec(),
             listen,
 
@@ -218,8 +210,6 @@ impl<C: Signer> Config<C> {
             max_peers_per_set: NZUsize!(32),
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_millis(250),
@@ -231,5 +221,66 @@ impl<C: Signer> Config<C> {
             tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_mins(1),
         }
+    }
+}
+
+impl<C: Signer> Config<encrypted::Handshake<C>> {
+    /// Generates a production configuration using the default encrypted handshake.
+    pub fn recommended(
+        crypto: C,
+        namespace: &[u8],
+        listen: SocketAddr,
+        max_peers_per_set: NonZeroUsize,
+        max_message_size: u32,
+    ) -> Self {
+        Self::recommended_with_handshake(
+            encrypted::Handshake {
+                signing_key: crypto,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            namespace,
+            listen,
+            max_peers_per_set,
+            max_message_size,
+        )
+    }
+
+    /// Generates a local-demo configuration using the default encrypted handshake.
+    ///
+    /// # Warning
+    ///
+    /// This configuration is not recommended for production.
+    pub fn local(
+        crypto: C,
+        namespace: &[u8],
+        listen: SocketAddr,
+        max_peers_per_set: NonZeroUsize,
+        max_message_size: u32,
+    ) -> Self {
+        Self::local_with_handshake(
+            encrypted::Handshake {
+                signing_key: crypto,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            namespace,
+            listen,
+            max_peers_per_set,
+            max_message_size,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
+        Self::test_with_handshake(
+            encrypted::Handshake {
+                signing_key: crypto,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            listen,
+            max_message_size,
+        )
     }
 }

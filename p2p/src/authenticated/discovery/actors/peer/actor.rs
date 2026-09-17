@@ -14,10 +14,10 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    telemetry::metrics::CounterFamily,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -70,11 +70,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Converts a control message into an outbound metric/payload pair.
     ///
     /// Returns `Err` for `Kill` so the caller can terminate the connection.
-    fn prepare_control(
+    fn prepare_control<S, R>(
         peer: &C,
         msg: Message<C>,
         pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message<C>, IoBufs), Error> {
+    ) -> Result<(metrics::Message<C>, IoBufs), Error<S, R>> {
         let (metric, payload) = match msg {
             Message::BitVec(bit_vec) => (
                 metrics::Message::new_bit_vec(peer),
@@ -119,7 +119,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// already ready (via `try_recv`), so this reduces runtime write calls
     /// without introducing a per-connection timer or extra buffering latency.
     #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V>(
+    fn extend_send_many<V, S, R>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -129,7 +129,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S, R>> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
                 let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
@@ -151,14 +151,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
         greeting: types::Info<C>,
-        (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
+        (mut conn_sender, mut conn_receiver): (S, R),
         tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S::Error, R::Error>> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -185,7 +185,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             .map_err(Error::SendFailed)?;
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+        let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
             let rate_limits = rate_limits.clone();
@@ -239,7 +239,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
+        let mut receive_handler = self
             .context
             .child("receiver")
             .spawn(move |context| async move {

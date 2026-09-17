@@ -8,7 +8,7 @@ use crate::{
     authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::Signer;
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
     // ---------- Message-Passing ----------
@@ -30,30 +30,30 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
-    receiver: mailbox::Receiver<Message<C::PublicKey>>,
+    receiver: mailbox::Receiver<Message<C>>,
 
     /// The mailbox for the listener.
     listener: listener::Mailbox,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
-    directory: Directory<E, C::PublicKey>,
+    directory: Directory<E, C>,
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
+    mailboxes: HashMap<C, peer::Mailbox>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C>>>,
 
     /// Subscribers to the set of blocked peers.
-    blocked_subscribers: Vec<ring::Sender<Set<C::PublicKey>>>,
+    blocked_subscribers: Vec<ring::Sender<Set<C>>>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C::PublicKey>, Oracle<C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Oracle<C>) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -66,7 +66,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let local = cfg.crypto.public_key();
+        let local = cfg.public_key;
         let oracle = Oracle::new(sender.clone(), local.clone(), cfg.max_peers_per_set);
         let releaser = Releaser::new(sender.clone());
 
@@ -123,7 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     }
 
     /// Handle a [`Message`].
-    fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+    fn handle_msg(&mut self, msg: Message<C>) {
         match msg {
             Message::Register { index, peers } => {
                 // Identify peers whose connection state should be torn down.
@@ -247,7 +247,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         }
     }
 
-    fn kill_peer(&mut self, public_key: &C::PublicKey) {
+    fn kill_peer(&mut self, public_key: &C) {
         if let Some(peer) = self.mailboxes.remove(public_key) {
             peer.kill();
         }
@@ -280,11 +280,14 @@ mod tests {
     };
 
     // Test Configuration Setup
-    fn test_config<C: Signer>(crypto: C, bypass_ip_check: bool) -> (Config<C>, listener::Updates) {
+    fn test_config<C: Signer>(
+        crypto: C,
+        bypass_ip_check: bool,
+    ) -> (Config<C::PublicKey>, listener::Updates) {
         let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {
-                crypto,
+                public_key: crypto.public_key(),
                 mailbox_size: NZUsize!(1024),
                 max_peers_per_set: 1024,
                 tracked_peer_sets: NZUsize!(2),
@@ -314,7 +317,7 @@ mod tests {
 
     fn setup_actor(
         runner_context: deterministic::Context,
-        cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
+        cfg_to_clone: Config<PublicKey>, // Pass by value to allow cloning
     ) -> TestHarness {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);

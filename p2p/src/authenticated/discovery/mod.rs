@@ -13,6 +13,13 @@
 //!
 //! # Design
 //!
+//! ## Authentication
+//!
+//! Discovery gossip is signed by the signer owned by [`Config::handshake`]. Custom
+//! [`commonware_stream::Handshake`] implementations used with discovery must expose a
+//! [`commonware_cryptography::Signer`] for the same public identity returned by the handshake.
+//! Network construction panics when the identities differ.
+//!
 //! ## Discovery
 //!
 //! Peer discovery operates under the assumption that all peers are aware of and synchronized on

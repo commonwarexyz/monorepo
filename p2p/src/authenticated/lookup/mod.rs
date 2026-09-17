@@ -10,6 +10,17 @@
 //! - Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! - Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //!
+//! # Custom Authentication
+//!
+//! [`Config::recommended`] and [`Config::local`] use the encrypted stream's default
+//! handshake and transcript. Use [`Config::recommended_with_handshake`] or
+//! [`Config::local_with_handshake`] to supply a [`commonware_stream::Handshake`],
+//! for example one that verifies enclave attestations. The network uses the public
+//! keys authenticated by that implementation. Custom signing and verification do not
+//! need to implement [`commonware_cryptography::Signer`].
+//! Connection scheduling, admission, timeouts, and channel rate limits remain managed
+//! by the network. The handshake implementation binds those identities to its message streams.
+//!
 //! # Design
 //!
 //! ## Discovery
@@ -205,6 +216,9 @@ pub use crate::authenticated::{
 pub use actors::tracker::Oracle;
 pub use config::Config;
 pub use network::Network;
+
+#[cfg(test)]
+mod custom;
 
 #[cfg(test)]
 mod tests {
