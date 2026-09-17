@@ -1453,7 +1453,9 @@ mod tests {
     fn regression_params(write_config: deterministic::WriteConfig) -> Params {
         Params {
             page_size: NonZeroU16::new(44).unwrap(),
-            page_cache_size: NZUsize!(1),
+            // Holds every flushed page. The probe at position 0 must reach disk because a failed
+            // flush caches nothing, not because a small cache evicted its page.
+            page_cache_size: NZUsize!(16),
             items_per_section: 1_000,
             write_buffer: NZUsize!(2_048),
             replay_buffer: NZUsize!(2_048),

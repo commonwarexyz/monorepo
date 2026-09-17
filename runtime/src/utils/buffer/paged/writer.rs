@@ -17,10 +17,10 @@
 //!
 //! Callers append and read logical bytes; the blob stores physical pages in the format described
 //! in [`super`]. Appends accumulate in a write buffer and reach the blob in pages. Buffered bytes
-//! are readable immediately but durable only after `sync`. Full pages read from the blob are
-//! cached in a shared page cache, so reads are served from the write buffer, the page cache, or
-//! the blob itself. Large appends bypass the write buffer and write whole pages directly to the
-//! blob.
+//! are readable immediately but durable only after `sync`. Full pages enter a shared page cache
+//! only once the blob accepted them, when a flush's write returns or a read validates them, so
+//! reads are served from the write buffer, the page cache, or the blob itself. Large appends
+//! bypass the write buffer and write whole pages directly to the blob.
 //!
 //! # Checksums
 //!
@@ -749,18 +749,6 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // Direct blob writes must not overtake an earlier started sync barrier.
         self.sync_state.wait_for_pending().await?;
 
-        // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
-        // served from the cache while the blob write is still in flight. Insert in
-        // write-buffer-sized chunks. The capacity is a whole number of pages (see
-        // [adjusted_capacity]), so each chunk is page-aligned.
-        let chunk_len = self.buffer.capacity;
-        let mut cache_offset = boundary;
-        for chunk in bulk.as_ref().chunks(chunk_len) {
-            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
-            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
-            cache_offset += chunk.len() as u64;
-        }
-
         // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
         // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
         // so seeding it with a view of `buf` would pin the entire backing allocation until the
@@ -790,6 +778,17 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                 WriteOptions::DONT_CACHE,
             )
             .await?;
+
+        // The blob accepted these pages, so the cache may now serve them. Insert in
+        // write-buffer-sized chunks. The capacity is a whole number of pages (see
+        // [adjusted_capacity]), so each chunk is page-aligned.
+        let chunk_len = self.buffer.capacity;
+        let mut cache_offset = boundary;
+        for chunk in bulk.as_ref().chunks(chunk_len) {
+            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
+            cache_offset += chunk.len() as u64;
+        }
 
         Ok(offset)
     }
@@ -869,13 +868,13 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             "flush work predicate must match physical page construction"
         );
 
-        // Split buffered bytes into full logical pages to hand off now, leaving any trailing
-        // partial page in tip for continued buffering.
+        // Split buffered bytes into the full logical pages this flush writes, leaving any
+        // trailing partial page in the tip for continued buffering.
         let page_size: usize = self.cache_ref.page_size().widen();
         let pages_to_cache = self.buffer.len() / page_size;
         let bytes_to_drain = pages_to_cache * page_size;
 
-        // Remember the logical start offset and page bytes for caching of flushed full pages.
+        // Remember the logical start offset and page bytes for caching once the blob accepts them.
         let cache_pages = if pages_to_cache > 0 {
             Some((self.buffer.offset, self.buffer.slice(..bytes_to_drain)))
         } else {
@@ -894,13 +893,6 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             self.buffer.offset += bytes_to_drain as u64;
         }
         let new_offset = self.buffer.offset;
-
-        // Cache full pages before publishing the new blob state so reads don't observe stale
-        // persisted bytes during the handoff from tip to cache.
-        if let Some((cache_offset, pages)) = cache_pages {
-            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
-            assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
-        }
 
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let write_at_offset = self.current_page * physical_page_size as u64;
@@ -944,6 +936,12 @@ impl<B: Blob, Phase> Writer<B, Phase> {
                     WriteOptions::DONT_CACHE,
                 )
                 .await?;
+        }
+
+        // The blob accepted these pages, so the cache may now serve them.
+        if let Some((cache_offset, pages)) = cache_pages {
+            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
+            assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
         }
         Ok(sync)
     }
@@ -2955,6 +2953,82 @@ mod tests {
 
             // The writer retains the flush failure and reports it on the next sync.
             assert!(writer.sync().await.is_err());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_failed_flush_caches_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, size) = context
+                .open("test_partition", b"failed_flush_caches_nothing")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Buffer one full page plus one byte, so the flush inside start_sync writes one full
+            // page and leaves one byte in the tip.
+            let page_size = PAGE_SIZE.get() as usize;
+            let data = vec![1u8; page_size + 1];
+            writer.append(&data).await.unwrap();
+            faults.arm();
+            let handle = writer.start_sync().await;
+            faults.disarm();
+            assert!(handle.await.is_err());
+
+            // The blob rejected the page, so the cache must not serve it and a read reaches the
+            // blob, which has no bytes for it.
+            let mut buf = vec![0u8; page_size];
+            assert!(
+                !writer.try_read_sync_into(&mut buf, 0),
+                "failed page must not be cached"
+            );
+            assert!(writer.read_at(0, page_size).await.is_err());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_failed_direct_append_caches_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, size) = context
+                .open("test_partition", b"failed_direct_append_caches_nothing")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // An append larger than the write buffer writes its full pages directly.
+            let page_size = PAGE_SIZE.get() as usize;
+            let data = vec![2u8; BUFFER_SIZE + page_size];
+            faults.arm();
+            assert!(writer.append(&data).await.is_err());
+            faults.disarm();
+
+            // Reads after a failed append are outside the writer's contract. This probes only
+            // that the cache admitted nothing: the read falls through to the blob, which the
+            // fault kept empty.
+            let mut buf = vec![0u8; page_size];
+            assert!(
+                !writer.try_read_sync_into(&mut buf, 0),
+                "failed pages must not be cached"
+            );
+            assert!(writer.read_at(0, page_size).await.is_err());
         });
     }
 
