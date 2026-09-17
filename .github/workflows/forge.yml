@@ -33,6 +33,8 @@ jobs:
       with:
         submodules: recursive
         persist-credentials: false
+
+    # The installer action and Foundry toolchain have independent release versions.
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
       with:

@@ -1183,7 +1183,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    function checkCompatibilityGas(bool belt) internal {
+    function checkRootPolicyGas(bool belt) internal {
         for (uint256 bagging; bagging < 2; ++bagging) {
             CompatibilityCase memory c;
             c.belt = belt;
@@ -1192,7 +1192,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.start = 480;
             c.inactive = 2;
             c = generate(c, 64, 7, false);
-            string memory group = string.concat("Compatibility", c.belt ? "MMB" : "MMR");
+            string memory group = string.concat(c.belt ? "MMB" : "MMR", "RootPolicy");
             string memory fold = c.backward ? "backward" : "forward";
             assertTrue(harness.verify(c, false, false));
             vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-range-memory"));

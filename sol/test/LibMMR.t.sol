@@ -198,8 +198,8 @@ contract LibMMRTest is MerkleTestCommon {
         checkCompatibilitySparseMaximumSize(false);
     }
 
-    function test_DifferentialCompatibilityGas() public {
-        checkCompatibilityGas(false);
+    function test_DifferentialRootPolicyGas() public {
+        checkRootPolicyGas(false);
     }
 
     function test_DifferentialCompatibilitySparseExactUnion() public {
