@@ -150,6 +150,7 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
+///
 /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
 /// `None` selects the latest retained state.
 ///

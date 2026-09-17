@@ -2752,6 +2752,92 @@ mod tests {
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
+    fn initialization_cfg(
+        context: &deterministic::Context,
+        partition: &str,
+        items_per_section: u64,
+    ) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NonZeroU64::new(items_per_section).unwrap(),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(4)),
+            write_buffer: NZUsize!(1),
+            replay_buffer: NZUsize!(256),
+        }
+    }
+
+    #[test]
+    fn test_recovery_failure_must_not_clear_durable_data() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = initialization_cfg(&context, "initialization-recovery-clear", 20);
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("seed"), config.clone(), 20)
+                    .await
+                    .unwrap();
+            for value in 0..8 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                remove_rate: Some(probability!(1.0)),
+                ..Default::default()
+            };
+
+            // Removing derived offsets may fail, but must never authorize clearing the data.
+            drop(Journal::<_, u64>::init(context.child("interrupted"), config.clone()).await);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, u64>::init(context.child("retry"), config)
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                20..28,
+                "ordinary recovery must retain committed data after retry"
+            );
+            for pos in 20..28 {
+                assert_eq!(journal.read(pos).await.unwrap(), pos - 20);
+            }
+        });
+    }
+
+    #[test]
+    fn test_sync_rejects_missing_acknowledged_data() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = initialization_cfg(&context, "initialization-missing-anchor", 5);
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
+                .await
+                .unwrap();
+            for value in 0..20 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            _ = journal.sync().await.unwrap();
+            for section in 1u64..=4 {
+                context
+                    .remove(
+                        "initialization-missing-anchor_data",
+                        Some(&section.to_be_bytes()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let result = <Journal<_, u64> as authenticated::Backing<_>>::recover(
+                context.child("sync"),
+                config,
+                Some(40),
+            )
+            .await;
+            let error = result.err().expect("missing acknowledged data must fail");
+            assert!(
+                matches!(error, Error::Corruption(_)),
+                "must reject missing data instead of authorizing a reset: {error}"
+            );
+        });
+    }
+
     struct Counted(u64);
 
     impl Write for Counted {
@@ -3146,24 +3232,24 @@ mod tests {
 
     #[test]
     fn test_bounded_initialization_retries_after_storage_faults() {
+        fn config(context: &deterministic::Context) -> Config<()> {
+            Config {
+                partition: "capped-faults".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(context, SMALL_PAGE_SIZE, NZUsize!(4)),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            }
+        }
+
         for start in [0, 7] {
             for kind in 0..3 {
                 for numerator in [1, 3, 7, 10] {
                     let (succeeded, checkpoint) = deterministic::Runner::default()
                         .start_and_recover(|context| async move {
-                            let cfg = Config {
-                                partition: "capped-faults".into(),
-                                items_per_section: NZU64!(5),
-                                compression: None,
-                                codec_config: (),
-                                page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    SMALL_PAGE_SIZE,
-                                    NZUsize!(4),
-                                ),
-                                write_buffer: NZUsize!(128),
-                                replay_buffer: NZUsize!(128),
-                            };
+                            let cfg = config(&context);
                             let mut journal = Journal::<_, u64>::init_at_size(
                                 context.child("seed"),
                                 cfg.clone(),
@@ -3195,19 +3281,7 @@ mod tests {
                     deterministic::Runner::from(checkpoint).start(|context| async move {
                         *context.storage_fault_config().write() =
                             deterministic::FaultConfig::default();
-                        let cfg = Config {
-                            partition: "capped-faults".into(),
-                            items_per_section: NZU64!(5),
-                            compression: None,
-                            codec_config: (),
-                            page_cache: CacheRef::from_pooler(
-                                &context,
-                                SMALL_PAGE_SIZE,
-                                NZUsize!(4),
-                            ),
-                            write_buffer: NZUsize!(128),
-                            replay_buffer: NZUsize!(128),
-                        };
+                        let cfg = config(&context);
                         if succeeded {
                             let journal =
                                 Journal::<_, u64>::init(context.child("ordinary"), cfg.clone())

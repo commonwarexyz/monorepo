@@ -697,10 +697,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
-    /// Open with an upper bound on section and index-byte end. A partial index entry
-    /// rounds down. Index sections above `section` and whole index pages above `end` are
-    /// removed before any recovery owner opens, so discarded storage is never read or
-    /// repaired. Recovery validates the selected paired prefix before publication.
+    /// Open with an upper bound on section and index-byte end.
+    ///
+    /// A partial index entry rounds down. Index sections above `section` and whole index pages
+    /// above `end` are removed before any recovery owner opens, so discarded storage is never
+    /// read or repaired. Recovery validates the selected paired prefix before publication.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -785,6 +786,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     }
 
     /// Begin tracked initialization with an upper bound on the retained section/index-byte end.
+    ///
     /// Required markers and the selected paired boundary are validated before lowering markers
     /// and releasing suffix storage. Sections above `section` are removed without being read.
     /// Unlike [Self::init_at_most], the bound section is opened before it is shortened: a
@@ -2176,6 +2178,88 @@ mod tests {
                 journal.destroy().await.unwrap();
             });
         }
+    }
+
+    #[test]
+    fn test_oversized_overshooting_cap_keeps_lazy_committed_validation() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                index_partition: "initialization-oversized-index".into(),
+                value_partition: "initialization-oversized-values".into(),
+                ..test_cfg(&context)
+            };
+            let seed_context = context.child("seed");
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                &seed_context,
+                cfg.clone(),
+                "initialization-markers".into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let mut journal = replay.finish_tracked().await.unwrap();
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .unwrap();
+            let offset;
+            (journal, _, offset, _) = journal
+                .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .unwrap();
+            _ = journal.sync_all().await.unwrap();
+            let mut markers = Metadata::<_, SectionKey, u64>::init(
+                context.child("markers"),
+                MetadataConfig {
+                    partition: "initialization-markers".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            markers.put(SectionKey::new(1), 2);
+            _ = markers.sync().await.unwrap();
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.write_at(offset, vec![0xff], WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            let open_context = context.child("ordinary");
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                &open_context,
+                cfg.clone(),
+                "initialization-markers".into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(journal.size(1).unwrap(), 40);
+            drop(journal);
+            let cap_context = context.child("cap");
+            let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                &cap_context,
+                cfg,
+                "initialization-markers".into(),
+                ReadOptions::default(),
+                1,
+                u64::MAX,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "an overshooting cap must preserve ordinary lazy validation"
+            );
+        });
     }
 
     #[test]

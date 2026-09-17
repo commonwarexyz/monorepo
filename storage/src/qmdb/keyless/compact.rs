@@ -350,6 +350,7 @@ where
     C: Clone + Send + Sync + 'static,
 {
     /// Initialize from a retained witness.
+    ///
     /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
     /// `None` selects the latest retained state.
     ///
