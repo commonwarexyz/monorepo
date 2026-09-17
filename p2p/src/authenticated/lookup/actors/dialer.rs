@@ -13,6 +13,7 @@ use crate::{
         },
     },
 };
+use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
@@ -28,8 +29,8 @@ use tracing::debug;
 // Mailbox for the spawner actor.
 type SupervisorMailbox<E, H> = Mailbox<
     spawner::Message<
-        <H as Handshake>::Sender<SinkOf<E>>,
-        <H as Handshake>::Receiver<StreamOf<E>>,
+        <H as Handshake>::Sender<StreamOf<E>, SinkOf<E>>,
+        <H as Handshake>::Receiver<StreamOf<E>, SinkOf<E>>,
         PublicKeyOf<H>,
     >,
 >;
@@ -56,7 +57,10 @@ pub struct Config<H: Handshake> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, H: Handshake> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, H: Handshake>
+where
+    PublicKeyOf<H>: PublicKey,
+{
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -77,6 +81,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 
 impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, H: Handshake>
     Actor<E, H>
+where
+    PublicKeyOf<H>: PublicKey,
 {
     pub fn new(context: E, cfg: Config<H>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");

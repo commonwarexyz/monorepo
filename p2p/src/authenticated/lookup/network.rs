@@ -13,6 +13,7 @@ use crate::{
     },
     sizing::max_retained_peers,
 };
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
@@ -28,6 +29,8 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, H: Handshake>
+where
+    PublicKeyOf<H>: PublicKey,
 {
     context: ContextCell<E>,
     cfg: Config<H>,
@@ -41,6 +44,8 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
     Network<E, H>
+where
+    PublicKeyOf<H>: PublicKey,
 {
     /// Create a new instance of an `authenticated` network.
     ///

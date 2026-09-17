@@ -1,4 +1,4 @@
-//! Communicate with a fixed set of authenticated peers over encrypted connections.
+//! Communicate with a fixed set of authenticated peers.
 //!
 //! [discovery] operates under the assumption that peer addresses aren't known in
 //! advance, and that they need to be discovered. Bootstrappers are used to

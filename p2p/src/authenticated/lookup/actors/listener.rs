@@ -5,6 +5,7 @@ use crate::authenticated::{
     lookup::actors::{spawner, tracker},
 };
 use commonware_actor::Feedback;
+use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
@@ -85,7 +86,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> Actor<E, H> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> Actor<E, H>
+where
+    PublicKeyOf<H>: PublicKey,
+{
     pub fn new(context: E, cfg: Config<H>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
@@ -133,7 +137,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
         stream: StreamOf<E>,
         tracker: tracker::Mailbox<PublicKeyOf<H>>,
         mut supervisor: SpawnerMailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
+            spawner::Message<
+                H::Sender<StreamOf<E>, SinkOf<E>>,
+                H::Receiver<StreamOf<E>, SinkOf<E>>,
+                PublicKeyOf<H>,
+            >,
         >,
     ) {
         // Perform handshake
@@ -178,7 +186,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
         mut self,
         tracker: tracker::Mailbox<PublicKeyOf<H>>,
         supervisor: SpawnerMailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
+            spawner::Message<
+                H::Sender<StreamOf<E>, SinkOf<E>>,
+                H::Receiver<StreamOf<E>, SinkOf<E>>,
+                PublicKeyOf<H>,
+            >,
         >,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -189,7 +201,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
         mut self,
         tracker: tracker::Mailbox<PublicKeyOf<H>>,
         supervisor: SpawnerMailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
+            spawner::Message<
+                H::Sender<StreamOf<E>, SinkOf<E>>,
+                H::Receiver<StreamOf<E>, SinkOf<E>>,
+                PublicKeyOf<H>,
+            >,
         >,
     ) {
         // Setup the rate limiters

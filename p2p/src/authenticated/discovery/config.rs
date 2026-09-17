@@ -1,4 +1,5 @@
 use crate::Ingress;
+use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
@@ -24,7 +25,10 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// synchronized, connections could be unnecessarily dropped, messages could be parsed
 /// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<H: Handshake> {
+pub struct Config<H: Handshake>
+where
+    PublicKeyOf<H>: PublicKey,
+{
     /// Handshake used to authenticate transport connections and sign discovery gossip.
     pub handshake: H,
 
@@ -154,7 +158,10 @@ pub struct Config<H: Handshake> {
     pub block_duration: Duration,
 }
 
-impl<H: Handshake> Config<H> {
+impl<H: Handshake> Config<H>
+where
+    PublicKeyOf<H>: PublicKey,
+{
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         handshake: H,

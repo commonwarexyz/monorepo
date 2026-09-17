@@ -14,7 +14,7 @@ use crate::{
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
@@ -37,6 +37,7 @@ pub struct Network<
     H: Handshake,
 > where
     H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
+    PublicKeyOf<H>: PublicKey,
 {
     context: ContextCell<E>,
     cfg: Config<H>,
@@ -53,6 +54,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     Network<E, H>
 where
     H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
+    PublicKeyOf<H>: PublicKey,
 {
     /// Create a new instance of an `authenticated` network.
     ///

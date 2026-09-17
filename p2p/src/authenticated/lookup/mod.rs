@@ -1,4 +1,4 @@
-//! Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+//! Communicate with a fixed set of authenticated peers with known addresses.
 //!
 //! `lookup` provides multiplexed communication between fully-connected peers
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
@@ -63,7 +63,7 @@
 //!
 //! ## Compression
 //!
-//! Stream compression is not provided at the transport layer to avoid inadvertently
+//! The default encrypted stream omits compression to avoid inadvertently
 //! enabling known attacks such as BREACH and CRIME. These attacks exploit the interaction
 //! between compression and encryption by analyzing patterns in the resulting data.
 //! By compressing secrets alongside attacker-controlled content, these attacks can infer
@@ -76,7 +76,7 @@
 //!
 //! Applications seeking higher performance should prefer batching messages
 //! above `p2p`. Larger application-level batches amortize per-message
-//! encryption overhead and, if the application also compresses its payloads,
+//! framing overhead and, if the application also compresses its payloads,
 //! can improve compression ratio.
 //!
 //! ## Rate Limiting
@@ -2274,13 +2274,10 @@ mod tests {
             self.inner.send(bufs)
         }
 
-        fn send_many<B, I>(
-            &mut self,
-            bufs: I,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send
+        fn send_many<I>(&mut self, bufs: I) -> impl Future<Output = Result<(), Self::Error>> + Send
         where
-            B: Into<IoBufs> + Send,
-            I: IntoIterator<Item = B> + Send,
+            I: IntoIterator + Send,
+            I::Item: Into<IoBufs> + Send,
             I::IntoIter: Send,
         {
             self.observations.sends.fetch_add(1, Ordering::Relaxed);
@@ -2461,8 +2458,8 @@ mod tests {
 
         type Scheme = TestScheme;
         type Error = TestHandshakeError;
-        type Sender<O: Sink> = TestSender<O>;
-        type Receiver<I: Stream> = TestReceiver<I>;
+        type Sender<I: Stream, O: Sink> = TestSender<O>;
+        type Receiver<I: Stream, O: Sink> = TestReceiver<I>;
 
         fn scheme(&self) -> &Self::Scheme {
             &self.scheme
@@ -2476,7 +2473,7 @@ mod tests {
             expected_peer: ed25519::PublicKey,
             mut stream: I,
             mut sink: O,
-        ) -> Result<(Self::Sender<O>, Self::Receiver<I>), Self::Error>
+        ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
             C: BufferPooler + Clock + CryptoRng,
             I: Stream,
@@ -2532,7 +2529,7 @@ mod tests {
             bouncer: B,
             mut stream: I,
             mut sink: O,
-        ) -> Result<(ed25519::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
+        ) -> Result<(ed25519::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
             C: BufferPooler + Clock + CryptoRng,
             I: Stream,

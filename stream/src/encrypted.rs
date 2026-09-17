@@ -215,8 +215,8 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
 
     type Scheme = S;
     type Error = Error;
-    type Sender<O: Sink> = Sender<O>;
-    type Receiver<I: Stream> = Receiver<I>;
+    type Sender<I: Stream, O: Sink> = Sender<O>;
+    type Receiver<I: Stream, O: Sink> = Receiver<I>;
 
     fn scheme(&self) -> &Self::Scheme {
         &self.signing_key
@@ -230,7 +230,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         peer: S::PublicKey,
         mut stream: I,
         mut sink: O,
-    ) -> Result<(Self::Sender<O>, Self::Receiver<I>), Self::Error>
+    ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
         C: BufferPooler + Clock + CryptoRng,
         I: Stream,
@@ -290,7 +290,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         bouncer: B,
         mut stream: I,
         mut sink: O,
-    ) -> Result<(S::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
+    ) -> Result<(S::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
         C: BufferPooler + Clock + CryptoRng,
         I: Stream,
@@ -614,10 +614,10 @@ impl<O: Sink> crate::Sender for Sender<O> {
         Self::send(self, message).await
     }
 
-    async fn send_many<B, I>(&mut self, messages: I) -> Result<(), Error>
+    async fn send_many<I>(&mut self, messages: I) -> Result<(), Error>
     where
-        B: Into<IoBufs> + Send,
-        I: IntoIterator<Item = B> + Send,
+        I: IntoIterator + Send,
+        I::Item: Into<IoBufs> + Send,
         I::IntoIter: Send,
     {
         Self::send_many(self, messages).await
