@@ -291,7 +291,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Removes `key`, returning whether it was present.
     ///
     /// The slot and its allocation are retained for reuse, so the value is not
-    /// returned. If the key is not resident, its Ghost history is forgotten.
+    /// returned.
     pub fn remove(&mut self, key: &K) -> bool {
         let hash = self.hasher.hash_one(key);
         match self
@@ -315,7 +315,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Retains only the entries for which `keep` returns `true`.
     ///
     /// Dropped entries' slots and allocations are retained for reuse.
-    /// Unrelated Ghost history is preserved.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
         let Self {
             index,
