@@ -56,6 +56,20 @@ where
         self.any.get_span(key).await
     }
 
+    /// Returns the smallest active key strictly greater than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the first key.
+    pub async fn get_next_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
+        self.any.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key`, or `None` if there is none.
+    ///
+    /// The query key need not be active. This lookup does not wrap around to the last key.
+    pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
+        self.any.get_prev_key(key).await
+    }
+
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
