@@ -62,6 +62,7 @@ use commonware_p2p::{
     authenticated::{self, discovery},
 };
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
+use commonware_stream::encrypted;
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -158,7 +159,7 @@ fn main() {
     const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
-        signer.clone(),
+        encrypted::Handshake::new(signer.clone()),
         APPLICATION_NAMESPACE,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

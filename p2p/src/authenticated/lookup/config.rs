@@ -1,6 +1,9 @@
+#[cfg(test)]
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_stream::{Handshake, encrypted};
+use commonware_stream::Handshake;
+#[cfg(test)]
+use commonware_stream::encrypted;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -125,7 +128,7 @@ pub struct Config<H: Handshake> {
 
 impl<H: Handshake> Config<H> {
     /// Generates a configuration with reasonable defaults for usage in production.
-    pub fn recommended_with_handshake(
+    pub fn recommended(
         handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
@@ -163,7 +166,7 @@ impl<H: Handshake> Config<H> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local_with_handshake(
+    pub fn local(
         handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
@@ -194,92 +197,24 @@ impl<H: Handshake> Config<H> {
             block_duration: Duration::from_hours(1),
         }
     }
-
-    #[cfg(test)]
-    fn test_with_handshake(handshake: H, listen: SocketAddr, max_message_size: u32) -> Self {
-        Self {
-            handshake,
-            namespace: b"test_namespace".to_vec(),
-            listen,
-
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
-            max_message_size,
-            max_peers_per_set: NZUsize!(32),
-            mailbox_size: NZUsize!(1_000),
-            send_batch_size: NZUsize!(8),
-            handshake_timeout: Duration::from_secs(5),
-            dial_timeout: Duration::from_secs(15),
-            peer_connection_cooldown: Duration::from_millis(250),
-            max_concurrent_handshakes: NZU32!(1_024),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
-            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
-            ping_frequency: Duration::from_secs(1),
-            dial_frequency: Duration::from_millis(200),
-            tracked_peer_sets: NZUsize!(4),
-            block_duration: Duration::from_mins(1),
-        }
-    }
 }
 
+#[cfg(test)]
 impl<C: Signer> Config<encrypted::Handshake<C>> {
-    /// Generates a production configuration using the default encrypted handshake.
-    pub fn recommended(
-        crypto: C,
-        namespace: &[u8],
-        listen: SocketAddr,
-        max_peers_per_set: NonZeroUsize,
-        max_message_size: u32,
-    ) -> Self {
-        Self::recommended_with_handshake(
-            encrypted::Handshake {
-                signing_key: crypto,
-                synchrony_bound: Duration::from_secs(5),
-                max_handshake_age: Duration::from_secs(10),
-            },
-            namespace,
-            listen,
-            max_peers_per_set,
-            max_message_size,
-        )
-    }
-
-    /// Generates a local-demo configuration using the default encrypted handshake.
-    ///
-    /// # Warning
-    ///
-    /// This configuration is not recommended for production.
-    pub fn local(
-        crypto: C,
-        namespace: &[u8],
-        listen: SocketAddr,
-        max_peers_per_set: NonZeroUsize,
-        max_message_size: u32,
-    ) -> Self {
-        Self::local_with_handshake(
-            encrypted::Handshake {
-                signing_key: crypto,
-                synchrony_bound: Duration::from_secs(5),
-                max_handshake_age: Duration::from_secs(10),
-            },
-            namespace,
-            listen,
-            max_peers_per_set,
-            max_message_size,
-        )
-    }
-
-    #[cfg(test)]
     pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
-        Self::test_with_handshake(
-            encrypted::Handshake {
-                signing_key: crypto,
-                synchrony_bound: Duration::from_secs(5),
-                max_handshake_age: Duration::from_secs(10),
-            },
+        let mut config = Self::local(
+            encrypted::Handshake::new(crypto),
+            b"test_namespace",
             listen,
+            NZUsize!(32),
             max_message_size,
-        )
+        );
+        config.peer_connection_cooldown = Duration::from_millis(250);
+        config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));
+        config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(256));
+        config.ping_frequency = Duration::from_secs(1);
+        config.dial_frequency = Duration::from_millis(200);
+        config.block_duration = Duration::from_mins(1);
+        config
     }
 }

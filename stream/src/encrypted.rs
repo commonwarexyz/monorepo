@@ -201,6 +201,17 @@ pub struct Handshake<S> {
     pub max_handshake_age: Duration,
 }
 
+impl<S> Handshake<S> {
+    /// Creates a handshake accepting timestamps up to five seconds ahead or ten seconds old.
+    pub const fn new(signing_key: S) -> Self {
+        Self {
+            signing_key,
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+        }
+    }
+}
+
 // Handshake frames are fixed-size protocol messages, so we cap receives to
 // their exact encoded length instead of the application message limit.
 async fn recv_handshake_frame<M, T>(stream: &mut T) -> Result<M, Error>

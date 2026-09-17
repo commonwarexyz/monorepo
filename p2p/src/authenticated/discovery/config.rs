@@ -1,7 +1,9 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_stream::{Handshake, PublicKeyOf, encrypted};
+#[cfg(test)]
+use commonware_stream::encrypted;
+use commonware_stream::{Handshake, PublicKeyOf};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -151,96 +153,12 @@ where
     pub block_duration: Duration,
 }
 
-impl<C: Signer> Config<encrypted::Handshake<C>> {
-    /// Generates a configuration with reasonable defaults for usage in production.
-    pub fn recommended(
-        crypto: C,
-        namespace: &[u8],
-        listen: SocketAddr,
-        dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_peers_per_set: NonZeroUsize,
-        max_message_size: u32,
-    ) -> Self {
-        let handshake = encrypted::Handshake {
-            signing_key: crypto,
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
-        };
-        Self::recommended_with_handshake(
-            handshake,
-            namespace,
-            listen,
-            dialable,
-            bootstrappers,
-            max_peers_per_set,
-            max_message_size,
-        )
-    }
-
-    /// Generates a configuration that minimizes peer discovery latency. This
-    /// can be useful when running local demos.
-    ///
-    /// # Warning
-    ///
-    /// It is not recommended to use this configuration in production.
-    pub fn local(
-        crypto: C,
-        namespace: &[u8],
-        listen: SocketAddr,
-        dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_peers_per_set: NonZeroUsize,
-        max_message_size: u32,
-    ) -> Self {
-        let handshake = encrypted::Handshake {
-            signing_key: crypto,
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
-        };
-        Self::local_with_handshake(
-            handshake,
-            namespace,
-            listen,
-            dialable,
-            bootstrappers,
-            max_peers_per_set,
-            max_message_size,
-        )
-    }
-
-    #[cfg(test)]
-    pub fn test(
-        crypto: C,
-        listen: SocketAddr,
-        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: u32,
-    ) -> Self {
-        let mut config = Self::local(
-            crypto,
-            b"test_namespace",
-            listen,
-            listen,
-            bootstrappers,
-            NZUsize!(32),
-            max_message_size,
-        );
-        config.peer_connection_cooldown = Duration::from_millis(250);
-        config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));
-        config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(256));
-        config.dial_frequency = Duration::from_millis(200);
-        config.gossip_bit_vec_frequency = Duration::from_secs(1);
-        config.block_duration = Duration::from_mins(1);
-        config
-    }
-}
-
 impl<H: Handshake> Config<H>
 where
     H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
 {
-    /// Generates a production configuration with a custom transport handshake.
-    pub fn recommended_with_handshake(
+    /// Generates a configuration with reasonable defaults for usage in production.
+    pub fn recommended(
         handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
@@ -284,7 +202,7 @@ where
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
-    pub fn local_with_handshake(
+    pub fn local(
         handshake: H,
         namespace: &[u8],
         listen: SocketAddr,
@@ -320,5 +238,32 @@ where
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(1),
         }
+    }
+}
+
+#[cfg(test)]
+impl<C: Signer> Config<encrypted::Handshake<C>> {
+    pub fn test(
+        crypto: C,
+        listen: SocketAddr,
+        bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+        max_message_size: u32,
+    ) -> Self {
+        let mut config = Self::local(
+            encrypted::Handshake::new(crypto),
+            b"test_namespace",
+            listen,
+            listen,
+            bootstrappers,
+            NZUsize!(32),
+            max_message_size,
+        );
+        config.peer_connection_cooldown = Duration::from_millis(250);
+        config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));
+        config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(256));
+        config.dial_frequency = Duration::from_millis(200);
+        config.gossip_bit_vec_frequency = Duration::from_secs(1);
+        config.block_duration = Duration::from_mins(1);
+        config
     }
 }

@@ -15,9 +15,11 @@
 //!
 //! ## Authentication
 //!
-//! Discovery gossip is signed by the scheme owned by [`Config::handshake`]. Custom
-//! [`commonware_stream::Handshake`] implementations used with discovery must provide a
-//! scheme that implements [`commonware_cryptography::Signer`].
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
+//! authenticates peers and supplies their message streams. Its scheme also signs
+//! discovery gossip and must implement [`commonware_cryptography::Signer`].
+//! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
+//! and handshake transcript.
 //!
 //! ## Discovery
 //!
@@ -172,6 +174,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
+//! use commonware_stream::encrypted;
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -209,7 +212,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     signer.clone(),
+//!     encrypted::Handshake::new(signer.clone()),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr

@@ -10,19 +10,15 @@
 //! - Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! - Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //!
-//! # Custom Authentication
-//!
-//! [`Config::recommended`] and [`Config::local`] use the encrypted stream's default
-//! handshake and transcript. Use [`Config::recommended_with_handshake`] or
-//! [`Config::local_with_handshake`] to supply a [`commonware_stream::Handshake`],
-//! for example one that verifies enclave attestations. The network uses the public
-//! keys authenticated by that implementation. Its scheme implements
-//! [`commonware_cryptography::AsyncSigner`], allowing signing to wait for an external
-//! service or fail.
-//! Connection scheduling, admission, timeouts, and channel rate limits remain managed
-//! by the network. The handshake implementation binds those identities to its message streams.
-//!
 //! # Design
+//!
+//! ## Authentication
+//!
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
+//! authenticates peers and supplies their message streams. Peer identities come from
+//! its [`commonware_cryptography::AsyncSigner`] scheme.
+//! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
+//! and handshake transcript.
 //!
 //! ## Discovery
 //!
@@ -131,6 +127,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
+//! use commonware_stream::encrypted;
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -166,7 +163,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     my_sk.clone(),
+//!     encrypted::Handshake::new(my_sk.clone()),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,

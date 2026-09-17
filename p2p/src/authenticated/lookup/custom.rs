@@ -44,7 +44,7 @@ struct Observations {
     pending_signatures: AtomicUsize,
     reject_inbound: AtomicBool,
     fail_signing: AtomicBool,
-    pending_signatures_remaining: AtomicUsize,
+    stall_next_signature: AtomicBool,
     signing_failures: AtomicUsize,
 }
 
@@ -115,11 +115,8 @@ impl AsyncSigner for TestScheme {
         yield_once().await;
         if self
             .observations
-            .pending_signatures_remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
+            .stall_next_signature
+            .swap(false, Ordering::Relaxed)
         {
             self.observations
                 .pending_signatures
@@ -461,7 +458,7 @@ fn custom_config<const MAX_SIZE: u32>(
     listen: SocketAddr,
     max_message_size: u32,
 ) -> Config<TestHandshake<MAX_SIZE>> {
-    Config::local_with_handshake(
+    Config::local(
         handshake,
         b"_COMMONWARE_P2P_CUSTOM_HANDSHAKE_TEST",
         listen,
@@ -700,8 +697,8 @@ async fn assert_pending_authentication_does_not_block_peer(
     let (blocked_handshake, blocked_observations) = handshakes.next().unwrap();
     let (healthy_handshake, healthy_observations) = handshakes.next().unwrap();
     central_observations
-        .pending_signatures_remaining
-        .store(1, Ordering::Relaxed);
+        .stall_next_signature
+        .store(true, Ordering::Relaxed);
 
     let central_key = central_handshake.scheme().public_key();
     let blocked_key = blocked_handshake.scheme().public_key();
@@ -848,8 +845,8 @@ fn test_custom_handshake_failures_release_for_retry() {
         let completed_signing_calls = observations_1.signing_calls.load(Ordering::Relaxed);
         let stalled_at = context.current();
         observations_1
-            .pending_signatures_remaining
-            .store(1, Ordering::Relaxed);
+            .stall_next_signature
+            .store(true, Ordering::Relaxed);
         observations_1.fail_signing.store(false, Ordering::Relaxed);
         wait_for_counter(&context, &observations_1.pending_signatures).await;
 
