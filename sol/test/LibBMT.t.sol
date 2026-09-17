@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 import { HashSelection, HashTest } from "./Common.t.sol";
@@ -276,7 +276,7 @@ contract LibBMTTest is HashTest {
         }
     }
 
-    /// @dev Check input immutability, zero slot, allocated scratch cleanup and subsequent allocations.
+    /// @dev Check input immutability, zero slot, private scratch cleanup and subsequent allocations.
     function checked(Case calldata c, uint256 mode, bool cd) external view returns (bool result) {
         uint256[] memory indices = c.indices;
         bytes32[] memory elements = c.elements;
@@ -284,6 +284,10 @@ contract LibBMTTest is HashTest {
         bytes32 beforeHash = keccak256(abi.encode(indices, elements, proof));
         uint256 beforePointer;
         assembly ("memory-safe") { beforePointer := mload(0x40) }
+        uint256 scratchEnd = beforePointer;
+        if (mode == 1 && c.leaves <= type(uint32).max && c.start <= c.leaves && elements.length <= c.leaves - c.start) {
+            scratchEnd += elements.length * 32;
+        }
         if (mode == 0) {
             result = cd
                 ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[0], c.proof, _hasher())
@@ -301,7 +305,8 @@ contract LibBMTTest is HashTest {
             if mload(0x60) { revert(0, 0) }
             let afterPointer := mload(0x40)
             if or(lt(afterPointer, beforePointer), and(afterPointer, 31)) { revert(0, 0) }
-            for { let p := beforePointer } lt(p, afterPointer) { p := add(p, 32) } {
+            if lt(scratchEnd, afterPointer) { scratchEnd := afterPointer }
+            for { let p := beforePointer } lt(p, scratchEnd) { p := add(p, 32) } {
                 if mload(p) { revert(0, 0) }
             }
         }

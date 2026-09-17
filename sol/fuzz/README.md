@@ -11,8 +11,9 @@ target/release/commonware-sol-fuzz merkle --help
 target/release/commonware-sol-fuzz simplex --help
 ```
 
-`bmt` generates and checks binary Merkle tree proofs.
-`merkle` generates and checks MMR and MMB proofs.
-Both use Keccak256 by default. Pass `--hash sha256` to use SHA-256.
-`simplex` recovers seeded 3-of-4 threshold signatures, hashes messages to curve
-points, and checks signatures. Its ABI formats are documented in `src/simplex.rs`.
+- `bmt`: Generate and check binary Merkle tree proofs.
+- `merkle`: Generate and check MMR and MMB proofs.
+- `simplex`: Recover seeded 3-of-4 threshold signatures, hash messages to curve
+  points, and check signatures. Its ABI formats are documented in [src/simplex.rs](src/simplex.rs).
+
+`bmt` and `merkle` use Keccak256 by default. Pass `--hash sha256` to use SHA-256.

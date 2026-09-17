@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 // Hash-to-curve adapted from Solady and Ithaca.
@@ -171,7 +171,8 @@ library LibSimplex {
     }
 
     /// @dev Expand with SHA-256 XMD, reduce 64-byte limbs, map twice, and add.
-    /// `out` points to an allocated G1 or G2 result. Temporary memory is cleared and released.
+    /// `out` points to an allocated G1 or G2 result.
+    /// Temporary memory is confined to one assembly block and cleared before return.
     function _hashToCurve(bytes memory message, uint256 out, bool g2) private view {
         uint256 scratchLength = (0x100 + 0x40 + message.length + 0x60 + 31) & ~uint256(31);
         if (scratchLength < 0x300) scratchLength = 0x300;
@@ -197,7 +198,6 @@ library LibSimplex {
             }
             let b := mload(0x40)
             let end := add(b, scratchLength)
-            mstore(0x40, end)
             let s := add(b, 0x100)
             mstore(s, 0)
             mstore(add(s, 0x20), 0)
@@ -237,7 +237,6 @@ library LibSimplex {
             ok := staticcall(gas(), add(0x0b, shl(1, g2)), s, shl(1, pointSize), out, pointSize)
             if iszero(and(ok, eq(returndatasize(), pointSize))) { fail() }
             for { let p := b } lt(p, end) { p := add(p, 0x20) } { mstore(p, 0) }
-            mstore(0x40, b)
         }
     }
 

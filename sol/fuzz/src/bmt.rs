@@ -6,7 +6,7 @@
 
 use super::{Hash, merkle::leaf};
 use alloy_sol_macro::sol;
-use alloy_sol_types::{SolValue as _, sol_data};
+use alloy_sol_types::{SolValue as _, abi::AbiDecoderConfig, sol_data};
 use clap::{Subcommand, ValueEnum};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Hasher, Keccak256, Sha256};
@@ -208,13 +208,11 @@ fn encode(output: &Output) -> Vec<u8> {
 }
 
 fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
-    let Ok(payload) = BmtPayload::abi_decode_params_validate(encoded) else {
+    let Ok(payload) =
+        BmtPayload::abi_decode_params_with_config(encoded, AbiDecoderConfig::new().strict(true))
+    else {
         return false;
     };
-    // Dynamic tails must be contiguous in field order and consume the entire input.
-    if payload.abi_encode_params() != encoded {
-        return false;
-    }
     let Ok(leaves) = u32::try_from(payload.leaves) else {
         return false;
     };

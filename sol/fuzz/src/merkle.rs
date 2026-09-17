@@ -5,7 +5,7 @@
 
 use crate::Hash;
 use alloy_sol_macro::sol;
-use alloy_sol_types::{SolType, SolValue};
+use alloy_sol_types::{SolType, SolValue, abi::AbiDecoderConfig};
 use clap::{Args, Subcommand, ValueEnum};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Hasher, Keccak256, Sha256, keccak256};
@@ -310,6 +310,7 @@ fn synthetic<F: Family, H: Hasher>(
 }
 
 /// Reads an ABI integer only if its upper 192 bits are zero.
+#[cfg(test)]
 fn abi_u64(encoded: &[u8], offset: usize) -> Option<u64> {
     <sol!(uint256)>::abi_decode(encoded.get(offset..offset.checked_add(32)?)?)
         .ok()?
@@ -317,54 +318,41 @@ fn abi_u64(encoded: &[u8], offset: usize) -> Option<u64> {
         .ok()
 }
 
-fn abi_array(encoded: &[u8], head_offset: usize) -> Option<Vec<[u8; 32]>> {
-    let offset = usize::try_from(abi_u64(encoded, head_offset)?).ok()?;
-    if offset < 160 || !offset.is_multiple_of(32) {
-        return None;
-    }
-    let length = usize::try_from(abi_u64(encoded, offset)?).ok()?;
-    let start = offset.checked_add(32)?;
-    let end = start.checked_add(length.checked_mul(32)?)?;
-    Some(encoded.get(start..end)?.as_chunks::<32>().0.to_vec())
-}
-
-/// Verifies `(root, leaves, start, elements, proof)` under the selected policy.
+/// Verifies a canonical ABI `(root, leaves, start, elements, proof)` tuple under the selected policy.
 /// Malformed ABI fields and values outside the family domain return false.
 fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
-    let Some(leaves) = abi_u64(encoded, 32) else {
+    let Ok(payload) = <RangeInput as SolValue>::abi_decode_params_with_config(
+        encoded,
+        AbiDecoderConfig::new().strict(true),
+    ) else {
         return false;
     };
-    let Some(start) = abi_u64(encoded, 64) else {
+    let Ok(leaves) = u64::try_from(payload.leaves) else {
+        return false;
+    };
+    let Ok(start) = u64::try_from(payload.start) else {
         return false;
     };
     if leaves > *F::MAX_LEAVES || start > leaves {
         return false;
     }
-    let Some(elements) = abi_array(encoded, 96) else {
-        return false;
-    };
-    let Some(digests) = abi_array(encoded, 128) else {
-        return false;
-    };
-    if elements.len() as u64 > leaves - start {
+    if payload.elements.len() as u64 > leaves - start {
         return false;
     }
-    let Some(root) = encoded.get(..32) else {
-        return false;
-    };
     let proof = Proof::<F, H::Digest> {
         leaves: Location::new(leaves),
         inactive_peaks: policy.inactive_peaks,
-        digests: digests
-            .iter()
+        digests: payload
+            .proof
+            .into_iter()
             .map(|d| H::Digest::decode(Copying(d.as_slice())).unwrap())
             .collect(),
     };
     proof.verify_range_inclusion(
         &policy.hasher::<H>(),
-        &elements,
+        &payload.elements,
         Location::new(start),
-        &H::Digest::decode(Copying(root)).unwrap(),
+        &H::Digest::decode(Copying(payload.root.as_slice())).unwrap(),
     )
 }
 
@@ -623,7 +611,15 @@ mod tests {
             proof: Vec::new(),
             leaves: 0,
         };
-        assert!(check::<F, H>(&check_input(&output, 0), Policy::default()));
+        let encoded = check_input(&output, 0);
+        assert!(check::<F, H>(&encoded, Policy::default()));
+        let mut trailing = encoded.clone();
+        trailing.extend_from_slice(&[0; 32]);
+        let mut overlapping = encoded;
+        overlapping.copy_within(96..128, 128);
+        for malformed in [trailing, overlapping] {
+            assert!(!check::<F, H>(&malformed, Policy::default()));
+        }
         assert!(!check::<F, H>(&check_input(&output, 1), Policy::default()));
         output.leaves = 1;
         assert!(!check::<F, H>(&check_input(&output, 0), Policy::default()));
