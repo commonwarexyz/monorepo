@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
-  <title id="title">Every Validator Checks the Same Close</title>
+  <title id="title">From Payments to a Certified Settlement</title>
   <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
@@ -49,7 +49,7 @@
     </g>
   </defs>
 
-  <text class="title" x="34" y="39">Every Validator Checks the Same Close</text>
+  <text class="title" x="34" y="39">From Payments to a Certified Settlement</text>
   <text class="note" x="34" y="66">Validators derive the balances and roots from the shared dealing and their local state</text>
 
   <text class="heading center" x="172" y="116">Operator</text>

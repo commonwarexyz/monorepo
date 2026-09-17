@@ -23,7 +23,7 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 One payment or a bajillion, each account settles once.
 
-## Payments as Frequent and Fast as Browsing the Web
+## Payments at the Speed and Scale of the Web
 
 When payments are as common as web requests, they need to be just as fast and dirt cheap. With Bajillion, a user can pay an API provider as fast as they can load a web page.
 
@@ -211,11 +211,13 @@ Figure 3: The close binds three validator-derived roots. The activity log append
 
 The settlement chain holds deposited funds and tracks commitments, counts, pending closes, deadlines, and claimed payout ranges. Bajillion validators store the underlying account and log records offchain.
 
-## Certify the Whole Close
+## Certifying Settlement
 
-A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, derives the same transitions, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
+A committee of $n=3f+1$ validators tolerates at most $f$ faulty or malicious members. Every signer checks the complete close, computes the new balances and roots, and signs the resulting commitment. A certificate combines $q=2f+1$ signatures on that commitment.
 
-The proposal identifier is a hash of the dealing's canonical encoding and authenticated epoch context. The certified close binds that identifier, the exact preceding snapshot, all three new roots, cumulative log counts, the ranges added by this epoch, and the withdrawal total. This lets the operator check that a certificate belongs to its proposal without rebuilding the validators' logs.
+The operator hashes the dealing with the epoch's registered parameters to identify its proposal. Validators include this hash in the commitment they sign, tying their settlement results to the operator's proposal and the previous state.
+
+The operator can then verify the certificate and check that the proposal hash matches, without rebuilding the validators' logs.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate.">
