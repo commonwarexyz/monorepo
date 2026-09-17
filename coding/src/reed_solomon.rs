@@ -18,7 +18,12 @@ use thiserror::Error;
 commonware_utils::thread_local_cache!(static CACHED_ENCODER: Encoder);
 commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 
-// Keep each stripe large enough to amortize extra encoder/decoder setup.
+/// Minimum stripe width for amortizing encoder/decoder setup.
+///
+/// Batching operates in `SHARD_CHUNK_BYTES` units. This minimum is a positive
+/// multiple of that width, so its stripe-count bound also guarantees at least
+/// one complete block per stripe. The strategy further caps the stripe count
+/// by available parallelism.
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.

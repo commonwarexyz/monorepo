@@ -9,6 +9,9 @@
 //! The core abstraction is the [`Strategy`] trait, which provides several operations:
 //!
 //! **Core Operations:**
+//! - [`run`](Strategy::run): Chooses between serial and parallel operation bodies
+//! - [`run_batches`](Strategy::run_batches): Runs a whole-input algorithm or supplies batches
+//!   for the caller to prepare and execute
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
 //!   failures
