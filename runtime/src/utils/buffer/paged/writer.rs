@@ -294,7 +294,6 @@ impl<B: Blob> Writer<B> {
     /// # Panics
     ///
     /// Panics if the encoder writes a different number of bytes than [`FixedSize::SIZE`].
-    /// If the encoder panics, the writer's logical contents and size remain unchanged.
     pub fn try_append_value<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
         let available = self.buffer.capacity.checked_sub(self.buffer.len())?;
         if T::SIZE > available {

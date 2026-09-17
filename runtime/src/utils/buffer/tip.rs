@@ -40,18 +40,6 @@ pub(super) struct Buffer {
     pool: BufferPool,
 }
 
-/// Restores backing storage even when an encoder unwinds. Logical length is committed separately.
-struct RestoreBacking<'a> {
-    data: &'a mut IoBuf,
-    writable: IoBufMut,
-}
-
-impl Drop for RestoreBacking<'_> {
-    fn drop(&mut self) {
-        *self.data = std::mem::take(&mut self.writable).freeze();
-    }
-}
-
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
     ///
@@ -257,15 +245,11 @@ impl Buffer {
     /// Encode a fixed-size value into the tip. The caller must ensure it fits in capacity.
     pub(super) fn append_value<T: FixedSize + Write>(&mut self, value: &T) {
         let end = self.len + T::SIZE;
-        let writable = self.writable(end);
-        let mut backing = RestoreBacking {
-            data: &mut self.data,
-            writable,
-        };
-        let mut dst = (&mut backing.writable).limit(T::SIZE);
+        let mut dst = self.writable(end).limit(T::SIZE);
         value.write(&mut dst);
         assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
         self.len = end;
+        self.data = dst.into_inner().freeze();
     }
 
     /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
@@ -307,7 +291,6 @@ impl AsRef<[u8]> for Buffer {
 mod tests {
     use super::*;
     use crate::telemetry::metrics::Registry;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn test_pool() -> crate::BufferPool {
         let mut registry = Registry::default();
@@ -415,50 +398,18 @@ mod tests {
         }
     }
 
-    struct Panicking;
-
-    impl FixedSize for Panicking {
-        const SIZE: usize = 8;
-    }
-
-    impl Write for Panicking {
-        fn write(&self, buf: &mut impl BufMut) {
-            buf.put_u8(42);
-            panic!("encoder panicked");
-        }
-    }
-
-    fn assert_failed_encoding_preserves_prefix(value: &(impl FixedSize + Write)) {
-        for shared in [false, true] {
-            for prefix in [b"".as_slice(), b"original".as_slice()] {
-                let mut buffer = Buffer::new(50, 32, test_pool());
-                buffer.append(prefix);
-                let snapshot = shared.then(|| buffer.slice(..));
-                assert!(catch_unwind(AssertUnwindSafe(|| buffer.append_value(value))).is_err());
-                assert_eq!(buffer.size(), 50 + prefix.len() as u64);
-                assert_eq!(buffer.as_ref(), prefix);
-                if let Some(snapshot) = snapshot {
-                    assert_eq!(snapshot.as_ref(), prefix);
-                }
-                buffer.append_value(&7u64);
-                assert_eq!(buffer.as_ref(), [prefix, &7u64.to_be_bytes()].concat());
-            }
-        }
-    }
-
     #[test]
+    #[should_panic(expected = "encoded size must match FixedSize")]
     fn test_tip_append_value_rejects_short_encoding() {
-        assert_failed_encoding_preserves_prefix(&IncorrectSize(7));
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(7));
     }
 
     #[test]
+    #[should_panic]
     fn test_tip_append_value_rejects_long_encoding() {
-        assert_failed_encoding_preserves_prefix(&IncorrectSize(9));
-    }
-
-    #[test]
-    fn test_tip_append_value_preserves_prefix_on_panic() {
-        assert_failed_encoding_preserves_prefix(&Panicking);
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(9));
     }
 
     #[test]
