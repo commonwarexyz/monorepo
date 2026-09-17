@@ -51,7 +51,7 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
-/// Hash ordered, equal-width payloads, keeping each worker's SIMD batches and tail together.
+/// Hash ordered, equal-width payloads in balanced batches across the strategy.
 #[track_caller]
 fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
     shards: &[M],
@@ -462,9 +462,6 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 
 /// Striped Reed-Solomon: split every shard by byte range and run independent
 /// Reed-Solomon operations over those ranges.
-///
-/// [`ranges`](striped::ranges) selects the parallel partition. A manual strategy executes
-/// that partition, while shard hashing retains the caller's adaptive policy.
 ///
 /// ```text
 ///   originals:

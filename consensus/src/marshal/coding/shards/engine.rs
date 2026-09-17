@@ -172,6 +172,7 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
+    iter::zip_eq,
     ordered::{Quorum, Set},
 };
 use rand_core::Rng;
@@ -1610,7 +1611,7 @@ where
             .map(|shard| (shard.index, &shard.data))
             .collect::<Vec<_>>();
         let checked = C::check_many(&commitment.config(), &commitment.root(), &shards, strategy);
-        for ((peer, _), checked) in pending.into_iter().zip(checked) {
+        for ((peer, _), checked) in zip_eq(pending, checked) {
             match checked {
                 Ok(checked) => self.common.checked_shards.push(checked),
                 Err(_) => {
@@ -1910,7 +1911,7 @@ mod tests {
         num::{NonZeroU32, NonZeroUsize},
         sync::{
             Arc,
-            atomic::{AtomicIsize, AtomicUsize, Ordering},
+            atomic::{AtomicIsize, Ordering},
         },
         time::Duration,
     };
@@ -2030,10 +2031,7 @@ mod tests {
     type ChurningShardEngine<S> =
         Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
 
-    /// The largest verification batch submitted through `BatchChecking`.
-    static CHECK_BATCH_LEN: AtomicUsize = AtomicUsize::new(0);
-
-    /// Records verification batch sizes independently of encoding and decoding.
+    /// Requires individual checking for the assigned shard and one batch for queued shards.
     #[derive(Clone, Debug)]
     struct BatchChecking;
 
@@ -2057,6 +2055,7 @@ mod tests {
             index: u16,
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error> {
+            assert_eq!(index, 3, "only the assigned shard is checked eagerly");
             C::check(config, commitment, index, shard)
         }
 
@@ -2066,7 +2065,7 @@ mod tests {
             shards: &[(u16, &Self::Shard)],
             strategy: &impl Strategy,
         ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
-            CHECK_BATCH_LEN.fetch_max(shards.len(), Ordering::Relaxed);
+            assert_eq!(shards.len(), 7);
             C::check_many(config, commitment, shards, strategy)
         }
 
@@ -3866,9 +3865,6 @@ mod tests {
 
     #[test_traced]
     fn test_pending_shards_batch_validated_at_quorum() {
-        // One eagerly checked assigned shard and seven queued shards reach quorum.
-        // Observe check_many directly so encode/decode batching cannot satisfy the test.
-        CHECK_BATCH_LEN.store(0, Ordering::Relaxed);
         let fixture: Fixture<BatchChecking> = Fixture {
             num_primary_peers: 22,
             ..Default::default()
@@ -3926,8 +3922,6 @@ mod tests {
                     blocked.is_empty(),
                     "no peers should be blocked for valid pending shards"
                 );
-
-                assert_eq!(CHECK_BATCH_LEN.load(Ordering::Relaxed), 7);
 
                 // Eight checked shards are sufficient to reconstruct the block.
                 let block = peers[3].mailbox.get(commitment).await;
