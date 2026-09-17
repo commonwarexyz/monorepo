@@ -122,6 +122,25 @@ mod tests {
         Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<HandoffProposal<Sha256Digest>>)>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
+    fn labeled_metric(metrics: &str, name: &str, label: &str, value: &str) -> u64 {
+        let suffix = format!("_{name}{{{label}=\"{value}\"}}");
+        metrics
+            .lines()
+            .find_map(|line| {
+                let (sample, count) = line.split_once(' ')?;
+                sample.ends_with(&suffix).then(|| count.parse().unwrap())
+            })
+            .unwrap_or_default()
+    }
+
+    fn handoff_event(metrics: &str, event: &str) -> u64 {
+        labeled_metric(metrics, "handoff_events_total", "event", event)
+    }
+
+    fn handoff_abandoned(metrics: &str, reason: &str) -> u64 {
+        labeled_metric(metrics, "handoff_abandoned_total", "reason", reason)
+    }
+
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
         peers: I,
@@ -3882,6 +3901,12 @@ mod tests {
                     }
                 }
             }
+            let metrics = context.encode();
+            assert_eq!(handoff_event(&metrics, "Requested"), 1);
+            assert_eq!(handoff_event(&metrics, "Received"), 1);
+            assert_eq!(handoff_event(&metrics, "Held"), 0);
+            assert_eq!(handoff_event(&metrics, "PublishedBeforeCertification"), 1);
+            assert_eq!(handoff_event(&metrics, "PublishedAfterCertification"), 0);
         });
     }
 
@@ -3989,6 +4014,10 @@ mod tests {
                 2,
                 "ordinary proposal should follow the deferred optimistic request"
             );
+            let metrics = context.encode();
+            assert_eq!(handoff_event(&metrics, "Requested"), 1);
+            assert_eq!(handoff_event(&metrics, "Deferred"), 1);
+            assert_eq!(handoff_event(&metrics, "Received"), 0);
         });
     }
 
@@ -4203,10 +4232,13 @@ mod tests {
     enum HeldInvalidation {
         Restart,
         ConflictingParent,
+        IneligibleAtRecording,
         Timeout,
+        ViewExit,
     }
 
     fn pipelined_handoff_retained_response_order(
+        handoff_publication: HandoffPublication,
         certification_first: bool,
         invalidation: Option<HeldInvalidation>,
     ) {
@@ -4276,7 +4308,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
                     accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AfterCertification,
+                    handoff_publication,
                     ..Default::default()
                 },
             )
@@ -4356,6 +4388,18 @@ mod tests {
                         if vote.view() == View::new(3)) { break; }
                 }
             }
+            if matches!(invalidation, Some(HeldInvalidation::ViewExit)) {
+                let (_, nullification) = build_nullification(
+                    &schemes,
+                    Round::new(epoch, View::new(3)),
+                    quorum(n),
+                );
+                mailbox.recovered(Certificate::Nullification(nullification));
+                loop {
+                    if matches!(batcher_receiver.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                        if current > View::new(3)) { break; }
+                }
+            }
             pending_syncs.arm();
             certified.send(true).unwrap();
             let deferred = next_pending_sync(&pending_syncs);
@@ -4364,6 +4408,9 @@ mod tests {
             while let Some(message) = batcher_receiver.recv().now_or_never().flatten() {
                 assert!(!matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
                     if vote.view() == View::new(3)), "must not vote before durable certification");
+            }
+            if matches!(invalidation, Some(HeldInvalidation::IneligibleAtRecording)) {
+                context.sleep(Duration::from_secs(11)).await;
             }
             deferred.release.send(Ok(())).unwrap();
             pending_syncs.unblock();
@@ -4376,13 +4423,22 @@ mod tests {
                 response.take().unwrap().send(HandoffProposal::Proposed(digest)).expect("handoff retained");
             }
 
-            if invalidation.is_some() {
+            if let Some(invalidation) = invalidation {
                 context.sleep(Duration::from_millis(100)).await;
                 assert!(relayed.recv().now_or_never().is_none(), "stale build must not relay");
                 while let Some(message) = batcher_receiver.recv().now_or_never().flatten() {
                     assert!(!matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
                         if vote.proposal.payload == digest), "stale build must not vote");
                 }
+                let metrics = context.encode();
+                let reason = match invalidation {
+                    HeldInvalidation::ConflictingParent => "AncestrySuperseded",
+                    HeldInvalidation::IneligibleAtRecording => "IneligibleAtRecording",
+                    HeldInvalidation::Timeout => "AncestrySuperseded",
+                    HeldInvalidation::ViewExit => "ViewExit",
+                    HeldInvalidation::Restart => unreachable!(),
+                };
+                assert_eq!(handoff_abandoned(&metrics, reason), 1);
                 return;
             }
             let mut observed_relay = false;
@@ -4419,32 +4475,88 @@ mod tests {
             assert_eq!(propose_requests.lock().iter().filter(|(view, _)| *view == View::new(3)).count(), 1,
                 "must not issue a second build for the retained opportunity");
             assert!(handoff_responses.lock().is_empty(), "must not repeat handoff");
+            let metrics = context.encode();
+            assert_eq!(handoff_event(&metrics, "Requested"), 1);
+            assert_eq!(handoff_event(&metrics, "Received"), 1);
+            assert_eq!(
+                handoff_event(&metrics, "Held"),
+                u64::from(!certification_first)
+            );
+            assert_eq!(handoff_event(&metrics, "PublishedBeforeCertification"), 0);
+            assert_eq!(handoff_event(&metrics, "PublishedAfterCertification"), 1);
         });
     }
 
     #[test_traced]
     fn test_pipelined_handoff_build_before_certification() {
-        pipelined_handoff_retained_response_order(false, None);
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            None,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_certification_before_build() {
-        pipelined_handoff_retained_response_order(true, None);
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            true,
+            None,
+        );
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AllowBeforeCertification,
+            true,
+            None,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::ConflictingParent));
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            Some(HeldInvalidation::ConflictingParent),
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_rejects_timeout() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Timeout));
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            Some(HeldInvalidation::Timeout),
+        );
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_becomes_ineligible() {
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            Some(HeldInvalidation::IneligibleAtRecording),
+        );
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_exits_view() {
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            Some(HeldInvalidation::ViewExit),
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Restart));
+        pipelined_handoff_retained_response_order(
+            HandoffPublication::AfterCertification,
+            false,
+            Some(HeldInvalidation::Restart),
+        );
     }
 
     /// A dropped handoff response is a terminal application failure for the
@@ -4566,6 +4678,9 @@ mod tests {
                 &[(View::new(3), View::new(2))],
                 "parent certification must not retry a dropped handoff"
             );
+            let metrics = context.encode();
+            assert_eq!(handoff_event(&metrics, "Requested"), 1);
+            assert_eq!(handoff_abandoned(&metrics, "ResponseClosed"), 1);
         });
     }
 
@@ -4665,6 +4780,9 @@ mod tests {
             }
             let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
             assert_eq!(propose_requests.lock().as_slice(), &expected);
+            let metrics = context.encode();
+            assert_eq!(handoff_event(&metrics, "Requested"), 1);
+            assert_eq!(handoff_abandoned(&metrics, "AncestrySuperseded"), 1);
         });
     }
 
