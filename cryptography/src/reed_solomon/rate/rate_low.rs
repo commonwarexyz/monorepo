@@ -216,11 +216,11 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 
         // ERASURE LOCATIONS
 
-        let mut small_erasures;
+        let mut direct_erasures;
         let mut full_erasures;
         let erasures = if recovery_end <= DIRECT_EVALUATION_LIMIT {
-            small_erasures = [0; DIRECT_EVALUATION_LIMIT];
-            let erasures = &mut small_erasures[..recovery_end];
+            direct_erasures = [0; DIRECT_EVALUATION_LIMIT];
+            let erasures = &mut direct_erasures[..recovery_end];
             eval_direct(erasures, original_count, received);
             erasures
         } else {
@@ -378,7 +378,7 @@ mod tests {
     use rand::RngExt as _;
 
     #[test]
-    fn small_erasures_match_transform() {
+    fn direct_matches_transform() {
         let mut rng = test_rng();
         for (original_count, recovery_count) in [
             (1usize, 1),
