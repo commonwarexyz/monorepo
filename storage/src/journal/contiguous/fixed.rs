@@ -401,44 +401,15 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         checkpoint: Checkpoint<E>,
         max_size: Option<u64>,
     ) -> Result<Self, Error> {
-        let ceiling = max_size.unwrap_or(u64::MAX);
-        let items_per_blob = cfg.items_per_blob.get();
         if let Some(target) = checkpoint.clear_target() {
             warn!(
                 clear_target = target,
                 "crash repair: completing interrupted clear"
             );
-
-            // A persisted reset is authoritative even when an open requests another cap.
-            let new_partition = format!("{}-blobs", cfg.partition);
-            Partition::<E>::remove_all(&context, &cfg.partition).await?;
-            Partition::<E>::remove_all(&context, &new_partition).await?;
-            let partition = Partition::new(
-                context.child("blobs"),
-                new_partition,
-                cfg.page_cache.clone(),
-                cfg.write_buffer,
-            );
-            let tail = super::position_to_blob(target, items_per_blob);
-            let mut pending = BTreeMap::new();
-            pending.insert(tail, partition.open_recovery(tail).await?);
-            let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
-            if ceiling < target {
-                return Err(Error::ItemPruned(ceiling));
-            }
-            return Ok(Self {
-                context,
-                cfg,
-                checkpoint,
-                partition,
-                pending,
-                discarded: Vec::new(),
-                bounds: target..target,
-                watermark: target,
-                bounded: max_size.is_some(),
-                _marker: PhantomData,
-            });
+            return Self::complete_clear(context, cfg, checkpoint, target, max_size).await;
         }
+        let ceiling = max_size.unwrap_or(u64::MAX);
+        let items_per_blob = cfg.items_per_blob.get();
 
         let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
@@ -565,6 +536,49 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         })
     }
 
+    /// Complete the reset to `target` staged in `checkpoint` without opening any stored blob.
+    ///
+    /// A persisted reset is authoritative even when the open requests another cap: the cap
+    /// is only checked against the reset size afterwards.
+    async fn complete_clear(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        target: u64,
+        max_size: Option<u64>,
+    ) -> Result<Self, Error> {
+        let ceiling = max_size.unwrap_or(u64::MAX);
+        let items_per_blob = cfg.items_per_blob.get();
+        let new_partition = format!("{}-blobs", cfg.partition);
+        Partition::<E>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E>::remove_all(&context, &new_partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            new_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        let tail = super::position_to_blob(target, items_per_blob);
+        let mut pending = BTreeMap::new();
+        pending.insert(tail, partition.open_recovery(tail).await?);
+        let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+        if ceiling < target {
+            return Err(Error::ItemPruned(ceiling));
+        }
+        Ok(Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            discarded: Vec::new(),
+            bounds: target..target,
+            watermark: target,
+            bounded: max_size.is_some(),
+            _marker: PhantomData,
+        })
+    }
+
     /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
     /// without opening any stored blob. A crash at any point leaves a durable intent that the
     /// next open finishes.
@@ -587,7 +601,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         }
         let checkpoint = checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
-        Self::open(context, cfg, checkpoint, None).await
+        Self::complete_clear(context, cfg, checkpoint, size, None).await
     }
 
     /// Open offsets while completing any previously staged dependent reset.
@@ -678,10 +692,12 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
         let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
         let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+        // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
+        // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
             .pending
             .get(&blob)
-            .ok_or_else(|| Error::Corruption(format!("missing recovery blob {blob}")))?;
+            .expect("positions inside bounds map to a pending recovery blob");
         Ok(A::decode(
             writer.read_at(offset, A::SIZE).await?.coalesce(),
         )?)
@@ -1561,9 +1577,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
     /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
-    /// changes the journal. A failed recovery-watermark sync is not observed by commit and
-    /// resurfaces on the next sync.
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
+    /// journal. A failed recovery-watermark sync is not observed by commit and resurfaces on the
+    /// next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -7092,7 +7108,7 @@ mod tests {
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
-            // This name would fail `Partition::open_many` if init tried to parse stale blobs before
+            // This name would fail `Partition::indices` if init tried to parse stale blobs before
             // honoring the clear intent.
             let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
             blob.write_at(0, vec![1, 2, 3], WriteOptions::SYNC)

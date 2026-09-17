@@ -5870,9 +5870,9 @@ mod tests {
     }
 
     /// A torn page beneath the offsets recovery watermark is external corruption, not a crash
-    /// artifact: the watermark only advances after the covering data fsync completes. Recovery
-    /// never re-reads blobs wholly below the floor's blob, so it adopts the journal unchanged
-    /// and the damage surfaces as read errors on the affected items.
+    /// artifact: the watermark only advances after the covering data fsync completes. In this
+    /// test, recovery adopts the journal unchanged and the damage surfaces as read errors on
+    /// the affected items.
     #[test_traced]
     fn test_variable_recovery_adopts_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();

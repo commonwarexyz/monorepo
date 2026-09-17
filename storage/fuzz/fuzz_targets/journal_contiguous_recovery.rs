@@ -1012,7 +1012,13 @@ async fn run_ops<J: FuzzJournal>(
                     };
                     let synced = match journal.sync().await {
                         Ok(journal) => journal,
-                        Err(_) => return false,
+                        Err(err) => {
+                            assert!(
+                                !matches!(err, Error::Corruption(_)),
+                                "sync before bounded reopen reported corruption mid-cycle: {err:?}"
+                            );
+                            return false;
+                        }
                     };
                     expected.committed(bounds.end);
                     possible_unobserved_failure = false;
@@ -1027,17 +1033,18 @@ async fn run_ops<J: FuzzJournal>(
                             expected.reopened(journal.bounds().end);
                             journal
                         }
-                        // Any error ends the cycle. Validation errors reject before
-                        // mutating and are only possible for a raw target, so seeing one for
-                        // a clamped target is a bug. Any other error
-                        // may have interrupted the truncation and lost data above `target`,
-                        // so lower durable_len conservatively.
+                        // Any error ends the cycle. Validation rejects a cap below the retained
+                        // start before mutating, which only a raw target can request, so seeing
+                        // that rejection for any other target is a bug. Any other error may have
+                        // interrupted the truncation and lost data above `target`, so lower
+                        // durable_len conservatively.
                         Err(e @ Error::ItemPruned(_)) => {
                             assert!(
-                                use_raw_target,
-                                "initialize at clamped retained target {target} (bounds [{}, {})) \
+                                use_raw_target && target < bounds.start,
+                                "initialize at retained target {target} (bounds [{}, {})) \
                                  returned {e:?}",
-                                bounds.start, bounds.end
+                                bounds.start,
+                                bounds.end
                             );
                             return false;
                         }
