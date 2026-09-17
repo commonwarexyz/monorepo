@@ -322,11 +322,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
-    /// An application's construction policy for a term handoff.
+    /// An application's preparation policy for a term handoff.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffPolicy {
-        /// Build or reuse a candidate before parent certification. Consensus controls publication.
-        Build,
+        /// Prepare or reuse a candidate before parent certification. Consensus controls publication.
+        Prepare,
         /// Wait for the parent to certify before proposing.
         AwaitCertification,
     }
@@ -366,9 +366,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
-        /// Decide whether to build on a parent that has not yet been certified.
+        /// Decide whether to prepare a proposal on a parent that has not yet been certified.
         ///
-        /// Returning [`HandoffPolicy::Build`] allows the marshal to continue through its
+        /// Returning [`HandoffPolicy::Prepare`] allows the marshal to continue through its
         /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
         /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
         /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before

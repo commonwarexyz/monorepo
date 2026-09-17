@@ -24,7 +24,7 @@ use commonware_consensus::{
     },
     simplex::{
         self, Floor,
-        config::{ForwardPolicy, SkipBudget, SkipPolicy},
+        config::{ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy},
         elector::RoundRobin,
         types::Context,
     },
@@ -587,7 +587,7 @@ where
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
-                pipelined_handoff: false,
+                handoff_publication: HandoffPublication::AfterCertification,
                 scheme,
                 elector: RoundRobin::<Sha256>::default(),
                 blocker: self.config.blocker,

@@ -71,7 +71,7 @@ mod tests {
         },
         simplex::{
             self, Plan,
-            config::{ForwardPolicy, SkipBudget, SkipPolicy},
+            config::{ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
@@ -2497,7 +2497,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
-                    pipelined_handoff: false,
+                    handoff_publication: HandoffPublication::AfterCertification,
                 },
             );
             let _engine = engine.start(vote_network, certificate_network, resolver_network);
@@ -3437,7 +3437,7 @@ mod tests {
 
                 // Dropping a handoff response must cancel the ordinary build it forwards.
                 let (gated_app, started, _release, dropped) = MockVerifyingApp::new()
-                    .with_handoff_policy(HandoffPolicy::Build)
+                    .with_handoff_policy(HandoffPolicy::Prepare)
                     .with_proposal_gate();
                 let mut gated = Wrapper::new(
                     kind,
@@ -3517,7 +3517,7 @@ mod tests {
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
                 let pipeline_app =
-                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Build);
+                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Prepare);
                 let mut pipeline = Wrapper::new(
                     kind,
                     context.child("pipeline_wrapper"),

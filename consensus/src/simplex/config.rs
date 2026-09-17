@@ -85,6 +85,22 @@ impl ForwardPolicy {
     }
 }
 
+/// Controls when consensus may publish a handoff proposal prepared by the application.
+///
+/// Certification means certification of the exact parent captured by the handoff request;
+/// finalization of that parent also satisfies the publication barrier. Proposal preparation
+/// remains application-owned through [`crate::Application::handoff_policy`].
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum HandoffPublication {
+    /// Wait until the captured parent certifies or finalizes before publication.
+    #[default]
+    AfterCertification,
+    /// Permit early relay and the proposer's notarize vote before parent certification.
+    ///
+    /// This trusts the outgoing leader not to equivocate.
+    AllowBeforeCertification,
+}
+
 /// The certified root from which a Simplex instance starts.
 ///
 /// The floor must be durable and must never move backwards across restarts:
@@ -246,14 +262,14 @@ where
     /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
-    /// Permit relaying a handoff proposal and casting our notarize vote before its
-    /// exact parent certifies.
+    /// Policy governing publication of prepared handoff proposals.
     ///
-    /// Prefer false: the application may prebuild, but consensus retains the result
-    /// until its parent certifies or finalizes. True trusts the outgoing leader not
-    /// to equivocate; an uncertified tip can leave the early child unusable.
+    /// Prefer [`HandoffPublication::AfterCertification`]: the application may prepare a
+    /// proposal early, but consensus retains it until its exact parent certifies or finalizes.
+    /// [`HandoffPublication::AllowBeforeCertification`] trusts the outgoing leader not to
+    /// equivocate; an uncertified tip can leave the early child unusable.
     /// See the module's [pipelined handoff](super#pipelined-handoff) documentation.
-    pub pipelined_handoff: bool,
+    pub handoff_publication: HandoffPublication,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
