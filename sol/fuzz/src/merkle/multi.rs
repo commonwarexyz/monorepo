@@ -292,39 +292,28 @@ fn canonical_positions<F: Family>(
     Ok(proof
         .digests
         .iter()
-        .map(|digest| abi_u64(&digest.0, 0).unwrap())
+        .map(|digest| Uint256::from_be_bytes(digest.0).to::<u64>())
         .collect())
 }
 
-/// Verifies `(root, leaves, locations, elements, proof, positions)` with paired input ordering.
+/// Verifies a canonical ABI `(root, leaves, locations, elements, proof, positions)` tuple.
 /// Commonware accepts duplicate locations when every supplied element agrees.
 pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
-    let Some(leaves) = abi_u64(encoded, 32) else {
-        return false;
-    };
-    if leaves > *F::MAX_LEAVES {
-        return false;
-    }
-    if [64, 96, 128, 160]
-        .iter()
-        .any(|&offset| abi_u64(encoded, offset).is_none_or(|value| value < 192))
-    {
-        return false;
-    }
-    let (Some(locations), Some(elements), Some(digests), Some(positions)) = (
-        abi_array(encoded, 64),
-        abi_array(encoded, 96),
-        abi_array(encoded, 128),
-        abi_array(encoded, 160),
+    let Ok(payload) = <MultiInput as SolValue>::abi_decode_params_with_config(
+        encoded,
+        AbiDecoderConfig::new().strict(true),
     ) else {
         return false;
     };
-    if locations.len() != elements.len() {
+    let Ok(leaves) = u64::try_from(payload.leaves) else {
+        return false;
+    };
+    if leaves > *F::MAX_LEAVES || payload.locations.len() != payload.elements.len() {
         return false;
     }
-    let mut pairs = Vec::with_capacity(elements.len());
-    for (encoded_loc, element) in locations.iter().zip(elements) {
-        let Some(loc) = abi_u64(encoded_loc, 0) else {
+    let mut pairs = Vec::with_capacity(payload.elements.len());
+    for (location, element) in payload.locations.into_iter().zip(payload.elements) {
+        let Ok(loc) = u64::try_from(location) else {
             return false;
         };
         if loc >= leaves {
@@ -336,29 +325,28 @@ pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> boo
     let Ok(expected) = canonical_positions::<F>(leaves, &locations, policy) else {
         return false;
     };
-    if positions.len() != expected.len()
-        || positions
+    if payload.positions.len() != expected.len()
+        || payload
+            .positions
             .iter()
             .zip(expected)
-            .any(|(encoded, expected)| abi_u64(encoded, 0) != Some(expected))
+            .any(|(position, expected)| *position != Uint256::from(expected))
     {
         return false;
     }
-    let Some(root) = encoded.get(..32) else {
-        return false;
-    };
     let proof = Proof::<F, H::Digest> {
         leaves: Location::new(leaves),
         inactive_peaks: policy.inactive_peaks,
-        digests: digests
-            .iter()
+        digests: payload
+            .proof
+            .into_iter()
             .map(|d| H::Digest::decode(Copying(d.as_slice())).unwrap())
             .collect(),
     };
     proof.verify_multi_inclusion(
         &policy.hasher::<H>(),
         &pairs,
-        &H::Digest::decode(Copying(root)).unwrap(),
+        &H::Digest::decode(Copying(payload.root.as_slice())).unwrap(),
     )
 }
 
@@ -552,6 +540,10 @@ mod tests {
             leaves: 0,
         };
         let encoded = check_input(&output, &[], &[]);
+        let mut trailing = encoded.clone();
+        trailing.extend_from_slice(&[0; 32]);
+        let mut overlapping = encoded.clone();
+        overlapping.copy_within(64..96, 96);
         for bagging in [Fold::Forward, Fold::Backward] {
             let policy = Policy {
                 bagging,
@@ -559,6 +551,10 @@ mod tests {
             };
             assert!(check::<mmr::Family, Keccak256>(&encoded, policy));
             assert!(check::<mmb::Family, Keccak256>(&encoded, policy));
+            for malformed in [&trailing, &overlapping] {
+                assert!(!check::<mmr::Family, Keccak256>(malformed, policy));
+                assert!(!check::<mmb::Family, Keccak256>(malformed, policy));
+            }
             let policy = Policy {
                 bagging,
                 inactive_peaks: 1,

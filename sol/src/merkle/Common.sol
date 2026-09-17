@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 /// @dev Shared Commonware peak geometry and root hashing.
@@ -153,6 +153,49 @@ library Common {
                     }
                     acc := fold(acc, suffix, hasher)
                 }
+            }
+        }
+    }
+
+    /// @dev Sort `count` allocated `(uint256 index, bytes32 value)` pairs in place.
+    /// Heapsort bounds work for arbitrary input order and moves each index with its value.
+    function sortPairs(uint256 pairs, uint256 count) internal pure {
+        assembly ("memory-safe") {
+            /// @dev Restore the max-heap below one displaced pair.
+            function sift(base, slot, size) {
+                let key := mload(add(base, shl(6, slot)))
+                let value := mload(add(add(base, shl(6, slot)), 0x20))
+                for { let child := add(shl(1, slot), 1) } lt(child, size) { child := add(shl(1, slot), 1) } {
+                    if lt(add(child, 1), size) {
+                        if lt(mload(add(base, shl(6, child))), mload(add(base, shl(6, add(child, 1))))) {
+                            child := add(child, 1)
+                        }
+                    }
+                    let source := add(base, shl(6, child))
+                    if iszero(lt(key, mload(source))) { break }
+                    let target := add(base, shl(6, slot))
+                    mstore(target, mload(source))
+                    mstore(add(target, 0x20), mload(add(source, 0x20)))
+                    slot := child
+                }
+                let target := add(base, shl(6, slot))
+                mstore(target, key)
+                mstore(add(target, 0x20), value)
+            }
+            for { let i := shr(1, count) } i { } {
+                i := sub(i, 1)
+                sift(pairs, i, count)
+            }
+            for { let size := count } gt(size, 1) { } {
+                size := sub(size, 1)
+                let last := add(pairs, shl(6, size))
+                let key := mload(pairs)
+                let value := mload(add(pairs, 0x20))
+                mstore(pairs, mload(last))
+                mstore(add(pairs, 0x20), mload(add(last, 0x20)))
+                mstore(last, key)
+                mstore(add(last, 0x20), value)
+                sift(pairs, 0, size)
             }
         }
     }

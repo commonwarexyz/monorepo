@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 import { LibMMB } from "../src/merkle/LibMMB.sol";
@@ -198,8 +198,8 @@ contract LibMMBTest is MerkleTestCommon {
         checkCompatibilitySparseMaximumSize(true);
     }
 
-    function test_DifferentialCompatibilityGas() public {
-        checkCompatibilityGas(true);
+    function test_DifferentialRootPolicyGas() public {
+        checkRootPolicyGas(true);
     }
 
     function test_DifferentialCompatibilitySparseExactUnion() public {
