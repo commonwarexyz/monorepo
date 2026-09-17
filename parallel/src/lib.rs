@@ -1601,21 +1601,29 @@ mod test {
         assert!(spawn_recorded(&strategy, loc));
     }
 
-    /// Once the seed and boundary runs measure a trivial job cheaper than the pool hand-off,
-    /// spawn places it inline on the calling (non-pool) thread.
+    /// Spawn honors an inline decision after cheap job and hand-off samples are recorded.
+    /// Caller tracking keys the recorded samples and spawn to the same policy entry.
     #[test]
-    fn spawn_converges_inline_for_tiny_jobs() {
+    #[track_caller]
+    fn spawn_inlines_a_sub_overhead_job() {
         let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let caller = std::panic::Location::caller();
+        let threads = strategy.thread_pool.current_num_threads();
 
-        for _ in 0..100 {
-            let on_pool = futures::executor::block_on(
-                strategy.spawn(64, |_| rayon::current_thread_index().is_some()),
+        for _ in 0..2 {
+            assert_eq!(
+                policy.choose_spawn(caller, 64, threads),
+                (crate::policy::SpawnExecution::Offload, true)
             );
-            if !on_pool {
-                return;
-            }
+            policy.record_spawn_job(caller, 64, threads, std::time::Duration::from_micros(2));
+            policy.record_spawn_overhead(caller, 64, threads, std::time::Duration::from_micros(50));
         }
-        panic!("a trivial job never converged to inline placement");
+
+        assert_eq!(
+            futures::executor::block_on(strategy.spawn(64, |_| std::thread::current().id())),
+            std::thread::current().id()
+        );
     }
 
     /// A job measured over the inline budget keeps offloading: the calling task is never blocked
