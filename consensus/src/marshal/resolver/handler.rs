@@ -173,61 +173,18 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
-/// Local processing annotation for a resolved key.
+/// Local retention metadata for a commitment lookup.
 ///
-/// The resolver key is the peer-visible lookup. An annotation is local
-/// metadata attached to that lookup so marshal can decide how to validate,
-/// process, and store the response. Peers never see it. Multiple local
-/// annotations may share one peer key when they depend on the same block.
-///
-/// [`Notarization`](Annotation::Notarization) carries round-bound local
-/// context. [`Untrusted`](Annotation::Untrusted), [`Certified`](Annotation::Certified)
-/// and [`Finalized`](Annotation::Finalized) describe how block-bearing
-/// responses should be validated and stored locally.
-///
-/// This role is part of the annotation because a [`Key::Block`] only names
-/// the peer-visible commitment. The same block-shaped response may need to
-/// update different local stores, and may or may not need its variant-specific
-/// commitment material recomputed, depending on the evidence the requester
-/// held for the commitment.
+/// Peers never see this metadata. Multiple retention reasons can share one
+/// commitment, and response validation is independent of these reasons.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
-    /// A notarization requested by round.
-    Notarization { round: Round },
-    /// A block requested by commitment without certification evidence.
-    ///
-    /// The expected height is local pruning metadata and should only be
-    /// supplied when the caller has a validated height bound. It must not make
-    /// a commitment-matching response invalid. A matching block above this
-    /// bound is delivered but not cached.
-    ///
-    /// Commitment material is recomputed unless another subscriber supplies
-    /// certification evidence.
-    Untrusted { height: Height },
-    /// A block requested by commitment that this node certified, or an ancestor
-    /// of one.
-    ///
-    /// Certification binds the block and its ancestors to their commitments,
-    /// so deliveries reuse commitment material. Height bounds match
-    /// [`Untrusted`](Annotation::Untrusted).
-    Certified { height: Height },
-    /// A block requested by commitment for the finalized chain.
-    ///
-    /// For [`Key::Block`], reuse commitment material authenticated by a verified
-    /// finalization or an archived finalized block's parent link.
-    Finalized(Finalized),
-}
-
-/// Metadata for a finalized block requested by commitment.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Finalized {
-    /// The finalized height is known before the request.
-    ByHeight { height: Height },
-    /// Only the finalization round is known before the request.
-    ///
-    /// This happens when a finalization names the block commitment but not the
-    /// block height.
-    ByRound { round: Round },
+    /// Retain until the owning subscription is canceled or fulfilled.
+    Subscription,
+    /// Retain until the processed round floor reaches this round.
+    Round(Round),
+    /// Retain until the processed height floor reaches this height.
+    Height(Height),
 }
 
 /// A raw resolver key for backfilling data.
@@ -254,136 +211,45 @@ impl<D: Digest> Key<D> {
     }
 }
 
-/// A valid marshal backfill fetch request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RequestKind<D: Digest> {
-    /// Fetch a notarized proposal for a round.
-    Notarized { round: Round },
-    /// Fetch a finalization for a height.
-    Finalized { height: Height },
-    /// Fetch a block by commitment without certification evidence.
-    Untrusted { commitment: D, height: Height },
-    /// Fetch a block this node certified, or an ancestor of one, by commitment.
-    Certified { commitment: D, height: Height },
-    /// Fetch a finalized-chain block by commitment when its height is known.
-    FinalizedByHeight { commitment: D, height: Height },
-    /// Fetch a finalized-chain block by commitment when only its finalization round is known.
-    FinalizedByRound { commitment: D, round: Round },
-}
-
-/// A marshal backfill fetch with a request and local processing annotation that match.
+/// A commitment lookup with local retention metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Request<D: Digest> {
-    kind: RequestKind<D>,
+    commitment: D,
+    retention: Annotation,
 }
 
 impl<D: Digest> Request<D> {
-    /// Fetch a notarized proposal for `round`.
-    pub const fn notarized(round: Round) -> Self {
+    /// Fetch a block by commitment for the given local retention reason.
+    pub const fn new(commitment: D, retention: Annotation) -> Self {
         Self {
-            kind: RequestKind::Notarized { round },
+            commitment,
+            retention,
         }
     }
 
-    /// Fetch a finalization for `height`.
-    pub const fn finalized(height: Height) -> Self {
-        Self {
-            kind: RequestKind::Finalized { height },
-        }
-    }
-
-    /// Fetch a block by commitment without certification evidence.
-    ///
-    /// Commitment material is recomputed unless another subscriber supplies
-    /// certification evidence.
-    pub const fn untrusted(commitment: D, height: Height) -> Self {
-        Self {
-            kind: RequestKind::Untrusted { commitment, height },
-        }
-    }
-
-    /// Fetch a block this node certified, or an ancestor of one, by commitment.
-    ///
-    /// Deliveries take variant-specific commitment material from `commitment`
-    /// instead of recomputing it from the block bytes.
-    pub const fn certified(commitment: D, height: Height) -> Self {
-        Self {
-            kind: RequestKind::Certified { commitment, height },
-        }
-    }
-
-    /// Fetch a finalized-chain block by commitment when its height is known.
-    ///
-    /// `commitment` must be the payload of a verified finalization or the parent
-    /// commitment of an archived finalized block. Deliveries take variant-specific
-    /// commitment material from it instead of recomputing it from the block bytes.
-    pub const fn finalized_by_height(commitment: D, height: Height) -> Self {
-        Self {
-            kind: RequestKind::FinalizedByHeight { commitment, height },
-        }
-    }
-
-    /// Fetch a finalized-chain block by commitment when only its finalization round is known.
-    ///
-    /// `commitment` must be the payload of a verified finalization. Deliveries take
-    /// variant-specific commitment material from it instead of recomputing it from the
-    /// block bytes.
-    pub const fn finalized_by_round(commitment: D, round: Round) -> Self {
-        Self {
-            kind: RequestKind::FinalizedByRound { commitment, round },
-        }
-    }
-
+    /// Returns whether the request survives the inclusive processed height floor.
     pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
-        match self.kind {
-            RequestKind::Untrusted { height, .. }
-            | RequestKind::Certified { height, .. }
-            | RequestKind::Finalized { height }
-            | RequestKind::FinalizedByHeight { height, .. } => height > floor,
-            RequestKind::Notarized { .. } | RequestKind::FinalizedByRound { .. } => true,
+        match self.retention {
+            Annotation::Height(height) => height > floor,
+            Annotation::Subscription | Annotation::Round(_) => true,
         }
     }
 
+    /// Returns whether the request survives the inclusive processed round floor.
     pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
-        match self.kind {
-            RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
-                round > floor
-            }
-            RequestKind::Untrusted { .. }
-            | RequestKind::Certified { .. }
-            | RequestKind::Finalized { .. }
-            | RequestKind::FinalizedByHeight { .. } => true,
+        match self.retention {
+            Annotation::Round(round) => round > floor,
+            Annotation::Subscription | Annotation::Height(_) => true,
         }
     }
 
+    /// Converts this request into a resolver fetch by commitment.
     pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
-        let (key, subscriber) = match self.kind {
-            RequestKind::Notarized { round } => {
-                (Key::Notarized { round }, Annotation::Notarization { round })
-            }
-            RequestKind::Finalized { height } => (
-                Key::Finalized { height },
-                Annotation::Finalized(Finalized::ByHeight { height }),
-            ),
-            RequestKind::Untrusted { commitment, height } => {
-                (Key::Block(commitment), Annotation::Untrusted { height })
-            }
-            RequestKind::Certified { commitment, height } => {
-                (Key::Block(commitment), Annotation::Certified { height })
-            }
-            RequestKind::FinalizedByHeight { commitment, height } => (
-                Key::Block(commitment),
-                Annotation::Finalized(Finalized::ByHeight { height }),
-            ),
-            RequestKind::FinalizedByRound { commitment, round } => (
-                Key::Block(commitment),
-                Annotation::Finalized(Finalized::ByRound { round }),
-            ),
-        };
+        let key = Key::Block(self.commitment);
         let span = info_span!("marshal.resolver.fetch", key = %key);
         ResolverFetch {
             key,
-            subscriber,
+            subscriber: self.retention,
             span,
         }
     }
@@ -402,15 +268,9 @@ impl<D: Digest> From<Request<D>> for ResolverFetch<Key<D>, Annotation> {
 pub(crate) fn above_height_floor<D: Digest>(
     height: Height,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |request, annotation| match (request, annotation) {
-        (Key::Finalized { height: requested }, _) => *requested > height,
-        (
-            Key::Block(_),
-            Annotation::Untrusted { height: requested }
-            | Annotation::Certified { height: requested }
-            | Annotation::Finalized(Finalized::ByHeight { height: requested }),
-        ) => *requested > height,
-        _ => true,
+    move |_, annotation| match annotation {
+        Annotation::Height(requested) => *requested > height,
+        Annotation::Subscription | Annotation::Round(_) => true,
     }
 }
 
@@ -421,12 +281,9 @@ pub(crate) fn above_height_floor<D: Digest>(
 pub(crate) fn above_round_floor<D: Digest>(
     round: Round,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |request, annotation| match (request, annotation) {
-        (Key::Notarized { round: requested }, _) => *requested > round,
-        (Key::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
-            *requested > round
-        }
-        _ => true,
+    move |_, annotation| match annotation {
+        Annotation::Round(requested) => *requested > round,
+        Annotation::Subscription | Annotation::Height(_) => true,
     }
 }
 
@@ -571,13 +428,9 @@ mod tests {
         let mut overflow = Pending::<D>::default();
         let deliver = |height: u64, response| Message::Deliver {
             delivery: Delivery {
-                key: Key::Finalized {
-                    height: Height::new(height),
-                },
+                key: Key::Block(Sha256::fill(height as u8)),
                 subscribers: NonEmptyVec::new((
-                    Annotation::Finalized(Finalized::ByHeight {
-                        height: Height::new(height),
-                    }),
+                    Annotation::Height(Height::new(height)),
                     tracing::Span::none(),
                 )),
             },
@@ -619,11 +472,11 @@ mod tests {
             messages.pop(),
             Some(Message::Deliver {
                 delivery: Delivery {
-                    key: Key::Finalized { height },
+                    key: Key::Block(commitment),
                     ..
                 },
                 ..
-            }) if height == Height::new(3)
+            }) if commitment == Sha256::fill(3)
         ));
     }
 
@@ -729,106 +582,78 @@ mod tests {
     }
 
     #[test]
+    fn test_request_retention() {
+        let commitment = Sha256::hash(&[b"block"]);
+        let height = Height::new(100);
+        let round = Round::new(Epoch::new(1), View::new(10));
+        for retention in [
+            Annotation::Subscription,
+            Annotation::Height(height),
+            Annotation::Round(round),
+        ] {
+            let request = Request::new(commitment, retention);
+            let fetch = request.into_inner();
+            assert_eq!(fetch.key, Key::Block(commitment));
+            assert_eq!(fetch.subscriber, retention);
+            assert_eq!(
+                request.above_height_floor(height),
+                retention != Annotation::Height(height),
+            );
+            assert_eq!(
+                request.above_round_floor(round),
+                retention != Annotation::Round(round),
+            );
+            assert!(request.above_height_floor(Height::new(99)));
+            assert!(request.above_round_floor(Round::new(Epoch::new(1), View::new(9))));
+        }
+    }
+
+    #[test]
     fn test_height_floor_predicate() {
         let floor = Height::new(100);
-        let higher_finalized = Key::<D>::Finalized {
-            height: Height::new(200),
-        };
-        let notarized = Key::<D>::Notarized {
-            round: Round::new(Epoch::new(333), View::new(150)),
-        };
-        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
-        let stale_finalized = Annotation::Finalized(Finalized::ByHeight {
-            height: Height::new(100),
-        });
-        let fresh_certified = Annotation::Certified {
-            height: Height::new(101),
-        };
-        let stale_certified = Annotation::Certified {
-            height: Height::new(100),
-        };
-        let fresh_untrusted = Annotation::Untrusted {
-            height: Height::new(101),
-        };
-        let stale_untrusted = Annotation::Untrusted {
-            height: Height::new(100),
-        };
-
         let predicate = above_height_floor(floor);
-        assert!(predicate(
-            &higher_finalized,
-            &Annotation::Finalized(Finalized::ByHeight {
-                height: Height::new(200),
-            })
-        ));
-        assert!(predicate(
-            &notarized,
-            &Annotation::Notarization {
-                round: Round::new(Epoch::new(333), View::new(150)),
-            }
-        ));
-        assert!(predicate(&block, &fresh_certified));
-        assert!(predicate(&block, &fresh_untrusted));
-
-        let same_height = Key::<D>::Finalized {
-            height: Height::new(100),
-        };
-        assert!(!predicate(
-            &same_height,
-            &Annotation::Finalized(Finalized::ByHeight {
-                height: Height::new(100),
-            })
-        ));
-        assert!(!predicate(&block, &stale_finalized));
-        assert!(!predicate(&block, &stale_certified));
-        assert!(!predicate(&block, &stale_untrusted));
+        for key in [
+            Key::<D>::Block(Sha256::hash(&[b"block"])),
+            Key::Finalized {
+                height: Height::zero(),
+            },
+            Key::Notarized {
+                round: Round::zero(),
+            },
+        ] {
+            assert!(predicate(&key, &Annotation::Subscription));
+            assert!(predicate(&key, &Annotation::Round(Round::zero())));
+            assert!(predicate(&key, &Annotation::Height(Height::new(101))));
+            assert!(!predicate(&key, &Annotation::Height(floor)));
+            assert!(!predicate(&key, &Annotation::Height(Height::new(99))));
+        }
     }
 
     #[test]
     fn test_round_floor_predicate() {
         let floor = Round::new(Epoch::new(1), View::new(10));
-        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
-        let higher_notarized = Key::<D>::Notarized {
-            round: Round::new(Epoch::new(1), View::new(11)),
-        };
-        let same_notarized = Key::<D>::Notarized {
-            round: Round::new(Epoch::new(1), View::new(10)),
-        };
-        let finalized = Key::<D>::Finalized {
-            height: Height::new(100),
-        };
-
         let predicate = above_round_floor(floor);
-        assert!(predicate(
-            &higher_notarized,
-            &Annotation::Notarization {
-                round: Round::new(Epoch::new(1), View::new(11)),
-            }
-        ));
-        assert!(predicate(
-            &finalized,
-            &Annotation::Finalized(Finalized::ByHeight {
-                height: Height::new(100),
-            })
-        ));
-        assert!(predicate(
-            &block,
-            &Annotation::Finalized(Finalized::ByRound {
-                round: Round::new(Epoch::new(1), View::new(11)),
-            })
-        ));
-        assert!(!predicate(
-            &same_notarized,
-            &Annotation::Notarization {
-                round: Round::new(Epoch::new(1), View::new(10)),
-            }
-        ));
-        assert!(!predicate(
-            &block,
-            &Annotation::Finalized(Finalized::ByRound {
-                round: Round::new(Epoch::new(1), View::new(10)),
-            })
-        ));
+        for key in [
+            Key::<D>::Block(Sha256::hash(&[b"block"])),
+            Key::Finalized {
+                height: Height::zero(),
+            },
+            Key::Notarized {
+                round: Round::zero(),
+            },
+        ] {
+            assert!(predicate(&key, &Annotation::Subscription));
+            assert!(predicate(&key, &Annotation::Height(Height::zero())));
+            assert!(predicate(
+                &key,
+                &Annotation::Round(Round::new(Epoch::new(1), View::new(11)))
+            ));
+            assert!(!predicate(&key, &Annotation::Round(floor)));
+            assert!(!predicate(
+                &key,
+                &Annotation::Round(Round::new(Epoch::zero(), View::new(u64::MAX)))
+            ));
+        }
     }
 
     #[test]

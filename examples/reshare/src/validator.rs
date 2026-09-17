@@ -329,6 +329,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (orchestrator_actor, orchestrator_mailbox) = orchestrator::Actor::new(
         context.child("orchestrator"),
         orchestrator::Config {
+            probe: probe_mailbox.clone(),
             oracle: oracle.clone(),
             manager: oracle.clone(),
             provider: provider.clone(),

@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, marshal::blocks::Blocks};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -76,7 +76,8 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
@@ -85,7 +86,9 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _block: Arc<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
     ) -> bool {
         self.verify_result
     }
@@ -133,7 +136,8 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
         None
@@ -142,7 +146,9 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _block: Arc<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

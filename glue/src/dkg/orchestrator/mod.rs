@@ -53,8 +53,9 @@
 //!
 //! Consensus votes are multiplexed by epoch. If the vote mux receives a message
 //! for a future epoch that has not been registered locally, the node is behind.
-//! The orchestrator hints marshal to fetch the boundary finalization needed to
-//! reach that epoch, allowing normal marshal delivery to drive the transition.
+//! The orchestrator asks the probe to discover the active epoch's boundary
+//! certificate. The probe verifies it and reports it to marshal, which acquires
+//! the committed block and drives the transition through normal delivery.
 //!
 //! # Configuration
 //!
@@ -78,6 +79,7 @@ mod tests {
     use crate::dkg::{
         fence::Fence,
         network::{Addresses, Manager},
+        probe,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::{max_supported_mode, mocks},
         types::{EpochInfo, EpochOutcome, Payload},
@@ -107,8 +109,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        non_empty, ordered::Set, probability, sequence::Unit,
+        Acknowledgement, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+        acknowledgement::Exact, non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -120,6 +122,7 @@ mod tests {
     const VOTE_CHANNEL: u64 = 1;
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
+    const BOUNDARY_CHANNEL: u64 = 4;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
@@ -294,6 +297,7 @@ mod tests {
         application: mocks::MockApplication,
         orchestrator_handle: Handle<()>,
         marshal_handle: Handle<()>,
+        probe_handle: Handle<()>,
         // Held so the epoch gate stays open for the node's lifetime.
         _fence: Fence,
     }
@@ -392,6 +396,30 @@ mod tests {
             )
             .await;
             let application = mocks::MockApplication::default();
+            let genesis_info = make_epoch_info(Epoch::zero(), fixture.participants.iter().cloned());
+            let (probe_actor, probe) = probe::Actor::new(probe::Config {
+                context: context.child("probe"),
+                manager: oracle.manager(),
+                bootstrap: probe::Bootstrap {
+                    epoch: Epoch::zero(),
+                    participants: genesis_info.participants(),
+                    directory: Unit,
+                },
+                verifier: fixture.schemes[index].clone(),
+                genesis: genesis_info,
+                strategy: Sequential,
+                blocker: control.clone(),
+                blocks_per_epoch: NZU64!(2),
+                retry_timeout: NZDuration!(Duration::from_millis(100)),
+                mailbox_size: NZUsize!(16),
+                block_codec_config: (),
+            });
+            probe.attach(marshal.clone());
+            let boundaries = control
+                .register(BOUNDARY_CHANNEL, TEST_QUOTA)
+                .await
+                .unwrap();
+            let probe_handle = probe_actor.start(boundaries);
             let (fence, gate) = Fence::new(gate_epoch);
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
@@ -400,6 +428,7 @@ mod tests {
                     manager,
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     marshal: marshal.clone(),
+                    probe,
                     application: application.clone(),
                     strategy: Sequential,
                     simplex: mocks::simplex_config(),
@@ -455,6 +484,7 @@ mod tests {
                 application,
                 orchestrator_handle,
                 marshal_handle,
+                probe_handle,
                 _fence: fence,
             }
         }
@@ -462,6 +492,7 @@ mod tests {
         fn abort(&mut self) {
             self.orchestrator_handle.abort();
             self.marshal_handle.abort();
+            self.probe_handle.abort();
         }
     }
 
@@ -748,6 +779,8 @@ mod tests {
                 )
                 .await;
 
+            let (probe_sender, _probe_receiver) =
+                commonware_actor::mailbox::new(context.child("probe_mailbox"), NZUsize!(16));
             let (_fence, gate) = Fence::new(Epoch::new(1));
             let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
@@ -756,6 +789,7 @@ mod tests {
                     manager: oracle.manager(),
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     marshal: marshal.clone(),
+                    probe: probe::Mailbox::new(probe_sender),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
                     simplex: mocks::simplex_config(),
@@ -1017,6 +1051,8 @@ mod tests {
             .await;
 
             let manager = mocks::DirectoryManager::new(oracle.manager());
+            let (probe_sender, _probe_receiver) =
+                commonware_actor::mailbox::new(context.child("probe_mailbox"), NZUsize!(16));
             let (_fence, gate) = Fence::new(synced_epoch);
             let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
@@ -1025,6 +1061,7 @@ mod tests {
                     manager: manager.clone(),
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     marshal: marshal.clone(),
+                    probe: probe::Mailbox::new(probe_sender),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
                     simplex: mocks::simplex_config(),
@@ -1072,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn future_epoch_vote_hints_marshal_to_fetch_boundary_finalization() {
+    fn future_epoch_vote_discovers_boundary_certificate() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let cluster = Cluster::start_with_seeded_first(&mut context, 4, false).await;

@@ -12,7 +12,7 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
-use crate::{Block, simplex::scheme::Scheme, types::Round};
+use crate::{Block, types::Round};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -80,18 +80,13 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Extracts the block digest from a consensus commitment.
     ///
-    /// For blocks/certificates accepted by marshal in this variant instance, the digest
+    /// For consensus-validated blocks/certificates in this variant instance, the digest
     /// must uniquely determine the commitment. In other words, there should not be two accepted
     /// commitments with the same inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
-
-    /// Validates a certificate payload against the active consensus scheme.
-    fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
-    where
-        S: Scheme<Self::Commitment>;
 
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
@@ -105,12 +100,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Converts a working block to a shared application block without copying the payload.
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
-
-    /// Reconstructs a working block from an application block and trusted payload.
-    fn from_application_block(
-        block: Self::ApplicationBlock,
-        payload: Self::Commitment,
-    ) -> Self::Block;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different
@@ -150,21 +139,6 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         &self,
         commitment: V::Commitment,
     ) -> impl Future<Output = Option<V::Block>> + Send;
-
-    /// Subscribe to a block's availability by its digest.
-    ///
-    /// Returns a receiver that will resolve when the block becomes available.
-    /// If the block is already cached, the receiver may resolve immediately.
-    /// Returns `None` when the buffer cannot provide availability notifications.
-    ///
-    /// Keep the subscription open while the block may still arrive. Close it only when the buffer
-    /// shuts down or can no longer obtain the block from any source.
-    ///
-    /// The returned receiver can be dropped to cancel the subscription.
-    fn subscribe_by_digest(
-        &self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<V::Block>>;
 
     /// Subscribe to a block's availability by its commitment.
     ///
@@ -229,13 +203,6 @@ where
     }
 
     async fn find_by_commitment(&self, _: V::Commitment) -> Option<V::Block> {
-        None
-    }
-
-    fn subscribe_by_digest(
-        &self,
-        _: <V::Block as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<V::Block>> {
         None
     }
 

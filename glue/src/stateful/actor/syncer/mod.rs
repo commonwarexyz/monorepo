@@ -7,7 +7,7 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
+        core::{Floor, Mailbox as MarshalMailbox, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -319,17 +319,15 @@ where
     V: Variant<ApplicationBlock = A::Block>,
 {
     // Marshal skips installing a startup floor whose round is already processed. Its block may
-    // have been pruned, so apply the same rule before registering a local-only waiter.
+    // have been pruned, so apply the same rule before acquiring its anchor.
     let block = if let Some(height) = floor.height()
         && floor.round() >= finalization.round()
     {
         V::into_shared(processed_anchor(marshal, height).await)
     } else {
-        // Marshal's configured startup floor fetches its anchor when needed. This local-only
-        // subscription observes that result without starting a separate fetch.
         let selected = {
             let block = marshal
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .acquire(finalization.proposal.payload)
                 .await
                 .expect("marshal must yield floor block");
             V::into_shared(block)

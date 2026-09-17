@@ -9,8 +9,8 @@
 //!   cache the resulting merkleized batches keyed by block digest.
 //!
 //! - Lazy recovery: when a parent's pending state is missing (e.g. after
-//!   restart), the processor walks the block DAG backward via marshal to the
-//!   nearest known anchor, then replays forward via [`Application::apply`],
+//!   restart), the processor selects the nearest known anchor from branch
+//!   commitments, then consumes forward blocks via [`Application::apply`],
 //!   inserting each intermediate result into the pending map.
 //!
 //! - Finalization: apply the winning fork's merkleized batches to the
@@ -19,8 +19,8 @@
 //!   can be covered by one storage sync.
 //!
 //! Verification jobs are polled independently and scoped to their callers.
-//! Verification-owned lazy recovery shares [`Application::apply`] by block
-//! digest. Proposal recovery remains actor-owned.
+//! Proposal and verification recovery share [`Application::apply`] by block
+//! digest while each verification retains its own application verdict.
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
@@ -31,7 +31,7 @@ use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+        blocks::{Blocks, Error as BlocksError},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
@@ -46,7 +46,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -193,13 +193,14 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    height: Height,
     round: Round,
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
     verified: bool,
 }
 
-/// Speculative state shared by independently-polled verification jobs.
+/// Speculative state shared by proposals and independent verification jobs.
 ///
 /// During finalization, the winning batch remains available as a branch parent
 /// while a clone is applied. `finalizing_compatible` admits late state only
@@ -285,7 +286,7 @@ where
     }
 }
 
-/// In-progress verification replays keyed by acquired block digest.
+/// In-progress batch reconstruction keyed by acquired block digest.
 ///
 /// Each key identifies a [`CertifiableBlock`] and its embedded context.
 #[derive(Clone)]
@@ -296,7 +297,7 @@ struct ReplayFlights<D: Copy + Ord> {
 #[derive(Clone, Copy)]
 struct ReplayTracking<'a, D: Copy + Ord> {
     flights: &'a ReplayFlights<D>,
-    progress: &'a VerificationProgress<D>,
+    progress: Option<&'a VerificationProgress<D>>,
 }
 
 impl<D: Copy + Ord> Default for ReplayFlights<D> {
@@ -660,7 +661,7 @@ where
         }
     }
 
-    /// Returns whether every verification-owned replay has released its owner.
+    /// Returns whether every replay has released its owner.
     pub(super) fn replays_idle(&self) -> bool {
         self.replays.is_empty()
     }
@@ -707,38 +708,22 @@ where
     /// build a new block proposal. The resulting block and its merkleized
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid or the application declines to propose.
-    pub(super) async fn propose<S, V>(
+    pub(super) async fn propose(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
         (runtime_context, consensus_context): (E, A::Context),
-        mut ancestry: impl Ancestry<A::Block>,
+        parent: Arc<A::Block>,
+        blocks: Blocks<A::Block>,
         input: Input<A::Input, A::Provider>,
         mut response: oneshot::Sender<Option<A::Block>>,
-    ) where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    {
+    ) {
         let timer = self.execution.metrics.propose_duration.timer(context);
 
-        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
-            Some(Some(parent)) => parent,
-            Some(None) => {
-                response.send_lossy(None);
-                return;
-            }
-            None => {
-                debug!("proposal request cancelled before initial ancestry arrived");
-                return;
-            }
-        };
         let parent_digest = parent.digest();
-        let ancestry = marshal_ancestry::with_prefix([Arc::clone(&parent)], ancestry);
 
         let round = consensus_context.round();
         let batches = match self
-            .prepare_batches(context, marshal, parent, &mut response)
+            .prepare_batches(context, blocks.clone(), parent.clone(), &mut response)
             .await
         {
             Ok(batches) => batches,
@@ -767,7 +752,8 @@ where
             &mut response,
             self.app.propose(
                 (runtime_context, consensus_context),
-                ancestry,
+                parent,
+                blocks,
                 batches,
                 input,
             ),
@@ -790,7 +776,14 @@ where
             "proposed state must match block commitments",
         );
         assert!(
-            self.cache_pending(block.digest(), parent_digest, round, merkleized, true),
+            self.cache_pending(
+                block.digest(),
+                parent_digest,
+                block.height(),
+                round,
+                merkleized,
+                true
+            ),
             "proposal parent must remain compatible until the proposal completes",
         );
         self.execution.update_pending_metric();
@@ -805,21 +798,28 @@ where
         skip_all,
         fields(parent = %parent.digest())
     )]
-    async fn prepare_batches<S, V, C>(
+    async fn prepare_batches<C>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        blocks: Blocks<A::Block>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
         C: Cancellation,
     {
         self.execution
-            .prepare_batches(&mut self.app, context, marshal, parent, cancellation, None)
+            .prepare_batches(
+                &mut self.app,
+                context,
+                blocks,
+                parent,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -832,21 +832,30 @@ where
         self.execution.fork_batches(parent).await
     }
 
-    /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
+    /// Replays a selected range through `target`.
     #[cfg(test)]
-    async fn rebuild_pending<P, C>(
+    async fn rebuild_pending<C>(
         &mut self,
         context: &E,
-        provider: P,
+        blocks: Blocks<A::Block>,
         target: Arc<A::Block>,
         cancellation: &mut C,
     ) -> Result<(), PrepareBatchesError>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
         C: Cancellation,
     {
         self.execution
-            .rebuild_pending(&mut self.app, context, provider, target, cancellation, None)
+            .rebuild_pending(
+                &mut self.app,
+                context,
+                blocks,
+                target,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -975,12 +984,13 @@ where
         &self,
         digest: PendingDigest<A, E>,
         parent: PendingDigest<A, E>,
+        height: Height,
         round: Round,
         merkleized: PendingBatches<A, E>,
         verified: bool,
     ) -> bool {
         self.execution
-            .cache_pending(digest, parent, round, merkleized, verified)
+            .cache_pending(digest, parent, height, round, merkleized, verified)
     }
 }
 
@@ -1080,6 +1090,7 @@ where
         &self,
         digest: PendingDigest<A, E>,
         parent: PendingDigest<A, E>,
+        height: Height,
         round: Round,
         merkleized: PendingBatches<A, E>,
         verified: bool,
@@ -1087,6 +1098,7 @@ where
         let mut state = self.state.lock();
         if let Some(existing) = state.pending.get_mut(&digest) {
             assert_eq!(existing.parent, parent, "pending parent changed for digest");
+            assert_eq!(existing.height, height, "pending height changed for digest");
             assert_eq!(existing.round, round, "pending round changed for digest");
 
             // Verifying a replayed block upgrades its entry to a verdict.
@@ -1129,6 +1141,7 @@ where
         state.pending.insert(
             digest,
             PendingEntry {
+                height,
                 round,
                 parent,
                 merkleized,
@@ -1238,13 +1251,14 @@ where
         app: &mut A,
         context: &E,
         target_digest: PendingDigest<A, E>,
+        digest: PendingDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
     ) -> ReplayResult
     where
         C: Cancellation,
     {
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        let parent_digest = block.parent();
         let consensus_context = block.context();
         let round = consensus_context.round();
 
@@ -1280,9 +1294,16 @@ where
             return Err(PrepareBatchesError::Invalid);
         }
 
-        self.cache_pending(digest, parent_digest, round, merkleized, false)
-            .then_some(())
-            .ok_or(PrepareBatchesError::Invalid)
+        self.cache_pending(
+            digest,
+            parent_digest,
+            block.height(),
+            round,
+            merkleized,
+            false,
+        )
+        .then_some(())
+        .ok_or(PrepareBatchesError::Invalid)
     }
 
     /// Replays one block while sharing completed work with concurrent requests.
@@ -1307,12 +1328,15 @@ where
             match self.claim_replay(replay.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
                 ReplayClaim::Owner(owner) => {
-                    replay.progress.replaying(digest, parent, round);
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round);
+                    }
                     let result = self
                         .replay_block(
                             app,
                             context,
                             target_digest,
+                            owner.digest,
                             Arc::clone(&block),
                             cancellation,
                         )
@@ -1323,7 +1347,9 @@ where
                     return result;
                 }
                 ReplayClaim::Wait(mut waiter) => {
-                    replay.progress.replaying(digest, parent, round);
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round);
+                    }
                     let Some(completion) =
                         await_or_cancel(cancellation, &mut waiter.completion).await
                     else {
@@ -1345,23 +1371,18 @@ where
 
     /// Ensures parent state exists and forks batches for speculative execution.
     ///
-    /// Verification supplies replay tracking to share reconstruction by block
-    /// digest, while proposals reconstruct independently. `fork_batches`
-    /// revalidates the parent after reconstruction in case finalization
-    /// advanced meanwhile.
-    async fn prepare_batches<S, V, C>(
+    /// Reconstruction is shared by block digest. `fork_batches` revalidates
+    /// the parent after reconstruction in case finalization advanced meanwhile.
+    async fn prepare_batches<C>(
         &self,
         app: &mut A,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        blocks: Blocks<A::Block>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: ReplayTracking<'_, PendingDigest<A, E>>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
         C: Cancellation,
     {
         let parent_digest = parent.digest();
@@ -1371,7 +1392,7 @@ where
                 || state.pending.contains_key(&parent_digest)
         };
         if !known {
-            self.rebuild_pending(app, context, marshal, parent, cancellation, replay)
+            self.rebuild_pending(app, context, blocks, parent, cancellation, replay)
                 .await?;
         }
 
@@ -1380,98 +1401,95 @@ where
             .ok_or(PrepareBatchesError::Cancelled)?
     }
 
-    /// Rebuilds missing ancestry through `target`.
+    /// Replays the selected branch from cached state or the applied anchor.
     ///
-    /// The backward walk stops only at pending state or the applied anchor and
-    /// rejects stale or non-contiguous ancestry. Blocks are then replayed in
-    /// ancestor order, with commitments checked before each cache insertion.
-    async fn rebuild_pending<P, C>(
+    /// Resident commitments and the held target's parent identify cached ancestors
+    /// without body reads. Acquisition begins above that anchor; the target is held.
+    async fn rebuild_pending<C>(
         &self,
         app: &mut A,
         context: &E,
-        provider: P,
+        blocks: Blocks<A::Block>,
         target: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: ReplayTracking<'_, PendingDigest<A, E>>,
     ) -> Result<(), PrepareBatchesError>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
         C: Cancellation,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
-        let target_digest = target.digest();
-
-        let mut replay_path = Vec::new();
-        let mut cursor = target;
-        loop {
-            let (known, last_processed) = {
-                let state = self.state.lock();
-                (
-                    cursor.digest() == state.last_processed.digest
-                        || state.pending.contains_key(&cursor.digest()),
-                    state.last_processed,
-                )
-            };
-            if known {
-                break;
+        let (target_height, target_digest) = (target.height(), target.digest());
+        let anchor = {
+            let state = self.state.lock();
+            if target_digest == state.last_processed.digest
+                || state.pending.contains_key(&target_digest)
+            {
+                return Ok(());
             }
-
-            let cursor_height = cursor.height();
-            if cursor_height <= last_processed.height {
-                warn!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    current_height = cursor_height.get(),
-                    last_processed_height = last_processed.height.get(),
-                    last_processed = ?last_processed.digest,
-                    "rebuild_pending reached stale ancestry at or below processed height"
-                );
+            if target_height <= state.last_processed.height
+                || target_height > blocks.tip()
+                || blocks
+                    .digest(target_height)
+                    .is_some_and(|digest| digest != target_digest)
+            {
                 return Err(PrepareBatchesError::Invalid);
             }
-
-            let Some(parent) =
-                await_or_cancel(cancellation, provider.clone().subscribe_parent(&cursor)).await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-
-            let Some(parent) = parent else {
-                debug!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    "ancestor subscription ended before delivery"
-                );
-                return Err(PrepareBatchesError::Incomplete);
-            };
-
-            if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
-                warn!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    parent = ?parent.digest(),
-                    cursor_height = cursor_height.get(),
-                    parent_height = parent.height().get(),
-                    expected_parent = ?cursor.parent(),
-                    "rebuild_pending received non-contiguous ancestry"
-                );
+            let mut anchor = state.last_processed;
+            let mut height = target_height
+                .previous()
+                .expect("unprocessed target must have a parent");
+            while !state.pending.is_empty() && height > anchor.height {
+                let Some(digest) = blocks
+                    .digest(height)
+                    .or_else(|| (height.next() == target_height).then(|| target.parent()))
+                else {
+                    break;
+                };
+                if let Some(entry) = state.pending.get(&digest) {
+                    if entry.height != height {
+                        return Err(PrepareBatchesError::Invalid);
+                    }
+                    anchor = Anchor {
+                        height,
+                        digest,
+                        round: entry.round,
+                    };
+                    break;
+                }
+                height = height
+                    .previous()
+                    .expect("selected height exceeds applied anchor");
+            }
+            anchor
+        };
+        let mut expected = anchor;
+        let mut range = blocks
+            .range(
+                anchor.height.next()
+                    ..=target_height
+                        .previous()
+                        .expect("unprocessed target must have a parent"),
+            )
+            .chain(futures::stream::iter([Ok(target)]));
+        let mut depth = 0;
+        while let Some(block) = await_or_cancel(cancellation, range.next())
+            .await
+            .ok_or(PrepareBatchesError::Cancelled)?
+        {
+            let block = block.map_err(|error| match error {
+                BlocksError::Unavailable => PrepareBatchesError::Incomplete,
+                _ => PrepareBatchesError::Invalid,
+            })?;
+            if block.height().previous() != Some(expected.height)
+                || block.parent() != expected.digest
+            {
                 return Err(PrepareBatchesError::Invalid);
             }
-
-            replay_path.push(cursor);
-            cursor = parent;
+            expected = Anchor::from(block.as_ref());
+            self.replay_block_shared(app, context, target_digest, block, cancellation, replay)
+                .await?;
+            depth += 1;
         }
-
-        let depth = replay_path.len();
-        for block in replay_path.into_iter().rev() {
-            if let Some(replay) = replay {
-                self.replay_block_shared(app, context, target_digest, block, cancellation, replay)
-                    .await?;
-            } else {
-                self.replay_block(app, context, target_digest, block, cancellation)
-                    .await?;
-            }
-        }
-
         self.update_pending_metric();
         let _ = self.metrics.rebuild_pending_depth.try_set(depth);
         timer.observe(context);
@@ -1526,16 +1544,6 @@ where
     Ok(canonical.digest() == block.digest())
 }
 
-/// Read the next ancestry item unless the request is cancelled.
-#[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
-async fn fetch_ancestor<C, T, S>(cancellation: &mut C, stream: &mut S) -> Option<Option<T>>
-where
-    S: Stream<Item = T> + Unpin,
-    C: Cancellation,
-{
-    await_or_cancel(cancellation, stream.next()).await
-}
-
 /// Wait for `future` unless the request is cancelled.
 async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
 where
@@ -1552,7 +1560,7 @@ where
 mod tests {
     use super::{
         Applied, Disposition, FinalizationBoundary, PrepareBatchesError, Processor, Prune, Pruning,
-        ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress, fetch_ancestor,
+        ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress, await_or_cancel,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -1562,7 +1570,7 @@ mod tests {
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
-        marshal::ancestry::{Ancestry, BlockProvider},
+        marshal::blocks::Blocks,
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
     };
@@ -1586,8 +1594,8 @@ mod tests {
     };
     use futures::StreamExt;
     use std::{
+        cell::Cell,
         collections::{BTreeMap, HashSet, VecDeque},
-        future::Future,
         num::NonZeroUsize,
         sync::{
             Arc,
@@ -1650,6 +1658,10 @@ mod tests {
         assert_eq!(boundary.disposition(&progress), Disposition::Reject,);
     }
 
+    thread_local! {
+        static DIGEST_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
         context: TestContext,
@@ -1700,6 +1712,7 @@ mod tests {
         type Digest = Digest;
 
         fn digest(&self) -> Digest {
+            DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
             Sha256::hash(&[&self.encode()])
         }
     }
@@ -1903,12 +1916,11 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
-            let mut ancestry = Box::pin(ancestry);
-            let parent = ancestry.next().await?;
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();
@@ -1929,11 +1941,11 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let mut ancestry = Box::pin(ancestry);
-            let block = ancestry.next().await?;
             let merkleized =
                 Self::execute(block.height(), block.context.round.view(), batches).await;
             if merkleized.root() != block.state_root {
@@ -2033,7 +2045,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MapProvider {
         blocks: Arc<Mutex<BTreeMap<Digest, Block>>>,
-        fetches: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<Digest>>>,
     }
 
     impl MapProvider {
@@ -2042,65 +2054,75 @@ mod tests {
         }
 
         fn fetch_by_digest(&self, digest: Digest) -> Option<Block> {
-            self.fetches.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().push(digest);
             self.blocks.lock().get(&digest).cloned()
         }
 
         fn fetches(&self) -> usize {
-            self.fetches.load(Ordering::SeqCst)
+            self.requests.lock().len()
         }
-    }
 
-    impl BlockProvider for MapProvider {
-        type Block = Block;
-
-        fn subscribe_parent(
-            &self,
-            block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+        fn source(&self, target: &Block) -> Blocks<Block> {
+            let mut selected: BTreeMap<_, _> = self
+                .blocks
+                .lock()
+                .values()
+                .map(|block| (block.height(), block.digest()))
+                .collect();
+            selected.insert(target.height(), target.digest());
+            let metadata = Arc::new(selected);
             let provider = self.clone();
-            let parent = block.parent();
-            async move { provider.fetch_by_digest(parent).map(Arc::new) }
+            let selected = metadata.clone();
+            Blocks::new(
+                target.height(),
+                NZUsize!(8),
+                move |height| selected.get(&height).copied(),
+                move |height| {
+                    let block = metadata
+                        .get(&height)
+                        .and_then(|digest| provider.fetch_by_digest(*digest));
+                    async move { block.map(Arc::new) }
+                },
+            )
         }
     }
 
     #[derive(Clone, Default)]
-    struct ScriptedParentProvider {
-        responses: Arc<Mutex<BTreeMap<Digest, VecDeque<Option<Block>>>>>,
+    struct ScriptedSource {
+        responses: Arc<Mutex<VecDeque<Option<Block>>>>,
         fetches: Arc<AtomicUsize>,
     }
 
-    impl ScriptedParentProvider {
-        fn push(&self, child: &Block, responses: impl IntoIterator<Item = Option<Block>>) {
-            self.responses
-                .lock()
-                .insert(child.digest(), responses.into_iter().collect());
+    impl ScriptedSource {
+        fn push(&self, responses: impl IntoIterator<Item = Option<Block>>) {
+            self.responses.lock().extend(responses);
         }
 
         fn fetches(&self) -> usize {
             self.fetches.load(Ordering::SeqCst)
         }
-    }
 
-    impl BlockProvider for ScriptedParentProvider {
-        type Block = Block;
-
-        fn subscribe_parent(
-            &self,
-            block: &Self::Block,
-        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+        fn source(&self, target: &Block) -> Blocks<Block> {
             let provider = self.clone();
-            let child = block.digest();
-            async move {
-                provider.fetches.fetch_add(1, Ordering::SeqCst);
-                provider
-                    .responses
-                    .lock()
-                    .get_mut(&child)
-                    .and_then(VecDeque::pop_front)
-                    .flatten()
-                    .map(Arc::new)
-            }
+            let (tip, digest, parent) = (target.height(), target.digest(), target.parent());
+            Blocks::new(
+                tip,
+                NZUsize!(1),
+                move |height| {
+                    if height == tip {
+                        Some(digest)
+                    } else if height.next() == tip {
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                },
+                move |_| {
+                    provider.fetches.fetch_add(1, Ordering::SeqCst);
+                    let block = provider.responses.lock().pop_front().flatten();
+                    async move { block.map(Arc::new) }
+                },
+            )
         }
     }
 
@@ -2160,7 +2182,8 @@ mod tests {
         }
 
         async fn build_child(&self, parent: &Block, view: View) -> (Block, TestMerkleized) {
-            let context = consensus_context(parent.digest(), view);
+            let mut context = consensus_context(parent.digest(), view);
+            context.parent.0 = parent.context.round.view();
             let height = Height::new(parent.height().get() + 1);
             let batches = self
                 .processor
@@ -2187,6 +2210,7 @@ mod tests {
             assert!(self.processor.cache_pending(
                 block.digest(),
                 parent.digest(),
+                block.height(),
                 round,
                 merkleized,
                 true,
@@ -2608,6 +2632,7 @@ mod tests {
             assert!(harness.processor.cache_pending(
                 winner.digest(),
                 genesis.digest(),
+                winner.height(),
                 round,
                 initial_batch,
                 true,
@@ -2628,6 +2653,7 @@ mod tests {
             assert!(execution.cache_pending(
                 winner.digest(),
                 genesis.digest(),
+                winner.height(),
                 round,
                 during_finalization_batch,
                 true,
@@ -2645,6 +2671,7 @@ mod tests {
             assert!(execution.cache_pending(
                 winner.digest(),
                 genesis.digest(),
+                winner.height(),
                 round,
                 after_finalization_batch,
                 true,
@@ -2689,7 +2716,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2703,7 +2730,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2784,7 +2811,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2798,7 +2825,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2870,7 +2897,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2936,7 +2963,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2985,6 +3012,7 @@ mod tests {
             assert!(harness.processor.cache_pending(
                 winner.digest(),
                 genesis.digest(),
+                winner.height(),
                 winner.context().round,
                 merkleized,
                 true,
@@ -3061,7 +3089,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -3075,7 +3103,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -3155,6 +3183,7 @@ mod tests {
                 !harness.processor.cache_pending(
                     late_child.digest(),
                     loser.digest(),
+                    late_child.height(),
                     Round::new(Epoch::zero(), late_view),
                     merkleized,
                     true,
@@ -3162,6 +3191,40 @@ mod tests {
                 "completed work on a losing fork must not publish after finalization",
             );
             assert!(!harness.processor.pending_contains(&late_child.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reuses_replay_digest() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let block = harness
+                .stage_pending_child(&Block::genesis(), View::new(1))
+                .await;
+            let digest = block.digest();
+            let blocks = harness.provider.source(&block);
+            harness.processor.clear_pending();
+            let (mut response, _live) = oneshot::channel::<bool>();
+
+            DIGEST_CALLS.set(0);
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(block),
+                    &mut response,
+                )
+                .await;
+            let digest_calls = DIGEST_CALLS.get();
+
+            assert_eq!(result, Ok(()));
+            assert!(harness.processor.pending_contains(&digest));
+            assert!(harness.processor.replays.is_empty());
+            assert!(
+                digest_calls <= 3,
+                "replay must reuse its registered digest: {digest_calls} hashes",
+            );
         });
     }
 
@@ -3184,12 +3247,17 @@ mod tests {
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    harness.provider.clone(),
+                    harness.provider.source(&block3),
                     Arc::new(block3.clone()),
                     &mut response,
                 )
                 .await;
             assert_eq!(result, Ok(()), "rebuild should succeed");
+            assert_eq!(
+                *harness.provider.requests.lock(),
+                vec![block2.digest()],
+                "recovery must acquire only missing ancestors in forward order"
+            );
             assert!(
                 harness.processor.pending_contains(&block2.digest()),
                 "first missing descendant should be reconstructed",
@@ -3198,6 +3266,275 @@ mod tests {
                 harness.processor.pending_contains(&block3.digest()),
                 "target block should be reconstructed",
             );
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reuses_held_target_without_fetching_it() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let target = harness.stage_pending_child(&first, View::new(2)).await;
+            harness.processor.clear_pending();
+            let (first_height, first_digest) = (first.height(), first.digest());
+            let (target_height, target_digest) = (target.height(), target.digest());
+            let provider = harness.provider.clone();
+            let blocks = Blocks::new(
+                target_height,
+                NZUsize!(8),
+                move |height| match height {
+                    height if height == first_height => Some(first_digest),
+                    height if height == target_height => Some(target_digest),
+                    _ => None,
+                },
+                move |height| {
+                    assert_ne!(height, target_height, "held target must not be fetched");
+                    assert_eq!(height, first_height);
+                    let block = provider.fetch_by_digest(first_digest);
+                    async move { block.map(Arc::new) }
+                },
+            );
+            let (mut response, _live) = oneshot::channel::<bool>();
+            harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(target),
+                    &mut response,
+                )
+                .await
+                .expect("held target and fetched ancestor should replay");
+            assert_eq!(*harness.provider.requests.lock(), vec![first_digest]);
+            assert!(harness.processor.pending_contains(&target_digest));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reuses_overlapping_fork() {
+        for (resident_metadata, cache_parent) in [(false, false), (false, true), (true, true)] {
+            deterministic::Runner::default().start(move |context| async move {
+                let mut harness = Harness::new(context).await;
+                let genesis = Block::genesis();
+                let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+                let shared = harness.stage_pending_child(&first, View::new(2)).await;
+                let discarded = harness.stage_pending_child(&shared, View::new(3)).await;
+                let fork = harness.stage_pending_child(&shared, View::new(4)).await;
+                let tip = harness.stage_pending_child(&fork, View::new(5)).await;
+                {
+                    let mut state = harness.processor.execution.state.lock();
+                    state.pending.remove(&fork.digest());
+                    state.pending.remove(&tip.digest());
+                    if !cache_parent {
+                        state.pending.remove(&shared.digest());
+                        state.pending.remove(&discarded.digest());
+                    }
+                }
+                let target = if resident_metadata { &tip } else { &fork };
+                let target_height = target.height();
+                let cached = if cache_parent { &shared } else { &first };
+                let probe = ApplicationProbe::new(cached.digest(), []);
+                harness.processor.app.apply_probe = Some(probe.clone());
+                let metadata: Arc<BTreeMap<_, _>> = Arc::new(
+                    [&genesis, &first, &shared, &fork, &tip]
+                        .into_iter()
+                        .map(|block| (block.height(), block.digest()))
+                        .collect(),
+                );
+                let selected = metadata.clone();
+                let provider = harness.provider.clone();
+                let blocks = Blocks::new(
+                    target_height,
+                    NZUsize!(8),
+                    move |height| {
+                        if !resident_metadata && height != target_height {
+                            return None;
+                        }
+                        selected.get(&height).copied()
+                    },
+                    move |height| {
+                        let block = metadata
+                            .get(&height)
+                            .and_then(|digest| provider.fetch_by_digest(*digest));
+                        async move { block.map(Arc::new) }
+                    },
+                );
+                let (mut response, _live) = oneshot::channel::<bool>();
+                harness
+                    .processor
+                    .rebuild_pending(
+                        harness.context_cell.as_present(),
+                        blocks,
+                        Arc::new(target.clone()),
+                        &mut response,
+                    )
+                    .await
+                    .expect("shared prefix should supply the replay base");
+                let expected_fetches = if resident_metadata {
+                    vec![fork.digest()]
+                } else if !cache_parent {
+                    vec![first.digest(), shared.digest()]
+                } else {
+                    vec![]
+                };
+                assert_eq!(*harness.provider.requests.lock(), expected_fetches);
+                assert_eq!(probe.calls(), 0, "shared prefix must not execute again");
+                let state = harness.processor.execution.state.lock();
+                let entry = state.pending.get(&target.digest()).unwrap();
+                assert_eq!(entry.merkleized.root(), target.state_root);
+                assert!(!entry.verified, "replay is not a verification verdict");
+                assert_eq!(
+                    state.pending.contains_key(&discarded.digest()),
+                    cache_parent
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reads_prefix_below_resident_metadata() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(first.clone()).await);
+            let second = harness.stage_pending_child(&first, View::new(2)).await;
+            let third = harness.stage_pending_child(&second, View::new(3)).await;
+            harness.processor.clear_pending();
+            let (tip, digest) = (third.height(), third.digest());
+            let provider = harness.provider.clone();
+            let blocks = Blocks::new(
+                tip,
+                NZUsize!(8),
+                move |height| (height == tip).then_some(digest),
+                move |height| {
+                    let digest = provider
+                        .blocks
+                        .lock()
+                        .values()
+                        .find(|block| block.height() == height)
+                        .map(Digestible::digest);
+                    let block = digest.and_then(|digest| provider.fetch_by_digest(digest));
+                    async move { block.map(Arc::new) }
+                },
+            );
+            let (mut response, _live) = oneshot::channel::<bool>();
+            harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(third.clone()),
+                    &mut response,
+                )
+                .await
+                .expect("canonical prefix should bridge pruned metadata");
+            assert_eq!(*harness.provider.requests.lock(), vec![second.digest()]);
+            assert!(harness.processor.pending_contains(&third.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_conflicting_target_commitment() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(first.clone()).await);
+            let second = harness.stage_pending_child(&first, View::new(2)).await;
+            let (other, _) = harness.build_child(&first, View::new(3)).await;
+            harness.processor.clear_pending();
+            let provider = harness.provider.clone();
+            let selected = second.digest();
+            let tip = second.height();
+            let blocks = Blocks::new(
+                tip,
+                NZUsize!(8),
+                move |height| (height == tip).then_some(selected),
+                move |_| {
+                    let block = provider.fetch_by_digest(selected);
+                    async move { block.map(Arc::new) }
+                },
+            );
+            let (mut response, _live) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(other.clone()),
+                    &mut response,
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert!(!harness.processor.pending_contains(&other.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_detached_prefix_before_held_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(first.clone()).await);
+            let canonical = harness.stage_pending_child(&first, View::new(2)).await;
+            let other = harness.stage_pending_child(&first, View::new(3)).await;
+            let target = harness.stage_pending_child(&other, View::new(4)).await;
+            harness.processor.clear_pending();
+            let provider = harness.provider.clone();
+            let selected = canonical.digest();
+            let blocks = Blocks::new(
+                target.height(),
+                NZUsize!(8),
+                |_| None,
+                move |_| {
+                    let block = provider.fetch_by_digest(selected);
+                    async move { block.map(Arc::new) }
+                },
+            );
+            let (mut response, _live) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(target.clone()),
+                    &mut response,
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(*harness.provider.requests.lock(), vec![selected]);
+            assert!(!harness.processor.pending_contains(&target.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_source_ending_below_held_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let target = harness.stage_pending_child(&genesis, View::new(1)).await;
+            harness.processor.clear_pending();
+            let blocks = Blocks::new(
+                Height::zero(),
+                NZUsize!(8),
+                |_| None,
+                |_| async { panic!("source below the target must not be fetched") },
+            );
+            let (mut response, _live) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(target.clone()),
+                    &mut response,
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert!(!harness.processor.pending_contains(&target.digest()));
         });
     }
 
@@ -3409,13 +3746,13 @@ mod tests {
                 let mut first = Box::pin(first_execution.rebuild_pending(
                     &mut first_app,
                     &context,
-                    first_provider,
+                    first_provider.source(&block2),
                     Arc::new(block2.clone()),
                     &mut first_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &first_replays,
-                        progress: &first_progress,
-                    }),
+                        progress: Some(&first_progress),
+                    },
                 ));
                 select! {
                     result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
@@ -3425,35 +3762,35 @@ mod tests {
                 let mut second = Box::pin(second_execution.rebuild_pending(
                     &mut second_app,
                     &context,
-                    second_provider,
+                    second_provider.source(&block2),
                     Arc::new(block2.clone()),
                     &mut second_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &second_replays,
-                        progress: &second_progress,
-                    }),
+                        progress: Some(&second_progress),
+                    },
                 ));
                 let mut third = Box::pin(third_execution.rebuild_pending(
                     &mut third_app,
                     &context,
-                    third_provider,
+                    third_provider.source(&block3),
                     Arc::new(block3),
                     &mut third_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &third_replays,
-                        progress: &third_progress,
-                    }),
+                        progress: Some(&third_progress),
+                    },
                 ));
                 let mut fourth = Box::pin(fourth_execution.rebuild_pending(
                     &mut fourth_app,
                     &context,
-                    fourth_provider,
+                    fourth_provider.source(&block2),
                     Arc::new(block2),
                     &mut fourth_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &fourth_replays,
-                        progress: &fourth_progress,
-                    }),
+                        progress: Some(&fourth_progress),
+                    },
                 ));
                 let mut waiters_registered = false;
                 for _ in 0..100 {
@@ -3581,7 +3918,7 @@ mod tests {
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    harness.provider.clone(),
+                    harness.provider.source(&stale),
                     Arc::new(stale),
                     &mut response,
                 )
@@ -3621,7 +3958,7 @@ mod tests {
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    harness.provider.clone(),
+                    harness.provider.source(&block2),
                     Arc::new(block2.clone()),
                     &mut response,
                 )
@@ -3639,57 +3976,61 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_rejects_height_gap_to_processed_anchor() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context.child("harness")).await;
-            let genesis = Block::genesis();
+    fn execution_rebuild_pending_rejects_height_gap_to_known_anchor() {
+        for finalize_anchor in [false, true] {
+            deterministic::Runner::default().start(move |context| async move {
+                let mut harness = Harness::new(context.child("harness")).await;
+                let genesis = Block::genesis();
 
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(block1.clone()).await);
+                let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+                if finalize_anchor {
+                    assert!(harness.finalize(block1.clone()).await);
+                }
 
-            let gap_height = Height::new(3);
-            let gap_view = View::new(3);
-            let batches = harness
-                .processor
-                .fork_batches(&block1.digest())
-                .await
-                .expect("processed anchor should be available");
-            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
-            let gap_block = Block {
-                context: consensus_context(block1.digest(), gap_view),
-                parent: block1.digest(),
-                height: gap_height,
-                state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
-            };
+                let gap_height = Height::new(3);
+                let gap_view = View::new(3);
+                let batches = harness
+                    .processor
+                    .fork_batches(&block1.digest())
+                    .await
+                    .expect("known anchor should be available");
+                let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
+                let gap_block = Block {
+                    context: consensus_context(block1.digest(), gap_view),
+                    parent: block1.digest(),
+                    height: gap_height,
+                    state_root: merkleized.root(),
+                    range: non_empty_range!(
+                        merkleized.bounds().inactivity_floor,
+                        merkleized.bounds().tip.size
+                    ),
+                };
 
-            let provider = ScriptedParentProvider::default();
-            provider.push(&gap_block, [Some(block1)]);
+                let provider = ScriptedSource::default();
+                provider.push([Some(block1)]);
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    provider,
-                    Arc::new(gap_block.clone()),
-                    &mut response,
-                )
-                .await;
+                let (mut response, _rx) = oneshot::channel::<bool>();
+                let result = harness
+                    .processor
+                    .rebuild_pending(
+                        harness.context_cell.as_present(),
+                        provider.source(&gap_block),
+                        Arc::new(gap_block.clone()),
+                        &mut response,
+                    )
+                    .await;
 
-            assert_eq!(
-                result,
-                Err(PrepareBatchesError::Invalid),
-                "rebuild must reject non-contiguous ancestry above the processed anchor",
-            );
-            assert!(
-                !harness.processor.pending_contains(&gap_block.digest()),
-                "height-gap block must not be cached as pending",
-            );
-        });
+                assert_eq!(
+                    result,
+                    Err(PrepareBatchesError::Invalid),
+                    "rebuild must reject non-contiguous ancestry above a known anchor",
+                );
+                assert!(
+                    !harness.processor.pending_contains(&gap_block.digest()),
+                    "height-gap block must not be cached as pending",
+                );
+            });
+        }
     }
 
     #[test]
@@ -3707,14 +4048,14 @@ mod tests {
             assert_ne!(wrong_parent.digest(), block3.parent());
             harness.processor.clear_pending();
 
-            let provider = ScriptedParentProvider::default();
-            provider.push(&block3, [Some(wrong_parent)]);
+            let provider = ScriptedSource::default();
+            provider.push([Some(wrong_parent)]);
             let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    provider.clone(),
+                    provider.source(&block3),
                     Arc::new(block3.clone()),
                     &mut response,
                 )
@@ -3858,18 +4199,24 @@ mod tests {
     }
 
     #[test]
-    fn initial_ancestry_read_cancels_when_response_dropped() {
+    fn range_read_cancels_when_response_dropped() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut response, receiver) = oneshot::channel::<bool>();
-            let mut ancestry = Box::pin(futures::stream::pending::<Block>());
+            let source = Blocks::<Block>::new(
+                Height::new(1),
+                NZUsize!(8),
+                |_| None,
+                |_| futures::future::pending(),
+            );
+            let mut range = source.range(Height::new(1)..=Height::new(1));
             drop(receiver);
 
-            assert_eq!(fetch_ancestor(&mut response, &mut ancestry).await, None);
+            assert_eq!(await_or_cancel(&mut response, range.next()).await, None);
         });
     }
 
     #[test]
-    fn execution_rebuild_pending_returns_incomplete_when_parent_subscription_ends() {
+    fn execution_rebuild_pending_returns_incomplete_when_range_source_ends() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
@@ -3877,18 +4224,19 @@ mod tests {
             assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
             harness.processor.clear_pending();
 
-            let provider = ScriptedParentProvider::default();
-            provider.push(&block2, [None]);
+            let provider = ScriptedSource::default();
+            provider.push([None]);
 
             let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    provider,
-                    Arc::new(block2),
+                    provider.source(&block3),
+                    Arc::new(block3),
                     &mut response,
                 )
                 .await;
@@ -3906,28 +4254,25 @@ mod tests {
             assert!(harness.finalize(block1.clone()).await);
 
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
             harness.processor.clear_pending();
 
-            let provider = ScriptedParentProvider::default();
-            provider.push(&block2, [None, Some(block1.clone())]);
+            let provider = ScriptedSource::default();
+            provider.push([None, Some(block2.clone())]);
 
             let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
-                    provider.clone(),
-                    Arc::new(block2),
+                    provider.source(&block3),
+                    Arc::new(block3),
                     &mut response,
                 )
                 .await;
 
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));
-            assert_eq!(
-                provider.fetches(),
-                1,
-                "closed ancestry should not be retried"
-            );
+            assert_eq!(provider.fetches(), 1, "closed range should not be retried");
         });
     }
 }

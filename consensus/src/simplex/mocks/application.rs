@@ -40,6 +40,7 @@ pub enum Message<D: Digest, P: PublicKey> {
     Certify {
         round: Round,
         payload: D,
+        ancestry: Arc<[D]>,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -63,7 +64,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        context: Self::Context,
+        _ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send_lossy(Message::Propose { context, response });
@@ -74,6 +79,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
+        _ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
@@ -86,11 +92,17 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        payload: Self::Digest,
+        ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
             round,
             payload,
+            ancestry,
             response: tx,
         });
         rx
@@ -128,6 +140,8 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
+type AncestryCertifier<D> = Box<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + 'static>;
+
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
 pub enum Certifier<D: Digest> {
@@ -135,6 +149,8 @@ pub enum Certifier<D: Digest> {
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
+    /// A custom predicate that also receives the selected parent commitments.
+    WithAncestry(AncestryCertifier<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
@@ -365,6 +381,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
+        ancestry: Arc<[H::Digest]>,
     ) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(self.context.as_mut());
@@ -376,6 +393,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         match &self.should_certify {
             Certifier::Always => Some(true),
             Certifier::Custom(func) => Some(func(round, payload)),
+            Certifier::WithAncestry(func) => Some(func(round, payload, ancestry)),
             Certifier::Cancel | Certifier::Pending => None,
         }
     }
@@ -464,10 +482,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Certify {
                         round,
                         payload,
+                        ancestry,
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
-                        if let Some(certified) = self.certify(round, payload, contents).await {
+                        if let Some(certified) = self.certify(round, payload, contents, ancestry).await {
                             response.send_lossy(certified);
                         } else if matches!(self.should_certify, Certifier::Pending) {
                             // Hold the sender alive so the receiver never resolves.

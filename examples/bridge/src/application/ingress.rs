@@ -13,7 +13,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digest, ed25519::PublicKey};
 use commonware_utils::channel::oneshot;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
@@ -57,6 +57,7 @@ impl<D: Digest> Au for Mailbox<D> {
     async fn propose(
         &mut self,
         context: Context<Self::Digest, PublicKey>,
+        _: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
@@ -77,6 +78,7 @@ impl<D: Digest> Au for Mailbox<D> {
         &mut self,
         _: Context<Self::Digest, PublicKey>,
         payload: Self::Digest,
+        _: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.

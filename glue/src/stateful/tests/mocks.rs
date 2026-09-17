@@ -5,7 +5,7 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::{ancestry::Ancestry, standard::Standard},
+    marshal::{blocks::Blocks, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
@@ -320,7 +320,8 @@ impl<
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -330,7 +331,9 @@ impl<
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _block: Arc<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         None
