@@ -13,9 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{
-                self, find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains,
-            },
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -28,8 +26,14 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq};
-use core::{cmp::Ordering, ops::Range};
+use commonware_utils::{bitmap, iter::zip_eq, range::span_contains};
+use core::{
+    cmp::Ordering,
+    ops::{
+        Bound::{Excluded, Included},
+        Range,
+    },
+};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, hash_map},
@@ -2569,11 +2573,6 @@ where
 
     /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
     fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
-        let bounds = if NEXT {
-            ordered::Bounds::StartInclusive
-        } else {
-            ordered::Bounds::EndInclusive
-        };
         let find = |batch: &Self| {
             let diff = batch.diff.as_slice();
             let end = diff.partition_point(|(candidate, _)| {
@@ -2600,7 +2599,12 @@ where
 
             // Successor queries use [start, end). Predecessor queries use (start, end].
             // Match the cyclic owner before the public methods suppress linear wraparound.
-            span_contains(&data.key, &data.next_key, key, bounds).then(|| {
+            let bounds = if NEXT {
+                (Included(&data.key), Excluded(&data.next_key))
+            } else {
+                (Excluded(&data.key), Included(&data.next_key))
+            };
+            span_contains(bounds, key).then(|| {
                 if NEXT {
                     data.next_key.clone()
                 } else {

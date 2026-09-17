@@ -11,6 +11,8 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_utils::range::span_contains;
+use core::ops::Bound::{Excluded, Included};
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -20,31 +22,6 @@ pub mod fixed;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
-
-/// Endpoint inclusion for a cyclic span with distinct endpoints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bounds {
-    /// Include the start and exclude the end: `[start, end)`.
-    StartInclusive,
-    /// Exclude the start and include the end: `(start, end]`.
-    EndInclusive,
-}
-
-/// Whether the cyclic span from `span_start` to `span_end` contains `key`, with endpoint
-/// inclusion determined by `bounds`.
-///
-/// Equal endpoints define a span containing every key.
-pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K, bounds: Bounds) -> bool {
-    let (after_start, before_end) = match bounds {
-        Bounds::StartInclusive => (key >= span_start, key < span_end),
-        Bounds::EndInclusive => (key > span_start, key <= span_end),
-    };
-    if span_start >= span_end {
-        after_start || before_end
-    } else {
-        after_start && before_end
-    }
-}
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
@@ -82,7 +59,7 @@ where
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
-            if span_contains(&data.key, &data.next_key, key, Bounds::StartInclusive) {
+            if span_contains(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
         }
@@ -159,7 +136,7 @@ where
             // A cyclic owner is a strict linear predecessor only when its key is smaller.
             let data = Self::get_update_op(&self.log, loc).await?;
             if data.key < *key
-                && span_contains(&data.key, &data.next_key, key, Bounds::EndInclusive)
+                && span_contains((Excluded(&data.key), Included(&data.next_key)), key)
             {
                 return Ok(Some(data.key));
             }
@@ -395,29 +372,6 @@ mod test {
     use core::{future::Future, pin::Pin};
     use rand::{RngExt as _, seq::SliceRandom as _};
     use std::{collections::BTreeSet, ops::Bound};
-
-    #[test]
-    fn span_contains_boundaries() {
-        for (bounds, inclusive_start) in [
-            (Bounds::StartInclusive, true),
-            (Bounds::EndInclusive, false),
-        ] {
-            assert!(!span_contains(&2, &6, &1, bounds));
-            assert_eq!(span_contains(&2, &6, &2, bounds), inclusive_start);
-            assert!(span_contains(&2, &6, &5, bounds));
-            assert_eq!(span_contains(&2, &6, &6, bounds), !inclusive_start);
-
-            assert!(span_contains(&6, &2, &1, bounds));
-            assert_eq!(span_contains(&6, &2, &2, bounds), !inclusive_start);
-            assert!(!span_contains(&6, &2, &5, bounds));
-            assert_eq!(span_contains(&6, &2, &6, bounds), inclusive_start);
-            assert!(span_contains(&6, &2, &7, bounds));
-
-            assert!(span_contains(&3, &3, &2, bounds));
-            assert!(span_contains(&3, &3, &3, bounds));
-            assert!(span_contains(&3, &3, &4, bounds));
-        }
-    }
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
     /// ascending query sequence, including queries past the last candidate (cyclic wrap).
