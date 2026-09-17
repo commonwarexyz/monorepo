@@ -229,3 +229,46 @@
   .log-recovery .log-cell rect,
   .log-recovery .log-route { transition: none; }
 }
+
+.mm-results { margin: 28px 0; font: 13px/1.5 monospace; }
+.mm-result-panel { margin-bottom: 20px; padding: 18px 20px 14px; border: 1px solid #bdbdbd; background: #fff; }
+.mm-result-panel h3 { margin: 0; font-size: 16px; }
+.mm-result-panel > p { margin: 3px 0 16px; color: #666; font-size: 12px; }
+.mm-result-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-bottom: 16px; font-size: 12px; }
+.mm-result-legend span { display: inline-flex; align-items: center; gap: 8px; }
+.mm-result-plot { position: relative; }
+.mm-result-plot svg { display: block; width: 100%; height: auto; overflow: visible; font: 11px monospace; fill: #666; }
+.mm-axis-title { fill: #444; }
+.mm-grid { stroke: #e8e8ee; stroke-width: 1; }
+.mm-guide { stroke: #1f1fd1; stroke-opacity: .3; stroke-dasharray: 3 4; }
+.mm-hit { fill: transparent; cursor: crosshair; }
+.mm-hit:focus-visible { outline: 2px solid #1f1fd1; outline-offset: -2px; }
+.mm-result-tooltip { position: absolute; z-index: 1; width: 340px; max-width: 100%; padding: 12px 14px; border: 1px solid #1f1fd1; background: #fff; color: #111; box-shadow: 3px 3px 0 #e9e9f8; pointer-events: none; font-size: 12px; }
+.mm-result-tooltip strong { display: block; }
+.mm-result-tooltip strong { color: #1f1fd1; font-size: 14px; }
+.mm-results figcaption { line-height: 1.5; }
+@media (max-width: 480px) {
+  .mm-result-panel { padding: 14px 10px 12px; }
+  .mm-result-legend { gap: 14px; }
+}
+
+.mm-result-controls { display: flex; gap: 0; }
+.mm-results button { background: #fff; color: #555; border: 1px solid #ccc; padding: 7px 10px; min-height: 36px; font: 12px monospace; cursor: pointer; margin: 4px 6px 0 0; }
+.mm-results button[aria-pressed="true"] { background: #f3f3ff; color: #1f1fd1; border-color: #1f1fd1; }
+.mm-results button:focus-visible { outline: 2px solid #1f1fd1; outline-offset: 2px; }
+.mm-result-legend [hidden] { display: none; }
+.mm-result-tooltip table { width: 100%; margin: 8px 0 0; border: 0; border-collapse: collapse; font-size: 11px; }
+.mm-result-tooltip th, .mm-result-tooltip td { padding: 4px 0; border: 0; background: transparent; text-align: right; white-space: nowrap; }
+.mm-result-tooltip th:first-child { text-align: left; }
+.mm-result-tooltip .mm-detail { text-align: left; color: #666; font-size: 10px; padding: 0 0 8px; white-space: normal; }
+.mm-result-panel .mm-result-status { margin: 12px 0 0; font-size: 11px; line-height: 1.5; color: #666; }
+
+.mm-result-scenarios { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #ddd; margin-top: 14px; }
+.mm-result-scenarios button { margin: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 10px 2px; }
+.mm-result-scenarios button[aria-pressed="true"] { background: transparent; border-color: #1f1fd1; }
+.mm-result-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 18px; }
+.mm-result-controls button { margin: 0; }
+.mm-result-controls button + button { border-left: 0; }
+.mm-result-sync { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; cursor: pointer; min-height: 36px; }
+.mm-result-sync input { accent-color: #1f1fd1; width: 16px; height: 16px; margin: 0; }
+.mm-result-sync small { color: #666; font-size: 10px; }

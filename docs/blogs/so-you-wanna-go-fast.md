@@ -168,11 +168,11 @@ To catch up, we have to deliver block data through this whole path faster than t
 
 As the chain produces more data, each replica has more to receive, store, and deliver. Larger batches reduce synchronization costs, but waiting to fill them can delay delivery. More concurrent I/O can keep the disk busy while holding more buffers in memory. We need to understand which cost limits sustained throughput, then leave enough network, disk, and processing capacity for a lagging replica to catch up as well.
 
-We use [tracer](https://github.com/clabby/tracer) to study these tradeoffs across deployed clusters. It aggregates traces from every replica so we can compare the same consensus round on a shared timeline, see which replicas lag, and identify the phases responsible. Diffing round traces before and after a change shows whether speeding up one operation made another wait longer.
+[tracer](https://github.com/clabby/tracer) lets us study these tradeoffs across deployed clusters by aggregating traces from every replica. Comparing the same consensus round on a shared timeline reveals which replicas lag and which phases account for the delay. Diffing round traces before and after a change shows whether speeding up one operation made another wait longer.
 
 ```{=html}
 <figure aria-describedby="tracer-caption">
-  <img src="/imgs/tracer.png" />
+  <img src="/imgs/tracer.png" alt="Tracer showing consensus-round spans from multiple validators on a shared timeline." />
   <figcaption id="tracer-caption">
     Figure 8. A visualized aggregation of consensus round traces across several instances using the tracer tool.
   </figcaption>
@@ -181,4 +181,39 @@ We use [tracer](https://github.com/clabby/tracer) to study these tradeoffs acros
 
 Traces include time spent waiting for disk, so we use [samply](https://github.com/mstange/samply) alongside them to find where the CPU is busy. Its profiles show time spent decoding records, copying buffers, or maintaining indexes. Combined with resource metrics, these can lead us into the codec, archive, and runtime primitives beneath marshal, where improvements benefit other components too.
 
-Multimmit's Marshal gives us a demanding place to test the primitives we build at Commonware. We want the next application to benefit from this work without its developers having to repeat it.
+## How fast does it go?
+
+Batching writes, overlapping independent work, and avoiding repeated reads give us more room to handle incoming blocks. To see how that work adds up, we've been measuring Multimmit in two deployments of 50 validators, spread across either 13 regions around the world or three regions in North America.
+
+The charts compare Multimmit with BlueBottle and Raptr, running consensus-only workloads on the same testbeds. Each validator runs on an AWS `c8g.12xlarge` instance with 48 vCPUs and 96 GiB of RAM, processing synthetic 512-byte transactions. These measurements cover the whole consensus implementation, including work beyond marshal.
+
+**Submission-to-finality latency** runs from a transaction's scheduled submission to its first local consensus finality at the producer. The clock starts before admission, block construction, and signing, so those delays count too.
+
+A coordinated upgrade or a fault can stop every validator at once. To recover safely from that shutdown, Multimmit waits for block data and signing decisions to reach durable storage before making the corresponding availability promises or releasing signatures. Blocking on fsync this way isn't standard practice in consensus PoCs (as it provides stronger guarantees than a standard ≤ f crashed validator assumption), so the comparison disables it across all three implementations while retaining disk writes. The **Fsync on** toggle shows Multimmit's results with those durability barriers enabled.
+
+In healthy runs with fsync disabled, increasing the offered load from 50,000 to one million transactions per second moves Multimmit's median submission-to-finality latency from 389 to 400 ms globally and from 52 to 63 ms in North America.
+
+```{=html}
+<figure class="mm-results" aria-describedby="mm-results-caption">
+  <div data-mm-results="global" class="mm-result-panel">
+    <h3>Global</h3>
+    <p>13 regions · 50 validators</p>
+    <p class="mm-result-fallback">At one million offered transactions per second, median submission-to-finality latency is 400 ms and P99 is 635 ms.</p>
+  </div>
+  <div data-mm-results="na" class="mm-result-panel">
+    <h3>North America</h3>
+    <p>Virginia · Ohio · Canada · 50 validators</p>
+    <p class="mm-result-fallback">At one million offered transactions per second, median submission-to-finality latency is 63 ms and P99 is 100 ms.</p>
+  </div>
+  <figcaption id="mm-results-caption">Figure 9. Scheduled submission to first local consensus finality at the producer, measured on the same testbeds. Use the controls inside each chart to select its scenario, enable fsync, or switch between median and P99. Median plots include P25–P75 range bars. Fsync off compares all three implementations. Fsync on shows only Multimmit. Each point is one 120-second submission cohort after a 120-second warmup. Throughput counts transactions finalized during the measurement window. Hover, tap, or focus a load point to compare the measurements. Latency uses a logarithmic scale, fitted to each chart. Throughput uses a linear scale.</figcaption>
+</figure>
+<script type="module" src="so-you-wanna-go-fast.results.js"></script>
+```
+
+The fault scenarios stop one or nine validators, or drop 0.1% of complete application messages at the receiver, after decoding and before protocol delivery. TCP cannot retransmit those injected drops.
+
+The [measurement dataset](/artifacts/multimmit-measurements.json.zst) records the source revisions and benchmark instrumentation. Raptr also includes a small payload-retention fix needed to complete the measurements. Its quorum is 34 out of 50 validators, compared with 41 for Multimmit and BlueBottle.
+
+BlueBottle and Raptr's sweeps stop at 500,000 offered transactions per second. BlueBottle exhausted memory in the global one-million-tx/s test. Raptr's healthy global runs overloaded at 250,000 and 500,000 tx/s, so those rates are excluded from its global results. Missing fault-scenario points are explained beneath each chart.
+
+We're working to bring Multimmit to production in the coming months. These measurements give us a way to keep checking that the work pays off as we get there.
