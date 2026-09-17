@@ -1112,6 +1112,51 @@ where
     }
 }
 
+impl<F, K, V, D, const N: usize, S: Strategy> MerkleizedBatch<F, D, update::Ordered<K, V>, N, S>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H>(
+        &self,
+        key: &K,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_next_key(key, &db.any).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H>(
+        &self,
+        key: &K,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_prev_key(key, &db.any).await
+    }
+}
+
 impl<F, E, C, I, H, U, const N: usize, S> super::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,

@@ -22,7 +22,10 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use std::{collections::HashMap, sync::Arc};
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
@@ -204,25 +207,32 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.get_timer();
-        self.metrics.get_calls.inc();
-        self.metrics.lookups_requested.inc();
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
-        let mut result = None;
-        for loc in locs {
-            let op = self.log.read(*loc).await?;
-            let Operation::Update(data) = op else {
-                panic!("location does not reference update operation. loc={loc}");
-            };
-            if data.key() == key {
-                result = Some(data.into_value());
-                break;
-            }
-        }
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get(
+        &self,
+        key: &U::Key,
+    ) -> impl Future<Output = Result<Option<U::Value>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            let _timer = self.metrics.get_timer();
+            self.metrics.get_calls.inc();
+            self.metrics.lookups_requested.inc();
 
-        Ok(result)
+            // Translated keys can collide, so read candidates until the full key matches.
+            let mut result = None;
+            for loc in self.index.get(key).copied() {
+                let op = self.log.read(*loc).await?;
+                let Operation::Update(data) = op else {
+                    panic!("location does not reference update operation. loc={loc}");
+                };
+                if data.key() == key {
+                    result = Some(data.into_value());
+                    break;
+                }
+            }
+
+            Ok(result)
+        }
     }
 
     /// Batch read multiple keys.
