@@ -347,7 +347,7 @@ mod tests {
         BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::{Config as StreamConfig, Handshake as StreamHandshake};
+    use commonware_stream::encrypted::{Config as EncryptedConfig, Handshake as StreamHandshake};
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
@@ -390,8 +390,8 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
-        StreamConfig {
+    fn stream_config<S: Signer>(key: S) -> EncryptedConfig<S> {
+        EncryptedConfig {
             handshake: StreamHandshake {
                 signing_key: key,
                 synchrony_bound: Duration::from_secs(10),

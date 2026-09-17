@@ -19,6 +19,8 @@ commonware_macros::stability_scope!(BETA {
     pub mod utils;
 
     /// Provides a handshake's local identity.
+    ///
+    /// Every [Signer] implements this trait.
     pub trait Identity {
         /// Public key identifying the local peer.
         type PublicKey: PublicKey;
@@ -59,7 +61,7 @@ commonware_macros::stability_scope!(BETA {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
 
-        /// Authority that owns the local authenticated identity.
+        /// Scheme that owns the local authenticated identity.
         type Scheme: Identity;
 
         /// Error returned when authentication or stream setup fails.
@@ -71,7 +73,7 @@ commonware_macros::stability_scope!(BETA {
         /// Receiver returned for a connection using `I` as its raw stream.
         type Receiver<I: Stream>: Receiver;
 
-        /// Returns the authority for the local authenticated identity.
+        /// Returns the scheme for the local authenticated identity.
         ///
         /// Its identity must remain stable across attempts and clones of this handshake.
         fn scheme(&self) -> &Self::Scheme;
