@@ -1058,6 +1058,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
     /// parallel execution for larger inputs.
     ///
+    /// Nested calls at the same callsite share estimates across parent paths, so use distinct
+    /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
+    ///
     /// # Thread Pool Ownership
     ///
     /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
