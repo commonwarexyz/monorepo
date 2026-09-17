@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::range::span_contains;
+use commonware_utils::range::contains_cyclic;
 use core::ops::Bound::{Excluded, Included};
 use futures::{
     future::try_join_all,
@@ -59,7 +59,7 @@ where
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
-            if span_contains(&data.key..&data.next_key, key) {
+            if contains_cyclic(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
         }
@@ -136,7 +136,7 @@ where
             // A cyclic owner is a strict linear predecessor only when its key is smaller.
             let data = Self::get_update_op(&self.log, loc).await?;
             if data.key < *key
-                && span_contains((Excluded(&data.key), Included(&data.next_key)), key)
+                && contains_cyclic((Excluded(&data.key), Included(&data.next_key)), key)
             {
                 return Ok(Some(data.key));
             }

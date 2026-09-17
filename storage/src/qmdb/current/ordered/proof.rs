@@ -15,7 +15,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::range::span_contains;
+use commonware_utils::range::contains_cyclic;
 
 /// Proofs with fixed-size bitmap chunks.
 pub mod constant {
@@ -145,7 +145,7 @@ where
     pub fn verify<H: Hasher<Digest = D>>(&self, key: &K, root: &D) -> bool {
         let (op_proof, op) = match self {
             Self::KeyValue(op_proof, data) => {
-                if data.key == *key || !span_contains(&data.key..&data.next_key, key) {
+                if data.key == *key || !contains_cyclic(&data.key..&data.next_key, key) {
                     return false;
                 }
 

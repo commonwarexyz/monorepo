@@ -26,7 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq, range::span_contains};
+use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
     ops::{
@@ -2604,7 +2604,7 @@ where
             } else {
                 (Excluded(&data.key), Included(&data.next_key))
             };
-            span_contains(bounds, key).then(|| {
+            contains_cyclic(bounds, key).then(|| {
                 if NEXT {
                     data.next_key.clone()
                 } else {

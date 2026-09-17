@@ -19,17 +19,17 @@ use core::{fmt, ops::Range};
 /// # Examples
 ///
 /// ```
-/// use commonware_utils::range::span_contains;
+/// use commonware_utils::range::contains_cyclic;
 /// use core::ops::Bound::{Excluded, Included};
 ///
-/// assert!(span_contains(2..6, &2));
-/// assert!(!span_contains(2..6, &6));
-/// assert!(span_contains((Excluded(2), Included(6)), &6));
-/// assert!(span_contains(6..2, &0));
-/// assert!(span_contains(3..3, &9));
+/// assert!(contains_cyclic(2..6, &2));
+/// assert!(!contains_cyclic(2..6, &6));
+/// assert!(contains_cyclic((Excluded(2), Included(6)), &6));
+/// assert!(contains_cyclic(6..2, &0));
+/// assert!(contains_cyclic(3..3, &9));
 /// ```
 #[stability(ALPHA)]
-pub fn span_contains<K: Ord + ?Sized>(span: impl RangeBounds<K>, key: &K) -> bool {
+pub fn contains_cyclic<K: Ord + ?Sized>(span: impl RangeBounds<K>, key: &K) -> bool {
     let start = span.start_bound();
     let end = span.end_bound();
     let after_start = match start {
@@ -182,7 +182,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]
-    fn test_span_contains_boundaries() {
+    fn test_contains_cyclic_boundaries() {
         let cases: &[(_, &[u8])] = &[
             ((Included(2), Excluded(6)), &[2, 3, 4, 5]),
             ((Excluded(2), Included(6)), &[3, 4, 5, 6]),
@@ -203,53 +203,53 @@ mod tests {
             ((Unbounded, Unbounded), &[0, 1, 2, 3, 4, 5, 6, 7]),
         ];
         for &(bounds, expected) in cases {
-            let actual: Vec<_> = (0..=7).filter(|key| span_contains(bounds, key)).collect();
+            let actual: Vec<_> = (0..=7).filter(|key| contains_cyclic(bounds, key)).collect();
             assert_eq!(actual, expected, "bounds: {bounds:?}");
         }
     }
 
     #[test]
     #[allow(clippy::reversed_empty_ranges)]
-    fn test_span_contains_extremes() {
+    fn test_contains_cyclic_extremes() {
         for key in u8::MIN..=u8::MAX {
-            assert_eq!(span_contains(u8::MAX..u8::MIN, &key), key == u8::MAX);
+            assert_eq!(contains_cyclic(u8::MAX..u8::MIN, &key), key == u8::MAX);
             assert_eq!(
-                span_contains((Excluded(u8::MAX), Included(u8::MIN)), &key),
+                contains_cyclic((Excluded(u8::MAX), Included(u8::MIN)), &key),
                 key == u8::MIN
             );
-            assert!(span_contains(u8::MIN..u8::MIN, &key));
-            assert!(span_contains(u8::MAX..u8::MAX, &key));
-            assert!(!span_contains(..u8::MIN, &key));
-            assert!(!span_contains((Excluded(u8::MAX), Unbounded), &key));
+            assert!(contains_cyclic(u8::MIN..u8::MIN, &key));
+            assert!(contains_cyclic(u8::MAX..u8::MAX, &key));
+            assert!(!contains_cyclic(..u8::MIN, &key));
+            assert!(!contains_cyclic((Excluded(u8::MAX), Unbounded), &key));
         }
     }
 
     #[test]
-    fn test_span_contains_range_syntax() {
+    fn test_contains_cyclic_range_syntax() {
         let start = String::from("a");
         let end = String::from("c");
         let key = String::from("b");
-        assert!(span_contains(&start..&end, &key));
-        assert!(!span_contains(&start..&end, &end));
-        assert!(span_contains(&start..=&end, &end));
-        assert!(span_contains(&start.., &key));
-        assert!(!span_contains(..&end, &end));
-        assert!(span_contains(..=&end, &end));
-        assert!(span_contains(.., &key));
-        assert!(span_contains((Excluded(&start), Included(&end)), &end));
-        assert!(span_contains(
+        assert!(contains_cyclic(&start..&end, &key));
+        assert!(!contains_cyclic(&start..&end, &end));
+        assert!(contains_cyclic(&start..=&end, &end));
+        assert!(contains_cyclic(&start.., &key));
+        assert!(!contains_cyclic(..&end, &end));
+        assert!(contains_cyclic(..=&end, &end));
+        assert!(contains_cyclic(.., &key));
+        assert!(contains_cyclic((Excluded(&start), Included(&end)), &end));
+        assert!(contains_cyclic(
             (Included(start.as_str()), Excluded(end.as_str())),
             key.as_str()
         ));
     }
 
     #[test]
-    fn test_span_contains_current_bounds() {
+    fn test_contains_cyclic_current_bounds() {
         let mut span = 2..=6;
         assert_eq!(span.next(), Some(2));
         assert_eq!(span.next_back(), Some(6));
         for key in 0..=7 {
-            assert_eq!(span_contains(span.clone(), &key), (3..=5).contains(&key));
+            assert_eq!(contains_cyclic(span.clone(), &key), (3..=5).contains(&key));
         }
     }
 
