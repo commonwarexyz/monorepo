@@ -380,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn small_recovery_matches_encoder() {
-        let mut rng = test_rng();
+    fn direct_recovery_matches_encoder() {
         // The last two cases straddle the direct-evaluation limit.
+        let mut rng = test_rng();
         for (k, m) in [(7, 13), (84, 166), (128, 384), (128, 385)] {
             for shard_size in [2, 66, 1024] {
                 let originals = test_util::generate_original(k, shard_size, 0);

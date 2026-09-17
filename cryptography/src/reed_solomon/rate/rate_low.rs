@@ -27,12 +27,12 @@ fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &Fix
     // product is therefore the reciprocal of the known-position product.
     let log = &tables::get_exp_log().log;
     for (i, erasure) in erasures.iter_mut().enumerate() {
+        // At most DIRECT_EVALUATION_LIMIT terms fit comfortably in u32.
         let mut sum = 0u32;
         for &j in &known[..count] {
             // log[0] is GF_MODULUS, so the self term vanishes modulo GF_MODULUS.
             sum += u32::from(log[i ^ j]);
         }
-        // At most DIRECT_EVALUATION_LIMIT terms fit comfortably in u32.
         *erasure = GF_MODULUS - (sum % u32::from(GF_MODULUS)) as GfElement;
     }
 }
