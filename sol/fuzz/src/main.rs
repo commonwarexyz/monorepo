@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod bmt;
 mod merkle;
 mod simplex;
 
@@ -15,6 +16,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Binary Merkle Tree proofs.
+    #[command(subcommand)]
+    Bmt(bmt::Command),
     /// MMR and MMB proofs.
     #[command(subcommand)]
     Merkle(merkle::Command),
@@ -26,6 +30,7 @@ enum Command {
 impl Command {
     fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::Bmt(command) => command.execute(),
             Self::Merkle(command) => command.execute(),
             Self::Simplex(command) => command.execute(),
         }

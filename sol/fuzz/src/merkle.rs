@@ -138,7 +138,7 @@ pub(crate) struct RangeArgs {
 }
 
 /// Raw elements are deterministic across tree families and generation modes.
-fn leaf(seed: u64, index: u64) -> [u8; 32] {
+pub(super) fn leaf(seed: u64, index: u64) -> [u8; 32] {
     Keccak256::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()]).0
 }
 

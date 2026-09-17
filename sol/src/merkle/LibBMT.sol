@@ -1,0 +1,446 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.15;
+
+/// @title Commonware Binary Merkle Tree inclusion verification
+/// @notice Verify Keccak256 proofs for raw 32-byte elements in trees of at most `2^32 - 1` leaves.
+/// @dev Leaves hash `uint32_be(index) || element`. Parents hash `left || right`.
+/// The final root hashes `uint32_be(leaves) || treeRoot`. An empty tree's tree root is `H(empty)`.
+/// Witnesses ascend by level, left to right. A last unpaired node duplicates itself without a witness.
+/// Every verifier requires exact proof consumption and leaves its input arrays unchanged.
+library LibBMT {
+    /// @notice Verify one raw element.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param index Zero-based leaf index.
+    /// @param element Raw 32-byte leaf value.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verify(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
+        internal
+        pure
+        returns (bool)
+    {
+        uint256 witnesses;
+        assembly ("memory-safe") {
+            witnesses := add(proof, 0x20)
+        }
+        return _single(root, leaves, index, element, witnesses, proof.length, false);
+    }
+
+    /// @notice Verify one raw element.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param index Zero-based leaf index.
+    /// @param element Raw 32-byte leaf value.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
+        internal
+        pure
+        returns (bool)
+    {
+        uint256 witnesses;
+        assembly ("memory-safe") {
+            witnesses := proof.offset
+        }
+        return _single(root, leaves, index, element, witnesses, proof.length, true);
+    }
+
+    /// @notice Verify consecutive raw elements beginning at `start`.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// Empty inputs require an empty tree and proof with `start == 0`.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param start Zero-based first leaf index.
+    /// @param elements Raw 32-byte leaf values.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
+        internal
+        pure
+        returns (bool)
+    {
+        uint256 witnesses;
+        uint256 data;
+        assembly ("memory-safe") {
+            witnesses := add(proof, 0x20)
+            data := add(elements, 0x20)
+        }
+        return _range(root, leaves, start, data, elements.length, witnesses, proof.length, false);
+    }
+
+    /// @notice Verify consecutive raw elements beginning at `start`.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// Empty inputs require an empty tree and proof with `start == 0`.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param start Zero-based first leaf index.
+    /// @param elements Raw 32-byte leaf values.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verifyRangeCalldata(
+        bytes32 root,
+        uint256 leaves,
+        uint256 start,
+        bytes32[] calldata elements,
+        bytes32[] calldata proof
+    ) internal pure returns (bool) {
+        uint256 witnesses;
+        uint256 data;
+        assembly ("memory-safe") {
+            witnesses := proof.offset
+            data := elements.offset
+        }
+        return _range(root, leaves, start, data, elements.length, witnesses, proof.length, true);
+    }
+
+    /// @notice Verify raw elements at arbitrary, distinct indices.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// Empty inputs require an empty tree and proof.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param indices Distinct zero-based leaf indices in the same order as `elements`.
+    /// @param elements Raw 32-byte leaf values.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verifyMulti(
+        bytes32 root,
+        uint256 leaves,
+        uint256[] memory indices,
+        bytes32[] memory elements,
+        bytes32[] memory proof
+    ) internal pure returns (bool) {
+        uint256 witnesses;
+        uint256 data;
+        if (indices.length != elements.length) return false;
+        uint256 positions;
+        assembly ("memory-safe") {
+            witnesses := add(proof, 0x20)
+            data := add(elements, 0x20)
+            positions := add(indices, 0x20)
+        }
+        return _multi(root, leaves, positions, data, elements.length, witnesses, proof.length, false);
+    }
+
+    /// @notice Verify raw elements at arbitrary, distinct indices.
+    /// @dev Invalid bounds, malformed proofs and root mismatches return false.
+    /// Empty inputs require an empty tree and proof.
+    /// @param root Trusted root commitment.
+    /// @param leaves Total leaf count, at most `2^32 - 1`.
+    /// @param indices Distinct zero-based leaf indices in the same order as `elements`.
+    /// @param elements Raw 32-byte leaf values.
+    /// @param proof Exact Commonware sibling digests in ascending level and index order.
+    /// @return True exactly when the complete proof authenticates the supplied elements.
+    function verifyMultiCalldata(
+        bytes32 root,
+        uint256 leaves,
+        uint256[] calldata indices,
+        bytes32[] calldata elements,
+        bytes32[] calldata proof
+    ) internal pure returns (bool) {
+        uint256 witnesses;
+        uint256 data;
+        if (indices.length != elements.length) return false;
+        uint256 positions;
+        assembly ("memory-safe") {
+            witnesses := proof.offset
+            data := elements.offset
+            positions := indices.offset
+        }
+        return _multi(root, leaves, positions, data, elements.length, witnesses, proof.length, true);
+    }
+
+    /// @dev Hash a single branch without allocating memory.
+    function _single(
+        bytes32 root,
+        uint256 leaves,
+        uint256 index,
+        bytes32 element,
+        uint256 proof,
+        uint256 proofLength,
+        bool cd
+    ) private pure returns (bool valid) {
+        assembly ("memory-safe") {
+            /// @dev Read one word from the selected input address space.
+            function load(p, calldataInput) -> v {
+                switch calldataInput
+                case 0 { v := mload(p) }
+                default { v := calldataload(p) }
+            }
+            if and(iszero(gt(leaves, 0xffffffff)), lt(index, leaves)) {
+                mstore(0, index)
+                mstore(0x20, element)
+                let digest := keccak256(0x1c, 0x24)
+                let cursor := proof
+                let end := add(proof, shl(5, proofLength))
+                let size := leaves
+                valid := 1
+                for { } gt(size, 1) { } {
+                    let sibling := digest
+                    if lt(xor(index, 1), size) {
+                        if eq(cursor, end) {
+                            valid := 0
+                            break
+                        }
+                        sibling := load(cursor, cd)
+                        cursor := add(cursor, 0x20)
+                    }
+                    let slot := shl(5, and(index, 1))
+                    mstore(slot, digest)
+                    mstore(xor(slot, 0x20), sibling)
+                    digest := keccak256(0, 0x40)
+                    index := shr(1, index)
+                    size := shr(1, add(size, 1))
+                }
+                mstore(0, leaves)
+                mstore(0x20, digest)
+                valid := and(valid, and(eq(cursor, end), eq(root, keccak256(0x1c, 0x24))))
+            }
+        }
+    }
+
+    /// @dev Compact each contiguous level in place. Only its two boundaries can require witnesses.
+    function _range(
+        bytes32 root,
+        uint256 leaves,
+        uint256 start,
+        uint256 data,
+        uint256 count,
+        uint256 proof,
+        uint256 proofLength,
+        bool cd
+    ) private pure returns (bool valid) {
+        if (leaves > type(uint32).max || start > leaves || count > leaves - start) return false;
+        if (count == 0) return start == 0 && _empty(root, leaves, proofLength);
+        assembly ("memory-safe") {
+            /// @dev Read one word from the selected input address space.
+            function load(p, calldataInput) -> v {
+                switch calldataInput
+                case 0 { v := mload(p) }
+                default { v := calldataload(p) }
+            }
+            let base := mload(0x40)
+            let limit := add(base, shl(5, count))
+            mstore(0x40, limit)
+            for { let i := 0 } lt(i, count) { i := add(i, 1) } {
+                mstore(0, add(start, i))
+                mstore(0x20, load(add(data, shl(5, i)), cd))
+                mstore(add(base, shl(5, i)), keccak256(0x1c, 0x24))
+            }
+            let cursor := proof
+            let end := add(proof, shl(5, proofLength))
+            let size := leaves
+            valid := 1
+            for { } and(gt(size, 1), valid) { } {
+                let output := base
+                let input := base
+                let inputEnd := add(base, shl(5, count))
+                let position := start
+                for { } lt(input, inputEnd) { position := add(position, 2) } {
+                    let left := mload(input)
+                    let right := left
+                    input := add(input, 0x20)
+                    switch and(position, 1)
+                    case 1 {
+                        if eq(cursor, end) {
+                            valid := 0
+                            break
+                        }
+                        right := left
+                        left := load(cursor, cd)
+                        cursor := add(cursor, 0x20)
+                        position := sub(position, 1)
+                    }
+                    default {
+                        switch lt(input, inputEnd)
+                        case 1 {
+                            right := mload(input)
+                            input := add(input, 0x20)
+                        }
+                        default {
+                            if lt(add(position, 1), size) {
+                                if eq(cursor, end) {
+                                    valid := 0
+                                    break
+                                }
+                                right := load(cursor, cd)
+                                cursor := add(cursor, 0x20)
+                            }
+                        }
+                    }
+                    mstore(0, left)
+                    mstore(0x20, right)
+                    mstore(output, keccak256(0, 0x40))
+                    output := add(output, 0x20)
+                }
+                count := shr(5, sub(output, base))
+                start := shr(1, start)
+                size := shr(1, add(size, 1))
+            }
+            mstore(0, leaves)
+            mstore(0x20, mload(base))
+            valid := and(valid, and(eq(cursor, end), eq(root, keccak256(0x1c, 0x24))))
+            for { let p := base } lt(p, limit) { p := add(p, 0x20) } { mstore(p, 0) }
+        }
+    }
+
+    /// @dev Sort private index/digest pairs, reject duplicates, and compact each level in place.
+    function _multi(
+        bytes32 root,
+        uint256 leaves,
+        uint256 indices,
+        uint256 data,
+        uint256 count,
+        uint256 proof,
+        uint256 proofLength,
+        bool cd
+    ) private pure returns (bool valid) {
+        if (leaves > type(uint32).max || count > leaves) return false;
+        if (count == 0) return _empty(root, leaves, proofLength);
+        uint256 base;
+        bool sorted = true;
+        assembly ("memory-safe") {
+            /// @dev Read one word from the selected input address space.
+            function load(p, calldataInput) -> v {
+                switch calldataInput
+                case 0 { v := mload(p) }
+                default { v := calldataload(p) }
+            }
+            base := mload(0x40)
+            mstore(0x40, add(base, shl(6, count)))
+            valid := 1
+            let previous := 0
+            for { let i := 0 } lt(i, count) { i := add(i, 1) } {
+                let index := load(add(indices, shl(5, i)), cd)
+                if iszero(lt(index, leaves)) { valid := 0 }
+                if lt(index, previous) { sorted := 0 }
+                previous := index
+                let target := add(base, shl(6, i))
+                mstore(target, index)
+                mstore(0, index)
+                mstore(0x20, load(add(data, shl(5, i)), cd))
+                mstore(add(target, 0x20), keccak256(0x1c, 0x24))
+            }
+        }
+        if (valid && !sorted) _sort(base, count);
+        assembly ("memory-safe") {
+            /// @dev Read one word from the selected input address space.
+            function load(p, calldataInput) -> v {
+                switch calldataInput
+                case 0 { v := mload(p) }
+                default { v := calldataload(p) }
+            }
+            let limit := add(base, shl(6, count))
+            for { let p := add(base, 0x40) } and(lt(p, limit), valid) { p := add(p, 0x40) } {
+                if eq(mload(p), mload(sub(p, 0x40))) { valid := 0 }
+            }
+            let cursor := proof
+            let end := add(proof, shl(5, proofLength))
+            let size := leaves
+            for { } and(gt(size, 1), valid) { } {
+                let output := base
+                let input := base
+                let inputEnd := add(base, shl(6, count))
+                for { } lt(input, inputEnd) { } {
+                    let index := mload(input)
+                    let left := mload(add(input, 0x20))
+                    let right := left
+                    input := add(input, 0x40)
+                    switch and(index, 1)
+                    case 1 {
+                        if eq(cursor, end) {
+                            valid := 0
+                            break
+                        }
+                        right := left
+                        left := load(cursor, cd)
+                        cursor := add(cursor, 0x20)
+                    }
+                    default {
+                        let paired := 0
+                        if lt(input, inputEnd) { paired := eq(mload(input), add(index, 1)) }
+                        switch paired
+                        case 1 {
+                            right := mload(add(input, 0x20))
+                            input := add(input, 0x40)
+                        }
+                        default {
+                            if lt(add(index, 1), size) {
+                                if eq(cursor, end) {
+                                    valid := 0
+                                    break
+                                }
+                                right := load(cursor, cd)
+                                cursor := add(cursor, 0x20)
+                            }
+                        }
+                    }
+                    mstore(0, left)
+                    mstore(0x20, right)
+                    mstore(output, shr(1, index))
+                    mstore(add(output, 0x20), keccak256(0, 0x40))
+                    output := add(output, 0x40)
+                }
+                count := shr(6, sub(output, base))
+                size := shr(1, add(size, 1))
+            }
+            mstore(0, leaves)
+            mstore(0x20, mload(add(base, 0x20)))
+            valid := and(valid, and(eq(cursor, end), eq(root, keccak256(0x1c, 0x24))))
+            for { let p := base } lt(p, limit) { p := add(p, 0x20) } { mstore(p, 0) }
+        }
+    }
+
+    /// @dev Authenticate the unique finalized empty tree without allocating memory.
+    function _empty(bytes32 root, uint256 leaves, uint256 proofLength) private pure returns (bool valid) {
+        assembly ("memory-safe") {
+            mstore(0, 0)
+            mstore(0x20, keccak256(0, 0))
+            valid := and(iszero(or(leaves, proofLength)), eq(root, keccak256(0x1c, 0x24)))
+        }
+    }
+
+    /// @dev Heapsort bounds work for arbitrary input order and moves each index with its value.
+    function _sort(uint256 pairs, uint256 count) private pure {
+        assembly ("memory-safe") {
+            /// @dev Restore the max-heap below one displaced pair.
+            function sift(base, slot, size) {
+                let key := mload(add(base, shl(6, slot)))
+                let value := mload(add(add(base, shl(6, slot)), 0x20))
+                for { let child := add(shl(1, slot), 1) } lt(child, size) { child := add(shl(1, slot), 1) } {
+                    if lt(add(child, 1), size) {
+                        if lt(mload(add(base, shl(6, child))), mload(add(base, shl(6, add(child, 1))))) {
+                            child := add(child, 1)
+                        }
+                    }
+                    let source := add(base, shl(6, child))
+                    if iszero(lt(key, mload(source))) { break }
+                    let target := add(base, shl(6, slot))
+                    mstore(target, mload(source))
+                    mstore(add(target, 0x20), mload(add(source, 0x20)))
+                    slot := child
+                }
+                let target := add(base, shl(6, slot))
+                mstore(target, key)
+                mstore(add(target, 0x20), value)
+            }
+            for { let i := shr(1, count) } i { } {
+                i := sub(i, 1)
+                sift(pairs, i, count)
+            }
+            for { let size := count } gt(size, 1) { } {
+                size := sub(size, 1)
+                let last := add(pairs, shl(6, size))
+                let key := mload(pairs)
+                let value := mload(add(pairs, 0x20))
+                mstore(pairs, mload(last))
+                mstore(add(pairs, 0x20), mload(add(last, 0x20)))
+                mstore(last, key)
+                mstore(add(last, 0x20), value)
+                sift(pairs, 0, size)
+            }
+        }
+    }
+}
