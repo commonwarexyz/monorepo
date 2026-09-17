@@ -1,10 +1,13 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
 import { Common } from "./Common.sol";
 
-/// @notice Commonware range proof reconstruction with Keccak256.
+/// @notice Commonware range proof reconstruction with a caller-selected hash.
 /// @dev Positions and counts are big-endian `uint64` values. Raw elements are 32 bytes.
+/// `H` uses native Keccak256 for `address(0)` or a trusted raw `STATICCALL` target.
+/// Targets must return exactly 32 bytes or verification reverts with `Common.HashFailed()`.
+/// The empty root is `H(bytes8(0))`.
 /// Leaves hash `position || element` and parents hash `position || left || right`.
 /// Peak pairs hash `left || right` without a position.
 ///
@@ -47,10 +50,23 @@ library LibMerkle {
         uint256 proofCount,
         bool single,
         bool fromCalldata,
-        bool mmb
-    ) internal pure returns (bool) {
+        bool mmb,
+        address hasher
+    ) internal view returns (bool) {
         return verify(
-            root, leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, Bagging.ForwardFold, 0
+            root,
+            leaves,
+            start,
+            data,
+            count,
+            proof,
+            proofCount,
+            single,
+            fromCalldata,
+            mmb,
+            Bagging.ForwardFold,
+            0,
+            hasher
         );
     }
 
@@ -71,27 +87,31 @@ library LibMerkle {
         bool fromCalldata,
         bool mmb,
         Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool valid) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool valid) {
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return false;
         if (start > leaves || count > leaves - start) return false;
         if (count == 0) {
-            return leaves == 0 && start == 0 && proofCount == 0 && inactivePeaks == 0 && root == Common.EMPTY_ROOT;
+            return
+                leaves == 0 && start == 0 && proofCount == 0 && inactivePeaks == 0 && root == Common.emptyRoot(hasher);
         }
         if (mmb ? leaves <= 2 : leaves & (leaves - 1) == 0) {
-            return
-                _onePeak(root, leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, inactivePeaks);
+            return _onePeak(
+                root, leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, inactivePeaks, hasher
+            );
         }
         if (bagging == Bagging.ForwardFold) {
-            return
-                _forward(root, leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, inactivePeaks);
+            return _forward(
+                root, leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, inactivePeaks, hasher
+            );
         }
         uint256 free;
         assembly ("memory-safe") { free := mload(0x40) }
         Proof memory p = Proof(data, start, start + count, proof, proofCount);
         uint256 scratch;
         assembly ("memory-safe") { scratch := mload(0x40) }
-        valid = _backwardRange(root, leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb);
+        valid = _backwardRange(root, leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb, hasher);
         _clear(free, scratch + Common.levels(leaves, mmb) * 32);
         assembly ("memory-safe") { mstore(0x40, free) }
     }
@@ -108,8 +128,9 @@ library LibMerkle {
         bool single,
         bool cd,
         bool belt,
-        uint256 inactive
-    ) private pure returns (bool) {
+        uint256 inactive,
+        address hasher
+    ) private view returns (bool) {
         unchecked {
             if (inactive > 1) return false;
             uint256 position = belt ? leaves - 1 : 2 * leaves - 2;
@@ -118,14 +139,14 @@ library LibMerkle {
             uint256 next;
             bool ok;
             if (single) {
-                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt);
+                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt, hasher);
             } else {
                 uint256 base;
                 assembly ("memory-safe") { base := mload(0x40) }
                 (digest, next, ok) =
-                    _subtree(data, start, start + count, position, leaves, 0, proof, end, base, cd, belt);
+                    _subtree(data, start, start + count, position, leaves, 0, proof, end, base, cd, belt, hasher);
             }
-            return ok && next == end && Common.root(leaves, inactive, digest) == root;
+            return ok && next == end && Common.root(leaves, inactive, digest, hasher) == root;
         }
     }
 
@@ -142,8 +163,9 @@ library LibMerkle {
         bool single,
         bool cd,
         bool belt,
-        uint256 inactive
-    ) private pure returns (bool) {
+        uint256 inactive,
+        address hasher
+    ) private view returns (bool) {
         unchecked {
             uint256 end = start + count;
             (uint256 prefix, uint256 after_, uint256 levels, uint256 peaks) = _forwardOffsets(n, start, end, belt);
@@ -180,18 +202,22 @@ library LibMerkle {
                             }
                             position = 2 * cursor - ones + 2 * w - 2;
                         }
-                        if (single) (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt);
-                        else (d, q, ok) = _subtree(data, start, end, position, w, cursor, q, qEnd, base, cd, belt);
+                        if (single) {
+                            (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, hasher);
+                        } else {
+                            (d, q, ok) =
+                                _subtree(data, start, end, position, w, cursor, q, qEnd, base, cd, belt, hasher);
+                        }
                         if (!ok) return false;
                     }
                     // `have` is true only after `acc` has been assigned a peak digest.
                     // forge-lint: disable-next-line(uninitialized-local)
-                    acc = have ? Common.fold(acc, d) : d;
+                    acc = have ? Common.fold(acc, d, hasher) : d;
                     have = true;
                 }
                 cursor = next;
             }
-            return q == qEnd && Common.root(n, inactive, acc) == root;
+            return q == qEnd && Common.root(n, inactive, acc, hasher) == root;
         }
     }
 
@@ -240,8 +266,9 @@ library LibMerkle {
         uint256 inactive,
         bool single,
         bool cd,
-        bool belt
-    ) private pure returns (bool) {
+        bool belt,
+        address hasher
+    ) private view returns (bool) {
         unchecked {
             uint256 offsets = _backwardOffsets(n, p.start, p.end, inactive, belt);
             if (offsets == type(uint256).max) return false;
@@ -290,7 +317,15 @@ library LibMerkle {
                         }
                         if (single) {
                             (d, q, ok) = _singleton(
-                                p.data, p.start - cursor, position, w, q, p.digests + p.digestCount * 32, cd, belt
+                                p.data,
+                                p.start - cursor,
+                                position,
+                                w,
+                                q,
+                                p.digests + p.digestCount * 32,
+                                cd,
+                                belt,
+                                hasher
                             );
                         } else {
                             (d, q, ok) = _subtree(
@@ -304,7 +339,8 @@ library LibMerkle {
                                 p.digests + p.digestCount * 32,
                                 base,
                                 cd,
-                                belt
+                                belt,
+                                hasher
                             );
                         }
                         if (!ok) return false;
@@ -320,7 +356,7 @@ library LibMerkle {
                         assembly ("memory-safe") { mstore(top, d) }
                         top += 32;
                     } else {
-                        acc = have ? Common.fold(acc, d) : d;
+                        acc = have ? Common.fold(acc, d, hasher) : d;
                         have = true;
                     }
                 }
@@ -328,8 +364,8 @@ library LibMerkle {
                 ++peakIndex;
             }
             if (q != p.digests + p.digestCount * 32) return false;
-            if (top != scratch) acc = Common.bag(scratch, (top - scratch) / 32, 0, true);
-            return Common.root(n, inactive, acc) == root;
+            if (top != scratch) acc = Common.bag(scratch, (top - scratch) / 32, 0, true, hasher);
+            return Common.root(n, inactive, acc, hasher) == root;
         }
     }
 
@@ -389,9 +425,22 @@ library LibMerkle {
         uint256 q,
         uint256 qEnd,
         bool cd,
-        bool belt
-    ) private pure returns (bytes32 d, uint256 nextQ, bool ok) {
+        bool belt,
+        address hasher
+    ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
         assembly ("memory-safe") {
+            hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
+            /// @dev Hash raw bytes through an external target and require exactly one digest.
+            function externalHash(pointer, length, target) -> digest {
+                let success := staticcall(gas(), target, pointer, length, 0, 0x20)
+                if iszero(and(success, eq(returndatasize(), 0x20))) {
+                    mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                    // Each external hash result must be checked before traversal continues.
+                    // forge-lint: disable-next-line(require-revert-in-loop)
+                    revert(0x1c, 4)
+                }
+                digest := mload(0)
+            }
             /// @dev Return the highest set bit of a positive `uint64` using `Common.log2`'s lookup.
             function ilog2(x) -> r {
                 r := shl(5, gt(x, 0xffffffff))
@@ -432,7 +481,9 @@ library LibMerkle {
                 if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
                 mstore(0, pos)
                 mstore(0x20, element)
-                d := keccak256(0x18, 0x28)
+                switch hasher
+                case 0 { d := keccak256(0x18, 0x28) }
+                default { d := externalHash(0x18, 0x28, hasher) }
                 for { let w := 1 } lt(w, width) { w := shl(1, w) } {
                     let sibling := 0
                     switch iszero(and(index, w))
@@ -457,7 +508,9 @@ library LibMerkle {
                     pos := p
                     if belt { pos := add(sub(shl(1, p), ilog2(add(p, 1))), 1) }
                     mstore(0, pos)
-                    d := keccak256(0x18, 0x48)
+                    switch hasher
+                    case 0 { d := keccak256(0x18, 0x48) }
+                    default { d := externalHash(0x18, 0x48, hasher) }
                 }
             }
             mstore(0x40, free)
@@ -475,9 +528,22 @@ library LibMerkle {
         uint256 cursor,
         uint256 q,
         uint256 qEnd,
-        uint256 base
-    ) private pure returns (bytes32 d, uint256 nextQ, bool ok) {
+        uint256 base,
+        address hasher
+    ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
         assembly ("memory-safe") {
+            hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
+            /// @dev Hash raw bytes through an external target and require exactly one digest.
+            function externalHash(pointer, length, target) -> digest {
+                let success := staticcall(gas(), target, pointer, length, 0, 0x20)
+                if iszero(and(success, eq(returndatasize(), 0x20))) {
+                    mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                    // Each external hash result must be checked before traversal continues.
+                    // forge-lint: disable-next-line(require-revert-in-loop)
+                    revert(0x1c, 4)
+                }
+                digest := mload(0)
+            }
             let free := mload(0x40)
             let top := base
             ok := 1
@@ -497,7 +563,9 @@ library LibMerkle {
                     case 1 {
                         mstore(0, p)
                         mstore(0x20, mload(add(data, shl(5, sub(cursor, start)))))
-                        d := keccak256(0x18, 0x28)
+                        switch hasher
+                        case 0 { d := keccak256(0x18, 0x28) }
+                        default { d := externalHash(0x18, 0x28, hasher) }
                         cursor := add(cursor, 1)
                     }
                     default {
@@ -519,7 +587,9 @@ library LibMerkle {
                     mstore(0, p)
                     mstore(0x20, mload(frame))
                     mstore(0x40, d)
-                    d := keccak256(0x18, 0x48)
+                    switch hasher
+                    case 0 { d := keccak256(0x18, 0x48) }
+                    default { d := externalHash(0x18, 0x48, hasher) }
                     mstore(frame, 0)
                     top := frame
                 }
@@ -544,12 +614,25 @@ library LibMerkle {
         uint256 qEnd,
         uint256 base,
         bool cd,
-        bool belt
-    ) private pure returns (bytes32 d, uint256 nextQ, bool ok) {
+        bool belt,
+        address hasher
+    ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
         if (!cd && !belt) {
-            return _memoryMMR(data, start, end, p, width, cursor, q, qEnd, base);
+            return _memoryMMR(data, start, end, p, width, cursor, q, qEnd, base, hasher);
         }
         assembly ("memory-safe") {
+            hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
+            /// @dev Hash raw bytes through an external target and require exactly one digest.
+            function externalHash(pointer, length, target) -> digest {
+                let success := staticcall(gas(), target, pointer, length, 0, 0x20)
+                if iszero(and(success, eq(returndatasize(), 0x20))) {
+                    mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                    // Each external hash result must be checked before traversal continues.
+                    // forge-lint: disable-next-line(require-revert-in-loop)
+                    revert(0x1c, 4)
+                }
+                digest := mload(0)
+            }
             /// @dev Return the highest set bit of a positive `uint64` using `Common.log2`'s lookup.
             function ilog2(x) -> r {
                 r := shl(5, gt(x, 0xffffffff))
@@ -592,7 +675,9 @@ library LibMerkle {
                         if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
                         mstore(0, pos)
                         mstore(0x20, load(add(data, shl(5, sub(cursor, start))), cd))
-                        d := keccak256(0x18, 0x28)
+                        switch hasher
+                        case 0 { d := keccak256(0x18, 0x28) }
+                        default { d := externalHash(0x18, 0x28, hasher) }
                         cursor := add(cursor, 1)
                     }
                     default {
@@ -626,7 +711,9 @@ library LibMerkle {
                     mstore(0, pos)
                     mstore(0x20, mload(frame))
                     mstore(0x40, d)
-                    d := keccak256(0x18, 0x48)
+                    switch hasher
+                    case 0 { d := keccak256(0x18, 0x48) }
+                    default { d := externalHash(0x18, 0x48, hasher) }
                     mstore(frame, 0)
                     top := frame
                 }
