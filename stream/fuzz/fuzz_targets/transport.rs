@@ -20,7 +20,7 @@ fn fuzz(data: &[u8]) {
 
         let dialer_config = Config {
             handshake: Handshake {
-                signing_key: dialer_signer.clone(),
+                signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -31,7 +31,7 @@ fn fuzz(data: &[u8]) {
 
         let listener_config = Config {
             handshake: Handshake {
-                signing_key: listener_signer.clone(),
+                signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },

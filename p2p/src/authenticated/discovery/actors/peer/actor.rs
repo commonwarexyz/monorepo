@@ -444,7 +444,7 @@ mod tests {
     fn stream_config<S: Signer>(signer: S) -> EncryptedConfig<S> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: signer,
+                signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },

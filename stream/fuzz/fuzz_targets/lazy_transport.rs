@@ -28,7 +28,7 @@ thread_local! {
 
             let dialer_config = Config {
                 handshake: Handshake {
-                    signing_key: dialer_signer.clone(),
+                    signer: dialer_signer.clone(),
                     synchrony_bound: Duration::from_secs(3),
                     max_handshake_age: Duration::from_secs(5),
                 },
@@ -39,7 +39,7 @@ thread_local! {
 
             let listener_config = Config {
                 handshake: Handshake {
-                    signing_key: listener_signer.clone(),
+                    signer: listener_signer.clone(),
                     synchrony_bound: Duration::from_secs(3),
                     max_handshake_age: Duration::from_secs(5),
                 },

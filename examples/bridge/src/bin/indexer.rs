@@ -239,7 +239,7 @@ fn main() {
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let config = StreamConfig {
             handshake: Handshake {
-                signing_key: signer,
+                signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
             },

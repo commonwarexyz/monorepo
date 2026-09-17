@@ -275,7 +275,7 @@ pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
 
 impl<S: Signer> Handshake for StreamHandshake<S> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
-        self.signing_key.sign(namespace, message)
+        self.signer.sign(namespace, message)
     }
 }
 

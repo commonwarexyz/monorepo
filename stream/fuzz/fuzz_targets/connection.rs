@@ -95,7 +95,7 @@ fn fuzz(input: FuzzInput) {
 
         let dialer_config = Config {
             handshake: Handshake {
-                signing_key: dialer_signer.clone(),
+                signer: dialer_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
             },
@@ -106,7 +106,7 @@ fn fuzz(input: FuzzInput) {
 
         let listener_config = Config {
             handshake: Handshake {
-                signing_key: listener_signer.clone(),
+                signer: listener_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
             },

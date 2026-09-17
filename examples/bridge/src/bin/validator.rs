@@ -162,7 +162,7 @@ fn main() {
     // Configure indexer
     let indexer_cfg = StreamConfig {
         handshake: Handshake {
-            signing_key: signer.clone(),
+            signer: signer.clone(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
         },

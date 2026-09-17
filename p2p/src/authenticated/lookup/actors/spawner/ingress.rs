@@ -75,7 +75,7 @@ mod tests {
     fn stream_config(signer: PrivateKey) -> EncryptedConfig<PrivateKey> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: signer,
+                signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },

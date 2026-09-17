@@ -158,8 +158,8 @@ pub struct Config<S> {
 /// Incompatible tolerances can cause connections to be rejected.
 #[derive(Clone)]
 pub struct Handshake<S> {
-    /// Private key used to authenticate the local peer.
-    pub signing_key: S,
+    /// Signer used to authenticate the local peer.
+    pub signer: S,
 
     /// Maximum time drift allowed for future timestamps.
     ///
@@ -173,9 +173,9 @@ pub struct Handshake<S> {
 
 impl<S> Handshake<S> {
     /// Creates a handshake accepting timestamps up to five seconds ahead or ten seconds old.
-    pub const fn new(signing_key: S) -> Self {
+    pub const fn new(signer: S) -> Self {
         Self {
-            signing_key,
+            signer,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
         }
@@ -219,7 +219,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
     type Receiver<I: Stream, O: Sink> = Receiver<I>;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.signing_key.public_key()
+        self.signer.public_key()
     }
 
     async fn dial<C, I, O>(
@@ -243,7 +243,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let pool = context.network_buffer_pool().clone();
         send_frame(
             &mut sink,
-            self.signing_key.public_key().encode(),
+            self.signer.public_key().encode(),
             max_message_size,
         )
         .await?;
@@ -251,13 +251,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
-            Context::new(
-                namespace,
-                current_time,
-                ok_timestamps,
-                self.signing_key,
-                peer,
-            ),
+            Context::new(namespace, current_time, ok_timestamps, self.signer, peer),
         );
         send_frame(&mut sink, syn.encode(), max_message_size).await?;
 
@@ -317,7 +311,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
                 namespace,
                 current_time,
                 ok_timestamps,
-                self.signing_key,
+                self.signer,
                 peer.clone(),
             ),
             msg1,
@@ -744,10 +738,10 @@ mod test {
         });
     }
 
-    fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
+    fn transport_config(signer: PrivateKey) -> Config<PrivateKey> {
         Config {
             handshake: Handshake {
-                signing_key,
+                signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -1250,14 +1244,14 @@ mod test {
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.handshake.time_information(&context);
             let listener_public_key = listener_signer.public_key();
-            let dialer_public_key = dialer_config.handshake.signing_key.public_key();
+            let dialer_public_key = dialer_config.handshake.signer.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
                     &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
-                    dialer_config.handshake.signing_key.clone(),
+                    dialer_config.handshake.signer.clone(),
                     listener_public_key.clone(),
                 ),
             );
