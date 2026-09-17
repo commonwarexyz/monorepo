@@ -344,7 +344,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let blob = self.manager.get_or_create(section).await?;
 
         // Encode the item
-        let offset = match blob.try_append_encoded(item) {
+        let offset = match blob.try_append_value(item) {
             Some(offset) => offset,
             None => blob.append_owned(item.encode_mut().into()).await?,
         };

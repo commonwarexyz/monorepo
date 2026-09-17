@@ -937,7 +937,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
-        if self.blobs.tail_writer().try_append_encoded(item).is_none() {
+        if self.blobs.tail_writer().try_append_value(item).is_none() {
             return self
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
                 .await;

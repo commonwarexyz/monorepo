@@ -295,13 +295,13 @@ impl<B: Blob> Writer<B> {
     ///
     /// Panics if the encoder writes a different number of bytes than [`FixedSize::SIZE`].
     /// If the encoder panics, the writer's logical contents and size remain unchanged.
-    pub fn try_append_encoded<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
+    pub fn try_append_value<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
         let available = self.buffer.capacity.checked_sub(self.buffer.len())?;
         if T::SIZE > available {
             return None;
         }
         let offset = self.buffer.size();
-        self.buffer.append_encoded(value);
+        self.buffer.append_value(value);
         Some(offset)
     }
 
@@ -1362,7 +1362,7 @@ mod tests {
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
     #[test_traced]
-    fn test_encoded_append_capacity_snapshot_and_recovery() {
+    fn test_append_value_capacity_snapshot_and_recovery() {
         deterministic::Runner::default().start(|context| async move {
             struct MustNotEncode<const SIZE: usize>;
             impl<const SIZE: usize> FixedSize for MustNotEncode<SIZE> {
@@ -1374,17 +1374,17 @@ mod tests {
                 }
             }
 
-            let (blob, size) = context.open("encoded_append", b"blob").await.unwrap();
+            let (blob, size) = context.open("append_value", b"blob").await.unwrap();
             let cache = CacheRef::from_pooler(&context, NZU16!(16), NZUsize!(4));
             let mut writer = Writer::new(blob, size, 32, cache.clone()).await.unwrap();
-            assert_eq!(writer.try_append_encoded(&0u64), Some(0));
-            assert_eq!(writer.try_append_encoded(&MustNotEncode::<25>), None);
+            assert_eq!(writer.try_append_value(&0u64), Some(0));
+            assert_eq!(writer.try_append_value(&MustNotEncode::<25>), None);
             let snapshot = writer.snapshot().await.unwrap();
             for i in 1..4u64 {
-                assert_eq!(writer.try_append_encoded(&i), Some(i * 8));
+                assert_eq!(writer.try_append_value(&i), Some(i * 8));
             }
 
-            assert_eq!(writer.try_append_encoded(&MustNotEncode::<8>), None);
+            assert_eq!(writer.try_append_value(&MustNotEncode::<8>), None);
             assert_eq!(writer.size(), 32);
             assert_eq!(
                 snapshot.read_at(0, 8).await.unwrap().coalesce().as_ref(),
@@ -1395,7 +1395,7 @@ mod tests {
             assert_eq!(writer.append(&4u64.to_be_bytes()).await.unwrap(), 32);
             writer.sync().await.unwrap();
             drop(writer);
-            let (blob, size) = context.open("encoded_append", b"blob").await.unwrap();
+            let (blob, size) = context.open("append_value", b"blob").await.unwrap();
             let writer = Writer::new(blob, size, 32, cache).await.unwrap();
             assert_eq!(writer.size(), 40);
             let expected: Vec<_> = (0..5u64).flat_map(u64::to_be_bytes).collect();
