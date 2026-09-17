@@ -149,6 +149,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Initialize from the latest retained commit, discarding uncommitted operations.
+    ///
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     #[boxed]

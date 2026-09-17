@@ -2203,6 +2203,41 @@ mod tests {
         format!("{}-blobs", cfg.partition)
     }
 
+    #[test]
+    fn test_unbounded_fixed_repairs_hole_after_full_capacity() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, NZU16!(8), NZUsize!(8));
+            let cfg = Config {
+                partition: "initialization-extra-tail".into(),
+                items_per_blob: NZU64!(2),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            };
+            let (blob, size) = context
+                .open("initialization-extra-tail-blobs", &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(&[1; 32]).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+            corrupt_page(
+                &context,
+                "initialization-extra-tail-blobs",
+                &0u64.to_be_bytes(),
+                2,
+                8,
+            )
+            .await;
+            let result = Journal::<_, u64>::init(context.child("open"), cfg).await;
+            assert!(
+                result.is_ok(),
+                "unbounded recovery must trim a hole after capacity: {result:?}"
+            );
+        });
+    }
+
     fn assert_dirty_blob_unlinked_before_drop(
         recordings: &Recordings,
         partition: &str,

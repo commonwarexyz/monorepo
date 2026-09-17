@@ -370,6 +370,7 @@ where
     }
 
     /// Initializes a new [Db] with the given configuration.
+    ///
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     #[boxed]

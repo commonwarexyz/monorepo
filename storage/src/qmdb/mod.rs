@@ -375,6 +375,7 @@ pub enum Error<F: Family> {
     FloorBeyondSize(Location<F>, Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
+    ///
     /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),

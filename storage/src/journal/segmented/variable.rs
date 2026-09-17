@@ -977,28 +977,28 @@ mod tests {
     use std::num::NonZeroU16;
 
     impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
-        async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
+        fn test_reopen_configuration(&self) -> (E, Config<V::Cfg>) {
             let (context, partition, factory) = self.0.manager.test_configuration();
-            let cfg = Config {
-                partition,
-                write_buffer: factory.write_buffer,
-                page_cache: factory.page_cache_ref,
-                compression: self.0.compression,
-                codec_config: self.0.codec_config.clone(),
-            };
+            (
+                context,
+                Config {
+                    partition,
+                    write_buffer: factory.write_buffer,
+                    page_cache: factory.page_cache_ref,
+                    compression: self.0.compression,
+                    codec_config: self.0.codec_config.clone(),
+                },
+            )
+        }
+
+        async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
+            let (context, cfg) = self.test_reopen_configuration();
             _ = self.sync_all().await?;
             Self::init_at_most(context, cfg, section, end).await
         }
 
         async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
-            let (context, partition, factory) = self.0.manager.test_configuration();
-            let cfg = Config {
-                partition,
-                write_buffer: factory.write_buffer,
-                page_cache: factory.page_cache_ref,
-                compression: self.0.compression,
-                codec_config: self.0.codec_config.clone(),
-            };
+            let (context, cfg) = self.test_reopen_configuration();
             _ = self.sync_all().await?;
             let mut journal = Self::init(context, cfg).await?;
             journal

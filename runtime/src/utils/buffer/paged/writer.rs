@@ -148,10 +148,11 @@ pub struct Writer<B: Blob, Phase = Append> {
 }
 
 impl<B: Blob> Recovery<B> {
-    /// Open `blob` for initialization repair. `blob` must already hold `original_blob_size`
-    /// physical bytes. Reads are cached through `cache_ref` and appends stage in a write buffer of
-    /// capacity `capacity`. Trims any invalid tail so the blob ends at a checksum-validated page.
-    /// Earlier pages are not scanned.
+    /// Open `blob` for initialization repair.
+    ///
+    /// `blob` must already hold `original_blob_size` physical bytes. Reads are cached through
+    /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid tail
+    /// so the blob ends at a checksum-validated page. Earlier pages are not scanned.
     ///
     /// Before appending, the tail-page contents must be durable: either open after a crash or
     /// call [Self::sync]. Until then, recovery may read or truncate the blob. The discovered
@@ -389,9 +390,10 @@ impl<B: Blob> Recovery<B> {
         Ok(())
     }
 
-    /// Durably retain at most `size` logical bytes. A size above the current length leaves the
-    /// length unchanged. Pending repair writes are synchronized even when the length
-    /// does not change.
+    /// Durably retain at most `size` logical bytes.
+    ///
+    /// A size above the current length leaves the length unchanged. Pending repair writes are
+    /// synchronized even when the length does not change.
     pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
         if size < self.size() {
             self.shrink(size).await?;
@@ -402,6 +404,7 @@ impl<B: Blob> Recovery<B> {
 
 impl<B: Blob> From<Recovery<B>> for Writer<B> {
     /// Convert recovery into a live writer without flushing or syncing.
+    ///
     /// Truncation is already durable. Bytes appended since the last completed sync remain unsynced.
     fn from(recovery: Recovery<B>) -> Self {
         Self {
