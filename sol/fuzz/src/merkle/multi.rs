@@ -200,7 +200,7 @@ impl<F: Family> SparseTree<F> {
         hasher: &MerkleHasher,
     ) -> Digest {
         let digest = if selected.is_empty() {
-            sha256::Digest(leaf(seed ^ u64::MAX, *pos))
+            keccak256::Digest(leaf(seed ^ u64::MAX, *pos))
         } else if height == 0 {
             hasher.leaf_digest(pos, &leaf(seed, *selected[0]))
         } else {
@@ -244,7 +244,9 @@ impl<F: Family> Storage<F> for PositionStore<F> {
     }
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<Digest>, Error<F>> {
-        Ok(Some(sha256::Digest(Uint256::from(*position).to_be_bytes())))
+        Ok(Some(keccak256::Digest(
+            Uint256::from(*position).to_be_bytes(),
+        )))
     }
 }
 
@@ -329,12 +331,12 @@ pub(super) fn check<F: Family>(encoded: &[u8], policy: Policy) -> bool {
     let proof = Proof::<F, Digest> {
         leaves: Location::new(leaves),
         inactive_peaks: policy.inactive_peaks,
-        digests: digests.into_iter().map(sha256::Digest).collect(),
+        digests: digests.into_iter().map(keccak256::Digest).collect(),
     };
     proof.verify_multi_inclusion(
         &policy.hasher(),
         &pairs,
-        &sha256::Digest(root.try_into().unwrap()),
+        &keccak256::Digest(root.try_into().unwrap()),
     )
 }
 
@@ -504,7 +506,7 @@ mod tests {
             }
         }
         let output = Output {
-            root: Keccak::hash(&[&0u64.to_be_bytes()]),
+            root: Keccak256::hash(&[&0u64.to_be_bytes()]),
             elements: vec![],
             proof: vec![],
             leaves: 0,

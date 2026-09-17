@@ -21,7 +21,7 @@ use commonware_cryptography::{
         },
     },
     certificate::Subject as _,
-    sha256,
+    keccak256,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{N3f1, NZU32, union_unique};
@@ -106,7 +106,7 @@ impl GenerateArgs {
         let payload = decode_hex(&self.payload_hex)?;
         let payload: [u8; 32] = payload.try_into().map_err(|_| "payload must be 32 bytes")?;
         let round = Round::new(Epoch::new(self.epoch), View::new(self.view));
-        let proposal = Proposal::new(round, View::new(self.parent), sha256::Digest(payload));
+        let proposal = Proposal::new(round, View::new(self.parent), keccak256::Digest(payload));
         let subject = match self.kind {
             Kind::Notarize => Subject::Notarize {
                 proposal: &proposal,

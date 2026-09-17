@@ -1977,6 +1977,7 @@ dependencies = [
  "rayon",
  "rstest",
  "sha2 0.11.0",
+ "sha3 0.10.9",
  "thiserror 2.0.18",
  "x25519-dalek",
  "zeroize",
@@ -2430,7 +2431,6 @@ dependencies = [
  "const-hex",
  "futures",
  "rand 0.10.2",
- "sha3 0.10.9",
 ]
 
 [[package]]

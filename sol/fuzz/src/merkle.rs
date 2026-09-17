@@ -1,22 +1,21 @@
 //! Commonware proof oracle for the Solidity differential tests.
 //!
 //! Commands emit a single hex-encoded ABI value. Tree construction, proof layout,
-//! and verification belong to Commonware. This binary adapts hashing and ABI I/O.
+//! and verification belong to Commonware. This binary adapts command-line inputs and ABI I/O.
 
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolType, SolValue};
 use clap::{Args, Subcommand, ValueEnum};
-use commonware_cryptography::{Hasher as CryptographicHasher, sha256};
+use commonware_cryptography::{Hasher, Keccak256, keccak256};
 use commonware_storage::merkle::{
     Bagging, Family, Location, Proof, hasher::Standard, mem::Mem, mmb, mmr,
 };
-use sha3::{Digest as _, Keccak256};
 
 mod multi;
 
 type Uint256 = <sol!(uint256) as SolType>::RustType;
-type Digest = sha256::Digest;
-type MerkleHasher = Standard<Keccak>;
+type Digest = keccak256::Digest;
+type MerkleHasher = Standard<Keccak256>;
 
 sol! {
     struct RangeOutput {
@@ -32,37 +31,6 @@ sol! {
         uint256 start;
         bytes32[] elements;
         bytes32[] proof;
-    }
-}
-
-/// Uses Commonware's 32-byte digest container with Ethereum's Keccak-256 hash.
-/// The `sha256::Digest` name specifies the storage type, not the hash algorithm.
-#[derive(Default)]
-struct Keccak(Keccak256);
-
-impl CryptographicHasher for Keccak {
-    type Digest = Digest;
-
-    fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Keccak256::new();
-        for part in parts {
-            hasher.update(part);
-        }
-        sha256::Digest(hasher.finalize().into())
-    }
-
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        (Self::hash(left), Self::hash(right))
-    }
-
-    fn update(&mut self, bytes: &[u8]) -> &mut Self {
-        self.0.update(bytes);
-        self
-    }
-
-    fn finalize(self) -> (Self, Self::Digest) {
-        let digest = sha256::Digest(self.0.finalize().into());
-        (Self::default(), digest)
     }
 }
 
@@ -171,7 +139,7 @@ pub(crate) struct RangeArgs {
 
 /// Raw elements are deterministic across tree families and generation modes.
 fn leaf(seed: u64, index: u64) -> [u8; 32] {
-    Keccak::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()]).0
+    Keccak256::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()]).0
 }
 
 /// Builds the full seed-derived tree and verifies its canonical range proof.
@@ -317,7 +285,7 @@ fn synthetic<F: Family>(
         }
         proof
             .digests
-            .push(sha256::Digest(leaf(seed ^ u64::MAX, count)));
+            .push(keccak256::Digest(leaf(seed ^ u64::MAX, count)));
     }
     Err("no canonical synthetic proof length found".into())
 }
@@ -368,13 +336,13 @@ fn check<F: Family>(encoded: &[u8], policy: Policy) -> bool {
     let proof = Proof::<F, Digest> {
         leaves: Location::new(leaves),
         inactive_peaks: policy.inactive_peaks,
-        digests: digests.into_iter().map(sha256::Digest).collect(),
+        digests: digests.into_iter().map(keccak256::Digest).collect(),
     };
     proof.verify_range_inclusion(
         &policy.hasher(),
         &elements,
         Location::new(start),
-        &sha256::Digest(root.try_into().unwrap()),
+        &keccak256::Digest(root.try_into().unwrap()),
     )
 }
 
@@ -597,7 +565,7 @@ mod tests {
 
     fn empty_tree<F: Family>() {
         let mut output = Output {
-            root: Keccak::hash(&[&0u64.to_be_bytes()]),
+            root: Keccak256::hash(&[&0u64.to_be_bytes()]),
             elements: Vec::new(),
             proof: Vec::new(),
             leaves: 0,
@@ -610,7 +578,7 @@ mod tests {
         output.root.0[0] ^= 1;
         assert!(!check::<F>(&check_input(&output, 0), Policy::default()));
         output.root.0[0] ^= 1;
-        output.proof.push(sha256::Digest([0; 32]));
+        output.proof.push(keccak256::Digest([0; 32]));
         assert!(!check::<F>(&check_input(&output, 0), Policy::default()));
     }
 
