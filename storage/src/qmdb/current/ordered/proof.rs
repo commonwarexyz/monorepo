@@ -6,7 +6,7 @@ use crate::{
     qmdb::{
         any::{
             ValueEncoding,
-            ordered::{Operation, Update, span_contains},
+            ordered::{Bounds, Operation, Update, span_contains},
         },
         current::proof::operation::Proof as OperationProof,
         operation::Key,
@@ -144,7 +144,9 @@ where
     pub fn verify<H: Hasher<Digest = D>>(&self, key: &K, root: &D) -> bool {
         let (op_proof, op) = match self {
             Self::KeyValue(op_proof, data) => {
-                if data.key == *key || !span_contains(&data.key, &data.next_key, key, true) {
+                if data.key == *key
+                    || !span_contains(&data.key, &data.next_key, key, Bounds::StartInclusive)
+                {
                     return false;
                 }
 

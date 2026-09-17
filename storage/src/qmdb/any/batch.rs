@@ -13,7 +13,9 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains},
+            ordered::{
+                self, find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains,
+            },
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -2567,6 +2569,11 @@ where
 
     /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
     fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        let bounds = if NEXT {
+            ordered::Bounds::StartInclusive
+        } else {
+            ordered::Bounds::EndInclusive
+        };
         let find = |batch: &Self| {
             let diff = batch.diff.as_slice();
             let end = diff.partition_point(|(candidate, _)| {
@@ -2593,7 +2600,7 @@ where
 
             // Successor queries use [start, end). Predecessor queries use (start, end].
             // Match the cyclic owner before the public methods suppress linear wraparound.
-            span_contains(&data.key, &data.next_key, key, NEXT).then(|| {
+            span_contains(&data.key, &data.next_key, key, bounds).then(|| {
                 if NEXT {
                     data.next_key.clone()
                 } else {
