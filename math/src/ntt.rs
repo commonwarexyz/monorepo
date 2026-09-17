@@ -1493,6 +1493,7 @@ mod test {
                 for zeros in 0..6 {
                     let data = Matrix::<F>::rand(&mut rng, rows, cols);
                     let mut expected = data.clone();
+                    // Include zeros at the ends and in the middle, plus an all-zero batch.
                     let denominators: Vec<_> = (0..rows)
                         .map(|i| {
                             if match zeros {
@@ -1509,6 +1510,7 @@ mod test {
                             }
                         })
                         .collect();
+                    // Use separate inversions as the reference, including 0.inv() == 0.
                     for (i, denominator) in denominators.iter().enumerate() {
                         let inverse = denominator.inv();
                         for value in &mut expected[i] {
@@ -1516,7 +1518,6 @@ mod test {
                         }
                     }
 
-                    // Construct polynomials with the chosen evaluations on the coset.
                     let mut p = EvaluationVector {
                         data,
                         active_rows: VanishingPoints::all_non_vanishing(lg_rows),
@@ -1526,10 +1527,12 @@ mod test {
                         evaluations: denominators,
                     }
                     .interpolate();
+                    // Cancel divide's coset shift so it sees the values we chose above.
                     p.divide_roots(F::coset_shift_inv());
                     q.divide_roots(F::coset_shift_inv());
 
                     p.divide(q);
+                    // Evaluate on that same coset to compare the quotient row by row.
                     p.divide_roots(F::coset_shift());
                     assert_eq!(
                         p.evaluate().data,
