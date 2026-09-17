@@ -334,7 +334,9 @@ pub trait Mutable: Contiguous + Sized {
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
     /// for the state present when the call begins (later appends need their own sync). Also
     /// tries to advance the recovery watermark to the previous proven durable size, bounding
-    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed.
+    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed. Dropping the
+    /// handle does not cancel the sync or lose its failure, which resurfaces at latest on the
+    /// next [Self::sync].
     fn start_sync(
         self,
     ) -> impl std::future::Future<Output = Result<(Self, Handle<()>), Error>> + Send;

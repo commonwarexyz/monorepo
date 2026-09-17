@@ -34,8 +34,8 @@ pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
 /// unfinished polls.
 ///
 /// Returns the output when the future completes within the budget. Otherwise returns `None`
-/// and drops the abandoned future, so the crash lands between its internal barriers. Arming
-/// the pending gate and crediting durability from a completed output stay with the caller.
+/// and drops the abandoned future, so the crash lands between its internal barriers. The caller
+/// arms the pending gate and updates its durability expectations from the returned output.
 pub async fn poll_interrupted<F: Future>(
     pending: &PendingSyncs,
     fut: F,
