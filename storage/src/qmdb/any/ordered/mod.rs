@@ -83,6 +83,7 @@ where
                 return Ok(None);
             }
 
+            // If the translated key is in the snapshot, search its conflicts for the span.
             if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
                 return Ok(Some(span));
             }
@@ -113,26 +114,33 @@ where
     /// Returns the largest active key strictly less than `key`, or `None` if there is none.
     ///
     /// The query key need not be active. This lookup does not wrap around to the last key.
-    pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, crate::qmdb::Error<F>> {
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        if let Some(prev) = self.find_strict_prev_key(locs, key).await? {
-            return Ok(Some(prev));
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get_prev_key(
+        &self,
+        key: &K,
+    ) -> impl Future<Output = Result<Option<K>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            // Distinct keys can share the query's translated key, including its predecessor.
+            if let Some(prev) = self
+                .find_strict_prev_key(self.snapshot.get(key).copied(), key)
+                .await?
+            {
+                return Ok(Some(prev));
+            }
+
+            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+                return Ok(None);
+            };
+
+            self.find_strict_prev_key(iter.copied(), key).await
         }
-
-        let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
-            return Ok(None);
-        };
-
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = iter.copied().collect();
-        self.find_strict_prev_key(locs, key).await
     }
 
     /// Returns the database's strict predecessor of `key` if it is among these snapshot entries.
     async fn find_strict_prev_key(
         &self,
-        locs: impl IntoIterator<Item = Location<F>>,
+        locs: impl Iterator<Item = Location<F>> + Send,
         key: &K,
     ) -> Result<Option<K>, crate::qmdb::Error<F>> {
         for loc in locs {
