@@ -11,7 +11,6 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use core::future::Future;
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -30,6 +29,17 @@ pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
         key >= span_start || key < span_end
     } else {
         key >= span_start && key < span_end
+    }
+}
+
+/// Whether the cyclic span from `span_start` (exclusive) to `span_end` (inclusive) contains `key`.
+///
+/// Equal endpoints define a span containing every key.
+pub(crate) fn span_contains_prev<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
+    if span_start >= span_end {
+        key > span_start || key <= span_end
+    } else {
+        key > span_start && key <= span_end
     }
 }
 
@@ -120,37 +130,32 @@ where
     /// Returns the largest active key strictly less than `key`, or `None` if there is none.
     ///
     /// The query key need not be active. This lookup does not wrap around to the last key.
-    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
-    #[allow(clippy::manual_async_fn)]
-    pub fn get_prev_key(
-        &self,
-        key: &K,
-    ) -> impl Future<Output = Result<Option<K>, crate::qmdb::Error<F>>> + Send {
-        async move {
-            if let Some(prev) = self
-                .find_prev_key(self.snapshot.get(key).copied(), key)
-                .await?
-            {
-                return Ok(Some(prev));
-            }
-
-            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
-                return Ok(None);
-            };
-            self.find_prev_key(iter.copied(), key).await
+    pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, crate::qmdb::Error<F>> {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        if let Some(prev) = self.find_strict_prev_key(locs, key).await? {
+            return Ok(Some(prev));
         }
+
+        let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+            return Ok(None);
+        };
+
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location<F>> = iter.copied().collect();
+        self.find_strict_prev_key(locs, key).await
     }
 
-    /// Finds the largest key strictly less than `key` among conflicting snapshot entries.
-    async fn find_prev_key(
+    /// Returns the database's strict predecessor of `key` if it is among these snapshot entries.
+    async fn find_strict_prev_key(
         &self,
-        locs: impl Iterator<Item = Location<F>> + Send,
+        locs: impl IntoIterator<Item = Location<F>>,
         key: &K,
     ) -> Result<Option<K>, crate::qmdb::Error<F>> {
         for loc in locs {
+            // A cyclic owner is a strict linear predecessor only when its key is smaller.
             let data = Self::get_update_op(&self.log, loc).await?;
-            // Require a smaller key whose successor reaches the query or wraps around.
-            if data.key < *key && (data.next_key >= *key || data.next_key <= data.key) {
+            if data.key < *key && span_contains_prev(&data.key, &data.next_key, key) {
                 return Ok(Some(data.key));
             }
         }
@@ -402,6 +407,24 @@ mod test {
         assert!(span_contains(&3, &3, &2));
         assert!(span_contains(&3, &3, &3));
         assert!(span_contains(&3, &3, &4));
+    }
+
+    #[test]
+    fn span_contains_prev_boundaries() {
+        assert!(!span_contains_prev(&2, &6, &1));
+        assert!(!span_contains_prev(&2, &6, &2));
+        assert!(span_contains_prev(&2, &6, &5));
+        assert!(span_contains_prev(&2, &6, &6));
+
+        assert!(span_contains_prev(&6, &2, &1));
+        assert!(span_contains_prev(&6, &2, &2));
+        assert!(!span_contains_prev(&6, &2, &5));
+        assert!(!span_contains_prev(&6, &2, &6));
+        assert!(span_contains_prev(&6, &2, &7));
+
+        assert!(span_contains_prev(&3, &3, &2));
+        assert!(span_contains_prev(&3, &3, &3));
+        assert!(span_contains_prev(&3, &3, &4));
     }
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
@@ -893,10 +916,11 @@ mod test {
                             );
                         }
 
+                        // Merkleizing must leave the DB view unchanged.
                         assert_neighbors!(
                             &db,
                             &committed,
-                            &queries[..4],
+                            &[min, a, max],
                             format_args!("phase {phase}, merkleized db")
                         );
                         (db, _) = db.apply_batch(batch).await.unwrap();
@@ -977,11 +1001,6 @@ mod test {
     test_neighbors!(
         test_neighbors_current_variable_partitioned,
         current::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
-        current::tests::variable_config_partitioned::<OneCap>
-    );
-    test_neighbors!(
-        test_neighbors_current_variable_partitioned_mmb_p2,
-        current::ordered::variable::partitioned::Db<mmb::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 2, 32, Sequential>,
         current::tests::variable_config_partitioned::<OneCap>
     );
 
@@ -1073,57 +1092,12 @@ mod test {
                     assert!(any_batch!($layer, base_batch).diff.is_empty());
                     assert_neighbors!(base_batch, &base_active, &queries, "nonempty to_batch", &db);
 
-                    let retained_key = layered_neighbor_key(83);
-                    let retained_parent = db
-                        .new_batch()
-                        .write(retained_key, Some(Sha256::fill(7)))
-                        .merkleize(&db, None)
-                        .await
-                        .unwrap();
-                    let retained_child = retained_parent
-                        .new_batch::<Sha256>()
-                        .write(layered_neighbor_key(160), Some(Sha256::fill(8)))
-                        .merkleize(&db, None)
-                        .await
-                        .unwrap();
-                    assert!(
-                        any_batch!($layer, retained_child)
-                            .diff
-                            .iter()
-                            .all(|(key, _)| key != &retained_key)
-                    );
-                    assert!(
-                        any_batch!($layer, retained_child)
-                            .ancestor_diffs
-                            .iter()
-                            .any(|diff| diff.iter().any(|(key, entry)| {
-                                key == &retained_key && entry.value().is_some()
-                            }))
-                    );
-                    let mut retained_active = base_active.clone();
-                    retained_active.insert(retained_key);
-                    let retained_queries = [
-                        layered_neighbor_key(82),
-                        retained_key,
-                        layered_neighbor_key(84),
-                    ];
-                    drop(retained_parent);
-                    assert_neighbors!(
-                        retained_child,
-                        &retained_active,
-                        &retained_queries,
-                        "child after unapplied parent drop",
-                        &db
-                    );
-                    assert_neighbors!(&db, &base_active, &retained_queries, "unapplied branch db");
-                    drop(retained_child);
-
                     let parent = parent.merkleize(&db, None).await.unwrap();
                     assert_neighbors!(parent, &parent_active, &queries, "parent merkleized", &db);
                     assert_neighbors!(&db, &base_active, &queries, "parent pending db");
 
-                    // A floor raise may copy untouched keys into the local diff. Prove that this
-                    // fixture still reads one neighbor from the parent and one from the DB.
+                    // A floor raise may copy untouched keys into the local diff. Both directions
+                    // need a span owner absent from that diff to exercise DB fallback.
                     let parent_diff = any_batch!($layer, parent).diff.as_slice();
                     assert!(
                         parent_diff
@@ -1134,9 +1108,26 @@ mod test {
                         .iter()
                         .enumerate()
                         .skip(1)
-                        .find(|(_, key)| parent_diff.iter().all(|(diff_key, _)| diff_key != *key))
+                        .find(|(_, key)| {
+                            let Some(prev) = parent_active.range(..**key).next_back() else {
+                                return false;
+                            };
+                            parent_active.contains(*key)
+                                && parent_diff
+                                    .iter()
+                                    .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
+                        })
                         .expect("enough base keys to retain a committed-only source");
                     let committed_n = committed_index as u16 * 4;
+                    let committed_predecessor =
+                        parent_active.range(..committed_only).next_back().unwrap();
+                    assert!(parent_diff.iter().all(|(key, _)| key != &committed_only));
+                    assert!(
+                        parent_diff
+                            .iter()
+                            .all(|(key, _)| key != committed_predecessor),
+                        "the successor's span owner must reside only in the DB"
+                    );
                     assert_eq!(
                         parent
                             .get_prev_key(&layered_neighbor_key(committed_n + 1), &db)

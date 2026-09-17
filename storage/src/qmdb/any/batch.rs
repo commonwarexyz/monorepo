@@ -13,7 +13,10 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains},
+            ordered::{
+                find_next_key, find_next_key_ascending, find_prev_key_mut, span_contains,
+                span_contains_prev,
+            },
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
@@ -2521,6 +2524,7 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no greater key, without wrapping.
+    /// Unapplied ancestors must remain alive.
     pub async fn get_next_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
@@ -2545,6 +2549,7 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no smaller key, without wrapping.
+    /// Unapplied ancestors must remain alive.
     pub async fn get_prev_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
@@ -2565,14 +2570,17 @@ where
         db.get_prev_key(key).await
     }
 
-    /// Find a cyclic neighbor from the retained batch chain, if it owns the query's span.
+    /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
     fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        let ancestors: Vec<_> = self.ancestors().collect();
+
         // Membership changes rewrite affected predecessors, so each unshadowed update carries
         // its successor in the final batch view.
-        for (level, diff) in iter::once(self.diff.as_slice())
-            .chain(self.ancestor_diffs.iter().map(|diff| diff.as_slice()))
+        for (level, batch) in iter::once(self)
+            .chain(ancestors.iter().map(AsRef::as_ref))
             .enumerate()
         {
+            let diff = batch.diff.as_slice();
             let end = diff.partition_point(|(candidate, _)| {
                 if NEXT {
                     candidate <= key
@@ -2591,9 +2599,9 @@ where
                     let loc = entry.loc()?;
                     if level > 0
                         && (lookup_sorted(self.diff.as_slice(), candidate).is_some()
-                            || self.ancestor_diffs[..level - 1]
-                                .iter()
-                                .any(|diff| lookup_sorted(diff.as_slice(), candidate).is_some()))
+                            || ancestors[..level - 1].iter().any(|batch| {
+                                lookup_sorted(batch.diff.as_slice(), candidate).is_some()
+                            }))
                     {
                         return None;
                     }
@@ -2603,28 +2611,18 @@ where
                 continue;
             };
 
-            // Retained item batches are contiguous in log order, including unapplied ancestors
-            // whose handles have been dropped.
-            let mut end = self.journal_batch.size();
-            let operation = iter::once(self.journal_batch.items())
-                .chain(self.journal_batch.ancestor_items.iter().rev())
-                .find_map(|items| {
-                    end -= items.len() as u64;
-                    (*loc >= end).then(|| &items[(*loc - end) as usize])
-                })
-                .expect("active diff entry must reference a retained operation");
-            let Operation::Update(data) = operation else {
+            // Active entries reference operations in their owning batch's journal suffix.
+            let index = (*loc - *batch.bounds.base.size) as usize;
+            let Operation::Update(data) = &batch.journal_batch.items()[index] else {
                 unreachable!("active diff entry must reference an update");
             };
 
-            // Successor queries use [start, end); predecessor queries use (start, end]. Both
-            // identify the cyclic owner before the public methods suppress linear wraparound.
+            // Successor queries use [start, end). Predecessor queries use (start, end].
+            // Match the cyclic owner before the public methods suppress linear wraparound.
             let contains = if NEXT {
                 span_contains(&data.key, &data.next_key, key)
-            } else if data.key >= data.next_key {
-                key > &data.key || key <= &data.next_key
             } else {
-                key > &data.key && key <= &data.next_key
+                span_contains_prev(&data.key, &data.next_key, key)
             };
             if contains {
                 return Some(if NEXT {

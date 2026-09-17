@@ -1170,6 +1170,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no greater key, without wrapping.
+    /// Unapplied ancestors must remain alive.
+    ///
+    /// Only valid while every batch applied to `db` since `self` was merkleized is an ancestor
+    /// of `self`.
     pub async fn get_next_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1188,6 +1192,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no smaller key, without wrapping.
+    /// Unapplied ancestors must remain alive.
+    ///
+    /// Only valid while every batch applied to `db` since `self` was merkleized is an ancestor
+    /// of `self`.
     pub async fn get_prev_key<E, C, I, H>(
         &self,
         key: &K,
