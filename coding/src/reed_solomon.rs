@@ -3,7 +3,7 @@ use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
-    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
+    reed_solomon::{DecodePlan, Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -516,14 +516,15 @@ mod striped {
     /// reveals all positions), so no separate re-encode is needed. Writes each restored shard's
     /// stripe into the matching `out.originals` / `out.recoveries` column slice.
     fn recover_all_into(
-        k: usize,
-        m: usize,
+        plan: &DecodePlan,
         range: Range<usize>,
         provided_originals: &[(usize, &[u8])],
         provided_recoveries: &[(usize, &[u8])],
         missing: Missing<'_>,
         mut out: StripeOut<'_>,
     ) -> Result<(), Error> {
+        let k = plan.original_count();
+        let m = plan.recovery_count();
         let shard_len = range.len();
         let mut decoder = Cached::take(
             &CACHED_DECODER,
@@ -543,7 +544,7 @@ mod striped {
                 .map_err(Error::ReedSolomon)?;
         }
         let decoding = decoder
-            .decode_with_recovery()
+            .decode_with_recovery_plan(plan)
             .map_err(Error::ReedSolomon)?
             .expect("decode runs only when an original is missing");
 
@@ -667,6 +668,12 @@ mod striped {
             .filter_map(|(i, digest)| digest.is_none().then_some(i))
             .collect::<Vec<_>>();
 
+        let plan = DecodePlan::new(
+            k,
+            m,
+            provided_originals.iter().map(|&(index, _)| index),
+            provided_recoveries.iter().map(|&(index, _)| index),
+        )?;
         let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
         let mut restored_recoveries = vec![0u8; missing_recoveries.len() * shard_len];
         let missing = Missing {
@@ -690,8 +697,7 @@ mod striped {
             .collect();
         strategy.try_map_collect_vec(stripes, |(range, out)| {
             recover_all_into(
-                k,
-                m,
+                &plan,
                 range,
                 &provided_originals,
                 &provided_recoveries,
@@ -1530,32 +1536,32 @@ mod tests {
     /// path. The striped path only activates for shards of at least
     /// `MIN_STRIPE_BYTES`, so this sweeps payload sizes and shard counts that land on
     /// several stripe-count boundaries under a parallel `Strategy`, decoding from a
-    /// recovery-only set (which forces Reed-Solomon recovery) and checking the result
+    /// set with as many recovery shards as possible and checking the result
     /// against the original data on both the sequential and parallel paths.
     #[test]
     fn test_striped_recovery_matches_sequential() {
         for &data_len in &[128 * 1024usize, 257 * 1024, 512 * 1024, 1024 * 1024] {
-            for &(total, min) in &[(12u16, 4u16), (24, 8), (33, 11)] {
+            for &(total, min) in &[(12u16, 4u16), (24, 8), (33, 11), (50, 33)] {
                 let data: Vec<u8> = (0..data_len)
                     .map(|i| (i as u8) ^ ((i >> 7) as u8))
                     .collect();
                 let (root, chunks) =
                     encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
-                let recovery_only = chunks
+                let originals_needed = min.saturating_sub(total - min) as usize;
+                let selected = chunks
                     .into_iter()
-                    .skip(min as usize)
+                    .enumerate()
+                    .filter(|&(i, _)| i < originals_needed || i >= min as usize)
                     .take(min as usize)
-                    .map(|c| checked(root, c))
+                    .map(|(_, c)| checked(root, c))
                     .collect::<Vec<_>>();
                 let sequential =
-                    decode::<Sha256, _>(total, min, &root, recovery_only.iter(), &Sequential)
-                        .unwrap();
+                    decode::<Sha256, _>(total, min, &root, selected.iter(), &Sequential).unwrap();
                 assert_eq!(sequential, data);
                 for &parallelism in &[2usize, 8] {
                     let strategy = Rayon::new(NZUsize!(parallelism)).unwrap();
                     let striped =
-                        decode::<Sha256, _>(total, min, &root, recovery_only.iter(), &strategy)
-                            .unwrap();
+                        decode::<Sha256, _>(total, min, &root, selected.iter(), &strategy).unwrap();
                     assert_eq!(
                         striped, data,
                         "striped decode mismatch (len={data_len} total={total} min={min} parallelism={parallelism})"

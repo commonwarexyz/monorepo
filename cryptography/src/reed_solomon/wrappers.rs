@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
+    DecodePlan, DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
 };
@@ -143,6 +143,22 @@ impl Decoder {
     /// [`recovery_iter`]: RecoveryDecoderResult::recovery_iter
     pub fn decode_with_recovery(&mut self) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
         Ok(self.0.decode(true)?.map(RecoveryDecoderResult::new))
+    }
+
+    /// Like [`decode_with_recovery`](Self::decode_with_recovery), using shared reconstruction
+    /// coefficients instead of evaluating the erasure polynomial.
+    ///
+    /// The plan must match the configured shard counts and all received shard indices, or this
+    /// returns [`Error::DecodePlanMismatch`] without modifying the decoder. Shard sizes and contents
+    /// may differ between decoders sharing a plan.
+    pub fn decode_with_recovery_plan(
+        &mut self,
+        plan: &DecodePlan,
+    ) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
+        Ok(self
+            .0
+            .decode_with_recovery_plan(plan)?
+            .map(RecoveryDecoderResult::new))
     }
 
     /// Creates new decoder with given configuration

@@ -1,6 +1,7 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error,
-    engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
+    DecodePlan, DecoderResult, EncoderResult, Error,
+    decode_plan::eval_erasures,
+    engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
 use core::marker::PhantomData;
@@ -169,6 +170,65 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
     }
 
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
+        let Some((_, original_count, recovery_count, received)) = self.work.decode_begin()? else {
+            self.work.reset_received();
+            return Ok(None);
+        };
+        let mut erasures = [0; GF_ORDER];
+        eval_erasures::<E>(
+            &mut erasures,
+            original_count,
+            recovery_count,
+            false,
+            received,
+        );
+        self.decode_with_erasures(compute_recovery, &erasures)
+    }
+
+    fn into_parts(self) -> (E, DecoderWork) {
+        (self.engine, self.work)
+    }
+
+    fn new(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+        engine: E,
+        work: Option<DecoderWork>,
+    ) -> Result<Self, Error> {
+        let mut work = work.unwrap_or_default();
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
+        Ok(Self { engine, work })
+    }
+
+    fn reset(
+        &mut self,
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
+    }
+}
+
+// ======================================================================
+// LowRateDecoder - PRIVATE
+
+impl<E: Engine> LowRateDecoder<E> {
+    pub(crate) fn decode_with_plan(
+        &mut self,
+        compute_recovery: bool,
+        plan: &DecodePlan,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        plan.validate(&self.work, false)?;
+        self.decode_with_erasures(compute_recovery, plan.erasures())
+    }
+
+    fn decode_with_erasures(
+        &mut self,
+        compute_recovery: bool,
+        erasures: &[GfElement],
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
@@ -181,28 +241,6 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         let chunk_size = original_count.next_power_of_two();
         let recovery_end = chunk_size + recovery_count;
         let work_count = work.len();
-
-        // ERASURE LOCATIONS
-
-        let mut erasures = [0; GF_ORDER];
-
-        for i in 0..original_count {
-            if !received[i] {
-                erasures[i] = 1;
-            }
-        }
-
-        for i in chunk_size..recovery_end {
-            if !received[i] {
-                erasures[i] = 1;
-            }
-        }
-
-        erasures[recovery_end..].fill(1);
-
-        // EVALUATE POLYNOMIAL
-
-        E::eval_poly(&mut erasures, GF_ORDER);
 
         // MULTIPLY SHARDS
 
@@ -272,36 +310,6 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
-    fn into_parts(self) -> (E, DecoderWork) {
-        (self.engine, self.work)
-    }
-
-    fn new(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-        engine: E,
-        work: Option<DecoderWork>,
-    ) -> Result<Self, Error> {
-        let mut work = work.unwrap_or_default();
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
-        Ok(Self { engine, work })
-    }
-
-    fn reset(
-        &mut self,
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
-    }
-}
-
-// ======================================================================
-// LowRateDecoder - PRIVATE
-
-impl<E: Engine> LowRateDecoder<E> {
     fn reset_work(
         original_count: usize,
         recovery_count: usize,

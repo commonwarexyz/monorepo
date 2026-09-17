@@ -143,6 +143,10 @@ impl DecoderWork {
         self.original_count
     }
 
+    pub(crate) const fn received(&self) -> &FixedBitSet {
+        &self.received
+    }
+
     pub(crate) fn reset(
         &mut self,
         original_count: usize,

@@ -14,6 +14,8 @@ use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
+mod decode_stripes;
+
 // ======================================================================
 // CONST
 
@@ -453,4 +455,9 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);
 criterion_group!(benches_engine, benchmarks_engine);
-criterion_main!(benches_main, benches_rate, benches_engine);
+criterion_main!(
+    benches_main,
+    benches_rate,
+    benches_engine,
+    decode_stripes::benches
+);

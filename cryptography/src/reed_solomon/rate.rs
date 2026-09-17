@@ -28,6 +28,7 @@
 //! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`DefaultEngine`]: crate::reed_solomon::engine::DefaultEngine
 
+pub(crate) use self::rate_default::use_high_rate;
 pub use self::{
     decoder_work::DecoderWork,
     encoder_work::EncoderWork,

@@ -22,6 +22,7 @@
 )]
 
 pub use self::{
+    decode_plan::DecodePlan,
     decoder_result::{DecoderResult, Originals, Recoveries, RecoveryDecoderResult},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
@@ -33,6 +34,7 @@ use thiserror::Error;
 #[macro_use]
 mod test_util;
 
+mod decode_plan;
 mod decoder_result;
 mod encoder_result;
 mod wrappers;
@@ -46,6 +48,10 @@ pub mod rate;
 /// Represents all possible errors that can occur in this library.
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub enum Error {
+    /// The decode plan does not match the decoder's shard counts or received indices.
+    #[error("decode plan does not match the received shards")]
+    DecodePlanMismatch,
+
     /// Given shard has different size than the configured shard size.
     #[error("different shard size: expected {shard_bytes} bytes, got {got} bytes")]
     DifferentShardSize {
