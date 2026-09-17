@@ -282,6 +282,7 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
+    use commonware_stream::encrypted::Handshake as StreamHandshake;
     use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -298,7 +299,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
-            let handshake = commonware_stream::encrypted::Handshake {
+            let handshake = StreamHandshake {
                 signing_key: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -446,7 +447,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_001);
-            let handshake = commonware_stream::encrypted::Handshake {
+            let handshake = StreamHandshake {
                 signing_key: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),

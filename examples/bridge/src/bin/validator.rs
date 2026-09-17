@@ -24,7 +24,7 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{self, Config as StreamConfig, dial};
+use commonware_stream::encrypted::{Config as StreamConfig, Handshake, dial};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -161,7 +161,7 @@ fn main() {
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
-        handshake: encrypted::Handshake {
+        handshake: Handshake {
             signing_key: signer.clone(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
@@ -173,7 +173,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        encrypted::Handshake::new(signer),
+        Handshake::new(signer),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

@@ -3,7 +3,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::Handshake;
 #[cfg(test)]
-use commonware_stream::encrypted;
+use commonware_stream::encrypted::Handshake as StreamHandshake;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -200,10 +200,10 @@ impl<H: Handshake> Config<H> {
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<encrypted::Handshake<C>> {
+impl<C: Signer> Config<StreamHandshake<C>> {
     pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            encrypted::Handshake::new(crypto),
+            StreamHandshake::new(crypto),
             b"test_namespace",
             listen,
             NZUsize!(32),

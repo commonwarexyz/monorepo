@@ -174,7 +174,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::encrypted;
+//! use commonware_stream::encrypted::Handshake;
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -212,7 +212,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     encrypted::Handshake::new(signer.clone()),
+//!     Handshake::new(signer.clone()),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -282,6 +282,7 @@ mod tests {
         BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
         Spawner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks, tokio,
     };
+    use commonware_stream::encrypted::Handshake;
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{
@@ -721,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<commonware_stream::encrypted::Handshake<ed25519::PrivateKey>>();
+        let limit = max_size::<Handshake<ed25519::PrivateKey>>();
         for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let config = Config::test(
@@ -739,7 +740,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<commonware_stream::encrypted::Handshake<ed25519::PrivateKey>>();
+            let limit = max_size::<Handshake<ed25519::PrivateKey>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
