@@ -1,9 +1,6 @@
 use super::K;
-use crate::sha256::{DIGEST_LENGTH, Digest, IV};
+use crate::sha256::{DIGEST_LENGTH, Digest, IV, simd::X16_LANES as LANES};
 use core::arch::asm;
-
-/// Independent 32-bit message lanes in a 512-bit vector.
-const LANES: usize = 16;
 
 /// Bytes in one SHA-256 compression block per message.
 const BLOCK_LENGTH: usize = 64;

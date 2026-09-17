@@ -53,6 +53,10 @@ const _: () = assert!(MMR_NODE_LEN == 72);
 const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
 const _: () = assert!(BMT_NODE_LEN == 64);
 
+/// Independent 32-bit message lanes in a 512-bit vector.
+#[cfg(target_arch = "x86_64")]
+pub(super) const X16_LANES: usize = 16;
+
 /// Return whether AVX-512 software SHA-256 is available for 16 messages.
 #[cfg(target_arch = "x86_64")]
 #[inline]
@@ -100,7 +104,7 @@ pub(super) fn minimum_x16_batch_len() -> Option<usize> {
 /// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub(super) fn hash_x16(messages: [&[u8]; 16]) -> Option<[Digest; 16]> {
+pub(super) fn hash_x16(messages: [&[u8]; X16_LANES]) -> Option<[Digest; X16_LANES]> {
     let len = messages[0].len();
     if !supports_hash_x16() || !messages[1..].iter().all(|message| message.len() == len) {
         return None;

@@ -208,12 +208,14 @@ impl Hasher for Sha256 {
                 .collect();
         };
 
+        // Adjacent equal-length runs satisfy the kernel's length requirement and
+        // keep the resulting digests in input order.
         let mut digests = Vec::with_capacity(messages.len());
         for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            for batch in run.chunks(16) {
+            for batch in run.chunks(simd::X16_LANES) {
                 if batch.len() >= minimum {
                     // Spare lanes borrow the first input; only active lanes contribute output.
-                    let mut inputs = [batch[0].as_ref(); 16];
+                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
                     for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
                         *input = message.as_ref();
                     }
