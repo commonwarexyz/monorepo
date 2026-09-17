@@ -161,11 +161,13 @@ fn main() {
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
-        signing_key: signer.clone(),
+        handshake: encrypted::Handshake {
+            signing_key: signer.clone(),
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(60),
+        },
         namespace: INDEXER_NAMESPACE.to_vec(),
         max_message_size: 1024 * 1024,
-        synchrony_bound: Duration::from_secs(1),
-        max_handshake_age: Duration::from_secs(60),
         handshake_timeout: Duration::from_secs(5),
     };
 

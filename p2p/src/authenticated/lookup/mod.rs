@@ -2249,7 +2249,7 @@ mod tests {
         receives: AtomicUsize,
         bouncer_calls: AtomicUsize,
         rejections: AtomicUsize,
-        listen_proof_receives: AtomicUsize,
+        listens: AtomicUsize,
         signing_calls: AtomicUsize,
         pending_signatures: AtomicUsize,
         reject_inbound: AtomicBool,
@@ -2317,11 +2317,11 @@ mod tests {
         type PublicKey = ed25519::PublicKey;
         type Error = TestSigningError;
 
-        fn public_key(&self) -> Self::PublicKey {
+        fn identity(&self) -> Self::PublicKey {
             Signer::public_key(&self.application_signer)
         }
 
-        async fn sign(
+        async fn sign_async(
             &self,
             namespace: &[u8],
             message: &[u8],
@@ -2400,11 +2400,7 @@ mod tests {
 
     impl<const MAX_SIZE: u32> TestHandshake<MAX_SIZE> {
         fn encrypted_handshake(&self) -> encrypted::Handshake<ed25519::PrivateKey> {
-            encrypted::Handshake {
-                signing_key: self.transport_signer.clone(),
-                synchrony_bound: Duration::from_secs(5),
-                max_handshake_age: Duration::from_secs(10),
-            }
+            encrypted::Handshake::new(self.transport_signer.clone())
         }
 
         async fn application_proof(
@@ -2412,11 +2408,14 @@ mod tests {
             namespace: &[u8],
         ) -> Result<ApplicationProof, TestSigningError> {
             let transport_key = Signer::public_key(&self.transport_signer);
-            let signature =
-                cryptography::AsyncSigner::sign(&self.scheme, namespace, transport_key.as_ref())
-                    .await?;
+            let signature = cryptography::AsyncSigner::sign_async(
+                &self.scheme,
+                namespace,
+                transport_key.as_ref(),
+            )
+            .await?;
             Ok((
-                cryptography::AsyncSigner::public_key(&self.scheme),
+                cryptography::AsyncSigner::identity(&self.scheme),
                 transport_key,
                 signature,
             ))
@@ -2481,7 +2480,7 @@ mod tests {
         async fn dial<C, I, O>(
             self,
             context: C,
-            namespace: Vec<u8>,
+            namespace: &[u8],
             max_message_size: u32,
             expected_peer: ed25519::PublicKey,
             mut stream: I,
@@ -2492,6 +2491,10 @@ mod tests {
             I: Stream,
             O: Sink,
         {
+            assert!(
+                max_message_size <= Self::MAX_SIZE,
+                "maximum message size exceeds stream limit"
+            );
             self.observations.dials.lock().push(expected_peer.clone());
 
             let transport_peer = self
@@ -2499,9 +2502,9 @@ mod tests {
                 .get(&expected_peer)
                 .cloned()
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
-            self.send_application_proof(&namespace, &mut sink).await?;
+            self.send_application_proof(namespace, &mut sink).await?;
             let proof = self
-                .receive_application_proof(&namespace, &mut stream)
+                .receive_application_proof(namespace, &mut stream)
                 .await?;
             if proof.0 != expected_peer || proof.1 != transport_peer {
                 return Err(TestHandshakeError::InvalidApplicationProof);
@@ -2533,7 +2536,7 @@ mod tests {
         async fn listen<C, I, O, B, F>(
             self,
             context: C,
-            namespace: Vec<u8>,
+            namespace: &[u8],
             max_message_size: u32,
             bouncer: B,
             mut stream: I,
@@ -2546,13 +2549,23 @@ mod tests {
             B: FnOnce(ed25519::PublicKey) -> F + Send,
             F: Future<Output = bool> + Send,
         {
-            self.observations
-                .listen_proof_receives
-                .fetch_add(1, Ordering::Relaxed);
+            assert!(
+                max_message_size <= Self::MAX_SIZE,
+                "maximum message size exceeds stream limit"
+            );
+            self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let proof = self
-                .receive_application_proof(&namespace, &mut stream)
+                .receive_application_proof(namespace, &mut stream)
                 .await?;
-            self.send_application_proof(&namespace, &mut sink).await?;
+            self.observations
+                .bouncer_calls
+                .fetch_add(1, Ordering::Relaxed);
+            let acceptable = bouncer(proof.0.clone()).await;
+            if !acceptable || self.observations.reject_inbound.load(Ordering::Relaxed) {
+                self.observations.rejections.fetch_add(1, Ordering::Relaxed);
+                return Err(TestHandshakeError::Rejected);
+            }
+            self.send_application_proof(namespace, &mut sink).await?;
             let expected_transport = proof.1.clone();
             let (transport_peer, sender, receiver) = self
                 .encrypted_handshake()
@@ -2577,14 +2590,6 @@ mod tests {
                 .inbound
                 .lock()
                 .push(application_peer.clone());
-            self.observations
-                .bouncer_calls
-                .fetch_add(1, Ordering::Relaxed);
-            let acceptable = bouncer(application_peer.clone()).await;
-            if !acceptable || self.observations.reject_inbound.load(Ordering::Relaxed) {
-                self.observations.rejections.fetch_add(1, Ordering::Relaxed);
-                return Err(TestHandshakeError::Rejected);
-            }
 
             Ok((
                 application_peer,
@@ -2705,8 +2710,8 @@ mod tests {
         listener_handshake: TestHandshake,
         dialer_handshake: TestHandshake,
     ) -> Pair {
-        let listener_key = cryptography::AsyncSigner::public_key(listener_handshake.scheme());
-        let dialer_key = cryptography::AsyncSigner::public_key(dialer_handshake.scheme());
+        let listener_key = cryptography::AsyncSigner::identity(listener_handshake.scheme());
+        let dialer_key = cryptography::AsyncSigner::identity(dialer_handshake.scheme());
         let listener_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
         let dialer_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
         let (mut listener_network, mut listener_oracle) = Network::new(
@@ -2808,7 +2813,10 @@ mod tests {
                     ),
                 )
             }));
-            assert!(result.is_err());
+            assert_eq!(
+                result.err().unwrap().downcast_ref::<&str>(),
+                Some(&"maximum message size exceeds stream limit")
+            );
 
             let (too_small, _, _, _) = handshakes::<{ MAX_PAYLOAD_OVERHEAD - 1 }>();
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -2821,7 +2829,14 @@ mod tests {
                     ),
                 )
             }));
-            assert!(result.is_err());
+            assert_eq!(
+                result
+                    .err()
+                    .unwrap()
+                    .downcast_ref::<String>()
+                    .map(String::as_str),
+                Some("stream message limit too small for p2p framing")
+            );
 
             let (zero_boundary, _, zero_over, _) = handshakes::<MAX_PAYLOAD_OVERHEAD>();
             assert_eq!(max_size::<TestHandshake<MAX_PAYLOAD_OVERHEAD>>(), 0);
@@ -2843,7 +2858,10 @@ mod tests {
                     ),
                 )
             }));
-            assert!(result.is_err());
+            assert_eq!(
+                result.err().unwrap().downcast_ref::<&str>(),
+                Some(&"maximum message size exceeds stream limit")
+            );
         });
     }
 
@@ -2925,9 +2943,9 @@ mod tests {
             .stall_next_signature
             .store(true, Ordering::Relaxed);
 
-        let central_key = cryptography::AsyncSigner::public_key(central_handshake.scheme());
-        let blocked_key = cryptography::AsyncSigner::public_key(blocked_handshake.scheme());
-        let healthy_key = cryptography::AsyncSigner::public_key(healthy_handshake.scheme());
+        let central_key = cryptography::AsyncSigner::identity(central_handshake.scheme());
+        let blocked_key = cryptography::AsyncSigner::identity(blocked_handshake.scheme());
+        let healthy_key = cryptography::AsyncSigner::identity(healthy_handshake.scheme());
         let central_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_300);
         let blocked_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_301);
         let healthy_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_302);
@@ -2970,9 +2988,9 @@ mod tests {
         blocked_network.start();
         wait_for_counter(&context, &central_observations.pending_signatures).await;
         let blocked_listener = if central_dials {
-            &blocked_observations.listen_proof_receives
+            &blocked_observations.listens
         } else {
-            &central_observations.listen_proof_receives
+            &central_observations.listens
         };
         wait_for_counter(&context, blocked_listener).await;
 
@@ -3024,20 +3042,10 @@ mod tests {
             let dials = central_observations.dials.lock();
             assert!(dials.contains(&blocked_key));
             assert!(dials.contains(&healthy_key));
-            assert!(
-                healthy_observations
-                    .listen_proof_receives
-                    .load(Ordering::Relaxed)
-                    > 0
-            );
+            assert!(healthy_observations.listens.load(Ordering::Relaxed) > 0);
         } else {
             assert!(central_observations.dials.lock().is_empty());
-            assert!(
-                central_observations
-                    .listen_proof_receives
-                    .load(Ordering::Relaxed)
-                    >= 2
-            );
+            assert!(central_observations.listens.load(Ordering::Relaxed) >= 2);
             assert!(blocked_observations.dials.lock().contains(&central_key));
             assert!(healthy_observations.dials.lock().contains(&central_key));
         }
@@ -3061,6 +3069,8 @@ mod tests {
             let mut pair = start_pair(&context, 5_200, handshake_0, handshake_1);
 
             wait_for_counter(&context, &observations_0.rejections).await;
+            assert!(observations_0.inbound.lock().is_empty());
+            assert_eq!(observations_0.signing_calls.load(Ordering::Relaxed), 0);
             observations_1.fail_signing.store(true, Ordering::Relaxed);
             observations_0
                 .reject_inbound

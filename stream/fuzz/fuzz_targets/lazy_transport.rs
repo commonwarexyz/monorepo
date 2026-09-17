@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::encrypted::{Config, Receiver, Sender, dial, listen};
+use commonware_stream::encrypted::{Config, Handshake, Receiver, Sender, dial, listen};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
@@ -27,20 +27,24 @@ thread_local! {
             let (listener_sink, dialer_stream) = mocks::Channel::init();
 
             let dialer_config = Config {
-                signing_key: dialer_crypto.clone(),
+                handshake: Handshake {
+                    signing_key: dialer_crypto.clone(),
+                    synchrony_bound: Duration::from_secs(3),
+                    max_handshake_age: Duration::from_secs(5),
+                },
                 namespace: NAMESPACE.to_vec(),
                 max_message_size: MAX_MESSAGE_SIZE,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
             };
 
             let listener_config = Config {
-                signing_key: listener_crypto.clone(),
+                handshake: Handshake {
+                    signing_key: listener_crypto.clone(),
+                    synchrony_bound: Duration::from_secs(3),
+                    max_handshake_age: Duration::from_secs(5),
+                },
                 namespace: NAMESPACE.to_vec(),
                 max_message_size: MAX_MESSAGE_SIZE,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
             };
 

@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::encrypted::{Config as StreamConfig, listen};
+use commonware_stream::encrypted::{self, Config as StreamConfig, listen};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -238,11 +238,13 @@ fn main() {
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let config = StreamConfig {
-            signing_key: signer,
+            handshake: encrypted::Handshake {
+                signing_key: signer,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(60),
+            },
             namespace: INDEXER_NAMESPACE.to_vec(),
             max_message_size: 1024 * 1024,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(5),
         };
         loop {

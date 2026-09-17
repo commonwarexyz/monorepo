@@ -3,7 +3,7 @@
 use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
 use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    encrypted::{Config, Error, Receiver, Sender, dial, listen},
+    encrypted::{Config, Error, Handshake, Receiver, Sender, dial, listen},
     utils::codec::{recv_frame, send_frame},
 };
 use futures::future::{Either, select};
@@ -101,20 +101,24 @@ fn fuzz(input: FuzzInput) {
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_config = Config {
-            signing_key: dialer_crypto.clone(),
+            handshake: Handshake {
+                signing_key: dialer_crypto.clone(),
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
             namespace: NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
         };
 
         let listener_config = Config {
-            signing_key: listener_crypto.clone(),
+            handshake: Handshake {
+                signing_key: listener_crypto.clone(),
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
             namespace: NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
         };
 

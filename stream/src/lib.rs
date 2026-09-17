@@ -23,18 +23,19 @@ commonware_macros::stability_scope!(BETA {
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
-    /// Implementations own their authentication mechanism; it may be asynchronous and fallible
-    /// and does not need to implement [`commonware_cryptography::Signer`]. They must prove each
-    /// peer's declared identity according to their configured authority and bind the supplied
+    /// Implementations own their authentication mechanism, which may be asynchronous and fallible.
+    /// They must prove each peer's declared identity according to their configured authority and
+    /// bind the supplied
     /// application namespace, both peer identities, and both message directions to the established
     /// session. The returned sender and receiver must preserve message boundaries and provide
     /// confidentiality and integrity. A successful dial must authenticate the expected peer. A
     /// listen may succeed only if the bouncer returns `true` for the same authenticated peer that
     /// is returned.
     ///
-    /// `max_message_size` limits plaintext messages. Implementations must reject unsupported
-    /// limits, reject larger outbound messages, and enforce the limit before allocating for an
-    /// inbound message. Framing and encryption overhead do not count toward this limit.
+    /// `max_message_size` limits plaintext messages. Callers must supply a limit no greater than
+    /// [`Self::MAX_SIZE`]. Implementations must reject larger outbound messages and enforce the
+    /// limit before allocating for an inbound message. Framing and encryption overhead do not
+    /// count toward this limit.
     ///
     /// Callers may cancel an in-progress handshake by dropping its future. Implementations must
     /// release the underlying connection when cancelled.
@@ -58,11 +59,15 @@ commonware_macros::stability_scope!(BETA {
         fn scheme(&self) -> &Self::Scheme;
 
         /// Authenticates an outbound connection to `peer`.
+        ///
+        /// # Panics
+        ///
+        /// Implementations may panic if `max_message_size` exceeds [`Self::MAX_SIZE`].
         #[allow(clippy::type_complexity)]
         fn dial<C, I, O>(
             self,
             context: C,
-            namespace: Vec<u8>,
+            namespace: &[u8],
             max_message_size: u32,
             peer: PublicKeyOf<Self>,
             stream: I,
@@ -74,11 +79,19 @@ commonware_macros::stability_scope!(BETA {
             O: Sink;
 
         /// Authenticates an inbound connection accepted by `bouncer`.
+        ///
+        /// The bouncer may receive an unverified identity claim before authentication completes.
+        /// Accepting this claim permits authentication to continue. Only a successful handshake
+        /// proves the returned peer's identity.
+        ///
+        /// # Panics
+        ///
+        /// Implementations may panic if `max_message_size` exceeds [`Self::MAX_SIZE`].
         #[allow(clippy::type_complexity)]
         fn listen<C, I, O, B, F>(
             self,
             context: C,
-            namespace: Vec<u8>,
+            namespace: &[u8],
             max_message_size: u32,
             bouncer: B,
             stream: I,

@@ -145,10 +145,10 @@ commonware_macros::stability_scope!(BETA {
         type Error: core::error::Error + Send + Sync + 'static;
 
         /// Returns the [PublicKey] corresponding to this [AsyncSigner].
-        fn public_key(&self) -> Self::PublicKey;
+        fn identity(&self) -> Self::PublicKey;
 
         /// Signs a message with the given namespace.
-        fn sign(
+        fn sign_async(
             &self,
             namespace: &[u8],
             message: &[u8],
@@ -160,11 +160,11 @@ commonware_macros::stability_scope!(BETA {
         type PublicKey = T::PublicKey;
         type Error = core::convert::Infallible;
 
-        fn public_key(&self) -> Self::PublicKey {
+        fn identity(&self) -> Self::PublicKey {
             Signer::public_key(self)
         }
 
-        fn sign(
+        fn sign_async(
             &self,
             namespace: &[u8],
             message: &[u8],
@@ -348,9 +348,7 @@ commonware_macros::stability_scope!(BETA {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "bls12381")]
-    use super::bls12381;
-    use super::{Hasher, PrivateKey, Sha256, Signer, Verifier, ed25519, secp256r1};
+    use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
 
@@ -359,10 +357,10 @@ mod tests {
         let private_key = ed25519::PrivateKey::from_seed(0);
         let namespace = b"test_namespace";
         let message = b"test_message";
-        let expected = Signer::sign(&private_key, namespace, message);
-        let public_key = super::AsyncSigner::public_key(&private_key);
-        let mut future =
-            core::pin::pin!(super::AsyncSigner::sign(&private_key, namespace, message));
+        let expected = private_key.sign(namespace, message);
+        let public_key = private_key.identity();
+        assert_eq!(public_key, private_key.public_key());
+        let mut future = core::pin::pin!(private_key.sign_async(namespace, message));
         let result = core::future::Future::poll(
             future.as_mut(),
             &mut core::task::Context::from_waker(core::task::Waker::noop()),

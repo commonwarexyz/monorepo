@@ -18,3 +18,18 @@ mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
 mod router;
+
+use std::time::Duration;
+
+/// Settings shared by inbound and outbound stream establishment.
+#[derive(Clone)]
+pub(crate) struct StreamConfig<H> {
+    /// Handshake used to authenticate and wrap a connection.
+    pub handshake: H,
+    /// Namespace for the stream handshake.
+    pub namespace: Vec<u8>,
+    /// Maximum stream message size, including p2p framing.
+    pub max_message_size: u32,
+    /// Maximum duration of a handshake attempt.
+    pub handshake_timeout: Duration,
+}

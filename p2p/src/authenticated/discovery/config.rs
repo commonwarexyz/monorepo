@@ -1,4 +1,5 @@
 use crate::Ingress;
+#[cfg(test)]
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 #[cfg(test)]
@@ -23,10 +24,7 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// synchronized, connections could be unnecessarily dropped, messages could be parsed
 /// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<H: Handshake>
-where
-    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
-{
+pub struct Config<H: Handshake> {
     /// Handshake used to authenticate transport connections and sign discovery gossip.
     pub handshake: H,
 
@@ -88,6 +86,9 @@ where
     pub send_batch_size: NonZeroUsize,
 
     /// Maximum time into the future allowed for timestamps in discovery gossip.
+    ///
+    /// Configure the handshake's clock-skew tolerance separately. For the encrypted
+    /// handshake, see [`commonware_stream::encrypted::Handshake::synchrony_bound`].
     pub synchrony_bound: Duration,
 
     /// Timeout for the handshake process.
@@ -153,10 +154,7 @@ where
     pub block_duration: Duration,
 }
 
-impl<H: Handshake> Config<H>
-where
-    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
-{
+impl<H: Handshake> Config<H> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         handshake: H,

@@ -1,7 +1,7 @@
 //! Listener
 
 use crate::authenticated::{
-    Mailbox,
+    Mailbox, StreamConfig,
     discovery::actors::{spawner, tracker},
 };
 use commonware_macros::{select, select_loop};
@@ -25,10 +25,7 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 /// Configuration for the listener actor.
 pub struct Config<H: Handshake> {
     pub address: SocketAddr,
-    pub handshake: H,
-    pub namespace: Vec<u8>,
-    pub max_message_size: u32,
-    pub handshake_timeout: std::time::Duration,
+    pub stream_cfg: StreamConfig<H>,
     pub allow_private_ips: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
@@ -39,10 +36,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     context: ContextCell<E>,
 
     address: SocketAddr,
-    handshake: H,
-    namespace: Vec<u8>,
-    max_message_size: u32,
-    handshake_timeout: std::time::Duration,
+    stream_cfg: StreamConfig<H>,
     allow_private_ips: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
@@ -77,10 +71,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
             context: ContextCell::new(context),
 
             address: cfg.address,
-            handshake: cfg.handshake,
-            namespace: cfg.namespace,
-            max_message_size: cfg.max_message_size,
-            handshake_timeout: cfg.handshake_timeout,
+            stream_cfg: cfg.stream_cfg,
             allow_private_ips: cfg.allow_private_ips,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
@@ -92,14 +83,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
-        handshake: H,
-        namespace: Vec<u8>,
-        max_message_size: u32,
-        handshake_timeout: std::time::Duration,
+        stream_cfg: StreamConfig<H>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
         tracker: tracker::Mailbox<PublicKeyOf<H>>,
@@ -107,11 +95,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
             spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
         >,
     ) {
-        let timeout = context.sleep(handshake_timeout);
-        let attempt = handshake.listen(
+        let timeout = context.sleep(stream_cfg.handshake_timeout);
+        let attempt = stream_cfg.handshake.listen(
             context,
-            namespace,
-            max_message_size,
+            &stream_cfg.namespace,
+            stream_cfg.max_message_size,
             |peer| tracker.acceptable(peer),
             stream,
             sink,
@@ -242,20 +230,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
 
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
-                    let handshake = self.handshake.clone();
-                    let namespace = self.namespace.clone();
-                    let max_message_size = self.max_message_size;
-                    let handshake_timeout = self.handshake_timeout;
+                    let stream_cfg = self.stream_cfg.clone();
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
                             context,
                             address,
-                            handshake,
-                            namespace,
-                            max_message_size,
-                            handshake_timeout,
+                            stream_cfg,
                             sink,
                             stream,
                             tracker,
@@ -310,10 +292,12 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    handshake,
-                    namespace: b"test-rate-limit".to_vec(),
-                    max_message_size: 1024,
-                    handshake_timeout: Duration::from_millis(5),
+                    stream_cfg: StreamConfig {
+                        handshake,
+                        namespace: b"test-rate-limit".to_vec(),
+                        max_message_size: 1024,
+                        handshake_timeout: Duration::from_millis(5),
+                    },
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip,
@@ -456,10 +440,12 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    handshake,
-                    namespace: b"test-private-ips".to_vec(),
-                    max_message_size: 1024,
-                    handshake_timeout: Duration::from_millis(5),
+                    stream_cfg: StreamConfig {
+                        handshake,
+                        namespace: b"test-private-ips".to_vec(),
+                        max_message_size: 1024,
+                        handshake_timeout: Duration::from_millis(5),
+                    },
                     allow_private_ips: false,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),

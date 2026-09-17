@@ -411,7 +411,7 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_stream::encrypted::{Config as StreamConfig, Handshake as StreamHandshake};
     use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -443,11 +443,13 @@ mod tests {
 
     fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
         StreamConfig {
-            signing_key: key,
+            handshake: StreamHandshake {
+                signing_key: key,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
             namespace: STREAM_NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
         }
     }

@@ -7,7 +7,7 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
-        MAX_PAYLOAD_OVERHEAD,
+        MAX_PAYLOAD_OVERHEAD, StreamConfig,
         channels::{self, Channels},
         max_size, router,
     },
@@ -69,7 +69,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                public_key: AsyncSigner::public_key(cfg.handshake.scheme()),
+                public_key: cfg.handshake.scheme().identity(),
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -203,10 +203,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                handshake: self.cfg.handshake.clone(),
-                namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-                max_message_size: self.max_frame_size,
-                handshake_timeout: self.cfg.handshake_timeout,
+                stream_cfg: StreamConfig {
+                    handshake: self.cfg.handshake.clone(),
+                    namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
+                    max_message_size: self.max_frame_size,
+                    handshake_timeout: self.cfg.handshake_timeout,
+                },
                 allow_private_ips: self.cfg.allow_private_ips,
                 bypass_ip_check: self.cfg.bypass_ip_check,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
@@ -222,10 +224,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                handshake: self.cfg.handshake,
-                namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-                max_message_size: self.max_frame_size,
-                handshake_timeout: self.cfg.handshake_timeout,
+                stream_cfg: StreamConfig {
+                    handshake: self.cfg.handshake,
+                    namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
+                    max_message_size: self.max_frame_size,
+                    handshake_timeout: self.cfg.handshake_timeout,
+                },
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,

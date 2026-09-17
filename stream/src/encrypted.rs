@@ -44,8 +44,9 @@
 //! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
 //!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
 //!   message integrity.
-//! - **Handshake Timeout**: A configurable deadline is enforced for handshake completion to protect
-//!   against malicious peers that create connections but abandon handshakes.
+//! - **Handshake Timeout**: The free functions [dial] and [listen] enforce a configurable deadline
+//!   to protect against peers that abandon handshakes. Callers using [Handshake] directly must
+//!   enforce their own deadline by dropping the handshake future.
 //!
 //! ## Not Provided
 //!
@@ -98,8 +99,6 @@ pub enum Error {
     RecvTooLarge(usize),
     #[error("invalid varint length prefix")]
     InvalidVarint,
-    #[error("maximum message size too large: {0} bytes")]
-    MaxMessageSizeTooLarge(u32),
     #[error("send failed")]
     SendFailed(RuntimeError),
     #[error("send zero size")]
@@ -128,14 +127,13 @@ impl From<HandshakeError> for Error {
 ///
 /// # Warning
 ///
-/// Synchronize this configuration across all peers.
-/// Mismatched configurations may cause dropped connections or parsing errors.
+/// Peers must use the same namespace and coordinate message limits and handshake timestamp
+/// tolerances. Mismatches can cause messages or connections to be rejected. Signing credentials
+/// and handshake deadlines are local to each peer.
 #[derive(Clone)]
 pub struct Config<S> {
-    /// The private key used for signing messages.
-    ///
-    /// This proves our own identity to other peers.
-    pub signing_key: S,
+    /// Handshake used to authenticate the connection.
+    pub handshake: Handshake<S>,
 
     /// Unique prefix for all signed messages. Should be application-specific.
     /// Prevents replay attacks across different applications using the same keys.
@@ -149,52 +147,28 @@ pub struct Config<S> {
     /// inheriting this limit.
     pub max_message_size: u32,
 
-    /// Maximum time drift allowed for future timestamps. Handles clock skew.
-    pub synchrony_bound: Duration,
-
-    /// Maximum age of handshake messages before rejection.
-    pub max_handshake_age: Duration,
-
     /// The allotted time for the handshake to complete.
     pub handshake_timeout: Duration,
 }
 
-impl<S> Config<S> {
-    /// Computes current time and acceptable timestamp range.
-    pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
-        time_information(ctx, self.synchrony_bound, self.max_handshake_age)
-    }
-}
-
-fn time_information(
-    ctx: &impl Clock,
-    synchrony_bound: Duration,
-    max_handshake_age: Duration,
-) -> (u64, Range<u64>) {
-    fn duration_to_u64(d: Duration) -> u64 {
-        u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
-    }
-
-    let current_time_ms = duration_to_u64(ctx.current().epoch());
-    let ok_timestamps = (current_time_ms.saturating_sub(duration_to_u64(max_handshake_age)))
-        ..(current_time_ms.saturating_add(duration_to_u64(synchrony_bound)));
-    (current_time_ms, ok_timestamps)
-}
-
-const fn validate_max_message_size(max_message_size: u32) -> Result<(), Error> {
-    if max_message_size > MAX_SIZE {
-        return Err(Error::MaxMessageSizeTooLarge(max_message_size));
-    }
-    Ok(())
-}
-
 /// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
+///
+/// Callers must enforce a handshake deadline by dropping the future when it expires.
+/// The free functions [dial] and [listen] enforce [`Config::handshake_timeout`].
+///
+/// # Warning
+///
+/// Coordinate timestamp tolerances across peers to accommodate clock skew and message delays.
+/// Incompatible tolerances can cause connections to be rejected.
 #[derive(Clone)]
 pub struct Handshake<S> {
     /// Private key used to authenticate the local peer.
     pub signing_key: S,
 
     /// Maximum time drift allowed for future timestamps.
+    ///
+    /// This governs the encrypted handshake. Protocols running over the stream may have
+    /// their own clock-skew tolerance, which must be configured separately.
     pub synchrony_bound: Duration,
 
     /// Maximum age of handshake messages before rejection.
@@ -209,6 +183,19 @@ impl<S> Handshake<S> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
         }
+    }
+
+    /// Computes the current time and acceptable timestamp range.
+    pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
+        fn duration_to_u64(d: Duration) -> u64 {
+            u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
+        }
+
+        let current_time_ms = duration_to_u64(ctx.current().epoch());
+        let ok_timestamps = (current_time_ms
+            .saturating_sub(duration_to_u64(self.max_handshake_age)))
+            ..(current_time_ms.saturating_add(duration_to_u64(self.synchrony_bound)));
+        (current_time_ms, ok_timestamps)
     }
 }
 
@@ -227,71 +214,6 @@ where
     Ok(M::decode(frame)?)
 }
 
-async fn listen_inner<C, S, I, O, B, F>(
-    handshake: Handshake<S>,
-    context: C,
-    namespace: Vec<u8>,
-    max_message_size: u32,
-    bouncer: B,
-    mut stream: I,
-    mut sink: O,
-) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error>
-where
-    C: BufferPooler + Clock + CryptoRng,
-    S: Signer,
-    I: Stream,
-    O: Sink,
-    B: FnOnce(S::PublicKey) -> F,
-    F: Future<Output = bool>,
-{
-    validate_max_message_size(max_message_size)?;
-    let pool = context.network_buffer_pool().clone();
-    let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
-    if !bouncer(peer.clone()).await {
-        return Err(Error::PeerRejected(peer.encode().to_vec()));
-    }
-
-    let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
-
-    let (current_time, ok_timestamps) = time_information(
-        &context,
-        handshake.synchrony_bound,
-        handshake.max_handshake_age,
-    );
-    let (state, syn_ack) = listen_start(
-        context,
-        Context::new(
-            &namespace,
-            current_time,
-            ok_timestamps,
-            handshake.signing_key,
-            peer.clone(),
-        ),
-        msg1,
-    )?;
-    send_frame(&mut sink, syn_ack.encode(), max_message_size).await?;
-
-    let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
-
-    let (send, recv) = listen_end(state, ack)?;
-
-    Ok((
-        peer,
-        Sender {
-            cipher: send,
-            sink,
-            max_message_size,
-            pool: pool.clone(),
-        },
-        Receiver {
-            cipher: recv,
-            stream,
-            max_message_size,
-            pool,
-        },
-    ))
-}
-
 impl<S: Signer> crate::Handshake for Handshake<S> {
     const MAX_SIZE: u32 = MAX_SIZE;
 
@@ -307,7 +229,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
     async fn dial<C, I, O>(
         self,
         context: C,
-        namespace: Vec<u8>,
+        namespace: &[u8],
         max_message_size: u32,
         peer: S::PublicKey,
         mut stream: I,
@@ -318,7 +240,10 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         I: Stream,
         O: Sink,
     {
-        validate_max_message_size(max_message_size)?;
+        assert!(
+            max_message_size <= MAX_SIZE,
+            "maximum message size exceeds stream limit"
+        );
         let pool = context.network_buffer_pool().clone();
         send_frame(
             &mut sink,
@@ -327,12 +252,11 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         )
         .await?;
 
-        let (current_time, ok_timestamps) =
-            time_information(&context, self.synchrony_bound, self.max_handshake_age);
+        let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
             Context::new(
-                &namespace,
+                namespace,
                 current_time,
                 ok_timestamps,
                 self.signing_key,
@@ -365,11 +289,11 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
     async fn listen<C, I, O, B, F>(
         self,
         context: C,
-        namespace: Vec<u8>,
+        namespace: &[u8],
         max_message_size: u32,
         bouncer: B,
-        stream: I,
-        sink: O,
+        mut stream: I,
+        mut sink: O,
     ) -> Result<(S::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
     where
         C: BufferPooler + Clock + CryptoRng,
@@ -378,21 +302,60 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
-        listen_inner(
-            self,
+        assert!(
+            max_message_size <= MAX_SIZE,
+            "maximum message size exceeds stream limit"
+        );
+        let pool = context.network_buffer_pool().clone();
+        let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
+        if !bouncer(peer.clone()).await {
+            return Err(Error::PeerRejected(peer.encode().to_vec()));
+        }
+
+        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
+
+        let (current_time, ok_timestamps) = self.time_information(&context);
+        let (state, syn_ack) = listen_start(
             context,
-            namespace,
-            max_message_size,
-            bouncer,
-            stream,
-            sink,
-        )
-        .await
+            Context::new(
+                namespace,
+                current_time,
+                ok_timestamps,
+                self.signing_key,
+                peer.clone(),
+            ),
+            msg1,
+        )?;
+        send_frame(&mut sink, syn_ack.encode(), max_message_size).await?;
+
+        let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
+
+        let (send, recv) = listen_end(state, ack)?;
+
+        Ok((
+            peer,
+            Sender {
+                cipher: send,
+                sink,
+                max_message_size,
+                pool: pool.clone(),
+            },
+            Receiver {
+                cipher: recv,
+                stream,
+                max_message_size,
+                pool,
+            },
+        ))
     }
 }
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
+///
+/// # Panics
+///
+/// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`].
 pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
     ctx: R,
     config: Config<S>,
@@ -401,22 +364,16 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
     sink: O,
 ) -> Result<(Sender<O>, Receiver<I>), Error> {
     let Config {
-        signing_key,
+        handshake,
         namespace,
         max_message_size,
-        synchrony_bound,
-        max_handshake_age,
         handshake_timeout,
     } = config;
     let timeout = ctx.sleep(handshake_timeout);
     let inner_routine = crate::Handshake::dial(
-        Handshake {
-            signing_key,
-            synchrony_bound,
-            max_handshake_age,
-        },
+        handshake,
         ctx,
-        namespace,
+        &namespace,
         max_message_size,
         peer,
         stream,
@@ -431,13 +388,20 @@ pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: 
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
+///
+/// The bouncer receives an unverified identity claim. Only a successful handshake proves
+/// the returned peer's identity.
+///
+/// # Panics
+///
+/// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`].
 pub async fn listen<
     R: BufferPooler + CryptoRng + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
-    Fut: Future<Output = bool>,
-    F: FnOnce(S::PublicKey) -> Fut,
+    Fut: Future<Output = bool> + Send,
+    F: FnOnce(S::PublicKey) -> Fut + Send,
 >(
     ctx: R,
     bouncer: F,
@@ -446,22 +410,16 @@ pub async fn listen<
     sink: O,
 ) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
     let Config {
-        signing_key,
+        handshake,
         namespace,
         max_message_size,
-        synchrony_bound,
-        max_handshake_age,
         handshake_timeout,
     } = config;
     let timeout = ctx.sleep(handshake_timeout);
-    let inner_routine = listen_inner(
-        Handshake {
-            signing_key,
-            synchrony_bound,
-            max_handshake_age,
-        },
+    let inner_routine = crate::Handshake::listen(
+        handshake,
         ctx,
-        namespace,
+        &namespace,
         max_message_size,
         bouncer,
         stream,
@@ -719,6 +677,7 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::Handshake as _;
     use commonware_codec::varint::UInt;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
@@ -726,7 +685,9 @@ mod test {
         Supervisor as _, deterministic, mocks,
     };
     use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use futures::FutureExt as _;
     use std::{
+        panic::AssertUnwindSafe,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -740,21 +701,62 @@ mod test {
     #[test]
     fn test_max_message_size_bounds() {
         assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
-        assert!(validate_max_message_size(0).is_ok());
-        assert!(validate_max_message_size(MAX_SIZE).is_ok());
-        assert!(matches!(
-            validate_max_message_size(MAX_SIZE + 1),
-            Err(Error::MaxMessageSizeTooLarge(size)) if size == MAX_SIZE + 1
-        ));
+        deterministic::Runner::default().start(|context| async move {
+            for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
+                for dialer in [true, false] {
+                    let (sink, _) = mocks::Channel::init();
+                    let (_, stream) = mocks::Channel::init();
+                    let handshake = Handshake::new(PrivateKey::from_seed(0));
+                    let attempt = async {
+                        if dialer {
+                            handshake
+                                .dial(
+                                    context.child("dialer"),
+                                    NAMESPACE,
+                                    max_message_size,
+                                    PrivateKey::from_seed(1).public_key(),
+                                    stream,
+                                    sink,
+                                )
+                                .await
+                                .map(|_| ())
+                        } else {
+                            handshake
+                                .listen(
+                                    context.child("listener"),
+                                    NAMESPACE,
+                                    max_message_size,
+                                    |_| async { true },
+                                    stream,
+                                    sink,
+                                )
+                                .await
+                                .map(|_| ())
+                        }
+                    };
+                    let result = AssertUnwindSafe(attempt).catch_unwind().await;
+                    if max_message_size <= MAX_SIZE {
+                        assert!(result.unwrap().is_err());
+                    } else {
+                        assert_eq!(
+                            result.err().unwrap().downcast_ref::<&str>(),
+                            Some(&"maximum message size exceeds stream limit")
+                        );
+                    }
+                }
+            }
+        });
     }
 
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
         Config {
-            signing_key,
+            handshake: Handshake {
+                signing_key,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+            },
             namespace: NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
         }
     }
@@ -1250,16 +1252,16 @@ mod test {
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
-            let (current_time, ok_timestamps) = dialer_config.time_information(&context);
+            let (current_time, ok_timestamps) = dialer_config.handshake.time_information(&context);
             let listener_public_key = listener_crypto.public_key();
-            let dialer_public_key = dialer_config.signing_key.public_key();
+            let dialer_public_key = dialer_config.handshake.signing_key.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
                     &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
-                    dialer_config.signing_key.clone(),
+                    dialer_config.handshake.signing_key.clone(),
                     listener_public_key.clone(),
                 ),
             );

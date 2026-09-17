@@ -171,8 +171,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
-        Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
-        listen,
+        Config as StreamConfig, Handshake as StreamHandshake, Receiver as EncryptedReceiver,
+        Sender as EncryptedSender, dial, listen,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
@@ -191,11 +191,13 @@ mod tests {
 
     fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
         StreamConfig {
-            signing_key: key,
+            handshake: StreamHandshake {
+                signing_key: key,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
             namespace: STREAM_NAMESPACE.to_vec(),
             max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
         }
     }
