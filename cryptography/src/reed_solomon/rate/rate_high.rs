@@ -36,6 +36,18 @@ pub struct HighRateEncoder<E: Engine> {
 impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
     type Rate = HighRate<E>;
 
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        Self::Rate::validate(original_count, recovery_count, shard_bytes)?;
+        super::validate_work_size(
+            shard_bytes,
+            Self::work_count(original_count, recovery_count),
+        )
+    }
+
     fn add_original_shard<T: AsRef<[u8]>>(&mut self, original_shard: T) -> Result<(), Error> {
         self.work.add_original_shard(original_shard)
     }
@@ -151,6 +163,18 @@ pub struct HighRateDecoder<E: Engine> {
 
 impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
     type Rate = HighRate<E>;
+
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        Self::Rate::validate(original_count, recovery_count, shard_bytes)?;
+        super::validate_work_size(
+            shard_bytes,
+            Self::work_count(original_count, recovery_count),
+        )
+    }
 
     fn add_original_shard<T: AsRef<[u8]>>(
         &mut self,

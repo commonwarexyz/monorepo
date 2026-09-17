@@ -63,15 +63,17 @@ impl DecoderWork {
         index: usize,
         original_shard: T,
     ) -> Result<(), Error> {
+        if index >= self.original_count {
+            return Err(Error::InvalidOriginalShardIndex {
+                original_count: self.original_count,
+                index,
+            });
+        }
+
         let pos = self.original_base_pos + index;
         let original_shard = original_shard.as_ref();
 
-        if index >= self.original_count {
-            Err(Error::InvalidOriginalShardIndex {
-                original_count: self.original_count,
-                index,
-            })
-        } else if self.received[pos] {
+        if self.received[pos] {
             Err(Error::DuplicateOriginalShardIndex { index })
         } else if original_shard.len() != self.shard_bytes {
             Err(Error::DifferentShardSize {
@@ -92,15 +94,17 @@ impl DecoderWork {
         index: usize,
         recovery_shard: T,
     ) -> Result<(), Error> {
+        if index >= self.recovery_count {
+            return Err(Error::InvalidRecoveryShardIndex {
+                recovery_count: self.recovery_count,
+                index,
+            });
+        }
+
         let pos = self.recovery_base_pos + index;
         let recovery_shard = recovery_shard.as_ref();
 
-        if index >= self.recovery_count {
-            Err(Error::InvalidRecoveryShardIndex {
-                recovery_count: self.recovery_count,
-                index,
-            })
-        } else if self.received[pos] {
+        if self.received[pos] {
             Err(Error::DuplicateRecoveryShardIndex { index })
         } else if recovery_shard.len() != self.shard_bytes {
             Err(Error::DifferentShardSize {
@@ -187,9 +191,12 @@ impl DecoderWork {
 
     // This must only be called by `DecoderResult`.
     pub(crate) fn original(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.original_count {
+            return None;
+        }
         let pos = self.original_base_pos + index;
 
-        if index < self.original_count && !self.received[pos] {
+        if !self.received[pos] {
             Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
         } else {
             None
@@ -201,9 +208,12 @@ impl DecoderWork {
     // recovery work buffers hold canonical values. Returns a reconstructed recovery shard, or `None`
     // if `index` is not a missing recovery shard.
     pub(crate) fn recovery(&self, index: usize) -> Option<&[u8]> {
+        if index >= self.recovery_count {
+            return None;
+        }
         let pos = self.recovery_base_pos + index;
 
-        if self.missing_original_count() > 0 && index < self.recovery_count && !self.received[pos] {
+        if self.missing_original_count() > 0 && !self.received[pos] {
             Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
         } else {
             None

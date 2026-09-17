@@ -124,7 +124,7 @@ impl<'a> ShardsRefMut<'a> {
     ///
     /// # Panics
     ///
-    /// If `dist` is `0`.
+    /// If `dist` is `0` or either shard index is out of bounds.
     ///
     /// [`Naive::fft`]: crate::reed_solomon::engine::Naive#method.fft
     pub fn dist2_mut(
@@ -135,6 +135,7 @@ impl<'a> ShardsRefMut<'a> {
         &mut [[u8; SHARD_CHUNK_BYTES]],
         &mut [[u8; SHARD_CHUNK_BYTES]],
     ) {
+        assert!(pos < self.shard_count && dist > 0 && dist < self.shard_count - pos);
         pos *= self.shard_chunk_count;
         dist *= self.shard_chunk_count;
 
@@ -153,10 +154,11 @@ impl<'a> ShardsRefMut<'a> {
     ///
     /// # Panics
     ///
-    /// If `dist` is `0`.
+    /// If `dist` is `0` or any shard index is out of bounds.
     ///
     /// [`NoSimd::fft`]: crate::reed_solomon::engine::NoSimd#method.fft
     pub fn dist4_mut(&mut self, mut pos: usize, mut dist: usize) -> FourShardsMut<'_> {
+        assert!(pos < self.shard_count && dist > 0 && dist <= (self.shard_count - 1 - pos) / 3);
         pos *= self.shard_chunk_count;
         dist *= self.shard_chunk_count;
 
@@ -183,27 +185,36 @@ impl<'a> ShardsRefMut<'a> {
     }
 
     /// Creates new [`ShardsRefMut`] that references given `data`.
+    /// Each shard contains `shard_chunk_count` chunks; zero-length shards are supported.
     ///
     /// # Panics
     ///
-    /// If `data.len() < shard_count * shard_chunk_count`.
+    /// If `shard_count * shard_chunk_count` overflows or exceeds `data.len()`.
     pub fn new(
         shard_count: usize,
         shard_chunk_count: usize,
         data: &'a mut [[u8; SHARD_CHUNK_BYTES]],
     ) -> Self {
-        assert!(data.len() >= shard_count * shard_chunk_count);
+        let chunk_count = shard_count
+            .checked_mul(shard_chunk_count)
+            .expect("shard dimensions overflow");
+        assert!(data.len() >= chunk_count);
 
         Self {
             shard_count,
             shard_chunk_count,
-            data: &mut data[..shard_count * shard_chunk_count],
+            data: &mut data[..chunk_count],
         }
     }
 
     /// Splits this [`ShardsRefMut`] into two so that
     /// first includes shards `0..mid` and second includes shards `mid..`.
+    ///
+    /// # Panics
+    ///
+    /// If `mid > self.len()`.
     pub fn split_at_mut(&mut self, mid: usize) -> (ShardsRefMut<'_>, ShardsRefMut<'_>) {
+        assert!(mid <= self.shard_count);
         let (a, b) = self.data.split_at_mut(mid * self.shard_chunk_count);
 
         (
@@ -213,20 +224,26 @@ impl<'a> ShardsRefMut<'a> {
     }
 
     /// Fills the given shard-range with `0u8`:s.
+    ///
+    /// # Panics
+    ///
+    /// If the range is reversed or extends beyond `self.len()`.
     pub fn zero<R: RangeBounds<usize>>(&mut self, range: R) {
         let start = match range.start_bound() {
-            Bound::Included(start) => start * self.shard_chunk_count,
-            Bound::Excluded(start) => (start + 1) * self.shard_chunk_count,
+            Bound::Included(start) => *start,
+            Bound::Excluded(start) => start.checked_add(1).expect("shard range start overflow"),
             Bound::Unbounded => 0,
         };
 
         let end = match range.end_bound() {
-            Bound::Included(end) => (end + 1) * self.shard_chunk_count,
-            Bound::Excluded(end) => end * self.shard_chunk_count,
-            Bound::Unbounded => self.shard_count * self.shard_chunk_count,
+            Bound::Included(end) => end.checked_add(1).expect("shard range end overflow"),
+            Bound::Excluded(end) => *end,
+            Bound::Unbounded => self.shard_count,
         };
 
-        self.data[start..end].fill([0; SHARD_CHUNK_BYTES]);
+        assert!(start <= end && end <= self.shard_count);
+        self.data[start * self.shard_chunk_count..end * self.shard_chunk_count]
+            .fill([0; SHARD_CHUNK_BYTES]);
     }
 }
 
@@ -236,6 +253,7 @@ impl<'a> ShardsRefMut<'a> {
 impl Index<usize> for ShardsRefMut<'_> {
     type Output = [[u8; SHARD_CHUNK_BYTES]];
     fn index(&self, index: usize) -> &Self::Output {
+        assert!(index < self.shard_count);
         &self.data[index * self.shard_chunk_count..(index + 1) * self.shard_chunk_count]
     }
 }
@@ -245,6 +263,7 @@ impl Index<usize> for ShardsRefMut<'_> {
 
 impl IndexMut<usize> for ShardsRefMut<'_> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(index < self.shard_count);
         &mut self.data[index * self.shard_chunk_count..(index + 1) * self.shard_chunk_count]
     }
 }
@@ -272,6 +291,9 @@ impl ShardsRefMut<'_> {
         &mut [[u8; SHARD_CHUNK_BYTES]],
         &mut [[u8; SHARD_CHUNK_BYTES]],
     ) {
+        assert!(x <= self.shard_count && count <= self.shard_count - x);
+        assert!(y <= self.shard_count && count <= self.shard_count - y);
+        assert!(x.abs_diff(y) >= count);
         x *= self.shard_chunk_count;
         y *= self.shard_chunk_count;
         count *= self.shard_chunk_count;
@@ -282,6 +304,134 @@ impl ShardsRefMut<'_> {
         } else {
             let (head, tail) = self.data.split_at_mut(x);
             (&mut tail[..count], &mut head[y..y + count])
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reed_solomon::engine::utils::xor_within;
+
+    #[test]
+    #[should_panic]
+    fn dimensions_overflow() {
+        ShardsRefMut::new(usize::MAX / 2 + 1, 2, &mut []);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_index_out_of_bounds() {
+        let shards = ShardsRefMut::new(2, 0, &mut []);
+        let _ = &shards[2];
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_mutable_index_out_of_bounds() {
+        let mut shards = ShardsRefMut::new(2, 0, &mut []);
+        let _ = &mut shards[2];
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_split_out_of_bounds() {
+        ShardsRefMut::new(2, 0, &mut []).split_at_mut(3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_range_out_of_bounds() {
+        ShardsRefMut::new(2, 0, &mut []).zero(0..3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_range_reversed() {
+        ShardsRefMut::new(2, 0, &mut []).zero((Bound::Included(2), Bound::Excluded(1)));
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_range_start_overflow() {
+        ShardsRefMut::new(2, 0, &mut []).zero((Bound::Excluded(usize::MAX), Bound::Unbounded));
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_range_end_overflow() {
+        ShardsRefMut::new(2, 0, &mut []).zero(..=usize::MAX);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_xor_out_of_bounds() {
+        xor_within(&mut ShardsRefMut::new(4, 0, &mut []), 0, 3, 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_xor_overlapping() {
+        xor_within(&mut ShardsRefMut::new(4, 0, &mut []), 0, 1, 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_dist2_zero() {
+        ShardsRefMut::new(2, 0, &mut []).dist2_mut(0, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_dist4_zero() {
+        ShardsRefMut::new(4, 0, &mut []).dist4_mut(0, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_dist2_out_of_bounds() {
+        ShardsRefMut::new(2, 0, &mut []).dist2_mut(1, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn empty_shard_dist4_out_of_bounds() {
+        ShardsRefMut::new(4, 0, &mut []).dist4_mut(1, 1);
+    }
+
+    #[test]
+    fn empty_shards() {
+        let mut shards = ShardsRefMut::new(4, 0, &mut []);
+        assert_eq!(shards.len(), 4);
+        assert!(!shards.is_empty());
+        assert!(shards[3].is_empty());
+        shards.dist2_mut(1, 2);
+        shards.dist4_mut(0, 1);
+        shards.zero(1..=3);
+        let (left, right) = shards.split_at_mut(4);
+        assert_eq!(left.len(), 4);
+        assert!(right.is_empty());
+    }
+
+    #[test]
+    fn views_preserve_shard_boundaries() {
+        let mut data = [[9; SHARD_CHUNK_BYTES]; 14];
+        let mut shards = ShardsRefMut::new(6, 2, &mut data);
+        shards.zero(2..4);
+        assert_eq!(shards[2], [[0; SHARD_CHUNK_BYTES]; 2]);
+        assert_eq!(shards[3], [[0; SHARD_CHUNK_BYTES]; 2]);
+        let (first, last) = shards.dist2_mut(0, 5);
+        first.fill([1; SHARD_CHUNK_BYTES]);
+        last.fill([6; SHARD_CHUNK_BYTES]);
+        let (a, b, c, d) = shards.dist4_mut(0, 1);
+        for (index, shard) in [a, b, c, d].into_iter().enumerate() {
+            shard.fill([index as u8 + 1; SHARD_CHUNK_BYTES]);
+        }
+        let (_, mut right) = shards.split_at_mut(3);
+        right[1].fill([5; SHARD_CHUNK_BYTES]);
+        for (index, shard) in data.as_chunks::<2>().0.iter().enumerate() {
+            let expected = if index < 6 { index as u8 + 1 } else { 9 };
+            assert_eq!(shard, &[[expected; SHARD_CHUNK_BYTES]; 2]);
         }
     }
 }
