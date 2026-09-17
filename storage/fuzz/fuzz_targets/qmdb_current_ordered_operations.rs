@@ -13,6 +13,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
+use commonware_storage_fuzz::assert_ordered_neighbors;
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -61,6 +62,9 @@ enum CurrentOperation {
         key: RawKey,
     },
     ExclusionProof {
+        key: RawKey,
+    },
+    GetNeighbors {
         key: RawKey,
     },
 }
@@ -128,6 +132,28 @@ async fn commit_pending<F: Graftable>(
     }
     committed_state.extend(pending_inserts.drain());
     db
+}
+
+async fn assert_neighbors<F: Graftable>(
+    db: &Db<F>,
+    committed_state: &HashMap<RawKey, RawValue>,
+    key: RawKey,
+) {
+    let query = Key::new(key);
+    let prev = db
+        .get_prev_key(&query)
+        .await
+        .expect("get_prev_key should not fail");
+    let next = db
+        .get_next_key(&query)
+        .await
+        .expect("get_next_key should not fail");
+    assert_ordered_neighbors(
+        committed_state.keys().copied().map(Key::new),
+        &query,
+        prev,
+        next,
+    );
 }
 
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
@@ -215,6 +241,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     pending_writes.push((k, None));
                     pending_inserts.remove(key);
                     pending_deletes.insert(*key);
+                    all_keys.insert(*key);
                     db
                 }
 
@@ -461,6 +488,12 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     }
                     db
                 }
+
+                CurrentOperation::GetNeighbors { key } => {
+                    assert_neighbors(&db, &committed_state, *key).await;
+                    all_keys.insert(*key);
+                    db
+                }
             };
         }
 
@@ -488,6 +521,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     assert!(result.is_none(), "Unset key {key:?} should not exist");
                 }
             }
+        }
+
+        for key in all_keys
+            .iter()
+            .copied()
+            .chain([[0u8; 32], [u8::MAX; 32]])
+        {
+            assert_neighbors(&db, &committed_state, key).await;
         }
 
         db.destroy().await.expect("Destroy should not fail");
