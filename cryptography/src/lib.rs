@@ -296,9 +296,6 @@ commonware_macros::stability_scope!(BETA {
         /// Returns one digest per input in the same order. Inputs may be empty,
         /// differ in length, or overlap. Output position `i` is equivalent to
         /// `Self::hash(&[messages[i].as_ref()])`.
-        ///
-        /// Implementations may use SIMD across messages. Callers are responsible
-        /// for scheduling batches across threads.
         fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
             messages
                 .iter()

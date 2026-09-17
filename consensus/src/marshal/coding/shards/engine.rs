@@ -2030,6 +2030,56 @@ mod tests {
     type ChurningShardEngine<S> =
         Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
 
+    /// The largest verification batch submitted through `BatchChecking`.
+    static CHECK_BATCH_LEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// Records verification batch sizes independently of encoding and decoding.
+    #[derive(Clone, Debug)]
+    struct BatchChecking;
+
+    impl CodingScheme for BatchChecking {
+        type Commitment = <C as CodingScheme>::Commitment;
+        type Shard = <C as CodingScheme>::Shard;
+        type CheckedShard = <C as CodingScheme>::CheckedShard;
+        type Error = <C as CodingScheme>::Error;
+
+        fn encode(
+            config: &CodingConfig,
+            data: impl bytes::Buf,
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+            C::encode(config, data, strategy)
+        }
+
+        fn check(
+            config: &CodingConfig,
+            commitment: &Self::Commitment,
+            index: u16,
+            shard: &Self::Shard,
+        ) -> Result<Self::CheckedShard, Self::Error> {
+            C::check(config, commitment, index, shard)
+        }
+
+        fn check_many(
+            config: &CodingConfig,
+            commitment: &Self::Commitment,
+            shards: &[(u16, &Self::Shard)],
+            strategy: &impl Strategy,
+        ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
+            CHECK_BATCH_LEN.fetch_max(shards.len(), Ordering::Relaxed);
+            C::check_many(config, commitment, shards, strategy)
+        }
+
+        fn decode<'a>(
+            config: &CodingConfig,
+            commitment: &Self::Commitment,
+            shards: impl Iterator<Item = &'a Self::CheckedShard>,
+            strategy: &impl Strategy,
+        ) -> Result<Vec<u8>, Self::Error> {
+            C::decode(config, commitment, shards, strategy)
+        }
+    }
+
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
         let is_blocked = blocked_peers
@@ -3816,54 +3866,6 @@ mod tests {
 
     #[test_traced]
     fn test_pending_shards_batch_validated_at_quorum() {
-        static CHECK_BATCH_LEN: AtomicUsize = AtomicUsize::new(0);
-
-        #[derive(Clone, Debug)]
-        struct BatchChecking;
-
-        impl CodingScheme for BatchChecking {
-            type Commitment = <C as CodingScheme>::Commitment;
-            type Shard = <C as CodingScheme>::Shard;
-            type CheckedShard = <C as CodingScheme>::CheckedShard;
-            type Error = <C as CodingScheme>::Error;
-
-            fn encode(
-                config: &CodingConfig,
-                data: impl bytes::Buf,
-                strategy: &impl Strategy,
-            ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-                C::encode(config, data, strategy)
-            }
-
-            fn check(
-                config: &CodingConfig,
-                commitment: &Self::Commitment,
-                index: u16,
-                shard: &Self::Shard,
-            ) -> Result<Self::CheckedShard, Self::Error> {
-                C::check(config, commitment, index, shard)
-            }
-
-            fn check_many(
-                config: &CodingConfig,
-                commitment: &Self::Commitment,
-                shards: &[(u16, &Self::Shard)],
-                strategy: &impl Strategy,
-            ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
-                CHECK_BATCH_LEN.fetch_max(shards.len(), Ordering::Relaxed);
-                C::check_many(config, commitment, shards, strategy)
-            }
-
-            fn decode<'a>(
-                config: &CodingConfig,
-                commitment: &Self::Commitment,
-                shards: impl Iterator<Item = &'a Self::CheckedShard>,
-                strategy: &impl Strategy,
-            ) -> Result<Vec<u8>, Self::Error> {
-                C::decode(config, commitment, shards, strategy)
-            }
-        }
-
         // One eagerly checked assigned shard and seven queued shards reach quorum.
         // Observe check_many directly so encode/decode batching cannot satisfy the test.
         CHECK_BATCH_LEN.store(0, Ordering::Relaxed);

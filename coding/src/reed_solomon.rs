@@ -84,6 +84,7 @@ fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
     )
 }
 
+/// Validate the requested shard index, embedded index, and proof leaf count before hashing.
 fn check_metadata<D: Digest>(total: u16, index: u16, shard: &Chunk<D>) -> Result<(), Error> {
     if index >= total {
         return Err(Error::InvalidIndex(index));
@@ -97,6 +98,8 @@ fn check_metadata<D: Digest>(total: u16, index: u16, shard: &Chunk<D>) -> Result
     Ok(())
 }
 
+/// Authenticate a shard at its requested position and cache its digest with the commitment.
+/// The digest is evaluated only after the shard metadata is valid.
 fn check_chunk<H: Hasher>(
     total: u16,
     commitment: &H::Digest,
@@ -459,6 +462,9 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 
 /// Striped Reed-Solomon: split every shard by byte range and run independent
 /// Reed-Solomon operations over those ranges.
+///
+/// [`ranges`](striped::ranges) selects the parallel partition. A manual strategy executes
+/// that partition, while shard hashing retains the caller's adaptive policy.
 ///
 /// ```text
 ///   originals:
@@ -1391,7 +1397,7 @@ mod tests {
         let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
         for count in [0, 1, 7, 9, 15, 16, 17, 128, 129, 144] {
             let shards = (0..count)
-                .map(|index| vec![index as u8; index * 13])
+                .map(|index| vec![index as u8; 128])
                 .collect::<Vec<_>>();
             let expected = shards
                 .iter()
@@ -1585,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_many_distributes_independent_mixed_widths() {
+    fn test_check_many_checks_mixed_widths_individually() {
         let config = Config {
             minimum_shards: NZU16!(32),
             extra_shards: NZU16!(32),
@@ -1603,7 +1609,7 @@ mod tests {
             .iter()
             .map(|&(index, shard)| RS::check(&config, &root, index, shard).unwrap())
             .collect::<Vec<_>>();
-        // Observe indivisible batches on one thread while planning eight workers.
+        // Observe every hashing call on one thread while planning eight workers.
         let strategy = Rayon::new(NZUsize!(1))
             .unwrap()
             .with_parallelism(NZUsize!(8))
@@ -1622,19 +1628,7 @@ mod tests {
             )
             .0;
         assert_eq!(actual, expected);
-        let total_work = payloads
-            .iter()
-            .map(|payload| payload.len() + 1)
-            .sum::<usize>();
-        let largest = payloads
-            .iter()
-            .map(|payload| payload.len() + 1)
-            .max()
-            .unwrap();
-        for batch in calls {
-            let work = batch.iter().map(|payload| payload.len() + 1).sum::<usize>();
-            assert!(work <= total_work.div_ceil(8) + largest);
-        }
+        assert!(calls.is_empty());
         assert!(matches!(
             RS::decode(&config, &root, actual.iter(), &STRATEGY),
             Err(Error::Inconsistent)
