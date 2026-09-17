@@ -249,13 +249,13 @@ where
 #[cfg(test)]
 impl<C: Signer> Config<StreamHandshake<C>> {
     pub fn test(
-        crypto: C,
+        signer: C,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
         max_message_size: u32,
     ) -> Self {
         let mut config = Self::local(
-            StreamHandshake::new(crypto),
+            StreamHandshake::new(signer),
             b"test_namespace",
             listen,
             listen,

@@ -281,13 +281,13 @@ mod tests {
 
     // Test Configuration Setup
     fn test_config<C: Signer>(
-        crypto: C,
+        signer: C,
         bypass_ip_check: bool,
     ) -> (Config<C::PublicKey>, listener::Updates) {
         let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {
-                public_key: crypto.public_key(),
+                public_key: signer.public_key(),
                 mailbox_size: NZUsize!(1024),
                 max_peers_per_set: 1024,
                 tracked_peer_sets: NZUsize!(2),

@@ -66,8 +66,8 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key).expect("Private key is invalid");
-    let public_key = key.public_key();
+    let signer = PrivateKey::decode(key).expect("Private key is invalid");
+    let public_key = signer.public_key();
 
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
@@ -131,7 +131,7 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            Handshake::new(key.clone()),
+            Handshake::new(signer.clone()),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

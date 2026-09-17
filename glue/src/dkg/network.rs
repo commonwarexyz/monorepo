@@ -467,10 +467,10 @@ mod tests {
     fn lookup_secondary_dials_primary_and_receives_response() {
         let executor = deterministic::Runner::timed(std::time::Duration::from_secs(10));
         executor.start(|context| async move {
-            let dealer = ed25519::PrivateKey::from_seed(10);
-            let participant = ed25519::PrivateKey::from_seed(11);
-            let dealer_key = dealer.public_key();
-            let participant_key = participant.public_key();
+            let dealer_signer = ed25519::PrivateKey::from_seed(10);
+            let participant_signer = ed25519::PrivateKey::from_seed(11);
+            let dealer_key = dealer_signer.public_key();
+            let participant_key = participant_signer.public_key();
             let dealer_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6100);
             let participant_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6101);
             let directory = Addresses::from_iter([
@@ -491,7 +491,7 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    Handshake::new(dealer),
+                    Handshake::new(dealer_signer),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
                     NZUsize!(2),
@@ -501,7 +501,7 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    Handshake::new(participant),
+                    Handshake::new(participant_signer),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
                     NZUsize!(2),

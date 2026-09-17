@@ -12,15 +12,15 @@ const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 fn fuzz(data: &[u8]) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let dialer_crypto = PrivateKey::from_seed(42);
-        let listener_crypto = PrivateKey::from_seed(24);
+        let dialer_signer = PrivateKey::from_seed(42);
+        let listener_signer = PrivateKey::from_seed(24);
 
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_config = Config {
             handshake: Handshake {
-                signing_key: dialer_crypto.clone(),
+                signing_key: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -31,7 +31,7 @@ fn fuzz(data: &[u8]) {
 
         let listener_config = Config {
             handshake: Handshake {
-                signing_key: listener_crypto.clone(),
+                signing_key: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -54,7 +54,7 @@ fn fuzz(data: &[u8]) {
         let (mut dialer_sender, mut dialer_receiver) = dial(
             context.child("dialer"),
             dialer_config,
-            listener_crypto.public_key(),
+            listener_signer.public_key(),
             dialer_stream,
             dialer_sink,
         )
@@ -63,7 +63,7 @@ fn fuzz(data: &[u8]) {
 
         let (listener_peer, mut listener_sender, mut listener_receiver) =
             listener_handle.await.unwrap().unwrap();
-        assert_eq!(listener_peer, dialer_crypto.public_key());
+        assert_eq!(listener_peer, dialer_signer.public_key());
 
         for chunk in data.chunks(1024) {
             dialer_sender.send(chunk.to_vec()).await.unwrap();

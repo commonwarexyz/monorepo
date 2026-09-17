@@ -441,10 +441,10 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> EncryptedConfig<S> {
+    fn stream_config<S: Signer>(signer: S) -> EncryptedConfig<S> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: key,
+                signing_key: signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
@@ -469,18 +469,18 @@ mod tests {
     fn test_missing_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
@@ -524,11 +524,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -572,18 +572,18 @@ mod tests {
     fn test_duplicate_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
@@ -627,11 +627,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -679,20 +679,20 @@ mod tests {
     fn test_greeting_public_key_mismatch_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let wrong_key = PrivateKey::from_seed(3);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
-            let wrong_pk = wrong_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let wrong_signer = PrivateKey::from_seed(3);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+            let wrong_pk = wrong_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
@@ -736,11 +736,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -754,11 +754,11 @@ mod tests {
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
@@ -789,18 +789,18 @@ mod tests {
     fn test_invalid_channel_no_unbounded_metric_cardinality() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Establish an encrypted connection between local (attacker) and
             // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
@@ -850,11 +850,11 @@ mod tests {
 
             // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
 
             let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -878,11 +878,11 @@ mod tests {
             context.child("task").spawn(move |_ctx| async move {
                 // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
-                    local_key.public_key(),
+                    signer.public_key(),
                     IP_NAMESPACE,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                     0,
-                    |namespace, message| local_key.sign(namespace, message),
+                    |namespace, message| signer.sign(namespace, message),
                 ));
                 local_sender
                     .send(greeting_payload.encode())

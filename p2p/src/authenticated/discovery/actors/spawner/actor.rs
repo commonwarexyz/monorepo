@@ -189,10 +189,10 @@ mod tests {
         EncryptedReceiver<mocks::Stream>,
     );
 
-    fn stream_config(key: PrivateKey) -> EncryptedConfig<PrivateKey> {
+    fn stream_config(signer: PrivateKey) -> EncryptedConfig<PrivateKey> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: key,
+                signing_key: signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
@@ -220,11 +220,11 @@ mod tests {
 
     async fn connections(
         context: &deterministic::Context,
-        peer_key: PrivateKey,
-        local_key: PrivateKey,
+        peer_signer: PrivateKey,
+        signer: PrivateKey,
     ) -> (Connection, Connection) {
-        let peer = peer_key.public_key();
-        let local = local_key.public_key();
+        let peer = peer_signer.public_key();
+        let local = signer.public_key();
         let (peer_sink, local_stream) = mocks::Channel::init();
         let (local_sink, peer_stream) = mocks::Channel::init();
 
@@ -234,7 +234,7 @@ mod tests {
                 listen(
                     context,
                     |_| async { true },
-                    stream_config(local_key),
+                    stream_config(signer),
                     local_stream,
                     local_sink,
                 )
@@ -248,7 +248,7 @@ mod tests {
 
         let dialer = dial(
             context.child("dialer"),
-            stream_config(peer_key),
+            stream_config(peer_signer),
             local,
             peer_stream,
             peer_sink,
@@ -309,12 +309,12 @@ mod tests {
     #[test]
     fn tracker_rejection_sends_no_greeting() {
         deterministic::Runner::default().start(|context| async move {
-            let peer_key = PrivateKey::from_seed(1);
-            let local_key = PrivateKey::from_seed(2);
-            let peer = peer_key.public_key();
-            let local = local_key.public_key();
+            let peer_signer = PrivateKey::from_seed(1);
+            let signer = PrivateKey::from_seed(2);
+            let peer = peer_signer.public_key();
+            let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
-                connections(&context, peer_key, local_key).await;
+                connections(&context, peer_signer, signer).await;
             let (mut spawner, mut tracker_receiver, _router_receiver, releaser, _handle) =
                 setup(context.child("setup"), local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
@@ -352,12 +352,12 @@ mod tests {
     #[test]
     fn router_rejection_sends_no_greeting() {
         deterministic::Runner::default().start(|context| async move {
-            let peer_key = PrivateKey::from_seed(1);
-            let local_key = PrivateKey::from_seed(2);
-            let peer = peer_key.public_key();
-            let local = local_key.public_key();
+            let peer_signer = PrivateKey::from_seed(1);
+            let signer = PrivateKey::from_seed(2);
+            let peer = peer_signer.public_key();
+            let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
-                connections(&context, peer_key, local_key.clone()).await;
+                connections(&context, peer_signer, signer.clone()).await;
             let (mut spawner, mut tracker_receiver, mut router_receiver, releaser, _handle) =
                 setup(context.child("setup"), local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
@@ -380,11 +380,11 @@ mod tests {
             };
             assert_eq!(public_key, peer);
             let greeting = types::Info::sign(
-                local_key.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch_millis(),
-                |namespace, message| local_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(responder.send(greeting).is_ok());
 

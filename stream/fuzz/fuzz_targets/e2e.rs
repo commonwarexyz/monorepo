@@ -92,8 +92,8 @@ fn fuzz(input: FuzzInput) {
             setup_corruption,
             messages,
         } = input;
-        let dialer_crypto = PrivateKey::from_seed(42);
-        let listener_crypto = PrivateKey::from_seed(24);
+        let dialer_signer = PrivateKey::from_seed(42);
+        let listener_signer = PrivateKey::from_seed(24);
 
         let (dialer_sink, mut adversary_d_stream) = mocks::Channel::init();
         let (mut adversary_d_sink, listener_stream) = mocks::Channel::init();
@@ -102,7 +102,7 @@ fn fuzz(input: FuzzInput) {
 
         let dialer_config = Config {
             handshake: Handshake {
-                signing_key: dialer_crypto.clone(),
+                signing_key: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
 
         let listener_config = Config {
             handshake: Handshake {
-                signing_key: listener_crypto.clone(),
+                signing_key: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
             dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 dialer_sink,
             )

@@ -315,16 +315,16 @@ mod tests {
 
     fn default_test_config<C: Signer>(
         context: &impl Clock,
-        crypto: C,
+        signer: C,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C::PublicKey> {
         Config {
             myself: Info::sign(
-                crypto.public_key(),
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 context.current().epoch_millis(),
-                |namespace, message| crypto.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             ),
             bootstrappers,
             allow_private_ips: true,

@@ -390,10 +390,10 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> EncryptedConfig<S> {
+    fn stream_config<S: Signer>(signer: S) -> EncryptedConfig<S> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: key,
+                signing_key: signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
@@ -418,18 +418,18 @@ mod tests {
     fn test_invalid_channel_no_unbounded_metric_cardinality() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Establish an encrypted connection between local (attacker) and
             // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
@@ -527,17 +527,17 @@ mod tests {
     fn test_batches_outbound_sends_into_single_runtime_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_config = stream_config(signer.clone());
+            let remote_config = stream_config(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({

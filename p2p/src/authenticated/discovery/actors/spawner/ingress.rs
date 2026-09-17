@@ -72,10 +72,10 @@ mod tests {
         EncryptedReceiver<mocks::Stream>,
     );
 
-    fn stream_config(key: PrivateKey) -> EncryptedConfig<PrivateKey> {
+    fn stream_config(signer: PrivateKey) -> EncryptedConfig<PrivateKey> {
         EncryptedConfig {
             handshake: StreamHandshake {
-                signing_key: key,
+                signing_key: signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
@@ -87,11 +87,11 @@ mod tests {
 
     async fn connections(
         context: &deterministic::Context,
-        local_key: PrivateKey,
-        remote_key: PrivateKey,
+        signer: PrivateKey,
+        remote_signer: PrivateKey,
     ) -> (Connection, Connection) {
-        let local_pk = local_key.public_key();
-        let remote_pk = remote_key.public_key();
+        let local_pk = signer.public_key();
+        let remote_pk = remote_signer.public_key();
         let (local_sink, remote_stream) = mocks::Channel::init();
         let (remote_sink, local_stream) = mocks::Channel::init();
 
@@ -101,7 +101,7 @@ mod tests {
                 listen(
                     context,
                     |_| async { true },
-                    stream_config(remote_key),
+                    stream_config(remote_signer),
                     remote_stream,
                     remote_sink,
                 )
@@ -115,7 +115,7 @@ mod tests {
 
         let dialer = dial(
             context.child("dialer"),
-            stream_config(local_key),
+            stream_config(signer),
             remote_pk,
             local_stream,
             local_sink,

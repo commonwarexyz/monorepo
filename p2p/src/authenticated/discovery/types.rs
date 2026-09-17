@@ -393,12 +393,12 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     fn signed_peer_info(rng: &mut impl rand_core::CryptoRng) -> Info<PublicKey> {
-        let c = PrivateKey::random(rng);
+        let signer = PrivateKey::random(rng);
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
-            public_key: c.public_key(),
-            signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
+            public_key: signer.public_key(),
+            signature: signer.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
         }
     }
 
@@ -584,21 +584,21 @@ mod tests {
     fn info_verifier_accepts_valid_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 SocketAddr::from(([8, 8, 8, 8], 8080)),
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(validator.validate(&context, &[peer]).is_ok());
         });
@@ -608,7 +608,7 @@ mod tests {
     fn info_verifier_rejects_too_many_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let timestamp = context.current().epoch().as_millis() as u64;
             let peers = {
@@ -632,12 +632,8 @@ mod tests {
                 );
                 vec![peer_a, peer_b]
             };
-            let validator = Info::verifier(
-                validator_key.public_key(),
-                1,
-                synchrony_bound,
-                NAMESPACE.to_vec(),
-            );
+            let validator =
+                Info::verifier(signer.public_key(), 1, synchrony_bound, NAMESPACE.to_vec());
             let err = validator.validate(&context, &peers).unwrap_err();
             assert!(matches!(err, Error::TooManyPeers(count) if count == 2));
         });
@@ -647,20 +643,20 @@ mod tests {
     fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                signer.public_key(),
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
-                validator_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 SocketAddr::from(([203, 0, 113, 1], 8080)),
                 timestamp,
-                |namespace, message| validator_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::ReceivedSelf));
@@ -671,11 +667,11 @@ mod tests {
     fn info_verifier_rejects_future_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -684,11 +680,11 @@ mod tests {
                 (context.current().epoch() + synchrony_bound + Duration::from_secs(1)).as_millis()
                     as u64;
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 SocketAddr::from(([198, 51, 100, 1], 8080)),
                 future_timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::SynchronyBound));
@@ -699,11 +695,11 @@ mod tests {
     fn info_verifier_allows_past_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -717,11 +713,11 @@ mod tests {
                 (context.current().epoch() - synchrony_bound - Duration::from_secs(1)).as_millis()
                     as u64;
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 SocketAddr::from(([198, 51, 100, 1], 8080)),
                 past_timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(validator.validate(&context, &[peer]).is_ok());
         });
@@ -731,21 +727,21 @@ mod tests {
     fn info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 b"wrong-namespace",
                 SocketAddr::from(([8, 8, 4, 4], 8080)),
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::InvalidSignature));
@@ -756,23 +752,23 @@ mod tests {
     fn info_with_dns_ingress_sign_and_verify() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let peer_key = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
                 host: hostname!("node.example.com"),
                 port: 8080,
             };
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 dns_ingress.clone(),
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
 
             assert_eq!(peer.ingress, dns_ingress);
             assert_eq!(peer.timestamp, timestamp);
-            assert_eq!(peer.public_key, peer_key.public_key());
+            assert_eq!(peer.public_key, signer.public_key());
             assert!(peer.verify(NAMESPACE));
         });
     }
@@ -781,18 +777,18 @@ mod tests {
     fn info_with_dns_ingress_codec() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let peer_key = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let timestamp = context.current().epoch().as_millis() as u64;
             let dns_ingress = Ingress::Dns {
                 host: hostname!("validator-1.network.io"),
                 port: 9090,
             };
             let original = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 dns_ingress.clone(),
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             let encoded = original.encode();
             let decoded = Info::<PublicKey>::decode(encoded).unwrap();
@@ -809,10 +805,10 @@ mod tests {
     fn info_verifier_accepts_dns_ingress() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -823,11 +819,11 @@ mod tests {
                 port: 8080,
             };
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 dns_ingress,
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(validator.validate(&context, &[peer]).is_ok());
         });
@@ -837,10 +833,10 @@ mod tests {
     fn info_verifier_accepts_dns_ingress_with_internal_hostname() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
             let validator = Info::verifier(
-                validator_key.public_key(),
+                validator_signer.public_key(),
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -851,11 +847,11 @@ mod tests {
                 port: 8080,
             };
             let peer = Info::sign(
-                peer_key.public_key(),
+                signer.public_key(),
                 NAMESPACE,
                 dns_ingress,
                 timestamp,
-                |namespace, message| peer_key.sign(namespace, message),
+                |namespace, message| signer.sign(namespace, message),
             );
             assert!(
                 validator.validate(&context, &[peer]).is_ok(),

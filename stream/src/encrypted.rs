@@ -818,14 +818,14 @@ mod test {
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-            let dialer_config = transport_config(dialer_crypto.clone());
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer.clone());
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -841,7 +841,7 @@ mod test {
             let (mut dialer_sender, mut dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 dialer_sink,
             )
@@ -849,7 +849,7 @@ mod test {
 
             let (listener_peer, mut listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            assert_eq!(listener_peer, dialer_crypto.public_key());
+            assert_eq!(listener_peer, dialer_signer.public_key());
             let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
             for msg in &messages {
                 dialer_sender.send(&msg[..]).await?;
@@ -867,8 +867,8 @@ mod test {
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
@@ -880,8 +880,8 @@ mod test {
                 last_alloc: last_alloc.clone(),
             };
 
-            let dialer_config = transport_config(dialer_crypto);
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer);
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -897,7 +897,7 @@ mod test {
             let (mut dialer_sender, _dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 dialer_sink,
             )
@@ -929,16 +929,16 @@ mod test {
     fn test_send_many_uses_single_runtime_send() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_crypto.clone());
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer.clone());
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -954,7 +954,7 @@ mod test {
             let (mut dialer_sender, _dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
             )
@@ -1003,16 +1003,16 @@ mod test {
             ),
         );
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_crypto.clone());
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer.clone());
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -1028,7 +1028,7 @@ mod test {
             let (mut dialer_sender, _dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
             )
@@ -1073,16 +1073,16 @@ mod test {
             ),
         );
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_crypto.clone());
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer.clone());
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -1098,7 +1098,7 @@ mod test {
             let (mut dialer_sender, _dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
             )
@@ -1132,16 +1132,16 @@ mod test {
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_crypto.clone());
-            let listener_config = transport_config(listener_crypto.clone());
+            let dialer_config = transport_config(dialer_signer.clone());
+            let listener_config = transport_config(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
@@ -1157,7 +1157,7 @@ mod test {
             let (mut dialer_sender, _dialer_receiver) = dial(
                 context,
                 dialer_config,
-                listener_crypto.public_key(),
+                listener_signer.public_key(),
                 dialer_stream,
                 CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
             )
@@ -1195,16 +1195,16 @@ mod test {
     fn test_listen_rejects_oversized_fixed_size_peer_key_frame() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
-            let peer = dialer_crypto.public_key();
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
+            let peer = dialer_signer.public_key();
 
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, _dialer_stream) = mocks::Channel::init();
 
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
-            let mut listener_config = transport_config(listener_crypto);
+            let mut listener_config = transport_config(listener_signer);
             listener_config.max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public
@@ -1235,21 +1235,21 @@ mod test {
     fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, _listener_stream) = mocks::Channel::init();
             let (mut listener_sink, dialer_stream) = mocks::Channel::init();
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let mut dialer_config = transport_config(dialer_crypto);
+            let mut dialer_config = transport_config(dialer_signer);
             dialer_config.max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.handshake.time_information(&context);
-            let listener_public_key = listener_crypto.public_key();
+            let listener_public_key = listener_signer.public_key();
             let dialer_public_key = dialer_config.handshake.signing_key.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
@@ -1267,7 +1267,7 @@ mod test {
                     &dialer_config.namespace,
                     current_time,
                     ok_timestamps,
-                    listener_crypto,
+                    listener_signer,
                     dialer_public_key,
                 ),
                 syn,

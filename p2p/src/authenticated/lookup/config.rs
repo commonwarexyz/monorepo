@@ -201,9 +201,9 @@ impl<H: Handshake> Config<H> {
 
 #[cfg(test)]
 impl<C: Signer> Config<StreamHandshake<C>> {
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
+    pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
         let mut config = Self::local(
-            StreamHandshake::new(crypto),
+            StreamHandshake::new(signer),
             b"test_namespace",
             listen,
             NZUsize!(32),
