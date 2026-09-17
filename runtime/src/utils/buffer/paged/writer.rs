@@ -289,7 +289,7 @@ impl<B: Blob> Writer<B> {
     ///
     /// Returns its logical offset on success. Returns `None` without encoding or changing the
     /// writer when there is insufficient buffer space. Performs no I/O and does not make the
-    /// append durable; callers can fall back to [`Self::append_owned`] when it does not fit.
+    /// append durable. Callers can fall back to [`Self::append_owned`] when it does not fit.
     ///
     /// # Panics
     ///
