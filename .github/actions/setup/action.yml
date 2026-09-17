@@ -63,6 +63,15 @@ runs:
         echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
         echo "CARGO_HTTP_MULTIPLEXING=false" >> "$GITHUB_ENV"
 
+    # Use lld to avoid branch relocation overflows in large ARM64 test binaries.
+    - name: Configure ARM64 linker
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        sudo apt-get install -y lld
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
+
     # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
     - name: Relocate Cargo directories to /mnt on Linux
       if: runner.os == 'Linux'
