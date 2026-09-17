@@ -50,13 +50,14 @@ commonware_macros::stability_scope!(BETA {
     /// peer. A listen may succeed only if the bouncer returns `true` for the same authenticated peer
     /// that is returned.
     ///
-    /// `max_message_size` limits plaintext messages. Callers must supply a limit no greater than
-    /// [`Self::MAX_SIZE`]. Implementations must reject larger outbound messages and enforce the
-    /// limit before allocating for an inbound message. Framing and encryption overhead do not
-    /// count toward this limit.
+    /// `max_message_size` sets the plaintext message limit for the returned streams. Callers must
+    /// supply a limit no greater than [`Self::MAX_SIZE`]. Implementations must reject larger outbound
+    /// messages and enforce the limit before allocating for an inbound message. Framing and
+    /// encryption overhead do not count toward this limit.
     ///
-    /// Callers may cancel an in-progress handshake by dropping its future. Implementations must
-    /// release the underlying connection when cancelled.
+    /// Callers must enforce their own deadline by dropping the handshake future when it expires.
+    /// Dropping the future cancels the attempt, and implementations must release the underlying
+    /// connection.
     pub trait Handshake: Clone + Send + Sync + 'static {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;

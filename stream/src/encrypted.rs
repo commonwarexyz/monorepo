@@ -44,9 +44,8 @@
 //! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
 //!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
 //!   message integrity.
-//! - **Handshake Timeout**: The free functions [dial] and [listen] enforce a configurable deadline
-//!   to protect against peers that abandon handshakes. Callers using [Handshake] directly must
-//!   enforce their own deadline by dropping the handshake future.
+//! - **Handshake Timeout**: The free functions [dial] and [listen] enforce
+//!   [`Config::handshake_timeout`] to protect against peers that abandon handshakes.
 //!
 //! ## Not Provided
 //!
@@ -61,8 +60,8 @@ use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
     handshake::{
-        self as cryptographic_handshake, Ack, Context, Error as HandshakeError, RecvCipher,
-        SendCipher, Syn, SynAck, dial_end, dial_start, listen_end, listen_start,
+        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
+        dial_start, listen_end, listen_start,
     },
 };
 use commonware_formatting::hex;
@@ -77,8 +76,8 @@ use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
 const TAG_SIZE: u32 = {
-    assert!(cryptographic_handshake::TAG_SIZE <= u32::MAX as usize);
-    cryptographic_handshake::TAG_SIZE as u32
+    assert!(handshake::TAG_SIZE <= u32::MAX as usize);
+    handshake::TAG_SIZE as u32
 };
 
 /// Maximum supported plaintext message size.
@@ -152,9 +151,6 @@ pub struct Config<S> {
 }
 
 /// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
-///
-/// Callers must enforce a handshake deadline by dropping the future when it expires.
-/// The free functions [dial] and [listen] enforce [`Config::handshake_timeout`].
 ///
 /// # Warning
 ///
