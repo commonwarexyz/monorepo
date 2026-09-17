@@ -15,8 +15,8 @@
 //! ## Authentication
 //!
 //! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
-//! authenticates peers and supplies their message streams. Peer identities come from
-//! its scheme's [`commonware_stream::Identity`] implementation.
+//! authenticates peers and supplies their message streams. The handshake defines the
+//! public key type and supplies the local identity.
 //! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
 //! and handshake transcript.
 //!
@@ -237,7 +237,7 @@ mod tests {
         telemetry::metrics::count_running_tasks, tokio,
     };
     use commonware_stream::{
-        Handshake, Identity, Receiver as StreamReceiver, Sender as StreamSender,
+        Handshake, Receiver as StreamReceiver, Sender as StreamSender,
         encrypted::{self, Handshake as StreamHandshake},
     };
     use commonware_utils::{
@@ -2300,60 +2300,16 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestScheme {
-        application_signer: ed25519::PrivateKey,
-        observations: Arc<Observations>,
-    }
-
     #[derive(Debug, Error)]
     #[error("application signer unavailable")]
     struct TestSigningError;
-
-    impl Identity for TestScheme {
-        type PublicKey = ed25519::PublicKey;
-
-        fn identity(&self) -> Self::PublicKey {
-            Signer::public_key(&self.application_signer)
-        }
-    }
-
-    impl TestScheme {
-        async fn sign(
-            &self,
-            namespace: &[u8],
-            message: &[u8],
-        ) -> Result<ed25519::Signature, TestSigningError> {
-            self.observations
-                .signing_calls
-                .fetch_add(1, Ordering::Relaxed);
-            yield_once().await;
-            if self
-                .observations
-                .stall_next_signature
-                .swap(false, Ordering::Relaxed)
-            {
-                self.observations
-                    .pending_signatures
-                    .fetch_add(1, Ordering::Relaxed);
-                pending::<()>().await;
-            }
-            if self.observations.fail_signing.load(Ordering::Relaxed) {
-                self.observations
-                    .signing_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(TestSigningError);
-            }
-            Ok(Signer::sign(&self.application_signer, namespace, message))
-        }
-    }
 
     type ApplicationProof = (ed25519::PublicKey, ed25519::PublicKey, ed25519::Signature);
     const APPLICATION_PROOF_SIZE: usize = ed25519::PublicKey::SIZE * 2 + ed25519::Signature::SIZE;
 
     #[derive(Clone)]
     struct TestHandshake<const MAX_SIZE: u32 = CUSTOM_MAX_FRAME_SIZE> {
-        scheme: TestScheme,
+        application_signer: ed25519::PrivateKey,
         transport_signer: ed25519::PrivateKey,
         application_to_transport: Arc<HashMap<ed25519::PublicKey, ed25519::PublicKey>>,
         transport_to_application: Arc<HashMap<ed25519::PublicKey, ed25519::PublicKey>>,
@@ -2397,6 +2353,34 @@ mod tests {
     }
 
     impl<const MAX_SIZE: u32> TestHandshake<MAX_SIZE> {
+        async fn sign(
+            &self,
+            namespace: &[u8],
+            message: &[u8],
+        ) -> Result<ed25519::Signature, TestSigningError> {
+            self.observations
+                .signing_calls
+                .fetch_add(1, Ordering::Relaxed);
+            yield_once().await;
+            if self
+                .observations
+                .stall_next_signature
+                .swap(false, Ordering::Relaxed)
+            {
+                self.observations
+                    .pending_signatures
+                    .fetch_add(1, Ordering::Relaxed);
+                pending::<()>().await;
+            }
+            if self.observations.fail_signing.load(Ordering::Relaxed) {
+                self.observations
+                    .signing_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(TestSigningError);
+            }
+            Ok(Signer::sign(&self.application_signer, namespace, message))
+        }
+
         fn encrypted_handshake(&self) -> StreamHandshake<ed25519::PrivateKey> {
             StreamHandshake::new(self.transport_signer.clone())
         }
@@ -2406,8 +2390,8 @@ mod tests {
             namespace: &[u8],
         ) -> Result<ApplicationProof, TestSigningError> {
             let transport_key = Signer::public_key(&self.transport_signer);
-            let signature = self.scheme.sign(namespace, transport_key.as_ref()).await?;
-            Ok((self.scheme.identity(), transport_key, signature))
+            let signature = self.sign(namespace, transport_key.as_ref()).await?;
+            Ok((self.public_key(), transport_key, signature))
         }
 
         fn verify_application_proof(
@@ -2457,13 +2441,13 @@ mod tests {
     impl<const MAX_SIZE: u32> Handshake for TestHandshake<MAX_SIZE> {
         const MAX_SIZE: u32 = MAX_SIZE;
 
-        type Scheme = TestScheme;
+        type PublicKey = ed25519::PublicKey;
         type Error = TestHandshakeError;
         type Sender<I: Stream, O: Sink> = TestSender<O>;
         type Receiver<I: Stream, O: Sink> = TestReceiver<I>;
 
-        fn scheme(&self) -> &Self::Scheme {
-            &self.scheme
+        fn public_key(&self) -> Self::PublicKey {
+            self.application_signer.public_key()
         }
 
         async fn dial<C, I, O>(
@@ -2644,10 +2628,7 @@ mod tests {
                 let observations = Arc::new(Observations::default());
                 (
                     TestHandshake {
-                        scheme: TestScheme {
-                            application_signer,
-                            observations: observations.clone(),
-                        },
+                        application_signer,
                         transport_signer,
                         application_to_transport: application_to_transport.clone(),
                         transport_to_application: transport_to_application.clone(),
@@ -2699,8 +2680,8 @@ mod tests {
         listener_handshake: TestHandshake,
         dialer_handshake: TestHandshake,
     ) -> Pair {
-        let listener_key = listener_handshake.scheme().identity();
-        let dialer_key = dialer_handshake.scheme().identity();
+        let listener_key = listener_handshake.public_key();
+        let dialer_key = dialer_handshake.public_key();
         let listener_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
         let dialer_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
         let (mut listener_network, mut listener_oracle) = Network::new(
@@ -2932,9 +2913,9 @@ mod tests {
             .stall_next_signature
             .store(true, Ordering::Relaxed);
 
-        let central_key = central_handshake.scheme().identity();
-        let blocked_key = blocked_handshake.scheme().identity();
-        let healthy_key = healthy_handshake.scheme().identity();
+        let central_key = central_handshake.public_key();
+        let blocked_key = blocked_handshake.public_key();
+        let healthy_key = healthy_handshake.public_key();
         let central_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_300);
         let blocked_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_301);
         let healthy_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_302);

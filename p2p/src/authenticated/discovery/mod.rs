@@ -15,9 +15,9 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
-//! authenticates peers and supplies their message streams. Its scheme also signs
-//! discovery gossip and must implement [`commonware_cryptography::Signer`].
+//! [`Config`] and [`Network`] use [`commonware_stream::Handshake`] to authenticate peers
+//! and supply their message streams. [`Network`] additionally requires [`Handshake`]
+//! to sign discovery gossip under the same identity.
 //! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
 //! and handshake transcript.
 //!
@@ -249,6 +249,9 @@
 //! });
 //! ```
 
+use commonware_cryptography::{PublicKey, Signer, Verifier};
+use commonware_stream::encrypted::Handshake as StreamHandshake;
+
 mod actors;
 mod config;
 mod metrics;
@@ -263,6 +266,19 @@ pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
+/// Authenticates connections and signs discovery gossip under the same local identity.
+pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
+    /// Signs a namespaced message with the identity returned by
+    /// [`public_key`](commonware_stream::Handshake::public_key).
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
+}
+
+impl<S: Signer> Handshake for StreamHandshake<S> {
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
+        self.signing_key.sign(namespace, message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +292,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_cryptography::ed25519;
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,

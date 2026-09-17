@@ -3,9 +3,9 @@ use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
+use commonware_stream::Handshake;
 #[cfg(test)]
 use commonware_stream::encrypted::Handshake as StreamHandshake;
-use commonware_stream::{Handshake, PublicKeyOf};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -27,7 +27,7 @@ pub type Bootstrapper<P> = (P, Ingress);
 #[derive(Clone)]
 pub struct Config<H: Handshake>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     /// Handshake used to authenticate transport connections and sign discovery gossip.
     pub handshake: H,
@@ -42,7 +42,7 @@ where
     pub dialable: Ingress,
 
     /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
+    pub bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
 
     /// Whether or not to allow DNS-based ingress addresses.
     ///
@@ -160,7 +160,7 @@ where
 
 impl<H: Handshake> Config<H>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
@@ -168,7 +168,7 @@ where
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
+        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -212,7 +212,7 @@ where
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
+        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {

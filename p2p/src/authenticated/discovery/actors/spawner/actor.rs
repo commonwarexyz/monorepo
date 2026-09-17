@@ -380,10 +380,11 @@ mod tests {
             };
             assert_eq!(public_key, peer);
             let greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch_millis(),
+                |namespace, message| local_key.sign(namespace, message),
             );
             assert!(responder.send(greeting).is_ok());
 

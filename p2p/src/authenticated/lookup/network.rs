@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Handshake, Identity, PublicKeyOf};
+use commonware_stream::Handshake;
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use tracing::{debug, info};
@@ -30,22 +30,22 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 /// Implementation of an `authenticated` network.
 pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, H: Handshake>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     context: ContextCell<E>,
     cfg: Config<H>,
     max_frame_size: u32,
 
-    channels: Channels<PublicKeyOf<H>>,
-    tracker: tracker::Actor<E, PublicKeyOf<H>>,
-    tracker_mailbox: tracker::Mailbox<PublicKeyOf<H>>,
+    channels: Channels<H::PublicKey>,
+    tracker: tracker::Actor<E, H::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
     listener: listener::Updates,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
     Network<E, H>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -61,7 +61,7 @@ where
     /// # Panics
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<PublicKeyOf<H>>) {
+    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
         assert!(
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
@@ -73,7 +73,7 @@ where
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                public_key: cfg.handshake.scheme().identity(),
+                public_key: cfg.handshake.public_key(),
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -149,8 +149,8 @@ where
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<PublicKeyOf<H>, E>,
-        channels::Receiver<PublicKeyOf<H>>,
+        channels::Sender<H::PublicKey, E>,
+        channels::Receiver<H::PublicKey>,
     ) {
         let context = self
             .context
@@ -182,8 +182,8 @@ where
 
     async fn run(
         self,
-        router: router::Actor<E, PublicKeyOf<H>>,
-        router_mailbox: router::Mailbox<PublicKeyOf<H>>,
+        router: router::Actor<E, H::PublicKey>,
+        router_mailbox: router::Mailbox<H::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();

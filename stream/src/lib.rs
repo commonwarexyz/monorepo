@@ -10,7 +10,6 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::Signer;
     use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
@@ -18,35 +17,13 @@ commonware_macros::stability_scope!(BETA {
     pub mod encrypted;
     pub mod utils;
 
-    /// Provides a handshake's local identity.
-    ///
-    /// Every [Signer] implements this trait.
-    pub trait Identity {
-        /// Public key identifying the local peer.
-        type PublicKey;
-
-        /// Returns the local identity.
-        fn identity(&self) -> Self::PublicKey;
-    }
-
-    impl<S: Signer> Identity for S {
-        type PublicKey = S::PublicKey;
-
-        fn identity(&self) -> Self::PublicKey {
-            self.public_key()
-        }
-    }
-
-    /// Public identity key authenticated by a handshake's scheme.
-    pub type PublicKeyOf<H> = <<H as Handshake>::Scheme as Identity>::PublicKey;
-
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
     /// Implementations own their authentication mechanism, which may be asynchronous and fallible.
-    /// They must prove each peer's declared identity according to their configured authority and
-    /// bind the supplied application namespace, both peer identities, and both message directions
-    /// to the established session. The returned sender and receiver must preserve message boundaries
-    /// and protect message integrity. Confidentiality depends on the implementation. A successful
+    /// They must authenticate each peer's declared identity and bind the supplied application
+    /// namespace, both peer identities, and both message directions to the established session.
+    /// The returned sender and receiver must preserve message boundaries and protect message
+    /// integrity. Confidentiality depends on the implementation. A successful
     /// dial must authenticate the expected peer. A listen may succeed only if the bouncer returns
     /// `true` for the same authenticated peer that is returned.
     ///
@@ -62,8 +39,8 @@ commonware_macros::stability_scope!(BETA {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
 
-        /// Scheme that owns the local authenticated identity.
-        type Scheme: Identity;
+        /// Public key identifying an authenticated peer.
+        type PublicKey;
 
         /// Error returned when authentication or stream setup fails.
         type Error: Error + Send + Sync + 'static;
@@ -74,10 +51,10 @@ commonware_macros::stability_scope!(BETA {
         /// Receiver returned for a connection using raw stream `I` and sink `O`.
         type Receiver<I: Stream, O: Sink>: Receiver;
 
-        /// Returns the scheme for the local authenticated identity.
+        /// Returns the local authenticated identity.
         ///
-        /// Its identity must remain stable across attempts and clones of this handshake.
-        fn scheme(&self) -> &Self::Scheme;
+        /// The identity must remain stable across attempts and clones of this handshake.
+        fn public_key(&self) -> Self::PublicKey;
 
         /// Authenticates an outbound connection to `peer`.
         ///
@@ -90,7 +67,7 @@ commonware_macros::stability_scope!(BETA {
             context: C,
             namespace: &[u8],
             max_message_size: u32,
-            peer: PublicKeyOf<Self>,
+            peer: Self::PublicKey,
             stream: I,
             sink: O,
         ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
@@ -119,7 +96,7 @@ commonware_macros::stability_scope!(BETA {
             sink: O,
         ) -> impl Future<
             Output = Result<
-                (PublicKeyOf<Self>, Self::Sender<I, O>, Self::Receiver<I, O>),
+                (Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>),
                 Self::Error,
             >,
         > + Send
@@ -127,7 +104,7 @@ commonware_macros::stability_scope!(BETA {
             C: BufferPooler + Clock + CryptoRng,
             I: Stream,
             O: Sink,
-            B: FnOnce(PublicKeyOf<Self>) -> F + Send,
+            B: FnOnce(Self::PublicKey) -> F + Send,
             F: Future<Output = bool> + Send;
     }
 
@@ -214,24 +191,16 @@ commonware_macros::stability_scope!(BETA {
         #[derive(Clone)]
         struct OpaqueHandshake;
 
-        impl Identity for OpaqueHandshake {
-            type PublicKey = OpaqueIdentity;
-
-            fn identity(&self) -> Self::PublicKey {
-                OpaqueIdentity(PhantomData)
-            }
-        }
-
         impl Handshake for OpaqueHandshake {
             const MAX_SIZE: u32 = encrypted::MAX_SIZE;
 
-            type Scheme = Self;
+            type PublicKey = OpaqueIdentity;
             type Error = Infallible;
             type Sender<I: Stream, O: Sink> = SharedHalf<I, O>;
             type Receiver<I: Stream, O: Sink> = SharedHalf<I, O>;
 
-            fn scheme(&self) -> &Self::Scheme {
-                self
+            fn public_key(&self) -> Self::PublicKey {
+                OpaqueIdentity(PhantomData)
             }
 
             fn dial<C, I, O>(
@@ -239,7 +208,7 @@ commonware_macros::stability_scope!(BETA {
                 _context: C,
                 _namespace: &[u8],
                 _max_message_size: u32,
-                _peer: PublicKeyOf<Self>,
+                _peer: Self::PublicKey,
                 _stream: I,
                 _sink: O,
             ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
@@ -260,13 +229,13 @@ commonware_macros::stability_scope!(BETA {
                 _stream: I,
                 _sink: O,
             ) -> impl Future<
-                Output = Result<(PublicKeyOf<Self>, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>,
+                Output = Result<(Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>,
             > + Send
             where
                 C: BufferPooler + Clock + CryptoRng,
                 I: Stream,
                 O: Sink,
-                B: FnOnce(PublicKeyOf<Self>) -> F + Send,
+                B: FnOnce(Self::PublicKey) -> F + Send,
                 F: Future<Output = bool> + Send,
             {
                 future::pending()
@@ -275,7 +244,7 @@ commonware_macros::stability_scope!(BETA {
 
         #[test]
         fn handshake_supports_opaque_identity_and_shared_session() {
-            let _: OpaqueIdentity = OpaqueHandshake.scheme().identity();
+            let _: OpaqueIdentity = OpaqueHandshake.public_key();
         }
     }
 });

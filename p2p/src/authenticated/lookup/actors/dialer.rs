@@ -20,7 +20,7 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::{Handshake, PublicKeyOf};
+use commonware_stream::Handshake;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::time::Duration;
@@ -31,7 +31,7 @@ type SupervisorMailbox<E, H> = Mailbox<
     spawner::Message<
         <H as Handshake>::Sender<StreamOf<E>, SinkOf<E>>,
         <H as Handshake>::Receiver<StreamOf<E>, SinkOf<E>>,
-        PublicKeyOf<H>,
+        <H as Handshake>::PublicKey,
     >,
 >;
 
@@ -59,13 +59,13 @@ pub struct Config<H: Handshake> {
 /// Actor responsible for dialing peers and establishing outgoing connections.
 pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, H: Handshake>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     context: ContextCell<E>,
 
     // ---------- State ----------
     /// The list of peers to dial.
-    queue: Vec<PublicKeyOf<H>>,
+    queue: Vec<H::PublicKey>,
 
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<H>,
@@ -76,13 +76,13 @@ where
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: CounterFamily<metrics::Peer<PublicKeyOf<H>>>,
+    attempts: CounterFamily<metrics::Peer<H::PublicKey>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, H: Handshake>
     Actor<E, H>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     pub fn new(context: E, cfg: Config<H>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
@@ -101,7 +101,7 @@ where
     /// Dial a peer for which we have a reservation.
     fn dial_peer(
         &mut self,
-        reservation: Reservation<PublicKeyOf<H>>,
+        reservation: Reservation<H::PublicKey>,
         ingress: Ingress,
         supervisor: &mut SupervisorMailbox<E, H>,
     ) {
@@ -178,7 +178,7 @@ where
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<PublicKeyOf<H>>,
+        tracker: tracker::Mailbox<H::PublicKey>,
         supervisor: SupervisorMailbox<E, H>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -186,7 +186,7 @@ where
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<PublicKeyOf<H>>,
+        tracker: tracker::Mailbox<H::PublicKey>,
         mut supervisor: SupervisorMailbox<E, H>,
     ) {
         let mut dial_deadline = self.context.current();

@@ -11,7 +11,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::{Handshake, PublicKeyOf};
+use commonware_stream::Handshake;
 use commonware_utils::{IpAddrExt, concurrency::Limiter, net::SubnetMask};
 use rand_core::CryptoRng;
 use std::{net::SocketAddr, num::NonZeroU32};
@@ -50,7 +50,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> Actor<E, H>
 where
-    PublicKeyOf<H>: PublicKey,
+    H::PublicKey: PublicKey,
 {
     pub fn new(context: E, cfg: Config<H>) -> Self {
         // Create metrics
@@ -94,12 +94,12 @@ where
         stream_cfg: StreamConfig<H>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        tracker: tracker::Mailbox<PublicKeyOf<H>>,
+        tracker: tracker::Mailbox<H::PublicKey>,
         mut supervisor: Mailbox<
             spawner::Message<
                 H::Sender<StreamOf<E>, SinkOf<E>>,
                 H::Receiver<StreamOf<E>, SinkOf<E>>,
-                PublicKeyOf<H>,
+                H::PublicKey,
             >,
         >,
     ) {
@@ -141,12 +141,12 @@ where
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<PublicKeyOf<H>>,
+        tracker: tracker::Mailbox<H::PublicKey>,
         supervisor: Mailbox<
             spawner::Message<
                 H::Sender<StreamOf<E>, SinkOf<E>>,
                 H::Receiver<StreamOf<E>, SinkOf<E>>,
-                PublicKeyOf<H>,
+                H::PublicKey,
             >,
         >,
     ) -> Handle<()> {
@@ -156,12 +156,12 @@ where
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: tracker::Mailbox<PublicKeyOf<H>>,
+        tracker: tracker::Mailbox<H::PublicKey>,
         supervisor: Mailbox<
             spawner::Message<
                 H::Sender<StreamOf<E>, SinkOf<E>>,
                 H::Receiver<StreamOf<E>, SinkOf<E>>,
-                PublicKeyOf<H>,
+                H::PublicKey,
             >,
         >,
     ) {

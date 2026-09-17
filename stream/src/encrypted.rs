@@ -213,13 +213,13 @@ where
 impl<S: Signer> crate::Handshake for Handshake<S> {
     const MAX_SIZE: u32 = MAX_SIZE;
 
-    type Scheme = S;
+    type PublicKey = S::PublicKey;
     type Error = Error;
     type Sender<I: Stream, O: Sink> = Sender<O>;
     type Receiver<I: Stream, O: Sink> = Receiver<I>;
 
-    fn scheme(&self) -> &Self::Scheme {
-        &self.signing_key
+    fn public_key(&self) -> Self::PublicKey {
+        self.signing_key.public_key()
     }
 
     async fn dial<C, I, O>(

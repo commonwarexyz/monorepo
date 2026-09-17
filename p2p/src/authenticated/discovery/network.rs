@@ -1,6 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
+    Handshake,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -9,24 +10,22 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD, StreamConfig,
         channels::{self, Channels},
-        discovery::types::InfoVerifier,
+        discovery::types::{Info, InfoVerifier},
         max_size, router,
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Handshake, PublicKeyOf};
-use commonware_utils::{ordered::Set, union};
+use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use tracing::{debug, info};
 
-/// Unique suffix for all messages signed by the tracker.
-const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
+/// Unique suffix for signed discovery address records.
+const IP_SUFFIX: &[u8] = b"_TRACKER_IP";
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
@@ -35,26 +34,20 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 pub struct Network<
     E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
     H: Handshake,
-> where
-    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
-    PublicKeyOf<H>: PublicKey,
-{
+> {
     context: ContextCell<E>,
     cfg: Config<H>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<PublicKeyOf<H>>,
-    tracker: tracker::Actor<E, H::Scheme>,
-    tracker_mailbox: tracker::Mailbox<PublicKeyOf<H>>,
-    info_verifier: InfoVerifier<PublicKeyOf<H>>,
+    channels: Channels<H::PublicKey>,
+    tracker: tracker::Actor<E, H::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
+    info_verifier: InfoVerifier<H::PublicKey>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
     Network<E, H>
-where
-    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
-    PublicKeyOf<H>: PublicKey,
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -70,7 +63,7 @@ where
     /// # Panics
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<PublicKeyOf<H>>) {
+    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
         assert!(
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
@@ -81,7 +74,7 @@ where
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
-        let local = cfg.handshake.scheme().public_key();
+        let local = cfg.handshake.public_key();
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers
                 .iter()
@@ -94,16 +87,27 @@ where
             cfg.tracked_peer_sets,
             persistent_peers,
         );
-        let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
+        let ip_namespace = union(&cfg.namespace, IP_SUFFIX);
+        let myself = Info::sign(
+            local.clone(),
+            &ip_namespace,
+            cfg.dialable.clone(),
+            context.current().epoch_millis(),
+            |namespace, message| cfg.handshake.sign(namespace, message),
+        );
+        let info_verifier = Info::verifier(
+            local,
+            cfg.peer_gossip_max_count,
+            cfg.synchrony_bound,
+            ip_namespace,
+        );
+        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                crypto: cfg.handshake.scheme().clone(),
-                namespace: union(&cfg.namespace, TRACKER_SUFFIX),
-                address: cfg.dialable.clone(),
+                myself,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
-                synchrony_bound: cfg.synchrony_bound,
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -178,8 +182,8 @@ where
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<PublicKeyOf<H>, E>,
-        channels::Receiver<PublicKeyOf<H>>,
+        channels::Sender<H::PublicKey, E>,
+        channels::Receiver<H::PublicKey>,
     ) {
         let context = self
             .context
@@ -211,8 +215,8 @@ where
 
     async fn run(
         self,
-        router: router::Actor<E, PublicKeyOf<H>>,
-        router_mailbox: router::Mailbox<PublicKeyOf<H>>,
+        router: router::Actor<E, H::PublicKey>,
+        router_mailbox: router::Mailbox<H::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -297,5 +301,68 @@ where
                 debug!(?dialer, "dialer stopped, shutting down network");
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
+    use commonware_codec::Encode;
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_utils::NZUsize;
+    use std::{net::SocketAddr, time::Duration};
+
+    #[test]
+    fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let peer_signer = PrivateKey::from_seed(1);
+            let local = signer.public_key();
+            let peer = peer_signer.public_key();
+            let address = SocketAddr::from(([127, 0, 0, 1], 7000));
+            let cfg = Config::local(
+                StreamHandshake::new(signer.clone()),
+                b"discovery-test",
+                address,
+                address,
+                Vec::new(),
+                NZUsize!(2),
+                1024,
+            );
+            let timestamp = context.current().epoch_millis();
+            let (network, mut oracle) = Network::new(context.child("network"), cfg);
+            let ingress = Ingress::from(address);
+            let message = (ingress, timestamp).encode();
+            let namespace = b"discovery-test_TRACKER_IP";
+            let peer_info = Info {
+                ingress: address.into(),
+                timestamp,
+                public_key: peer.clone(),
+                signature: peer_signer.sign(namespace, &message),
+            };
+            assert!(
+                network
+                    .info_verifier
+                    .validate(&context, &[peer_info])
+                    .is_ok()
+            );
+
+            network.tracker.start();
+            oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
+            let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();
+            let (mailbox, _receiver) = peer::Mailbox::new(context.child("peer"), NZUsize!(1));
+            let greeting = network
+                .tracker_mailbox
+                .connect(peer, mailbox, false)
+                .await
+                .unwrap();
+            assert_eq!(greeting.public_key, local);
+            assert_eq!(greeting.ingress, address.into());
+            assert_eq!(greeting.timestamp, timestamp);
+            assert_eq!(greeting.signature, signer.sign(namespace, &message));
+        });
     }
 }

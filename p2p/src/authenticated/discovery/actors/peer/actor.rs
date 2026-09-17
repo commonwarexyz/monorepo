@@ -524,10 +524,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| local_key.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -626,10 +627,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| local_key.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -734,10 +736,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| local_key.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -751,10 +754,11 @@ mod tests {
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| local_key.sign(namespace, message),
             );
             wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
@@ -846,10 +850,11 @@ mod tests {
 
             // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
-                &local_key,
+                local_key.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| local_key.sign(namespace, message),
             );
 
             let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -873,10 +878,11 @@ mod tests {
             context.child("task").spawn(move |_ctx| async move {
                 // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
-                    &local_key,
+                    local_key.public_key(),
                     IP_NAMESPACE,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                     0,
+                    |namespace, message| local_key.sign(namespace, message),
                 ));
                 local_sender
                     .send(greeting_payload.encode())
