@@ -2002,6 +2002,7 @@ mod tests {
 
             // Prune history below B: reopening at B still works, reopening at A does not.
             let db = db.prune(sizes[1]).await.unwrap();
+            let tip_target = db.target();
             assert!(matches!(
                 {
                     _ = db.sync().await.unwrap();
@@ -2011,7 +2012,7 @@ mod tests {
                 Err(Error::HistoricalFloorPruned(_))
             ));
 
-            // Reopen at B after the durable prune.
+            // The rejected initialization discarded nothing: reopen still lands on C.
             let cfg = Config {
                 strategy: Sequential,
                 witness: witness_cfg.clone(),
@@ -2021,6 +2022,9 @@ mod tests {
                 Db::init(context.child("db").with_attribute("index", 2), cfg, None)
                     .await
                     .unwrap();
+            assert_eq!(db.target(), tip_target);
+
+            // Reopen at B after the durable prune.
             let db = {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(context.child("cap"), witness_cfg.clone(), sizes[1])

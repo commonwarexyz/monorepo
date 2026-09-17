@@ -2681,8 +2681,11 @@ mod tests {
             assert_eq!(recovery.size(), 0);
             assert_eq!(recovery.recovery_watermark(), 0);
             recovery = recovery.truncate(0).await.unwrap();
+
+            // Rebuild with values the surviving blobs never held so adopting their stale pages
+            // fails the reads below.
             for i in 0..13 {
-                recovery = recovery.append(&test_digest(i)).await.unwrap();
+                recovery = recovery.append(&test_digest(100 + i)).await.unwrap();
             }
             let journal = recovery.publish(13).await.unwrap();
             _ = Box::new(journal).sync().await.unwrap();
@@ -2691,7 +2694,7 @@ mod tests {
                 .unwrap();
             assert_eq!(journal.bounds(), 0..13);
             for value in 0..13 {
-                assert_eq!(journal.read(value).await.unwrap(), test_digest(value));
+                assert_eq!(journal.read(value).await.unwrap(), test_digest(100 + value));
             }
         });
     }
