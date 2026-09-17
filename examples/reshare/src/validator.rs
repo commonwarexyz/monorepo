@@ -75,7 +75,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::new(node.signing_key.clone()),
+        Handshake::new(node.signer.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -279,7 +279,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
-            signer: node.signing_key,
+            signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
             participants_provider: participants,

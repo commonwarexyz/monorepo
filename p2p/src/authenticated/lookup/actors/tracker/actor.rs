@@ -832,7 +832,7 @@ mod tests {
     fn test_register_disconnects_removed_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
@@ -840,7 +840,7 @@ mod tests {
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             cfg.max_peers_per_set = 2;
 
@@ -897,13 +897,13 @@ mod tests {
     fn test_register_keeps_connected_peer_present_across_rollover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             let TestHarness {
                 mailbox,
@@ -950,13 +950,13 @@ mod tests {
     fn test_reserved_removed_peer_rejected_on_connect() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             let TestHarness {
                 mailbox,
@@ -999,12 +999,12 @@ mod tests {
     fn test_reserved_peer_killed_on_connect_after_tracked_address_change() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(2);
             let TestHarness {
                 mailbox,
@@ -1045,12 +1045,12 @@ mod tests {
     fn test_reserved_peer_killed_on_connect_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -1087,12 +1087,12 @@ mod tests {
     fn test_stale_inbound_source_rejected_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -1127,14 +1127,14 @@ mod tests {
     fn test_overwrite_triggers_listener() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness { mut oracle, .. } = setup_actor(context.child("actor"), cfg);
 
             oracle.track(
@@ -1199,14 +1199,14 @@ mod tests {
     fn test_overwrite_blocked_peer_not_in_listenable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness { mut oracle, .. } = setup_actor(context.child("actor"), cfg);
 
             oracle.track(

@@ -138,7 +138,7 @@
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
-//! let my_sk = ed25519::PrivateKey::from_seed(0);
+//! let signer = ed25519::PrivateKey::from_seed(0);
 //! let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 //!
 //! // Generate peers
@@ -163,7 +163,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     Handshake::new(my_sk.clone()),
+//!     Handshake::new(signer.clone()),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
@@ -180,7 +180,7 @@
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
 //!     let peers: Map<_, Address> = [
-//!         (my_sk.public_key(), my_addr.into()),
+//!         (signer.public_key(), my_addr.into()),
 //!         (peer1, peer1_addr.into()),
 //!         (peer2, peer2_addr.into()),
 //!         (peer3, peer3_addr.into()),
@@ -334,28 +334,28 @@ mod tests {
         mode: Mode,
     ) {
         // Create peers
-        let mut peers_and_sks = Vec::new();
+        let mut nodes = Vec::new();
         for i in 0..n {
-            let private_key = ed25519::PrivateKey::from_seed(i as u64);
-            let public_key = private_key.public_key();
+            let signer = ed25519::PrivateKey::from_seed(i as u64);
+            let public_key = signer.public_key();
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-            peers_and_sks.push((private_key, public_key, address));
+            nodes.push((signer, public_key, address));
         }
-        let peers: Vec<(ed25519::PublicKey, Address)> = peers_and_sks
+        let peers: Vec<(ed25519::PublicKey, Address)> = nodes
             .iter()
             .map(|(_, pub_key, addr)| (pub_key.clone(), (*addr).into()))
             .collect::<Vec<_>>();
 
         // Create networks
         let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
-        for (i, (private_key, public_key, address)) in peers_and_sks.iter().enumerate() {
+        for (i, (signer, public_key, address)) in nodes.iter().enumerate() {
             let public_key = public_key.clone();
 
             // Create peer context
             let context = context.child("peer").with_attribute("index", i);
 
             // Create network
-            let config = Config::test(private_key.clone(), *address, max_message_size);
+            let config = Config::test(signer.clone(), *address, max_message_size);
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
@@ -550,27 +550,27 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let sk = ed25519::PrivateKey::from_seed(i as u64);
-                let pk = sk.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((sk, pk, addr));
+                nodes.push((signer, pk, addr));
             }
-            let peers = peers_and_sks
+            let peers = nodes
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .collect::<Vec<_>>();
 
             // Create networks
             let mut waiters = Vec::new();
-            for (i, (peer_sk, peer_pk, peer_addr)) in peers_and_sks.iter().enumerate() {
+            for (i, (signer, peer_pk, peer_addr)) in nodes.iter().enumerate() {
                 // Create peer context
                 let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
                 let config = Config::test(
-                    peer_sk.clone(),
+                    signer.clone(),
                     *peer_addr,
                     1_024 * 1_024, // 1MB
                 );
@@ -690,24 +690,24 @@ mod tests {
         let executor = deterministic::Runner::seeded(0);
         executor.start(|mut context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let peer_sk = ed25519::PrivateKey::from_seed(i as u64);
-                let peer_pk = peer_sk.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let peer_pk = signer.public_key();
                 let peer_addr =
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((peer_sk, peer_pk, peer_addr));
+                nodes.push((signer, peer_pk, peer_addr));
             }
-            let peers: Map<_, _> = peers_and_sks
+            let peers: Map<_, _> = nodes
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
 
             // Create network
-            let (sk, _, addr) = peers_and_sks[0].clone();
+            let (signer, _, addr) = nodes[0].clone();
             let config = Config::test(
-                sk,
+                signer,
                 addr,
                 1_024 * 1_024, // 1MB
             );
@@ -742,23 +742,23 @@ mod tests {
         let executor = deterministic::Runner::seeded(0);
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let sk = ed25519::PrivateKey::from_seed(i as u64);
-                let pk = sk.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((sk, pk, addr));
+                nodes.push((signer, pk, addr));
             }
-            let peers: Map<_, _> = peers_and_sks
+            let peers: Map<_, _> = nodes
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            let (sk0, _, addr0) = peers_and_sks[0].clone();
-            let (sk1, pk1, addr1) = peers_and_sks[1].clone();
+            let (signer0, _, addr0) = nodes[0].clone();
+            let (signer1, pk1, addr1) = nodes[1].clone();
 
             // Create network for peer 0
-            let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
+            let config0 = Config::test(signer0, addr0, 1_024 * 1_024); // 1MB
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             oracle0.track(0, peers.clone());
@@ -766,7 +766,7 @@ mod tests {
             network0.start();
 
             // Create network for peer 1
-            let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
+            let config1 = Config::test(signer1, addr1, 1_024 * 1_024); // 1MB
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
             oracle1.track(0, peers.clone());
@@ -806,14 +806,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let sk = ed25519::PrivateKey::from_seed(i as u64);
-                let pk = sk.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((sk, pk, addr));
+                nodes.push((signer, pk, addr));
             }
-            let peer0 = peers_and_sks[0].clone();
+            let peer0 = nodes[0].clone();
             let config = Config::test(peer0.0, peer0.2, 1_024 * 1_024);
             let (network, mut oracle) = Network::new(context.child("network"), config);
             network.start();
@@ -822,7 +822,7 @@ mod tests {
             let mut subscription = oracle.subscribe().await;
 
             // Register initial peer set
-            let set10: Map<_, _> = peers_and_sks
+            let set10: Map<_, _> = nodes
                 .iter()
                 .take(2)
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
@@ -837,7 +837,7 @@ mod tests {
             assert!(update.all.secondary.is_empty());
 
             // Register old peer sets (ignored)
-            let set9: Map<_, _> = peers_and_sks
+            let set9: Map<_, _> = nodes
                 .iter()
                 .skip(2)
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
@@ -846,7 +846,7 @@ mod tests {
             oracle.track(9, set9.clone());
 
             // Add new peer set
-            let set11: Map<_, _> = peers_and_sks
+            let set11: Map<_, _> = nodes
                 .iter()
                 .skip(4)
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
@@ -876,14 +876,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let sk = ed25519::PrivateKey::from_seed(i as u64);
-                let pk = sk.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = signer.public_key();
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((sk, pk, addr));
+                nodes.push((signer, pk, addr));
             }
-            let peers: Map<_, _> = peers_and_sks
+            let peers: Map<_, _> = nodes
                 .iter()
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
@@ -891,9 +891,9 @@ mod tests {
 
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
-            for (i, (sk, pk, addr)) in peers_and_sks.iter().enumerate() {
+            for (i, (signer, pk, addr)) in nodes.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
-                let config = Config::test(sk.clone(), *addr, 1_024 * 1_024);
+                let config = Config::test(signer.clone(), *addr, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
@@ -1009,15 +1009,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create self (peer0) and other peers
-            let self_sk = ed25519::PrivateKey::from_seed(0);
-            let self_pk = self_sk.public_key();
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let self_pk = signer.public_key();
             let self_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
 
             let other_pk = ed25519::PrivateKey::from_seed(1).public_key();
             let other_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
             // Create network for peer0 (self)
-            let config = Config::test(self_sk, self_addr, 1_024 * 1_024);
+            let config = Config::test(signer, self_addr, 1_024 * 1_024);
             let (network, mut oracle) = Network::new(context.child("network"), config);
             network.start();
 
@@ -1109,23 +1109,23 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let private_key = ed25519::PrivateKey::from_seed(i as u64);
-                let public_key = private_key.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let public_key = signer.public_key();
                 let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
                 let host_str = format!("peer-{i}.local");
                 let host = Hostname::new(&host_str).unwrap();
-                peers_and_sks.push((private_key, public_key, socket, host_str, host));
+                nodes.push((signer, public_key, socket, host_str, host));
             }
 
             // Register DNS mappings for all peers
-            for (_, _, socket, host_str, _) in &peers_and_sks {
+            for (_, _, socket, host_str, _) in &nodes {
                 context.resolver_register(host_str.clone(), Some(vec![socket.ip()]));
             }
 
             // Create peer addresses with DNS ingress
-            let peers: Vec<(_, Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = nodes
                 .iter()
                 .map(|(_, pk, socket, _, host)| {
                     (
@@ -1143,11 +1143,11 @@ mod tests {
 
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
-            for (i, (private_key, public_key, socket, _, _)) in peers_and_sks.iter().enumerate() {
+            for (i, (signer, public_key, socket, _, _)) in nodes.iter().enumerate() {
                 let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
-                let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
+                let config = Config::test(signer.clone(), *socket, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with DNS addresses
@@ -1239,21 +1239,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let mut peers_and_sks = Vec::new();
+            let mut nodes = Vec::new();
             for i in 0..n {
-                let private_key = ed25519::PrivateKey::from_seed(i as u64);
-                let public_key = private_key.public_key();
+                let signer = ed25519::PrivateKey::from_seed(i as u64);
+                let public_key = signer.public_key();
                 let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
-                peers_and_sks.push((private_key, public_key, socket));
+                nodes.push((signer, public_key, socket));
             }
 
             // Register DNS mappings for peers 2 and 3 only
-            for (i, (_, _, socket)) in peers_and_sks.iter().enumerate().skip(2) {
+            for (i, (_, _, socket)) in nodes.iter().enumerate().skip(2) {
                 context.resolver_register(format!("peer-{i}.local"), Some(vec![socket.ip()]));
             }
 
             // Create peer addresses - peers 0,1 use Symmetric, peers 2,3 use DNS Asymmetric
-            let peers: Vec<(_, Address)> = peers_and_sks
+            let peers: Vec<(_, Address)> = nodes
                 .iter()
                 .enumerate()
                 .map(|(i, (_, pk, socket))| {
@@ -1276,11 +1276,11 @@ mod tests {
 
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
-            for (i, (private_key, public_key, socket)) in peers_and_sks.iter().enumerate() {
+            for (i, (signer, public_key, socket)) in nodes.iter().enumerate() {
                 let context = context.child("peer").with_attribute("index", i);
 
                 // Create network
-                let config = Config::test(private_key.clone(), *socket, 1_024 * 1_024);
+                let config = Config::test(signer.clone(), *socket, 1_024 * 1_024);
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with mixed addresses
@@ -1371,8 +1371,8 @@ mod tests {
         let base_port = 4400;
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            let peer0 = ed25519::PrivateKey::from_seed(0);
-            let peer1 = ed25519::PrivateKey::from_seed(1);
+            let signer0 = ed25519::PrivateKey::from_seed(0);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
 
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
@@ -1381,15 +1381,15 @@ mod tests {
             context.resolver_register("peer-0.local".to_string(), Some(vec![socket0.ip()]));
 
             // Create peer 0 with allow_private_ips=true
-            let mut config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
+            let mut config0 = Config::test(signer0.clone(), socket0, 1_024 * 1_024);
             config0.allow_private_ips = true;
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
 
             // Peer 0 knows about peer 1 with a socket address
             let peers0: Vec<(_, Address)> = vec![
-                (peer0.public_key(), Address::Symmetric(socket0)),
-                (peer1.public_key(), Address::Symmetric(socket1)),
+                (signer0.public_key(), Address::Symmetric(socket0)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0.track(0, Map::try_from(peers0).unwrap());
 
@@ -1397,7 +1397,7 @@ mod tests {
             network0.start();
 
             // Create peer 1 with allow_private_ips=false
-            let mut config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
+            let mut config1 = Config::test(signer1.clone(), socket1, 1_024 * 1_024);
             config1.allow_private_ips = false; // This should prevent dialing the private IP
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
@@ -1405,7 +1405,7 @@ mod tests {
             // Peer 1 knows about peer 0 with a DNS address that resolves to private IP
             let peers1: Vec<(_, Address)> = vec![
                 (
-                    peer0.public_key(),
+                    signer0.public_key(),
                     Address::Asymmetric {
                         ingress: Ingress::Dns {
                             host: hostname!("peer-0.local"),
@@ -1414,7 +1414,7 @@ mod tests {
                         egress: socket0,
                     },
                 ),
-                (peer1.public_key(), Address::Symmetric(socket1)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
             ];
             oracle1.track(0, Map::try_from(peers1).unwrap());
 
@@ -1425,7 +1425,11 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
-            let sent = sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
+            let sent = sender1.send(
+                Recipients::All,
+                signer1.public_key().as_ref().to_vec(),
+                true,
+            );
             assert!(
                 sent.is_empty(),
                 "peer 1 should not have connected to peer 0 (private IP)"
@@ -1458,8 +1462,8 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(120)));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|context| async move {
-                let peer0 = ed25519::PrivateKey::from_seed(0);
-                let peer1 = ed25519::PrivateKey::from_seed(1);
+                let signer0 = ed25519::PrivateKey::from_seed(0);
+                let signer1 = ed25519::PrivateKey::from_seed(1);
 
                 let good_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
                 let socket0 = SocketAddr::new(good_ip, base_port);
@@ -1481,7 +1485,7 @@ mod tests {
                 // Create peer addresses - both peers use DNS with mixed IPs
                 let peers: Vec<(_, Address)> = vec![
                     (
-                        peer0.public_key(),
+                        signer0.public_key(),
                         Address::Asymmetric {
                             ingress: Ingress::Dns {
                                 host: hostname!("peer-0.local"),
@@ -1491,7 +1495,7 @@ mod tests {
                         },
                     ),
                     (
-                        peer1.public_key(),
+                        signer1.public_key(),
                         Address::Asymmetric {
                             ingress: Ingress::Dns {
                                 host: hostname!("peer-1.local"),
@@ -1503,7 +1507,7 @@ mod tests {
                 ];
 
                 // Create peer 0
-                let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
+                let config0 = Config::test(signer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
                     Network::new(context.child("peer").with_attribute("index", 0), config0);
                 oracle0.track(0, Map::try_from(peers.clone()).unwrap());
@@ -1512,7 +1516,7 @@ mod tests {
                 network0.start();
 
                 // Create peer 1
-                let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
+                let config1 = Config::test(signer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
                     Network::new(context.child("peer").with_attribute("index", 1), config1);
                 oracle1.track(0, Map::try_from(peers.clone()).unwrap());
@@ -1524,14 +1528,14 @@ mod tests {
                 loop {
                     let checked = sender1.check(Recipients::All).unwrap();
                     if !checked.recipients().is_empty() {
-                        checked.send(peer1.public_key().as_ref().to_vec(), true);
+                        checked.send(signer1.public_key().as_ref().to_vec(), true);
                     }
 
                     select! {
                         result = receiver0.recv() => {
                             let (sender, msg) = result.unwrap();
-                            assert_eq!(sender, peer1.public_key());
-                            assert_eq!(msg, peer1.public_key().as_ref());
+                            assert_eq!(sender, signer1.public_key());
+                            assert_eq!(msg, signer1.public_key().as_ref());
                             break;
                         },
                         _ = context.sleep(Duration::from_millis(100)) => {},
@@ -1549,10 +1553,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let peers: Vec<_> = (0..n)
+            let signers: Vec<_> = (0..n)
                 .map(|i| ed25519::PrivateKey::from_seed(i as u64))
                 .collect();
-            let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
+            let addresses: Vec<_> = signers.iter().map(|signer| signer.public_key()).collect();
 
             // Track senders/receivers/oracles/handles across restarts
             let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
@@ -1580,11 +1584,11 @@ mod tests {
                 .collect();
 
             // Create networks for all peers
-            for (i, peer) in peers.iter().enumerate() {
+            for (i, signer) in signers.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
 
                 let config = Config::test(
-                    peer.clone(),
+                    signer.clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
                     MAX_MESSAGE_SIZE,
                 );
@@ -1608,7 +1612,7 @@ mod tests {
                 loop {
                     let sent = sender.send(
                         Recipients::All,
-                        peers[i].public_key().as_ref().to_vec(),
+                        signers[i].public_key().as_ref().to_vec(),
                         true,
                     );
                     if sent.len() == n - 1 {
@@ -1675,7 +1679,7 @@ mod tests {
                         .with_attribute("index", restart_peer_idx)
                         .with_attribute("round", round);
                     let config = Config::test(
-                        peers[restart_peer_idx].clone(),
+                        signers[restart_peer_idx].clone(),
                         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), new_port),
                         MAX_MESSAGE_SIZE,
                     );
@@ -1700,7 +1704,7 @@ mod tests {
                     loop {
                         let sent = restarted_sender.send(
                             Recipients::All,
-                            peers[restart_peer_idx].public_key().as_ref().to_vec(),
+                            signers[restart_peer_idx].public_key().as_ref().to_vec(),
                             true,
                         );
                         if sent.len() == n - 1 {
@@ -1718,7 +1722,7 @@ mod tests {
                         loop {
                             let sent = sender.send(
                                 Recipients::One(addresses[restart_peer_idx].clone()),
-                                peers[i].public_key().as_ref().to_vec(),
+                                signers[i].public_key().as_ref().to_vec(),
                                 true,
                             );
                             if sent.len() == 1 {
@@ -1752,10 +1756,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create peers
-            let peers: Vec<_> = (0..n)
+            let signers: Vec<_> = (0..n)
                 .map(|i| ed25519::PrivateKey::from_seed(i as u64))
                 .collect();
-            let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
+            let addresses: Vec<_> = signers.iter().map(|signer| signer.public_key()).collect();
 
             // Track port allocations (updated on restart)
             let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
@@ -1783,11 +1787,11 @@ mod tests {
                 (0..n).map(|_| None).collect();
 
             // Create networks for all peers
-            for (i, peer) in peers.iter().enumerate() {
+            for (i, signer) in signers.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
 
                 let config = Config::test(
-                    peer.clone(),
+                    signer.clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[i]),
                     MAX_MESSAGE_SIZE,
                 );
@@ -1811,7 +1815,7 @@ mod tests {
                 loop {
                     let sent = sender.send(
                         Recipients::All,
-                        peers[i].public_key().as_ref().to_vec(),
+                        signers[i].public_key().as_ref().to_vec(),
                         true,
                     );
                     if sent.len() == n - 1 {
@@ -1875,7 +1879,7 @@ mod tests {
             for &idx in &restart_peers {
                 let peer_context = context.child("peer_restarted").with_attribute("index", idx);
                 let config = Config::test(
-                    peers[idx].clone(),
+                    signers[idx].clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), ports[idx]),
                     MAX_MESSAGE_SIZE,
                 );
@@ -1898,7 +1902,7 @@ mod tests {
                 loop {
                     let sent = sender.send(
                         Recipients::All,
-                        peers[i].public_key().as_ref().to_vec(),
+                        signers[i].public_key().as_ref().to_vec(),
                         true,
                     );
                     if sent.len() == n - 1 {
@@ -1926,12 +1930,12 @@ mod tests {
     fn test_operations_after_shutdown_do_not_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let peer = ed25519::PrivateKey::from_seed(0);
-            let address = peer.public_key();
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let address = signer.public_key();
 
             let peer_context = context.child("peer");
             let config = Config::test(
-                peer.clone(),
+                signer.clone(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200),
                 MAX_MESSAGE_SIZE,
             );
@@ -1970,11 +1974,11 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|context| async move {
-            let peer = ed25519::PrivateKey::from_seed(0);
+            let signer = ed25519::PrivateKey::from_seed(0);
 
             let peer_context = context.child("peer");
             let config = Config::test(
-                peer.clone(),
+                signer.clone(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200),
                 MAX_MESSAGE_SIZE,
             );
@@ -1985,7 +1989,7 @@ mod tests {
             let peer_addr =
                 Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200));
             let peers: Map<ed25519::PublicKey, Address> =
-                vec![(peer.public_key(), peer_addr)].try_into().unwrap();
+                vec![(signer.public_key(), peer_addr)].try_into().unwrap();
             oracle.track(0, peers);
 
             // Start the network
@@ -2028,15 +2032,15 @@ mod tests {
         let base_port = 6000;
         let executor = deterministic::Runner::seeded(seed);
         executor.start(|context| async move {
-            let peer0 = ed25519::PrivateKey::from_seed(0);
+            let signer0 = ed25519::PrivateKey::from_seed(0);
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let wrong_socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 100);
-            let peer1 = ed25519::PrivateKey::from_seed(1);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
-            let peer2 = ed25519::PrivateKey::from_seed(2);
+            let signer2 = ed25519::PrivateKey::from_seed(2);
 
             // Start peer 0
-            let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
+            let config0 = Config::test(signer0.clone(), socket0, MAX_MESSAGE_SIZE);
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, _receiver0) = network0.register(0, Quota::per_second(NZU32!(100)));
@@ -2044,9 +2048,9 @@ mod tests {
 
             // Create peer set with an incorrect address for peer 2
             let peer_set0: Vec<(_, Address)> = vec![
-                (peer0.public_key(), Address::Symmetric(socket0)),
-                (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket1)),
+                (signer0.public_key(), Address::Symmetric(socket0)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
+                (signer2.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0.track(0, Map::try_from(peer_set0).unwrap());
 
@@ -2054,11 +2058,15 @@ mod tests {
             context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 can't send to anyone
-            let sent = sender0.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
+            let sent = sender0.send(
+                Recipients::All,
+                signer1.public_key().as_ref().to_vec(),
+                true,
+            );
             assert!(sent.is_empty());
 
             // Start peer 1 (has duplicate but correct address)
-            let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
+            let config1 = Config::test(signer1.clone(), socket1, MAX_MESSAGE_SIZE);
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (_sender1, mut receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
@@ -2066,9 +2074,9 @@ mod tests {
 
             // Create peer set where peer 0 must dial peer 1 for connection
             let peer_set1: Vec<(_, Address)> = vec![
-                (peer0.public_key(), Address::Symmetric(wrong_socket0)),
-                (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket1)),
+                (signer0.public_key(), Address::Symmetric(wrong_socket0)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
+                (signer2.public_key(), Address::Symmetric(socket1)),
             ];
             oracle1.track(0, Map::try_from(peer_set1).unwrap());
 
@@ -2077,16 +2085,19 @@ mod tests {
 
             // Now peer 0 should connect to peer 1 at correct address
             loop {
-                let sent =
-                    sender0.send(Recipients::All, peer0.public_key().as_ref().to_vec(), true);
+                let sent = sender0.send(
+                    Recipients::All,
+                    signer0.public_key().as_ref().to_vec(),
+                    true,
+                );
                 if sent.len() == 1 {
-                    assert_eq!(sent[0], peer1.public_key());
+                    assert_eq!(sent[0], signer1.public_key());
                     break;
                 }
                 context.sleep(Duration::from_millis(100)).await;
             }
             let (sender, _) = receiver1.recv().await.unwrap();
-            assert_eq!(sender, peer0.public_key());
+            assert_eq!(sender, signer0.public_key());
         });
     }
 
@@ -2103,23 +2114,23 @@ mod tests {
         let base_port = 6000;
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let peer0 = ed25519::PrivateKey::from_seed(0);
+            let signer0 = ed25519::PrivateKey::from_seed(0);
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let wrong_socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 100);
-            let peer1 = ed25519::PrivateKey::from_seed(1);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
-            let peer2 = ed25519::PrivateKey::from_seed(2);
+            let signer2 = ed25519::PrivateKey::from_seed(2);
             let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 2);
 
             // Start peer 0
-            let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
+            let config0 = Config::test(signer0.clone(), socket0, MAX_MESSAGE_SIZE);
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut sender0, mut receiver0) = network0.register(0, Quota::per_second(NZU32!(100)));
             network0.start();
 
             // Start peer 2
-            let config2 = Config::test(peer2.clone(), socket2, MAX_MESSAGE_SIZE);
+            let config2 = Config::test(signer2.clone(), socket2, MAX_MESSAGE_SIZE);
             let (mut network2, mut oracle2) =
                 Network::new(context.child("peer").with_attribute("index", 2), config2);
             let (_sender2, mut receiver2) = network2.register(0, Quota::per_second(NZU32!(100)));
@@ -2127,9 +2138,9 @@ mod tests {
 
             // Create peer set with an incorrect address for peer 2
             let peer_set: Vec<(_, Address)> = vec![
-                (peer0.public_key(), Address::Symmetric(socket0)),
-                (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket1)),
+                (signer0.public_key(), Address::Symmetric(socket0)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
+                (signer2.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0.track(0, Map::try_from(peer_set.clone()).unwrap());
             oracle2.track(0, Map::try_from(peer_set).unwrap());
@@ -2139,19 +2150,22 @@ mod tests {
 
             // Peer 0 can send to peer 2
             loop {
-                let sent =
-                    sender0.send(Recipients::All, peer2.public_key().as_ref().to_vec(), true);
+                let sent = sender0.send(
+                    Recipients::All,
+                    signer2.public_key().as_ref().to_vec(),
+                    true,
+                );
                 if sent.len() == 1 {
-                    assert_eq!(sent[0], peer2.public_key());
+                    assert_eq!(sent[0], signer2.public_key());
                     break;
                 }
                 context.sleep(Duration::from_millis(100)).await;
             }
             let (sender, _) = receiver2.recv().await.unwrap();
-            assert_eq!(sender, peer0.public_key());
+            assert_eq!(sender, signer0.public_key());
 
             // Start peer 1 (has duplicate but correct address)
-            let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
+            let config1 = Config::test(signer1.clone(), socket1, MAX_MESSAGE_SIZE);
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
             let (mut sender1, _receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
@@ -2159,9 +2173,9 @@ mod tests {
 
             // Create peer set where peer 0 must dial peer 1 for connection
             let peer_set1: Vec<(_, Address)> = vec![
-                (peer0.public_key(), Address::Symmetric(wrong_socket0)),
-                (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket1)),
+                (signer0.public_key(), Address::Symmetric(wrong_socket0)),
+                (signer1.public_key(), Address::Symmetric(socket1)),
+                (signer2.public_key(), Address::Symmetric(socket1)),
             ];
             oracle1.track(0, Map::try_from(peer_set1).unwrap());
 
@@ -2170,11 +2184,14 @@ mod tests {
 
             // Now peer 0 should connect to peer 1 at correct address and peer 2 should dial peer 1
             loop {
-                let sent =
-                    sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
+                let sent = sender1.send(
+                    Recipients::All,
+                    signer1.public_key().as_ref().to_vec(),
+                    true,
+                );
                 if sent.len() == 2 {
-                    assert!(sent.contains(&peer0.public_key()));
-                    assert!(sent.contains(&peer2.public_key()));
+                    assert!(sent.contains(&signer0.public_key()));
+                    assert!(sent.contains(&signer2.public_key()));
                     break;
                 }
                 context.sleep(Duration::from_millis(100)).await;
@@ -2182,14 +2199,14 @@ mod tests {
             let mut received0 = false;
             while let Ok((sender, _)) = receiver0.recv().await {
                 // May have some items around from the initial send
-                if sender == peer1.public_key() {
+                if sender == signer1.public_key() {
                     received0 = true;
                     break;
                 }
             }
             assert!(received0);
             let (sender, _) = receiver2.recv().await.unwrap();
-            assert_eq!(sender, peer1.public_key());
+            assert_eq!(sender, signer1.public_key());
         });
     }
 

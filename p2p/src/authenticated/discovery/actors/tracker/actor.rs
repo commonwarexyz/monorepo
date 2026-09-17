@@ -610,8 +610,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let (_s1, peer1_pk) = new_signer_and_pk(1);
-            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            let (_signer1, peer1_pk) = new_signer_and_pk(1);
+            let (_signer2, peer2_pk) = new_signer_and_pk(2);
             oracle.track(
                 0,
                 Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
@@ -655,8 +655,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let (_s1, peer1_pk) = new_signer_and_pk(1);
-            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            let (_signer1, peer1_pk) = new_signer_and_pk(1);
+            let (_signer2, peer2_pk) = new_signer_and_pk(2);
             oracle.track(
                 0,
                 Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
@@ -712,8 +712,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let (_s1, peer1_pk) = new_signer_and_pk(1);
-            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            let (_signer1, peer1_pk) = new_signer_and_pk(1);
+            let (_signer2, peer2_pk) = new_signer_and_pk(2);
             oracle.track(
                 0,
                 Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
@@ -762,7 +762,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let (_s1, peer_pk) = new_signer_and_pk(1);
+            let (_signer, peer_pk) = new_signer_and_pk(1);
             oracle.track(
                 0,
                 Set::try_from([tracker_pk.clone(), peer_pk.clone()]).unwrap(),
@@ -1285,8 +1285,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg_initial);
 
-            let (_s1, pk1) = new_signer_and_pk(1);
-            let (_s2, pk2) = new_signer_and_pk(2);
+            let (_signer1, pk1) = new_signer_and_pk(1);
+            let (_signer2, pk2) = new_signer_and_pk(2);
             oracle.track(
                 0,
                 Set::try_from([tracker_pk, pk1.clone(), pk2.clone()]).unwrap(),
@@ -1322,8 +1322,8 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg_initial);
 
-            let (mut peer1_s, peer1_pk) = new_signer_and_pk(1);
-            let (_peer2_s, peer2_pk) = new_signer_and_pk(2);
+            let (mut signer1, peer1_pk) = new_signer_and_pk(1);
+            let (_signer2, peer2_pk) = new_signer_and_pk(2);
 
             // --- Initial Connect for unauthorized peer ---
             let (peer_mailbox1, mut peer_receiver1) =
@@ -1369,7 +1369,7 @@ mod tests {
             let peer1_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             let peer1_ts = context.current().epoch_millis();
             let peer1_info = new_peer_info(
-                &mut peer1_s,
+                &mut signer1,
                 &ip_namespace,
                 peer1_addr,
                 peer1_ts,
@@ -1413,7 +1413,7 @@ mod tests {
             }
 
             // --- Set eviction and peer killing ---
-            let (_peer3_s, peer3_pk) = new_signer_and_pk(3);
+            let (_signer3, peer3_pk) = new_signer_and_pk(3);
             let set1_peers: Set<_> = [tracker_pk.clone(), peer2_pk.clone()].try_into().unwrap(); // New set without peer1
             oracle.track(1, set1_peers.clone());
             context.sleep(Duration::from_millis(10)).await;
