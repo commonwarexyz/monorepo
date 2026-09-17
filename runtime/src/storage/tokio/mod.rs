@@ -158,6 +158,7 @@ impl crate::Storage for Storage {
                     pending.forget(&partition, Some(&name));
                 }
                 let (generation, wait, owed) = pending.attach(&partition, &name)?;
+                let owed = owed || pending.first_open(&generation, existing.is_some());
 
                 let (mut logical_size, blob_version, data_offset) = match existing {
                     Some(resolved) => resolved,
@@ -1029,6 +1030,80 @@ mod tests {
         assert!(!storage.pending.owes("partition", b"blob"));
         drop(storage.open("partition", b"blob").await.unwrap());
         assert_eq!(storage.pending.completions(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Outside Linux nothing flushes the filesystem at startup, so the first open of an existing
+    /// blob in a process flushes it. Later opens in that process, and blobs it created, owe nothing.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn test_first_open_flushes_existing_blob() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_first_open_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+
+        // A previous instance leaves a durable blob behind.
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"hello", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            settle(&storage).await;
+            assert_eq!(storage.pending.completions(), 0);
+        }
+
+        let storage = Storage::new(config, test_pool());
+        let (blob, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 5);
+        assert_eq!(storage.pending.completions(), 1);
+        drop(blob);
+        settle(&storage).await;
+        drop(storage.open("partition", b"blob").await.unwrap());
+        assert_eq!(storage.pending.completions(), 1);
+
+        drop(storage.open("partition", b"fresh").await.unwrap());
+        settle(&storage).await;
+        drop(storage.open("partition", b"fresh").await.unwrap());
+        assert_eq!(storage.pending.completions(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A failed first-open flush is retained for the name until it is removed.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn test_first_open_flush_failure_is_retained() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_first_open_fail_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"hello", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            settle(&storage).await;
+        }
+
+        let storage = Storage::new(config, test_pool());
+        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
+        assert!(matches!(
+            storage.open("partition", b"blob").await,
+            Err(Error::Closed)
+        ));
+        assert!(matches!(
+            storage.open("partition", b"blob").await,
+            Err(Error::Closed)
+        ));
+        assert_eq!(storage.pending.completions(), 0);
+
+        storage.remove("partition", Some(b"blob")).await.unwrap();
+        let (_, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 0);
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

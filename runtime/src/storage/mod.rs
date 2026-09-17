@@ -8,6 +8,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use cfg_if::cfg_if;
     use commonware_formatting::hex;
     use commonware_utils::sync::Mutex;
+    #[cfg(not(target_os = "linux"))]
+    use std::collections::HashSet;
     use std::{
         collections::HashMap,
         fs::File,
@@ -30,37 +32,28 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
-    /// but did not `fsync` are crash-durable before any storage structure reads.
-    ///
-    /// Per-platform guarantee:
-    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
-    ///
-    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8.
-    pub(crate) fn sync(dir: &Path) -> io::Result<()> {
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            /// Make what a prior process wrote crash-durable before any storage structure reads by
+            /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
+            ///
+            /// Assumes storage lives on a single filesystem. Reliable error detection needs kernel
+            /// >= 5.8.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
                 let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "made storage filesystem durable at startup (syncfs)"
-                );
                 Ok(())
-            } else {
-                // SAFETY: `sync` takes no arguments and cannot fail.
-                unsafe { libc::sync() };
-                tracing::debug!(
-                    storage_directory = %dir.display(),
-                    "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
-                );
+            }
+        } else {
+            /// Make what a prior process wrote crash-durable before any storage structure reads.
+            ///
+            /// No filesystem-wide flush with that guarantee exists here, so this does nothing and
+            /// the first open of each existing blob flushes it instead (see [Pending::first_open]).
+            pub(crate) const fn sync(_: &Path) -> io::Result<()> {
                 Ok(())
             }
         }
@@ -95,6 +88,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     #[derive(Default)]
     pub(crate) struct Pending {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
+        /// Names this process has created or flushed. Nothing flushes the filesystem at startup
+        /// here, so the first open of any other existing name owes a flush before trusting the file.
+        #[cfg(not(target_os = "linux"))]
+        flushed: Mutex<HashSet<(String, Vec<u8>)>>,
         #[cfg(test)]
         test: TestState,
     }
@@ -310,6 +307,33 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             match result {
                 Ok(()) => entry.dirty = false,
                 Err(error) => entry.failed = Some(error.clone()),
+            }
+        }
+
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                /// Whether the first open of `generation`'s name in this process owes a flush.
+                /// Linux flushes the filesystem at startup, so no open does.
+                pub(crate) const fn first_open(&self, _: &Generation, _: bool) -> bool {
+                    false
+                }
+            } else {
+                /// Whether the first open of `generation`'s name in this process owes a flush.
+                /// Nothing flushes the filesystem at startup here, so an existing blob owes one the
+                /// first time this process opens it. Creations are durable on return and owe nothing.
+                pub(crate) fn first_open(&self, generation: &Generation, existing: bool) -> bool {
+                    let first = self.flushed.lock().insert(generation.key.clone());
+                    if !(first && existing) {
+                        return false;
+                    }
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.get_mut(&generation.key)
+                        && ptr::eq(entry.identity.as_ptr(), generation)
+                    {
+                        entry.dirty = true;
+                    }
+                    true
+                }
             }
         }
 
