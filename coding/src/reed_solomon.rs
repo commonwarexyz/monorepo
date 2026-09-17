@@ -57,7 +57,6 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 }
 
 /// Hash ordered, equal-width payloads in balanced batches across the strategy.
-#[track_caller]
 fn hash_shards<H: Hasher, M: AsRef<[u8]> + Sync>(
     shards: &[M],
     strategy: &impl Strategy,
