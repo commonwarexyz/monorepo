@@ -1,4 +1,5 @@
-//! Shared input generators, model checks, and crash-recovery helpers for storage fuzz targets.
+//! Shared input generators, model checks, crash-recovery flows, and raw-image oracles for
+//! storage fuzz targets.
 
 use arbitrary::Unstructured;
 use commonware_runtime::{

@@ -134,6 +134,7 @@ async fn commit_pending<F: Graftable>(
     db
 }
 
+/// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
 async fn assert_neighbors<F: Graftable>(
     db: &Db<F>,
     committed_state: &HashMap<RawKey, RawValue>,

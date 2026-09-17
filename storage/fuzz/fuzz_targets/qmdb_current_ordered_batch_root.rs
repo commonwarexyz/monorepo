@@ -160,6 +160,9 @@ fn apply_mutations<F: Graftable>(mut batch: Batch<F>, mutations: &[Mutation]) ->
     batch
 }
 
+/// Advance the batch's logical key-value model independently of ancestor application.
+///
+/// The same expected neighbors apply before and after ancestors are applied to the database.
 fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
     for mutation in mutations {
         let key = key_from_seed(match mutation {
@@ -176,6 +179,8 @@ fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
     }
 }
 
+/// Check strict, non-wrapping neighbors across the mutation key space, including absent keys.
+/// A query above that space also checks the upper boundary.
 async fn assert_batch_neighbors<F: Graftable>(
     db: &Db<F>,
     batch: &Merkleized<F>,

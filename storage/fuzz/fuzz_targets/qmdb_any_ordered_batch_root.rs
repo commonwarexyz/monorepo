@@ -158,6 +158,9 @@ fn apply_mutations<F: MerkleFamily>(mut batch: Batch<F>, mutations: &[Mutation])
     batch
 }
 
+/// Advance the batch's logical key-value model independently of ancestor application.
+///
+/// The model checks neighbor reads in pending batches and the applied database's keys and values.
 fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
     for mutation in mutations {
         let key = key_from_seed(match mutation {
@@ -174,6 +177,8 @@ fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
     }
 }
 
+/// Check strict, non-wrapping neighbors across the mutation key space, including absent keys.
+/// A query above that space also checks the upper boundary.
 async fn assert_batch_neighbors<F: MerkleFamily>(
     db: &Db<F>,
     batch: &Merkleized<F>,
@@ -316,6 +321,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     "child root depended on a committed-and-dropped prefix"
                 );
 
+                // The parent (A) is already committed. Applying the retained child also applies
+                // B and C, so the database must contain the full modeled state.
                 let (db, _) = db.apply_batch(retained_child).await.unwrap();
                 assert_eq!(
                     db.root(),
