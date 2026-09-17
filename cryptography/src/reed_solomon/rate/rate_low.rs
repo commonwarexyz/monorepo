@@ -9,9 +9,9 @@ use fixedbitset::FixedBitSet;
 // Bound the quadratic calculation and its stack storage.
 const DIRECT_EVALUATION_LIMIT: usize = 512;
 
-/// Compute log erasure factors for a small decoding domain from its known positions.
+/// Compute log erasure factors directly from the known positions in a small decoding domain.
 /// This avoids evaluating the erasure polynomial over the entire field.
-fn eval_small_erasures(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
+fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
     let chunk_size = original_count.next_power_of_two();
     let mut known = [0; DIRECT_EVALUATION_LIMIT];
     let mut count = 0;
@@ -221,7 +221,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         let erasures = if recovery_end <= DIRECT_EVALUATION_LIMIT {
             small_erasures = [0; DIRECT_EVALUATION_LIMIT];
             let erasures = &mut small_erasures[..recovery_end];
-            eval_small_erasures(erasures, original_count, received);
+            eval_direct(erasures, original_count, received);
             erasures
         } else {
             full_erasures = [0; GF_ORDER];
@@ -403,7 +403,7 @@ mod tests {
                 }
                 NoSimd::eval_poly(&mut expected, GF_ORDER);
                 let mut actual = [0; DIRECT_EVALUATION_LIMIT];
-                eval_small_erasures(&mut actual[..end], original_count, &received);
+                eval_direct(&mut actual[..end], original_count, &received);
                 for i in 0..end {
                     // Zero and GF_MODULUS represent the same logarithmic exponent.
                     assert_eq!(

@@ -1,6 +1,6 @@
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZU16, NZUsize};
+use commonware_utils::{Faults, N3f1, NZU16, NZUsize};
 use core::slice;
 use criterion::{BatchSize, Criterion, criterion_main};
 use rand::{Rng, SeedableRng as _};
@@ -75,8 +75,8 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
     for (data_length, shard_counts, concs, selections) in cases.into_iter().chain(extra_cases) {
         for &chunks in shard_counts {
             for &conc in concs {
-                // Consensus recovers from f + 1 shards, where f = (chunks - 1) / 3.
-                let min = chunks.div_ceil(3);
+                // Consensus recovers from f + 1 shards.
+                let min = (N3f1::max_faults(chunks) + 1) as u16;
                 let config = Config {
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
