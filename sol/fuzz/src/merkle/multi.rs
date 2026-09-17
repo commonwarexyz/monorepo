@@ -7,6 +7,8 @@ use commonware_storage::merkle::{
 use futures::executor::block_on;
 use std::collections::BTreeMap;
 
+type RootProof<F, D> = (D, Proof<F, D>);
+
 sol! {
     struct MultiOutput {
         bytes32 root;
@@ -28,6 +30,8 @@ sol! {
 
 #[derive(Args)]
 pub(crate) struct MultiArgs {
+    #[arg(long, value_enum, default_value = "keccak")]
+    pub(super) hash: Hash,
     leaf_count: u64,
     /// Comma-separated leaf locations in the desired element order.
     #[arg(value_delimiter = ',', num_args = 1, required = true)]
@@ -40,27 +44,30 @@ pub(crate) struct MultiArgs {
 }
 
 impl MultiArgs {
-    pub(super) fn execute(self, kind: TreeKind, synthetic: bool) -> Result<Vec<u8>, String> {
+    pub(super) fn execute<H: Hasher>(
+        self,
+        kind: TreeKind,
+        synthetic: bool,
+    ) -> Result<Vec<u8>, String> {
         let output = match kind {
-            TreeKind::Mmr => self.generate::<mmr::Family>(synthetic)?,
-            TreeKind::Mmb => self.generate::<mmb::Family>(synthetic)?,
+            TreeKind::Mmr => self.generate::<mmr::Family, H>(synthetic)?,
+            TreeKind::Mmb => self.generate::<mmb::Family, H>(synthetic)?,
         };
         let (output, positions) = output;
         Ok(MultiOutput {
-            root: output.root.0.into(),
+            root: output.root.into(),
             elements: output.elements.into_iter().map(Into::into).collect(),
-            proof: output
-                .proof
-                .into_iter()
-                .map(|digest| digest.0.into())
-                .collect(),
+            proof: output.proof.into_iter().map(Into::into).collect(),
             leaves: Uint256::from(output.leaves),
             positions: positions.into_iter().map(Uint256::from).collect(),
         }
         .abi_encode_params())
     }
 
-    fn generate<F: Family>(&self, synthetic: bool) -> Result<(Output, Vec<u64>), String> {
+    fn generate<F: Family, H: Hasher>(
+        &self,
+        synthetic: bool,
+    ) -> Result<(Output, Vec<u64>), String> {
         if self.leaf_count > *F::MAX_LEAVES
             || self.locations.is_empty()
             || self.locations.len() > 4096
@@ -68,14 +75,14 @@ impl MultiArgs {
         {
             return Err("invalid sparse request (maximum 4096 elements)".into());
         }
-        let hasher = self.policy.hasher();
+        let hasher = self.policy.hasher::<H>();
         let locations: Vec<_> = self.locations.iter().copied().map(Location::new).collect();
         let (root, proof) = if synthetic {
             let tree = SparseTree::new(self.leaf_count, self.seed, &locations, &hasher);
-            prove(&tree, self.policy, &locations)?
+            prove::<F, H, _>(&tree, self.policy, &locations)?
         } else {
-            let tree = materialize::<F>(self.leaf_count, self.seed, &hasher)?;
-            prove(&tree, self.policy, &locations)?
+            let tree = materialize::<F, H>(self.leaf_count, self.seed, &hasher)?;
+            prove::<F, H, _>(&tree, self.policy, &locations)?
         };
         let elements: Vec<_> = self
             .locations
@@ -91,14 +98,18 @@ impl MultiArgs {
             return Err("Commonware rejected its generated multiproof".into());
         }
         if synthetic || self.check_mutated {
-            check_rejections(&hasher, &proof, &pairs, root)?;
+            check_rejections::<F, H>(&hasher, &proof, &pairs, root)?;
         }
         let positions = canonical_positions::<F>(self.leaf_count, &locations, self.policy)?;
         Ok((
             Output {
-                root,
+                root: root.as_ref().try_into().unwrap(),
                 elements,
-                proof: proof.digests,
+                proof: proof
+                    .digests
+                    .iter()
+                    .map(|d| d.as_ref().try_into().unwrap())
+                    .collect(),
                 leaves: self.leaf_count,
             },
             positions,
@@ -106,13 +117,13 @@ impl MultiArgs {
     }
 }
 
-fn prove<F: Family, S: Storage<F, Digest = Digest>>(
+fn prove<F: Family, H: Hasher, S: Storage<F, Digest = H::Digest>>(
     tree: &S,
     policy: Policy,
     locations: &[Location<F>],
-) -> Result<(Digest, Proof<F, Digest>), String> {
+) -> Result<RootProof<F, H::Digest>, String> {
     block_on(async {
-        let hasher = policy.hasher();
+        let hasher = policy.hasher::<H>();
         let leaves = Location::<F>::try_from(tree.size()).map_err(|error| format!("{error}"))?;
         let mut peaks = Vec::new();
         for (pos, _) in F::peaks(tree.size()) {
@@ -138,14 +149,15 @@ fn prove<F: Family, S: Storage<F, Digest = Digest>>(
     })
 }
 
-fn check_rejections<F: Family>(
-    hasher: &MerkleHasher,
-    proof: &Proof<F, Digest>,
+fn check_rejections<F: Family, H: Hasher>(
+    hasher: &MerkleHasher<H>,
+    proof: &Proof<F, H::Digest>,
     pairs: &[([u8; 32], Location<F>)],
-    root: Digest,
+    root: H::Digest,
 ) -> Result<(), String> {
-    let mut bad_root = root;
-    bad_root.0[0] ^= 1;
+    let mut bytes = root.as_ref().to_vec();
+    bytes[0] ^= 1;
+    let bad_root = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
     let mut bad_pairs = pairs.to_vec();
     bad_pairs[0].0[0] ^= 1;
     if proof.verify_multi_inclusion(hasher, pairs, &bad_root)
@@ -155,7 +167,9 @@ fn check_rejections<F: Family>(
     }
     if !proof.digests.is_empty() {
         let mut bad_proof = proof.clone();
-        bad_proof.digests[0].0[0] ^= 1;
+        let mut bytes = bad_proof.digests[0].as_ref().to_vec();
+        bytes[0] ^= 1;
+        bad_proof.digests[0] = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
         if bad_proof.verify_multi_inclusion(hasher, pairs, &root) {
             return Err("multiproof accepted a mutated digest".into());
         }
@@ -165,13 +179,18 @@ fn check_rejections<F: Family>(
 
 /// A coherent partial tree with arbitrary digests outside the selected paths.
 /// Family owns positions and child relationships while Commonware owns all hashing.
-struct SparseTree<F: Family> {
+struct SparseTree<F: Family, D: commonware_cryptography::Digest> {
     size: Position<F>,
-    nodes: BTreeMap<Position<F>, Digest>,
+    nodes: BTreeMap<Position<F>, D>,
 }
 
-impl<F: Family> SparseTree<F> {
-    fn new(leaves: u64, seed: u64, locations: &[Location<F>], hasher: &MerkleHasher) -> Self {
+impl<F: Family, D: commonware_cryptography::Digest> SparseTree<F, D> {
+    fn new<H: Hasher<Digest = D>>(
+        leaves: u64,
+        seed: u64,
+        locations: &[Location<F>],
+        hasher: &MerkleHasher<H>,
+    ) -> Self {
         let size = F::location_to_position(Location::new(leaves));
         let mut tree = Self {
             size,
@@ -191,16 +210,16 @@ impl<F: Family> SparseTree<F> {
         tree
     }
 
-    fn subtree(
+    fn subtree<H: Hasher<Digest = D>>(
         &mut self,
         pos: Position<F>,
         height: u32,
         seed: u64,
         selected: &[Location<F>],
-        hasher: &MerkleHasher,
-    ) -> Digest {
+        hasher: &MerkleHasher<H>,
+    ) -> D {
         let digest = if selected.is_empty() {
-            keccak256::Digest(leaf(seed ^ u64::MAX, *pos))
+            D::decode(Copying(leaf(seed ^ u64::MAX, *pos).as_slice())).unwrap()
         } else if height == 0 {
             hasher.leaf_digest(pos, &leaf(seed, *selected[0]))
         } else {
@@ -221,14 +240,14 @@ impl<F: Family> SparseTree<F> {
     }
 }
 
-impl<F: Family> Storage<F> for SparseTree<F> {
-    type Digest = Digest;
+impl<F: Family, D: commonware_cryptography::Digest> Storage<F> for SparseTree<F, D> {
+    type Digest = D;
 
     fn size(&self) -> Position<F> {
         self.size
     }
 
-    async fn get_node(&self, position: Position<F>) -> Result<Option<Digest>, Error<F>> {
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
         Ok(self.nodes.get(&position).copied())
     }
 }
@@ -266,7 +285,7 @@ fn canonical_positions<F: Family>(
     let proof = block_on(verification::multi_proof(
         &store,
         policy.inactive_peaks,
-        policy.hasher().root_bagging(),
+        policy.hasher::<Keccak256>().root_bagging(),
         locations,
     ))
     .map_err(|error| error.to_string())?;
@@ -279,7 +298,7 @@ fn canonical_positions<F: Family>(
 
 /// Verifies `(root, leaves, locations, elements, proof, positions)` with paired input ordering.
 /// Commonware accepts duplicate locations when every supplied element agrees.
-pub(super) fn check<F: Family>(encoded: &[u8], policy: Policy) -> bool {
+pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     let Some(leaves) = abi_u64(encoded, 32) else {
         return false;
     };
@@ -328,15 +347,18 @@ pub(super) fn check<F: Family>(encoded: &[u8], policy: Policy) -> bool {
     let Some(root) = encoded.get(..32) else {
         return false;
     };
-    let proof = Proof::<F, Digest> {
+    let proof = Proof::<F, H::Digest> {
         leaves: Location::new(leaves),
         inactive_peaks: policy.inactive_peaks,
-        digests: digests.into_iter().map(keccak256::Digest).collect(),
+        digests: digests
+            .iter()
+            .map(|d| H::Digest::decode(Copying(d.as_slice())).unwrap())
+            .collect(),
     };
     proof.verify_multi_inclusion(
-        &policy.hasher(),
+        &policy.hasher::<H>(),
         &pairs,
-        &keccak256::Digest(root.try_into().unwrap()),
+        &H::Digest::decode(Copying(root)).unwrap(),
     )
 }
 
@@ -348,17 +370,17 @@ mod tests {
 
     fn check_input(output: &Output, locations: &[u64], positions: &[u64]) -> Vec<u8> {
         MultiInput {
-            root: output.root.0.into(),
+            root: output.root.into(),
             leaves: Uint256::from(output.leaves),
             locations: locations.iter().copied().map(Uint256::from).collect(),
             elements: output.elements.iter().copied().map(Into::into).collect(),
-            proof: output.proof.iter().map(|digest| digest.0.into()).collect(),
+            proof: output.proof.iter().map(|digest| (*digest).into()).collect(),
             positions: positions.iter().copied().map(Uint256::from).collect(),
         }
         .abi_encode_params()
     }
 
-    fn policies<F: Family>() {
+    fn policies<F: Family, H: Hasher>() {
         for bagging in [Fold::Forward, Fold::Backward] {
             for leaves in [1, 2, 3, 7, 11, 31, 62] {
                 let peak_count = F::peaks(F::location_to_position(Location::new(leaves))).count();
@@ -369,6 +391,7 @@ mod tests {
                     };
                     for locations in [vec![0], vec![leaves - 1, 0, leaves / 2, 0]] {
                         let args = MultiArgs {
+                            hash: Hash::Keccak,
                             leaf_count: leaves,
                             locations,
                             seed: 42,
@@ -376,40 +399,40 @@ mod tests {
                             policy,
                         };
                         for synthetic in [false, true] {
-                            let (output, positions) = args.generate::<F>(synthetic).unwrap();
+                            let (output, positions) = args.generate::<F, H>(synthetic).unwrap();
                             let encoded = check_input(&output, &args.locations, &positions);
-                            assert!(check::<F>(&encoded, policy));
+                            assert!(check::<F, H>(&encoded, policy));
                             let mut bad = encoded.clone();
                             bad[0] ^= 1;
-                            assert!(!check::<F>(&bad, policy));
+                            assert!(!check::<F, H>(&bad, policy));
                             let mut bad = encoded.clone();
                             bad[224] = 1;
-                            assert!(!check::<F>(&bad, policy));
+                            assert!(!check::<F, H>(&bad, policy));
                             let mut bad = encoded.clone();
                             let element_offset = abi_u64(&bad, 96).unwrap() as usize;
                             bad[element_offset..element_offset + 32]
                                 .copy_from_slice(&0u64.abi_encode());
-                            assert!(!check::<F>(&bad, policy));
+                            assert!(!check::<F, H>(&bad, policy));
                             let mut bad = encoded.clone();
                             let proof_offset = abi_u64(&bad, 128).unwrap() as usize;
                             bad[proof_offset..proof_offset + 32]
                                 .copy_from_slice(&(output.proof.len() as u64 + 1).abi_encode());
                             bad.extend_from_slice(&[0; 32]);
-                            assert!(!check::<F>(&bad, policy));
-                            assert!(!check::<F>(&encoded[..encoded.len() - 1], policy));
+                            assert!(!check::<F, H>(&bad, policy));
+                            assert!(!check::<F, H>(&encoded[..encoded.len() - 1], policy));
                             if !positions.is_empty() {
                                 let offset = abi_u64(&encoded, 160).unwrap() as usize;
                                 let mut changed = encoded.clone();
                                 changed[offset + 63] ^= 1;
-                                assert!(!check::<F>(&changed, policy));
+                                assert!(!check::<F, H>(&changed, policy));
                                 changed = encoded.clone();
                                 changed[offset..offset + 32]
                                     .copy_from_slice(&(positions.len() as u64 - 1).abi_encode());
-                                assert!(!check::<F>(&changed, policy));
+                                assert!(!check::<F, H>(&changed, policy));
                             }
                             let mut wrong_policy = policy;
                             wrong_policy.inactive_peaks = peak_count + 1;
-                            assert!(!check::<F>(&encoded, wrong_policy));
+                            assert!(!check::<F, H>(&encoded, wrong_policy));
                         }
                     }
                 }
@@ -419,16 +442,22 @@ mod tests {
 
     #[test]
     fn sparse_proofs_cover_policies_order_duplicates_and_malformed_abi() {
-        policies::<mmr::Family>();
-        policies::<mmb::Family>();
+        sparse_proofs_cover_policies_order_duplicates_and_malformed_abi_with::<Keccak256>();
+        sparse_proofs_cover_policies_order_duplicates_and_malformed_abi_with::<Sha256>();
     }
 
-    fn deep<F: Family>() {
+    fn sparse_proofs_cover_policies_order_duplicates_and_malformed_abi_with<H: Hasher>() {
+        policies::<mmr::Family, H>();
+        policies::<mmb::Family, H>();
+    }
+
+    fn deep<F: Family, H: Hasher>() {
         for leaves in [*F::MAX_LEAVES - 1, *F::MAX_LEAVES] {
             let peak_count = F::peaks(F::location_to_position(Location::new(leaves))).count();
             for bagging in [Fold::Forward, Fold::Backward] {
                 for inactive_peaks in [0, 1, peak_count] {
                     let args = MultiArgs {
+                        hash: Hash::Keccak,
                         leaf_count: leaves,
                         locations: vec![leaves - 1, 0, leaves / 2, 1, leaves / 2 - 1],
                         seed: 17,
@@ -438,8 +467,8 @@ mod tests {
                             inactive_peaks,
                         },
                     };
-                    let (output, positions) = args.generate::<F>(true).unwrap();
-                    assert!(check::<F>(
+                    let (output, positions) = args.generate::<F, H>(true).unwrap();
+                    assert!(check::<F, H>(
                         &check_input(&output, &args.locations, &positions),
                         args.policy
                     ));
@@ -450,13 +479,19 @@ mod tests {
 
     #[test]
     fn sparse_proofs_reach_maximum_depth() {
-        deep::<mmr::Family>();
-        deep::<mmb::Family>();
+        sparse_proofs_reach_maximum_depth_with::<Keccak256>();
+        sparse_proofs_reach_maximum_depth_with::<Sha256>();
     }
 
-    fn complete_selection<F: Family>() {
+    fn sparse_proofs_reach_maximum_depth_with<H: Hasher>() {
+        deep::<mmr::Family, H>();
+        deep::<mmb::Family, H>();
+    }
+
+    fn complete_selection<F: Family, H: Hasher>() {
         for leaves in [1, 3, 11, 31] {
             let args = MultiArgs {
+                hash: Hash::Keccak,
                 leaf_count: leaves,
                 locations: (0..leaves).rev().collect(),
                 seed: 81,
@@ -466,8 +501,8 @@ mod tests {
                     inactive_peaks: 1,
                 },
             };
-            let (full, full_positions) = args.generate::<F>(false).unwrap();
-            let (sparse, sparse_positions) = args.generate::<F>(true).unwrap();
+            let (full, full_positions) = args.generate::<F, H>(false).unwrap();
+            let (sparse, sparse_positions) = args.generate::<F, H>(true).unwrap();
             assert_eq!(full.root, sparse.root);
             assert_eq!(full.proof, sparse.proof);
             assert_eq!(full_positions, sparse_positions);
@@ -476,8 +511,13 @@ mod tests {
 
     #[test]
     fn complete_sparse_selection_matches_materialized_tree() {
-        complete_selection::<mmr::Family>();
-        complete_selection::<mmb::Family>();
+        complete_sparse_selection_matches_materialized_tree_with::<Keccak256>();
+        complete_sparse_selection_matches_materialized_tree_with::<Sha256>();
+    }
+
+    fn complete_sparse_selection_matches_materialized_tree_with<H: Hasher>() {
+        complete_selection::<mmr::Family, H>();
+        complete_selection::<mmb::Family, H>();
     }
 
     #[test]
@@ -506,7 +546,7 @@ mod tests {
             }
         }
         let output = Output {
-            root: Keccak256::hash(&[&0u64.to_be_bytes()]),
+            root: Keccak256::hash(&[&0u64.to_be_bytes()]).0,
             elements: vec![],
             proof: vec![],
             leaves: 0,
@@ -517,14 +557,77 @@ mod tests {
                 bagging,
                 inactive_peaks: 0,
             };
-            assert!(check::<mmr::Family>(&encoded, policy));
-            assert!(check::<mmb::Family>(&encoded, policy));
+            assert!(check::<mmr::Family, Keccak256>(&encoded, policy));
+            assert!(check::<mmb::Family, Keccak256>(&encoded, policy));
             let policy = Policy {
                 bagging,
                 inactive_peaks: 1,
             };
-            assert!(!check::<mmr::Family>(&encoded, policy));
-            assert!(!check::<mmb::Family>(&encoded, policy));
+            assert!(!check::<mmr::Family, Keccak256>(&encoded, policy));
+            assert!(!check::<mmb::Family, Keccak256>(&encoded, policy));
+        }
+    }
+    #[test]
+    fn cli_hash_selection() {
+        for kind in ["mmr", "mmb"] {
+            for mode in ["generate-multi", "synthetic-multi"] {
+                let mut outputs = Vec::new();
+                for hash in ["keccak", "sha256"] {
+                    let encoded = Cli::try_parse_from([
+                        "fuzz",
+                        "merkle",
+                        mode,
+                        kind,
+                        "31",
+                        "30,0,12,0",
+                        "42",
+                        "--bagging",
+                        "backward",
+                        "--inactive-peaks",
+                        "2",
+                        "--hash",
+                        hash,
+                    ])
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
+                    let output =
+                        <MultiOutput as SolValue>::abi_decode_params_validate(&encoded).unwrap();
+                    let input = MultiInput {
+                        root: output.root,
+                        leaves: output.leaves,
+                        locations: [30u64, 0, 12, 0].into_iter().map(Uint256::from).collect(),
+                        elements: output.elements,
+                        proof: output.proof,
+                        positions: output.positions,
+                    }
+                    .abi_encode_params();
+                    let hex = const_hex::encode(input);
+                    for check_hash in ["keccak", "sha256"] {
+                        let accepted = Cli::try_parse_from([
+                            "fuzz",
+                            "merkle",
+                            "check-multi",
+                            kind,
+                            &hex,
+                            "--bagging",
+                            "backward",
+                            "--inactive-peaks",
+                            "2",
+                            "--hash",
+                            check_hash,
+                        ])
+                        .unwrap()
+                        .command
+                        .execute()
+                        .unwrap();
+                        assert_eq!(accepted, (hash == check_hash).abi_encode());
+                    }
+                    outputs.push(encoded);
+                }
+                assert_ne!(outputs[0], outputs[1]);
+            }
         }
     }
 }

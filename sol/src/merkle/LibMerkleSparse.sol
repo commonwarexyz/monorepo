@@ -14,6 +14,7 @@ library LibMerkleSparse {
         bool belt;
         uint256 cursor;
         uint256 end;
+        address hasher;
     }
 
     /// @dev Verify sparse raw elements with strictly increasing physical witness positions.
@@ -32,16 +33,17 @@ library LibMerkleSparse {
         bool backward,
         uint256 inactive,
         bool cd,
-        bool belt
-    ) internal pure returns (bool valid) {
+        bool belt,
+        address hasher
+    ) internal view returns (bool valid) {
         if (leaves > (uint256(1) << 62) + (belt ? 30 : 0)) return false;
         if (count == 0) {
-            return leaves == 0 && inactive == 0 && proofCount == 0 && root == Merkle.EMPTY_ROOT;
+            return leaves == 0 && inactive == 0 && proofCount == 0 && root == Merkle.emptyRoot(hasher);
         }
         if (leaves == 0) return false;
         uint256 free;
         assembly ("memory-safe") { free := mload(0x40) }
-        Proof memory p = Proof(positions, digests, proofCount, 0, cd, belt, 0, 0);
+        Proof memory p = Proof(positions, digests, proofCount, 0, cd, belt, 0, 0, hasher);
         uint256 pairs;
         assembly ("memory-safe") { pairs := mload(0x40) }
         uint256 peaks = pairs + count * 64;
@@ -62,7 +64,7 @@ library LibMerkleSparse {
     /// @dev Sort selected elements and hash each distinct leaf after checking duplicate values.
     function _elements(Proof memory p, uint256 n, uint256 indices, uint256 data, uint256 count, uint256 pairs)
         private
-        pure
+        view
         returns (uint256 unique, bool ok)
     {
         unchecked {
@@ -106,9 +108,10 @@ library LibMerkleSparse {
                 assembly ("memory-safe") {
                     let slot := add(pairs, shl(6, unique))
                     mstore(slot, index)
-                    mstore(0, position)
-                    mstore(0x20, element)
-                    mstore(add(slot, 0x20), keccak256(0x18, 0x28))
+                }
+                bytes32 digest = Merkle.hash(bytes32(position), element, 0x18, 0x28, p.hasher);
+                assembly ("memory-safe") {
+                    mstore(add(add(pairs, shl(6, unique)), 0x20), digest)
                 }
                 previous = index;
                 previousElement = element;
@@ -170,7 +173,7 @@ library LibMerkleSparse {
         uint256 peaks,
         bool backward,
         uint256 inactive
-    ) private pure returns (bool) {
+    ) private view returns (bool) {
         unchecked {
             uint256 cursor = 0;
             uint256 peakCount = 0;
@@ -191,8 +194,8 @@ library LibMerkleSparse {
                 cursor += w;
             }
             if (inactive > peakCount || p.used != p.length) return false;
-            bytes32 acc = Merkle.bag(peaks, peakCount, inactive, backward);
-            return Merkle.root(n, inactive, acc) == root;
+            bytes32 acc = Merkle.bag(peaks, peakCount, inactive, backward, p.hasher);
+            return Merkle.root(n, inactive, acc, p.hasher) == root;
         }
     }
 
@@ -202,7 +205,7 @@ library LibMerkleSparse {
     /// The left witness must be consumed before visiting the right child to preserve proof order.
     function _subtree(Proof memory p, uint256 pos, uint256 w, uint256 cursor)
         private
-        pure
+        view
         returns (bytes32 digest, bool ok)
     {
         unchecked {
@@ -243,12 +246,25 @@ library LibMerkleSparse {
                 if (!found || expected != b) return (0, false);
             }
             uint256 position = Merkle.position(pos, w, p.belt);
+            address hasher = p.hasher;
             assembly ("memory-safe") {
+                hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
                 let free := mload(0x40)
                 mstore(0, position)
                 mstore(0x20, a)
                 mstore(0x40, b)
-                digest := keccak256(0x18, 0x48)
+                switch hasher
+                case 0 { digest := keccak256(0x18, 0x48) }
+                default {
+                    let success := staticcall(gas(), hasher, 0x18, 0x48, 0, 0x20)
+                    if iszero(and(success, eq(returndatasize(), 0x20))) {
+                        mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                        // Each external hash result must be checked before traversal continues.
+                        // forge-lint: disable-next-line(require-revert-in-loop)
+                        revert(0x1c, 4)
+                    }
+                    digest := mload(0)
+                }
                 mstore(0x40, free)
             }
             // forge-lint: disable-next-line(boolean-cst)

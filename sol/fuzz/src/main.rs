@@ -7,6 +7,14 @@ mod bmt;
 mod merkle;
 mod simplex;
 
+/// Hash function used by the tree proof oracle.
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
+pub(crate) enum Hash {
+    Sha256,
+    #[default]
+    Keccak,
+}
+
 #[derive(Parser)]
 #[command(about = "Generate and verify Commonware test inputs")]
 struct Cli {

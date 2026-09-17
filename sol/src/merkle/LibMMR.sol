@@ -5,8 +5,11 @@ import { LibMerkle } from "./LibMerkle.sol";
 import { LibMerkleSparse } from "./LibMerkleSparse.sol";
 
 /// @title Commonware Merkle Mountain Range inclusion verification
-/// @notice Verify Keccak256 inclusion proofs for raw 32-byte elements.
+/// @notice Verify inclusion proofs with a caller-selected hash for raw 32-byte elements.
 /// @dev Supports at most `2^62` leaves.
+/// `H` is native Keccak256 for `address(0)`. Other addresses receive raw hash input via
+/// `STATICCALL` and must return exactly 32 bytes. The caller must trust the selected hasher.
+/// A failed call or any other return length reverts with `Common.HashFailed()`.
 /// Entry points without policy arguments use `ForwardFold` and zero inactive peaks.
 /// Policy overloads select the fold direction and the inactive prefix committed by the root.
 /// `LibMerkle` documents shared hashing and the policy-dependent range proof layout.
@@ -36,42 +39,53 @@ library LibMMR {
     /// @param index Zero-based index of the leaf.
     /// @param element Raw 32-byte value to hash with its physical node position.
     /// @param proof Exact Commonware range proof digests for `ForwardFold` with zero inactive peaks.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, missing digests or extra digests return false.
-    function verify(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
-        internal
-        pure
-        returns (bool)
-    {
+    function verify(
+        bytes32 root,
+        uint256 leaves,
+        uint256 index,
+        bytes32 element,
+        bytes32[] memory proof,
+        address hasher
+    ) internal view returns (bool) {
         uint256 proofData;
         assembly ("memory-safe") { proofData := add(proof, 0x20) }
-        return LibMerkle.verify(root, leaves, index, uint256(element), 1, proofData, proof.length, true, false, false);
+        return LibMerkle.verify(
+            root, leaves, index, uint256(element), 1, proofData, proof.length, true, false, false, hasher
+        );
     }
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev Uses `ForwardFold` with zero inactive peaks.
     /// An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == keccak256(bytes8(0))`.
+    /// `root == H(bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
     /// @param elements Raw 32-byte values in consecutive leaf-index order.
     /// @param proof Exact Commonware range proof digests for `ForwardFold` with zero inactive peaks.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, missing digests or extra digests return false.
-    function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
-        internal
-        pure
-        returns (bool)
-    {
+    function verifyRange(
+        bytes32 root,
+        uint256 leaves,
+        uint256 start,
+        bytes32[] memory elements,
+        bytes32[] memory proof,
+        address hasher
+    ) internal view returns (bool) {
         uint256 data;
         uint256 proofData;
         assembly ("memory-safe") {
             data := add(elements, 0x20)
             proofData := add(proof, 0x20)
         }
-        return
-            LibMerkle.verify(root, leaves, start, data, elements.length, proofData, proof.length, false, false, false);
+        return LibMerkle.verify(
+            root, leaves, start, data, elements.length, proofData, proof.length, false, false, false, hasher
+        );
     }
 
     /// @notice Verify the raw element at leaf index `index`.
@@ -82,28 +96,35 @@ library LibMMR {
     /// @param index Zero-based index of the leaf.
     /// @param element Raw 32-byte value to hash with its physical node position.
     /// @param proof Exact Commonware range proof digests for `ForwardFold` with zero inactive peaks.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, missing digests or extra digests return false.
-    function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
-        internal
-        pure
-        returns (bool)
-    {
+    function verifyCalldata(
+        bytes32 root,
+        uint256 leaves,
+        uint256 index,
+        bytes32 element,
+        bytes32[] calldata proof,
+        address hasher
+    ) internal view returns (bool) {
         uint256 proofData;
         assembly ("memory-safe") { proofData := proof.offset }
-        return LibMerkle.verify(root, leaves, index, uint256(element), 1, proofData, proof.length, true, true, false);
+        return LibMerkle.verify(
+            root, leaves, index, uint256(element), 1, proofData, proof.length, true, true, false, hasher
+        );
     }
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev Uses `ForwardFold` with zero inactive peaks.
     /// Input arrays are read directly from calldata without copying.
     /// An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == keccak256(bytes8(0))`.
+    /// `root == H(bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
     /// @param elements Raw 32-byte values in consecutive leaf-index order.
     /// @param proof Exact Commonware range proof digests for `ForwardFold` with zero inactive peaks.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, missing digests or extra digests return false.
     function verifyRangeCalldata(
@@ -111,15 +132,18 @@ library LibMMR {
         uint256 leaves,
         uint256 start,
         bytes32[] calldata elements,
-        bytes32[] calldata proof
-    ) internal pure returns (bool) {
+        bytes32[] calldata proof,
+        address hasher
+    ) internal view returns (bool) {
         uint256 data;
         uint256 proofData;
         assembly ("memory-safe") {
             data := elements.offset
             proofData := proof.offset
         }
-        return LibMerkle.verify(root, leaves, start, data, elements.length, proofData, proof.length, false, true, false);
+        return LibMerkle.verify(
+            root, leaves, start, data, elements.length, proofData, proof.length, false, true, false, hasher
+        );
     }
 
     /// @notice Verify the raw element at leaf index `index`.
@@ -131,6 +155,7 @@ library LibMMR {
     /// @param proof Exact Commonware range proof digests for the selected root policy.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, an invalid inactive count, missing digests or extra digests return false.
     function verify(
@@ -140,8 +165,9 @@ library LibMMR {
         bytes32 element,
         bytes32[] memory proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         uint256 proofData;
         assembly ("memory-safe") { proofData := add(proof, 0x20) }
         return LibMerkle.verify(
@@ -156,13 +182,14 @@ library LibMMR {
             false,
             false,
             bagging,
-            inactivePeaks
+            inactivePeaks,
+            hasher
         );
     }
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == keccak256(bytes8(0))` with zero inactive peaks.
+    /// `root == H(bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
@@ -170,6 +197,7 @@ library LibMMR {
     /// @param proof Exact Commonware range proof digests for the selected root policy.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, an invalid inactive count, missing digests or extra digests return false.
     function verifyRange(
@@ -179,8 +207,9 @@ library LibMMR {
         bytes32[] memory elements,
         bytes32[] memory proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         uint256 data;
         uint256 proofData;
         assembly ("memory-safe") {
@@ -199,7 +228,8 @@ library LibMMR {
             false,
             false,
             bagging,
-            inactivePeaks
+            inactivePeaks,
+            hasher
         );
     }
 
@@ -213,6 +243,7 @@ library LibMMR {
     /// @param proof Exact Commonware range proof digests for the selected root policy.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, an invalid inactive count, missing digests or extra digests return false.
     function verifyCalldata(
@@ -222,19 +253,32 @@ library LibMMR {
         bytes32 element,
         bytes32[] calldata proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         uint256 proofData;
         assembly ("memory-safe") { proofData := proof.offset }
         return LibMerkle.verify(
-            root, leaves, index, uint256(element), 1, proofData, proof.length, true, true, false, bagging, inactivePeaks
+            root,
+            leaves,
+            index,
+            uint256(element),
+            1,
+            proofData,
+            proof.length,
+            true,
+            true,
+            false,
+            bagging,
+            inactivePeaks,
+            hasher
         );
     }
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev Input arrays are read directly from calldata without copying.
     /// An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == keccak256(bytes8(0))` with zero inactive peaks.
+    /// `root == H(bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
@@ -242,6 +286,7 @@ library LibMMR {
     /// @param proof Exact Commonware range proof digests for the selected root policy.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if the proof matches `root` and consumes every digest.
     /// Invalid bounds, an invalid inactive count, missing digests or extra digests return false.
     function verifyRangeCalldata(
@@ -251,8 +296,9 @@ library LibMMR {
         bytes32[] calldata elements,
         bytes32[] calldata proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         uint256 data;
         uint256 proofData;
         assembly ("memory-safe") {
@@ -271,7 +317,8 @@ library LibMMR {
             true,
             false,
             bagging,
-            inactivePeaks
+            inactivePeaks,
+            hasher
         );
     }
 
@@ -279,7 +326,7 @@ library LibMMR {
     /// @dev Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == keccak256(bytes8(0))`.
+    /// `root == H(bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param indices Zero-based leaf indices, which may be unordered or repeated.
@@ -288,6 +335,7 @@ library LibMMR {
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
     /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
     function verifyMulti(
@@ -298,8 +346,9 @@ library LibMMR {
         uint256[] memory proofPositions,
         bytes32[] memory proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         if (indices.length != elements.length || proofPositions.length != proof.length) {
             return false;
         }
@@ -325,7 +374,8 @@ library LibMMR {
             bagging == LibMerkle.Bagging.BackwardFold,
             inactivePeaks,
             false,
-            false
+            false,
+            hasher
         );
     }
 
@@ -334,7 +384,7 @@ library LibMMR {
     /// Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == keccak256(bytes8(0))`.
+    /// `root == H(bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param indices Zero-based leaf indices, which may be unordered or repeated.
@@ -343,6 +393,7 @@ library LibMMR {
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
     /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
     function verifyMultiCalldata(
@@ -353,8 +404,9 @@ library LibMMR {
         uint256[] calldata proofPositions,
         bytes32[] calldata proof,
         LibMerkle.Bagging bagging,
-        uint256 inactivePeaks
-    ) internal pure returns (bool) {
+        uint256 inactivePeaks,
+        address hasher
+    ) internal view returns (bool) {
         if (indices.length != elements.length || proofPositions.length != proof.length) {
             return false;
         }
@@ -380,7 +432,8 @@ library LibMMR {
             bagging == LibMerkle.Bagging.BackwardFold,
             inactivePeaks,
             true,
-            false
+            false,
+            hasher
         );
     }
 }

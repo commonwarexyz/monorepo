@@ -2,31 +2,31 @@
 pragma solidity ^0.8.15;
 
 import { LibMMB } from "../src/merkle/LibMMB.sol";
-import { MerkleTestCommon, CompatibilityHarness, IMerkleGasHarness } from "./Common.t.sol";
+import { MerkleTestCommon, CompatibilityHarness, IMerkleGasHarness, HashSelection } from "./Common.t.sol";
 
-contract MMBHarness {
+contract MMBHarness is HashSelection {
     function verify(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibMMB.verify(root, leaves, index, element, proof);
+        return LibMMB.verify(root, leaves, index, element, proof, _hasher());
     }
 
     function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibMMB.verifyRange(root, leaves, start, elements, proof);
+        return LibMMB.verifyRange(root, leaves, start, elements, proof, _hasher());
     }
 
     function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
         external
-        pure
+        view
         returns (bool)
     {
-        return LibMMB.verifyCalldata(root, leaves, index, element, proof);
+        return LibMMB.verifyCalldata(root, leaves, index, element, proof, _hasher());
     }
 
     function verifyRangeCalldata(
@@ -35,8 +35,8 @@ contract MMBHarness {
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof
-    ) external pure returns (bool) {
-        return LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof);
+    ) external view returns (bool) {
+        return LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
     }
 }
 
@@ -45,36 +45,36 @@ contract MMBCompatibilityHarness is CompatibilityHarness { }
 contract LibMMBTest is MerkleTestCommon {
     MMBHarness internal gasHarness = new MMBHarness();
 
-    function setUp() public {
+    function setUp() public virtual {
         harness = new MMBCompatibilityHarness();
     }
 
     function testGas_IndividualTwoLeaves() public {
         bytes32 a = bytes32(uint256(11));
         bytes32 b = bytes32(uint256(22));
-        bytes32 left = keccak256(abi.encodePacked(uint64(0), a));
-        bytes32 right = keccak256(abi.encodePacked(uint64(1), b));
-        bytes32 root = keccak256(abi.encodePacked(uint64(2), keccak256(abi.encodePacked(uint64(2), left, right))));
+        bytes32 left = _hash(abi.encodePacked(uint64(0), a));
+        bytes32 right = _hash(abi.encodePacked(uint64(1), b));
+        bytes32 root = _hash(abi.encodePacked(uint64(2), _hash(abi.encodePacked(uint64(2), left, right))));
         bytes32[] memory proof = new bytes32[](1);
         proof[0] = right;
         assertTrue(gasHarness.verify(root, 2, 0, a, proof));
-        vm.snapshotGasLastFrame("MMB", "individual-2");
+        vm.snapshotGasLastFrame(_group("MMB"), "individual-2");
         assertTrue(gasHarness.verifyCalldata(root, 2, 0, a, proof));
-        vm.snapshotGasLastFrame("MMB", "individual-2-calldata");
+        vm.snapshotGasLastFrame(_group("MMB"), "individual-2-calldata");
     }
 
     function testGas_RangeTwoLeaves() public {
         bytes32[] memory elements = new bytes32[](2);
         elements[0] = bytes32(uint256(11));
         elements[1] = bytes32(uint256(22));
-        bytes32 left = keccak256(abi.encodePacked(uint64(0), elements[0]));
-        bytes32 right = keccak256(abi.encodePacked(uint64(1), elements[1]));
-        bytes32 root = keccak256(abi.encodePacked(uint64(2), keccak256(abi.encodePacked(uint64(2), left, right))));
+        bytes32 left = _hash(abi.encodePacked(uint64(0), elements[0]));
+        bytes32 right = _hash(abi.encodePacked(uint64(1), elements[1]));
+        bytes32 root = _hash(abi.encodePacked(uint64(2), _hash(abi.encodePacked(uint64(2), left, right))));
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(gasHarness.verifyRange(root, 2, 0, elements, proof));
-        vm.snapshotGasLastFrame("MMB", "range-2");
+        vm.snapshotGasLastFrame(_group("MMB"), "range-2");
         assertTrue(gasHarness.verifyRangeCalldata(root, 2, 0, elements, proof));
-        vm.snapshotGasLastFrame("MMB", "range-2-calldata");
+        vm.snapshotGasLastFrame(_group("MMB"), "range-2-calldata");
     }
 
     function testFuzz_CalldataSlices(bytes32 a, bytes32 b) public view {
@@ -212,5 +212,34 @@ contract LibMMBTest is MerkleTestCommon {
 
     function test_DifferentialCompatibilityRootPolicyBinding() public {
         checkCompatibilityRootPolicyBinding(true);
+    }
+}
+
+/// @dev SHA-256 specialization keeps the verifier's hasher constant at each call site.
+contract MMBSha256Harness is MMBHarness {
+    /// @dev Select the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+}
+
+contract MMBSha256CompatibilityHarness is CompatibilityHarness {
+    /// @dev Select the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+}
+
+/// @dev Run the complete family suite against Commonware SHA-256 roots.
+contract LibMMBSha256Test is LibMMBTest {
+    /// @dev Select the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+
+    /// @dev Install harnesses with the same hash algorithm as the reference builder.
+    function setUp() public override {
+        gasHarness = new MMBSha256Harness();
+        harness = new MMBSha256CompatibilityHarness();
     }
 }
