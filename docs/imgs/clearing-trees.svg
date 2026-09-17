@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1010" role="img" aria-labelledby="title description">
   <title id="title">The Commitments Behind a Close</title>
-  <desc id="description">Each validator derives three QMDB roots: state, activity, and payout. The close commitment binds them with the close context. The state database retains balances a: 85, b: 58, c: 26, and d: 31. State uses Current Ordered QMDB, while activity and payouts use Keyless QMDB. This close appends four sorted account Rows, then payment Entries grouped by payer. The highlighted Row for c contains debit 11, sequence 2, and c's signed outgoing-payment BMT root. Its Entries reconstruct that BMT: 4 to b and 7 to d, one payment each. This close creates no payouts.</desc>
+  <desc id="description">Each validator derives three QMDB roots: state, activity, and payout. The close commitment binds them with the close context. The state database retains balances a: 85, b: 58, c: 26, and d: 31. State uses Current Ordered QMDB, while activity and payouts use Keyless QMDB. This close appends four sorted account rows, then payment entries grouped by payer. The highlighted row for c contains debit 11, sequence 2, and c's signed outgoing-payment BMT root. Its entries reconstruct that BMT: 4 to b and 7 to d, one payment each. This close creates no payouts.</desc>
   <rect width="1120" height="1010" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -36,8 +36,8 @@
   <rect class="selected" x="396" y="246" width="328" height="176" rx="5"/>
   <text class="heading center blue" x="560" y="282">Activity root</text>
   <text class="note center" x="560" y="315">QMDB · Keyless</text>
-  <text class="label center" x="560" y="361">Account Rows</text>
-  <text class="label center" x="560" y="395">Payment Entries</text>
+  <text class="label center" x="560" y="361">Account rows</text>
+  <text class="label center" x="560" y="395">Payment entries</text>
 
   <rect class="panel" x="760" y="246" width="328" height="176" rx="5"/>
   <text class="heading center" x="924" y="282">Payout root</text>
@@ -46,7 +46,7 @@
   <text class="note center" x="924" y="395">None created in this close</text>
 
   <text class="heading" x="32" y="477">Inside the activity log</text>
-  <text class="note center blue" x="337" y="516">4 sorted Rows</text>
+  <text class="note center blue" x="337" y="516">4 sorted rows</text>
   <path class="link" d="M182 569 H216 M462 569 H510"/>
   <rect class="panel" x="32" y="534" width="150" height="70" rx="4"/>
   <text class="note center" x="107" y="563">Earlier</text>
@@ -60,14 +60,14 @@
   <text class="label center blue" x="371.5" y="577">c</text>
   <text class="label center" x="436.5" y="577">d</text>
   <rect class="record" x="510" y="534" width="578" height="70" rx="4"/>
-  <text class="label center" x="799" y="563">Payment Entries, grouped by payer</text>
+  <text class="label center" x="799" y="563">Payment entries, grouped by payer</text>
   <text class="note center" x="799" y="589">a→b · b→c · c→b · c→d · d→a · d→b</text>
   <path class="focus" d="M216 616 V626 H1088 V616"/>
   <text class="note center blue" x="652" y="654">This close appends left to right</text>
 
-  <text class="heading blue" x="32" y="707">The highlighted Row belongs to payer c</text>
+  <text class="heading blue" x="32" y="707">The highlighted row belongs to payer c</text>
   <rect class="selected" x="32" y="740" width="370" height="130" rx="5"/>
-  <text class="heading blue" x="56" y="775">c's Row</text>
+  <text class="heading blue" x="56" y="775">c's row</text>
   <text class="label" x="56" y="813">debit 11 · sequence 2</text>
   <text class="note" x="56" y="847">outgoing-payment root</text>
   <path class="focus" d="M402 840 H550"/>
@@ -80,6 +80,6 @@
   <text class="note center" x="680" y="969">1 payment</text>
   <text class="label center" x="958" y="943">to d: 7</text>
   <text class="note center" x="958" y="969">1 payment</text>
-  <text class="note" x="32" y="917">Original Entries supply the leaves.</text>
+  <text class="note" x="32" y="917">Payment entries supply the leaves.</text>
   <text class="label blue" x="32" y="950">4 + 7 = c's debit 11</text>
 </svg>

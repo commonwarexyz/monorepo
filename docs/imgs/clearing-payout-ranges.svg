@@ -100,5 +100,5 @@
   <text class="heading red" x="498" y="650">REJECT</text>
   <text class="note" x="620" y="636">Already claimed:</text>
   <text class="note" x="620" y="660">12 is inside [10,15).</text>
-  <text class="note center" x="540" y="707">Each claim atomically updates its range, reduces the reserve, and pays.</text>
+  <text class="note center" x="540" y="707">Each claim atomically records its index, reduces the reserve, and pays.</text>
 </svg>

@@ -131,6 +131,6 @@
   <circle cx="940" cy="259.84" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
   <circle cx="1090" cy="296.51" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
   <circle cx="1240" cy="333.18" r="5" fill="#fff" stroke="#555" stroke-width="3"/>
-  <text class="value neutral-text" x="802" y="211">all profiles · 0.000101</text>
+  <text class="value neutral-text" x="802" y="211">all account counts · 0.000101</text>
   <text class="value neutral-text" x="1228" y="348" text-anchor="end">0.000000101</text>
 </svg>
