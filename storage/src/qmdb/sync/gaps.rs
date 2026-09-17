@@ -46,6 +46,7 @@ pub fn find_next<F: Family>(
             (None, None) => break,
         };
 
+        // Empty ranges cover no operations, so they must not split a gap.
         if covered_range.is_empty() {
             continue;
         }
