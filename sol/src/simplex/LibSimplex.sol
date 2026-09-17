@@ -72,8 +72,9 @@ library LibSimplex {
     }
 
     function _message(Subject memory subject) private pure returns (bytes memory) {
-        bytes memory round = bytes.concat(LibCodec.encodeU64(subject.epoch), LibCodec.encodeU64(subject.viewNumber));
+        bytes memory round =
+            bytes.concat(LibCodec.encodeVarint(subject.epoch), LibCodec.encodeVarint(subject.viewNumber));
         if (subject.kind == Kind.Nullification) return round;
-        return bytes.concat(round, LibCodec.encodeU64(subject.parent), subject.payload);
+        return bytes.concat(round, LibCodec.encodeVarint(subject.parent), subject.payload);
     }
 }

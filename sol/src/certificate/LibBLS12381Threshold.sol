@@ -122,7 +122,7 @@ library LibBLS12381Threshold {
         // forge-lint: disable-next-line(require-revert-in-loop)
         if (namespace.length > type(uint32).max) revert NamespaceTooLong();
         // forge-lint: disable-next-line(unsafe-typecast)
-        return bytes.concat(LibCodec.encodeU64(uint64(namespace.length)), namespace, message);
+        return bytes.concat(LibCodec.encodeVarint(uint64(namespace.length)), namespace, message);
     }
 
     /// @dev Pad each 48-byte coordinate component into an allocated 64-byte precompile field.

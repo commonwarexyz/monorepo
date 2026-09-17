@@ -3,8 +3,8 @@ pragma solidity ^0.8.15;
 
 /// @notice Encode Commonware unsigned integer fields.
 library LibCodec {
-    /// @notice Encode a uint64 in little-endian groups of seven bits.
-    function encodeU64(uint64 value) internal pure returns (bytes memory result) {
+    /// @notice Encode a uint64 as an unsigned base-128 varint.
+    function encodeVarint(uint64 value) internal pure returns (bytes memory result) {
         result = new bytes(10);
         uint256 length = 0;
         do {
