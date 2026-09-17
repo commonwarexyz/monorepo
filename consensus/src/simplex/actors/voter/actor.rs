@@ -180,6 +180,8 @@ pub struct Actor<
     outbound_messages: CounterFamily<Outbound>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
+    notarization_latency_from_view_entry: Histogram,
+    finalization_latency_from_view_entry: Histogram,
 }
 
 impl<
@@ -200,6 +202,17 @@ impl<
             context.histogram("notarization_latency", "notarization latency", LATENCY);
         let finalization_latency =
             context.histogram("finalization_latency", "finalization latency", LATENCY);
+
+        let notarization_latency_from_view_entry = context.histogram(
+            "notarization_latency_from_view_entry",
+            "leader seconds from first local view entry to local notarization certificate readiness",
+            LATENCY,
+        );
+        let finalization_latency_from_view_entry = context.histogram(
+            "finalization_latency_from_view_entry",
+            "leader seconds from first local view entry to local finalization certificate readiness",
+            LATENCY,
+        );
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) =
@@ -243,6 +256,8 @@ impl<
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
+                notarization_latency_from_view_entry,
+                finalization_latency_from_view_entry,
             },
             mailbox,
         )
@@ -629,9 +644,13 @@ impl<
             return (self, None);
         };
 
-        // Only the leader sees an unbiased latency sample, so record it now.
+        // Record leader-local latency at certificate readiness.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
+            if let Some(since_entry) = self.state.elapsed_since_entry(view) {
+                self.notarization_latency_from_view_entry
+                    .observe(since_entry.as_secs_f64());
+            }
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
@@ -699,6 +718,10 @@ impl<
         // Only record latency if we are the current leader.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.finalization_latency.observe(elapsed);
+            if let Some(since_entry) = self.state.elapsed_since_entry(view) {
+                self.finalization_latency_from_view_entry
+                    .observe(since_entry.as_secs_f64());
+            }
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.

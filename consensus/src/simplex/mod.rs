@@ -289,6 +289,21 @@
 //! tip never notarizes, validators cannot use the proposal built on it. The usual timeout path
 //! then nullifies the incoming term.
 //!
+//! ### Latency Metrics
+//!
+//! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
+//! local proposal recording to local certificate readiness, falling back to first local view
+//! entry when no local proposal was recorded. Holding a prepared candidate happens before
+//! proposal recording, so that wait is excluded. Early publication can record the proposal
+//! before parent certification and include the remaining wait in these metrics.
+//!
+//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` use first
+//! local view entry as their starting point, regardless of proposal timing. They measure the
+//! remaining time after entry and omit samples when no entry was recorded. Both metric pairs
+//! sample only the view's leader at the same certificate-ready event, before certificate journal
+//! persistence and network publication. Timestamps are process-local and are not restored on
+//! restart. These durations do not measure transaction latency or total speculative work.
+//!
 //! ### Optimistic Finality
 //!
 //! The forced inclusion property provides a weaker but faster form of finality: a payload
