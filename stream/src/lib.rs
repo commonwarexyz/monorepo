@@ -10,13 +10,16 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_cryptography::PublicKey;
+    use commonware_cryptography::AsyncSigner;
     use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
     pub mod encrypted;
     pub mod utils;
+
+    /// Public identity key authenticated by a handshake's signing scheme.
+    pub type PublicKeyOf<H> = <<H as Handshake>::Scheme as AsyncSigner>::PublicKey;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
@@ -36,13 +39,11 @@ commonware_macros::stability_scope!(BETA {
     /// Callers may cancel an in-progress handshake by dropping its future. Implementations must
     /// release the underlying connection when cancelled.
     pub trait Handshake: Clone + Send + Sync + 'static {
-        /// Public key used to identify authenticated peers.
-        type PublicKey: PublicKey;
+        /// Largest plaintext message supported by the established streams, in bytes.
+        const MAX_SIZE: u32;
 
-        /// Local signing owner for the same identity returned by [`Handshake::public_key`].
-        ///
-        /// This type is not required to implement [`commonware_cryptography::Signer`].
-        type Signer;
+        /// Signing scheme that owns the local authenticated identity.
+        type Scheme: AsyncSigner;
 
         /// Error returned when authentication or stream setup fails.
         type Error: Error + Send + Sync + 'static;
@@ -53,11 +54,8 @@ commonware_macros::stability_scope!(BETA {
         /// Receiver returned for a connection using `I` as its raw stream.
         type Receiver<I: Stream>: Receiver;
 
-        /// Returns the local identity authenticated by this handshake.
-        fn public_key(&self) -> Self::PublicKey;
-
-        /// Returns the local signing owner.
-        fn signer(&self) -> &Self::Signer;
+        /// Returns the signing scheme for the local authenticated identity.
+        fn scheme(&self) -> &Self::Scheme;
 
         /// Authenticates an outbound connection to `peer`.
         #[allow(clippy::type_complexity)]
@@ -66,7 +64,7 @@ commonware_macros::stability_scope!(BETA {
             context: C,
             namespace: Vec<u8>,
             max_message_size: u32,
-            peer: Self::PublicKey,
+            peer: PublicKeyOf<Self>,
             stream: I,
             sink: O,
         ) -> impl Future<Output = Result<(Self::Sender<O>, Self::Receiver<I>), Self::Error>> + Send
@@ -87,7 +85,7 @@ commonware_macros::stability_scope!(BETA {
             sink: O,
         ) -> impl Future<
             Output = Result<
-                (Self::PublicKey, Self::Sender<O>, Self::Receiver<I>),
+                (PublicKeyOf<Self>, Self::Sender<O>, Self::Receiver<I>),
                 Self::Error,
             >,
         > + Send
@@ -95,7 +93,7 @@ commonware_macros::stability_scope!(BETA {
             C: BufferPooler + Clock + CryptoRng,
             I: Stream,
             O: Sink,
-            B: FnOnce(Self::PublicKey) -> F + Send,
+            B: FnOnce(PublicKeyOf<Self>) -> F + Send,
             F: Future<Output = bool> + Send;
     }
 

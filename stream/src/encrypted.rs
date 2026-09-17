@@ -282,17 +282,14 @@ where
 }
 
 impl<S: Signer> crate::Handshake for Handshake<S> {
-    type PublicKey = S::PublicKey;
-    type Signer = S;
+    const MAX_SIZE: u32 = MAX_SIZE;
+
+    type Scheme = S;
     type Error = Error;
     type Sender<O: Sink> = Sender<O>;
     type Receiver<I: Stream> = Receiver<I>;
 
-    fn public_key(&self) -> Self::PublicKey {
-        self.signing_key.public_key()
-    }
-
-    fn signer(&self) -> &Self::Signer {
+    fn scheme(&self) -> &Self::Scheme {
         &self.signing_key
     }
 
@@ -301,7 +298,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         context: C,
         namespace: Vec<u8>,
         max_message_size: u32,
-        peer: Self::PublicKey,
+        peer: S::PublicKey,
         mut stream: I,
         mut sink: O,
     ) -> Result<(Self::Sender<O>, Self::Receiver<I>), Self::Error>
@@ -362,12 +359,12 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         bouncer: B,
         stream: I,
         sink: O,
-    ) -> Result<(Self::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
+    ) -> Result<(S::PublicKey, Self::Sender<O>, Self::Receiver<I>), Self::Error>
     where
         C: BufferPooler + Clock + CryptoRng,
         I: Stream,
         O: Sink,
-        B: FnOnce(Self::PublicKey) -> F + Send,
+        B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
         listen_inner(

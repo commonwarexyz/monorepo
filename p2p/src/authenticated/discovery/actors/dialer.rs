@@ -16,7 +16,7 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Handshake, PublicKeyOf};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::time::Duration;
@@ -27,7 +27,7 @@ type SupervisorMailbox<E, H> = Mailbox<
     spawner::Message<
         <H as Handshake>::Sender<SinkOf<E>>,
         <H as Handshake>::Receiver<StreamOf<E>>,
-        <H as Handshake>::PublicKey,
+        PublicKeyOf<H>,
     >,
 >;
 
@@ -67,7 +67,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, H: Handshake
 
     // ---------- State ----------
     /// The list of peers to dial.
-    queue: Vec<H::PublicKey>,
+    queue: Vec<PublicKeyOf<H>>,
 
     // ---------- Configuration ----------
     handshake: H,
@@ -81,7 +81,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, H: Handshake
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: CounterFamily<metrics::Peer<H::PublicKey>>,
+    attempts: CounterFamily<metrics::Peer<PublicKeyOf<H>>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, H: Handshake>
@@ -107,7 +107,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     /// Dial a peer for which we have a reservation.
     fn dial_peer(
         &mut self,
-        reservation: Reservation<H::PublicKey>,
+        reservation: Reservation<PublicKeyOf<H>>,
         supervisor: &mut SupervisorMailbox<E, H>,
     ) {
         // Extract metadata from the reservation
@@ -193,7 +193,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<PublicKeyOf<H>>,
         supervisor: SupervisorMailbox<E, H>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -201,7 +201,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metric
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<PublicKeyOf<H>>,
         mut supervisor: SupervisorMailbox<E, H>,
     ) {
         let mut dial_deadline = self.context.current();

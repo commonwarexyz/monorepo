@@ -42,8 +42,7 @@ pub struct Config<H: Handshake> {
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The default encrypted stream supports up to [`crate::authenticated::MAX_SIZE`].
-    /// Custom handshakes must support the configured value plus [`crate::authenticated::MAX_PAYLOAD_OVERHEAD`].
+    /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.

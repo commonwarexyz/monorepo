@@ -10,7 +10,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Handshake, PublicKeyOf};
 use commonware_utils::{IpAddrExt, concurrency::Limiter, net::SubnetMask};
 use rand_core::CryptoRng;
 use std::{net::SocketAddr, num::NonZeroU32};
@@ -102,9 +102,9 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
         handshake_timeout: std::time::Duration,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<PublicKeyOf<H>>,
         mut supervisor: Mailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, H::PublicKey>,
+            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
         >,
     ) {
         let timeout = context.sleep(handshake_timeout);
@@ -145,9 +145,9 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<PublicKeyOf<H>>,
         supervisor: Mailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, H::PublicKey>,
+            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
         >,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -156,9 +156,9 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Hands
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<PublicKeyOf<H>>,
         supervisor: Mailbox<
-            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, H::PublicKey>,
+            spawner::Message<H::Sender<SinkOf<E>>, H::Receiver<StreamOf<E>>, PublicKeyOf<H>>,
         >,
     ) {
         // Create the rate limiters

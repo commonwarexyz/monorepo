@@ -9,16 +9,17 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        router,
+        max_size, router,
     },
     sizing::max_retained_peers,
 };
+use commonware_cryptography::AsyncSigner;
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Handshake, PublicKeyOf};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use tracing::{debug, info};
@@ -33,9 +34,9 @@ pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Me
     cfg: Config<H>,
     max_frame_size: u32,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
+    channels: Channels<PublicKeyOf<H>>,
+    tracker: tracker::Actor<E, PublicKeyOf<H>>,
+    tracker_mailbox: tracker::Mailbox<PublicKeyOf<H>>,
     listener: listener::Updates,
 }
 
@@ -55,19 +56,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if configured frame or retained-peer capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        let max_frame_size = cfg
-            .max_message_size
-            .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow");
+    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
+    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<PublicKeyOf<H>>) {
+        assert!(
+            cfg.max_message_size <= max_size::<H>(),
+            "maximum message size exceeds stream limit"
+        );
+        let max_frame_size = cfg.max_message_size + MAX_PAYLOAD_OVERHEAD;
         let max_retained_peers =
             max_retained_peers(cfg.max_peers_per_set, cfg.tracked_peer_sets, 0);
         let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                public_key: cfg.handshake.public_key(),
+                public_key: AsyncSigner::public_key(cfg.handshake.scheme()),
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -143,8 +145,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<PublicKeyOf<H>, E>,
+        channels::Receiver<PublicKeyOf<H>>,
     ) {
         let context = self
             .context
@@ -176,8 +178,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, PublicKeyOf<H>>,
+        router_mailbox: router::Mailbox<PublicKeyOf<H>>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();

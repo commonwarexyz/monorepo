@@ -1,7 +1,7 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_stream::{Handshake, encrypted};
+use commonware_stream::{Handshake, PublicKeyOf, encrypted};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -23,7 +23,7 @@ pub type Bootstrapper<P> = (P, Ingress);
 #[derive(Clone)]
 pub struct Config<H: Handshake>
 where
-    H::Signer: Signer<PublicKey = H::PublicKey>,
+    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
 {
     /// Handshake used to authenticate transport connections and sign discovery gossip.
     pub handshake: H,
@@ -38,7 +38,7 @@ where
     pub dialable: Ingress,
 
     /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+    pub bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
 
     /// Whether or not to allow DNS-based ingress addresses.
     ///
@@ -51,8 +51,7 @@ where
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The default encrypted stream supports up to [`crate::authenticated::MAX_SIZE`]. Custom
-    /// handshakes must support the configured value plus [`crate::authenticated::MAX_PAYLOAD_OVERHEAD`].
+    /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
@@ -238,7 +237,7 @@ impl<C: Signer> Config<encrypted::Handshake<C>> {
 
 impl<H: Handshake> Config<H>
 where
-    H::Signer: Signer<PublicKey = H::PublicKey>,
+    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
 {
     /// Generates a production configuration with a custom transport handshake.
     pub fn recommended_with_handshake(
@@ -246,7 +245,7 @@ where
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -290,7 +289,7 @@ where
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<PublicKeyOf<H>>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {

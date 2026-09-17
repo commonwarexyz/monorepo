@@ -15,10 +15,9 @@
 //!
 //! ## Authentication
 //!
-//! Discovery gossip is signed by the signer owned by [`Config::handshake`]. Custom
-//! [`commonware_stream::Handshake`] implementations used with discovery must expose a
-//! [`commonware_cryptography::Signer`] for the same public identity returned by the handshake.
-//! Network construction panics when the identities differ.
+//! Discovery gossip is signed by the scheme owned by [`Config::handshake`]. Custom
+//! [`commonware_stream::Handshake`] implementations used with discovery must provide a
+//! scheme that implements [`commonware_cryptography::Signer`].
 //!
 //! ## Discovery
 //!
@@ -254,8 +253,8 @@ mod network;
 mod types;
 
 pub use crate::authenticated::{
-    MAX_SIZE,
     channels::{Error, Receiver, Sender},
+    max_size,
 };
 pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
@@ -703,8 +702,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "maximum frame size overflow")]
-    fn test_max_message_size_overflow_panics() {
+    #[should_panic(expected = "maximum message size exceeds stream limit")]
+    fn test_max_message_size_exceeds_stream_limit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let config = Config::test(
@@ -712,6 +711,37 @@ mod tests {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 Vec::new(),
                 u32::MAX,
+            );
+            let _ = Network::new(context.child("network"), config);
+        });
+    }
+
+    #[test]
+    fn test_max_message_size_stream_boundary() {
+        let limit = max_size::<commonware_stream::encrypted::Handshake<ed25519::PrivateKey>>();
+        for size in [0, limit] {
+            deterministic::Runner::default().start(|context| async move {
+                let config = Config::test(
+                    ed25519::PrivateKey::from_seed(0),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    Vec::new(),
+                    size,
+                );
+                let _ = Network::new(context.child("network"), config);
+            });
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum message size exceeds stream limit")]
+    fn test_max_message_size_above_stream_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let limit = max_size::<commonware_stream::encrypted::Handshake<ed25519::PrivateKey>>();
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                limit + 1,
             );
             let _ = Network::new(context.child("network"), config);
         });

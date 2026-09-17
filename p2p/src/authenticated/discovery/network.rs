@@ -10,17 +10,17 @@ use crate::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         discovery::types::InfoVerifier,
-        router,
+        max_size, router,
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::{AsyncSigner, Signer};
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Handshake, PublicKeyOf};
 use commonware_utils::{ordered::Set, union};
 use rand_core::CryptoRng;
 use tracing::{debug, info};
@@ -36,23 +36,23 @@ pub struct Network<
     E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
     H: Handshake,
 > where
-    H::Signer: Signer<PublicKey = H::PublicKey>,
+    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
 {
     context: ContextCell<E>,
     cfg: Config<H>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::Signer>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
-    info_verifier: InfoVerifier<H::PublicKey>,
+    channels: Channels<PublicKeyOf<H>>,
+    tracker: tracker::Actor<E, H::Scheme>,
+    tracker_mailbox: tracker::Mailbox<PublicKeyOf<H>>,
+    info_verifier: InfoVerifier<PublicKeyOf<H>>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
     Network<E, H>
 where
-    H::Signer: Signer<PublicKey = H::PublicKey>,
+    H::Scheme: Signer<PublicKey = PublicKeyOf<H>>,
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -67,18 +67,19 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if configured frame, bit-vector, or retained-peer capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        let max_frame_size = cfg
-            .max_message_size
-            .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow");
+    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
+    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<PublicKeyOf<H>>) {
+        assert!(
+            cfg.max_message_size <= max_size::<H>(),
+            "maximum message size exceeds stream limit"
+        );
+        let max_frame_size = cfg.max_message_size + MAX_PAYLOAD_OVERHEAD;
         let max_peer_set_size =
             u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
-        let local = cfg.handshake.public_key();
+        let local = AsyncSigner::public_key(cfg.handshake.scheme());
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers
                 .iter()
@@ -94,7 +95,7 @@ where
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                crypto: cfg.handshake.signer().clone(),
+                crypto: cfg.handshake.scheme().clone(),
                 namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 address: cfg.dialable.clone(),
                 bootstrappers: cfg.bootstrappers.clone(),
@@ -175,8 +176,8 @@ where
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<PublicKeyOf<H>, E>,
+        channels::Receiver<PublicKeyOf<H>>,
     ) {
         let context = self
             .context
@@ -208,8 +209,8 @@ where
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, PublicKeyOf<H>>,
+        router_mailbox: router::Mailbox<PublicKeyOf<H>>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
