@@ -40,6 +40,13 @@ library Common {
         }
     }
 
+    /// @dev Count aligned MMB chunks whose ancestor exists at `height`, between 1 and 62.
+    /// Delayed merges need another `2^(height - 1) - 1` leaves after each chunk fills.
+    function graftableMMBChunks(uint256 leaves, uint256 height) internal pure returns (uint256) {
+        uint256 delay = (uint256(1) << (height - 1)) - 1;
+        return leaves < delay ? 0 : (leaves - delay) >> height;
+    }
+
     /// @dev Adapted from Solady `LibBit.fls` for positive `uint64` values.
     /// https://github.com/Vectorized/solady/blob/2afba69bf67b78dd4abeadcc696052b3a6f71499/src/utils/LibBit.sol
     /// https://github.com/Vectorized/solady/blob/2afba69bf67b78dd4abeadcc696052b3a6f71499/LICENSE.txt
@@ -79,6 +86,25 @@ library Common {
                 if iszero(and(success, eq(returndatasize(), 0x20))) {
                     mstore(0, 0x832d9905) // `HashFailed()`.
                     // Each external hash result must be checked before traversal continues.
+                    // forge-lint: disable-next-line(require-revert-in-loop)
+                    revert(0x1c, 4)
+                }
+                digest := mload(0)
+            }
+        }
+    }
+
+    /// @dev Hash an owned byte array with the selected raw hash target.
+    function hash(bytes memory input, address hasher) internal view returns (bytes32 digest) {
+        assembly ("memory-safe") {
+            hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
+            switch hasher
+            case 0 { digest := keccak256(add(input, 0x20), mload(input)) }
+            default {
+                let success := staticcall(gas(), hasher, add(input, 0x20), mload(input), 0, 0x20)
+                if iszero(and(success, eq(returndatasize(), 0x20))) {
+                    mstore(0, 0x832d9905) // `HashFailed()`.
+                    // Every hash result must be checked before verification continues.
                     // forge-lint: disable-next-line(require-revert-in-loop)
                     revert(0x1c, 4)
                 }

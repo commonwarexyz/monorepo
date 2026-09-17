@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.15;
+
+import { Common } from "../merkle/Common.sol";
+import { LibMerkle } from "../merkle/LibMerkle.sol";
+
+/// @notice Verify an active operation in a current MMB QMDB with 32-byte bitmap chunks.
+/// @dev Uses QMDB's backward peak fold and big-endian position and count encodings.
+/// The caller supplies an authenticated root and a trusted hash target.
+/// Hash targets receive raw bytes and must return exactly 32 bytes.
+/// A failed call or any other return length reverts with `Common.HashFailed()`.
+library LibQMDB {
+    /// @dev Absent pending and partial digests are zero. Their presence follows from `leaves`.
+    struct Proof {
+        uint256 leaves;
+        uint256 location;
+        uint256 inactivePeaks;
+        bytes32 chunk;
+        bytes32 opsRoot;
+        bytes32 pending;
+        bytes32 partialDigest;
+        bytes32[] digests;
+    }
+
+    /// @notice Verify an encoded operation and its active bit against a trusted current root.
+    /// @param root Authenticated QMDB root.
+    /// @param operation Exact Commonware operation encoding, without a length prefix.
+    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
+    /// @return True when the active operation reconstructs `root` and consumes every digest.
+    function verify(bytes32 root, bytes memory operation, Proof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 n = proof.leaves;
+        uint256 loc = proof.location;
+        if (n > (uint256(1) << 62) + 30 || loc >= n) return false;
+        if (uint8(proof.chunk[(loc & 255) >> 3]) & (uint256(1) << (loc & 7)) == 0) return false;
+
+        uint256 complete = n >> 8;
+        uint256 graftable = Common.graftableMMBChunks(n, 8);
+        bool pending = complete != graftable;
+        uint256 nextBit = n & 255;
+        if ((!pending && proof.pending != 0) || (nextBit == 0 && proof.partialDigest != 0)) return false;
+        uint256 chunkIndex = loc >> 8;
+        if (chunkIndex >= graftable) {
+            bytes32 digest = Common.hash(proof.chunk, 0, 0, 32, hasher);
+            if (chunkIndex == complete) {
+                if (digest != proof.partialDigest) return false;
+            } else if (digest != proof.pending) {
+                return false;
+            }
+        }
+
+        uint256 position = Common.position(loc, 1, true);
+        // The leaf bound keeps every physical position below `2^64`.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        bytes32 leaf = Common.hash(abi.encodePacked(uint64(position), operation), hasher);
+        (bytes32 merkleRoot, bool valid) = LibMerkle.reconstructGraftedMMB(
+            n, loc, leaf, proof.digests, proof.inactivePeaks, LibMerkle.Graft(proof.chunk, 256), hasher
+        );
+        if (!valid) return false;
+        return _root(proof, merkleRoot, pending, nextBit, hasher) == root;
+    }
+
+    /// @dev Pending precedes partial when both chunks are outside the grafted tree.
+    function _root(Proof calldata proof, bytes32 merkleRoot, bool pending, uint256 nextBit, address hasher)
+        private
+        view
+        returns (bytes32)
+    {
+        bytes memory input = new bytes(64 + (pending ? 32 : 0) + (nextBit != 0 ? 40 : 0));
+        bytes32 opsRoot = proof.opsRoot;
+        bytes32 pendingDigest = proof.pending;
+        bytes32 partialDigest = proof.partialDigest;
+        assembly ("memory-safe") {
+            let p := add(input, 0x20)
+            mstore(p, opsRoot)
+            mstore(add(p, 0x20), merkleRoot)
+            p := add(p, 0x40)
+            if pending {
+                mstore(p, pendingDigest)
+                p := add(p, 0x20)
+            }
+            if nextBit {
+                mstore(p, shl(192, nextBit))
+                mstore(add(p, 8), partialDigest)
+            }
+        }
+        return Common.hash(input, hasher);
+    }
+}

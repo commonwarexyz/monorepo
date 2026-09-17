@@ -6,6 +6,7 @@ use std::process::ExitCode;
 mod bmt;
 mod certificate;
 mod merkle;
+mod qmdb;
 mod simplex;
 
 /// Hash function used by the tree proof oracle.
@@ -41,6 +42,9 @@ enum Command {
         #[command(subcommand)]
         command: merkle::Command,
     },
+    /// Current ordered QMDB operation proofs over MMB.
+    #[command(subcommand)]
+    Qmdb(qmdb::Command),
     /// Simplex signatures.
     #[command(subcommand)]
     Simplex(simplex::Command),
@@ -52,6 +56,7 @@ impl Command {
             Self::Bmt { hash, command } => command.execute(hash),
             Self::Certificate(command) => command.execute(),
             Self::Merkle { hash, command } => command.execute(hash),
+            Self::Qmdb(command) => command.execute(),
             Self::Simplex(command) => command.execute(),
         }
     }

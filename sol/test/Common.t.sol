@@ -25,13 +25,13 @@ abstract contract HashTest is Test, HashSelection {
     /// @dev Ask the Rust oracle to use the same hash algorithm as the verifier.
     function _ffi(string[] memory args) internal returns (bytes memory) {
         string[] memory selected = new string[](args.length + 2);
-        selected[0] = args[0];
-        selected[1] = args[1];
-        selected[2] = "--hash";
-        selected[3] = _hasher() == address(0) ? "keccak" : "sha256";
-        for (uint256 i = 2; i < args.length; ++i) {
-            selected[i + 2] = args[i];
+        // QMDB selects its hash per operation. BMT and Merkle select it at the family command.
+        uint256 hashIndex = keccak256(bytes(args[1])) == keccak256("qmdb") ? args.length : 2;
+        for (uint256 i; i < args.length; ++i) {
+            selected[i < hashIndex ? i : i + 2] = args[i];
         }
+        selected[hashIndex] = "--hash";
+        selected[hashIndex + 1] = _hasher() == address(0) ? "keccak" : "sha256";
         return vm.ffi(selected);
     }
 

@@ -9,6 +9,7 @@ cargo test --release --locked -p commonware-sol-fuzz
 target/release/commonware-sol-fuzz bmt --help
 target/release/commonware-sol-fuzz certificate --help
 target/release/commonware-sol-fuzz merkle --help
+target/release/commonware-sol-fuzz qmdb --help
 target/release/commonware-sol-fuzz simplex --help
 ```
 
@@ -16,4 +17,7 @@ target/release/commonware-sol-fuzz simplex --help
 - `certificate`: Generate and check BLS12-381 certificates, or hash namespaced messages
   to curve points.
 - `merkle`: Generate and check MMR and MMB proofs.
+- `qmdb` generates active operation proofs for current MMB QMDBs.
 - `simplex`: Generate Simplex signatures.
+
+`qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.

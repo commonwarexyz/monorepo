@@ -28,13 +28,51 @@ library LibMerkle {
         BackwardFold
     }
 
-    /// @dev Array addresses point at their first item. `data` holds the raw element for single proofs.
+    /// @dev Array addresses point at their first item. For single proofs, `data` holds
+    /// the raw element or the positioned leaf digest when grafting is enabled.
     struct Proof {
         uint256 data;
         uint256 start;
         uint256 end;
         uint256 digests;
         uint256 digestCount;
+    }
+
+    /// @dev A prehashed leaf can bind additional data when its ancestor reaches `width` leaves.
+    struct Graft {
+        bytes32 prefix;
+        uint256 width;
+    }
+
+    /// @dev Reconstruct a backward-folded MMB root from a positioned leaf digest.
+    /// `graft.prefix` is hashed before the ancestor digest at `graft.width` leaves.
+    /// Width is zero to disable grafting or a power of two of at least two.
+    /// Callers authenticate the returned root.
+    function reconstructGraftedMMB(
+        uint256 leaves,
+        uint256 index,
+        bytes32 leaf,
+        bytes32[] calldata proof,
+        uint256 inactive,
+        Graft memory graft,
+        address hasher
+    ) internal view returns (bytes32 root, bool valid) {
+        // forge-lint: disable-next-line(boolean-cst)
+        if (leaves > (uint256(1) << 62) + 30 || index >= leaves) return (0, false);
+        uint256 free;
+        uint256 proofData;
+        uint256 graftData;
+        assembly ("memory-safe") {
+            free := mload(0x40)
+            proofData := proof.offset
+            graftData := graft
+        }
+        Proof memory p = Proof(uint256(leaf), index, index + 1, proofData, proof.length);
+        uint256 scratch;
+        assembly ("memory-safe") { scratch := mload(0x40) }
+        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, true, true, true, graftData, hasher);
+        _clear(free, scratch + Common.levels(leaves, true) * 32);
+        assembly ("memory-safe") { mstore(0x40, free) }
     }
 
     /// @dev Verify with `ForwardFold` and zero inactive peaks using the selected input location.
@@ -111,7 +149,9 @@ library LibMerkle {
         Proof memory p = Proof(data, start, start + count, proof, proofCount);
         uint256 scratch;
         assembly ("memory-safe") { scratch := mload(0x40) }
-        valid = _backwardRange(root, leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb, hasher);
+        bytes32 reconstructed;
+        (reconstructed, valid) = _backwardRoot(leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb, 0, hasher);
+        valid = valid && reconstructed == root;
         _clear(free, scratch + Common.levels(leaves, mmb) * 32);
         assembly ("memory-safe") { mstore(0x40, free) }
     }
@@ -139,7 +179,7 @@ library LibMerkle {
             uint256 next;
             bool ok;
             if (single) {
-                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt, hasher);
+                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt, 0, hasher);
             } else {
                 uint256 base;
                 assembly ("memory-safe") { base := mload(0x40) }
@@ -203,7 +243,7 @@ library LibMerkle {
                             position = 2 * cursor - ones + 2 * w - 2;
                         }
                         if (single) {
-                            (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, hasher);
+                            (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, 0, hasher);
                         } else {
                             (d, q, ok) =
                                 _subtree(data, start, end, position, w, cursor, q, qEnd, base, cd, belt, hasher);
@@ -258,8 +298,7 @@ library LibMerkle {
     /// optional backward suffix and finally left-first DFS siblings.
     /// Peak digests occupy temporary memory above the free memory pointer.
     /// All called helpers must remain allocation-free while those digests are live.
-    function _backwardRange(
-        bytes32 root,
+    function _backwardRoot(
         uint256 n,
         Proof memory p,
         uint256 scratch,
@@ -267,16 +306,19 @@ library LibMerkle {
         bool single,
         bool cd,
         bool belt,
+        uint256 graft,
         address hasher
-    ) private view returns (bool) {
+    ) private view returns (bytes32 root, bool valid) {
         unchecked {
             uint256 offsets = _backwardOffsets(n, p.start, p.end, inactive, belt);
-            if (offsets == type(uint256).max) return false;
+            // forge-lint: disable-next-line(boolean-cst)
+            if (offsets == type(uint256).max) return (0, false);
             uint256 prefix = offsets & 0xff;
             uint256 before = (offsets >> 8) & 0xff;
             uint256 after_ = (offsets >> 16) & 0xff;
             uint256 suffixCount = (offsets >> 24) & 0xff;
-            if (prefix + before + after_ + suffixCount > p.digestCount) return false;
+            // forge-lint: disable-next-line(boolean-cst)
+            if (prefix + before + after_ + suffixCount > p.digestCount) return (0, false);
             uint256 front = p.digests + prefix * 32;
             uint256 suffix = front + before * 32;
             uint256 q = suffix + (after_ + suffixCount) * 32;
@@ -325,6 +367,7 @@ library LibMerkle {
                                 p.digests + p.digestCount * 32,
                                 cd,
                                 belt,
+                                graft,
                                 hasher
                             );
                         } else {
@@ -343,7 +386,8 @@ library LibMerkle {
                                 hasher
                             );
                         }
-                        if (!ok) return false;
+                        // forge-lint: disable-next-line(boolean-cst)
+                        if (!ok) return (0, false);
                     }
                     if (peakIndex >= inactive) {
                         if (have) {
@@ -363,9 +407,11 @@ library LibMerkle {
                 cursor = next;
                 ++peakIndex;
             }
-            if (q != p.digests + p.digestCount * 32) return false;
+            // forge-lint: disable-next-line(boolean-cst)
+            if (q != p.digests + p.digestCount * 32) return (0, false);
             if (top != scratch) acc = Common.bag(scratch, (top - scratch) / 32, 0, true, hasher);
-            return Common.root(n, inactive, acc, hasher) == root;
+            // forge-lint: disable-next-line(boolean-cst)
+            return (Common.root(n, inactive, acc, hasher), true);
         }
     }
 
@@ -417,6 +463,7 @@ library LibMerkle {
     }
 
     /// @dev Reconstruct a singleton using the selected input and tree family siblings without DFS frames.
+    /// A nonzero `graft` points to a `Graft` and makes `element` a positioned leaf digest.
     function _singleton(
         uint256 element,
         uint256 index,
@@ -426,6 +473,7 @@ library LibMerkle {
         uint256 qEnd,
         bool cd,
         bool belt,
+        uint256 graft,
         address hasher
     ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
         assembly ("memory-safe") {
@@ -477,13 +525,22 @@ library LibMerkle {
                 default {
                     if gt(width, 1) { p := add(sub(add(p, 2), add(width, shr(1, width))), index) }
                 }
-                let pos := p
-                if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
-                mstore(0, pos)
-                mstore(0x20, element)
-                switch hasher
-                case 0 { d := keccak256(0x18, 0x28) }
-                default { d := externalHash(0x18, 0x28, hasher) }
+                let pos := 0
+                let graftStep := 0
+                switch graft
+                case 0 {
+                    pos := p
+                    if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
+                    mstore(0, pos)
+                    mstore(0x20, element)
+                    switch hasher
+                    case 0 { d := keccak256(0x18, 0x28) }
+                    default { d := externalHash(0x18, 0x28, hasher) }
+                }
+                default {
+                    d := element
+                    graftStep := shr(1, mload(add(graft, 0x20)))
+                }
                 for { let w := 1 } lt(w, width) { w := shl(1, w) } {
                     let sibling := 0
                     switch iszero(and(index, w))
@@ -511,6 +568,16 @@ library LibMerkle {
                     switch hasher
                     case 0 { d := keccak256(0x18, 0x48) }
                     default { d := externalHash(0x18, 0x48, hasher) }
+                    // Constant zero removes grafting from ordinary proof loops.
+                    if graft {
+                        if eq(w, graftStep) {
+                            mstore(0, mload(graft))
+                            mstore(0x20, d)
+                            switch hasher
+                            case 0 { d := keccak256(0, 0x40) }
+                            default { d := externalHash(0, 0x40, hasher) }
+                        }
+                    }
                 }
             }
             mstore(0x40, free)
