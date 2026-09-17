@@ -23,8 +23,9 @@ pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as U
 
 /// Whether the cyclic span from `span_start` to `span_end` contains `key`.
 ///
-/// When `inclusive_start` is `true`, the span is `[span_start, span_end)`; otherwise it is
+/// When `inclusive_start` is `true`, the span is `[span_start, span_end)`. Otherwise it is
 /// `(span_start, span_end]`.
+///
 /// Equal endpoints define a span containing every key.
 pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K, inclusive_start: bool) -> bool {
     let (after_start, before_end) = if inclusive_start {

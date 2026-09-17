@@ -2569,14 +2569,7 @@ where
 
     /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
     fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
-        let ancestors: Vec<_> = self.ancestors().collect();
-
-        // Membership changes rewrite affected predecessors, so each unshadowed update carries
-        // its successor in the final batch view.
-        for (level, batch) in iter::once(self)
-            .chain(ancestors.iter().map(AsRef::as_ref))
-            .enumerate()
-        {
+        let find = |batch: &Self| {
             let diff = batch.diff.as_slice();
             let end = diff.partition_point(|(candidate, _)| {
                 if NEXT {
@@ -2586,27 +2579,13 @@ where
                 }
             });
 
-            // Search below the query first, wrapping only when that side has no visible active
-            // entry. An earlier key cannot own the span past a later visible active key.
+            // Search below the query first, wrapping only when that side has no active entry.
+            // An earlier key cannot own the span past a later active key in this layer.
             let loc = diff[..end]
                 .iter()
                 .rev()
                 .chain(diff[end..].iter().rev())
-                .find_map(|(candidate, entry)| {
-                    let loc = entry.loc()?;
-                    if level > 0
-                        && (lookup_sorted(self.diff.as_slice(), candidate).is_some()
-                            || ancestors[..level - 1].iter().any(|batch| {
-                                lookup_sorted(batch.diff.as_slice(), candidate).is_some()
-                            }))
-                    {
-                        return None;
-                    }
-                    Some(loc)
-                });
-            let Some(loc) = loc else {
-                continue;
-            };
+                .find_map(|(_, entry)| entry.loc())?;
 
             // Active entries reference operations in their owning batch's journal suffix.
             let index = (*loc - *batch.bounds.base.size) as usize;
@@ -2616,15 +2595,18 @@ where
 
             // Successor queries use [start, end). Predecessor queries use (start, end].
             // Match the cyclic owner before the public methods suppress linear wraparound.
-            if span_contains(&data.key, &data.next_key, key, NEXT) {
-                return Some(if NEXT {
+            span_contains(&data.key, &data.next_key, key, NEXT).then(|| {
+                if NEXT {
                     data.next_key.clone()
                 } else {
                     data.key.clone()
-                });
-            }
-        }
-        None
+                }
+            })
+        };
+
+        // Membership changes emit affected predecessors and created keys, so the newest
+        // matching layer owns the query's span in the final batch view.
+        find(self).or_else(|| self.ancestors().find_map(|batch| find(&batch)))
     }
 }
 
