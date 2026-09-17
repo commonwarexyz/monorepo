@@ -1062,16 +1062,29 @@ impl<F: FieldNTT> PolynomialVector<F> {
                 data: [&mut q.coefficients],
             },
         );
+        // Batch invert the denominators using prefix products of nonzero entries.
+        // Zero denominators retain their inverse of zero.
+        let zero = F::zero();
+        let mut prefix = Vec::with_capacity(q.coefficients.len());
+        let mut product = F::one();
+        for q_i in &q.coefficients {
+            prefix.push(product.clone());
+            if q_i != &zero {
+                product *= q_i;
+            }
+        }
+        let mut inverse = product.inv();
+        for (q_i, prefix) in q.coefficients.iter_mut().zip(prefix).rev() {
+            if q_i != &zero {
+                let next = inverse.clone() * &*q_i;
+                *q_i = inverse * &prefix;
+                inverse = next;
+            }
+        }
         // Do a point wise division.
-        for i in 0..self.data.rows {
-            let q_i = q.coefficients[i].clone();
-            // If `q_i = 0`, then we will get 0 in the output.
-            // We don't expect any of the q_i to be 0, but being 0 is only one
-            // of the many possibilities for the coefficient to be incorrect,
-            // so doing a runtime assertion here doesn't make sense.
-            let q_i_inv = q_i.inv();
+        for (i, q_i_inv) in q.coefficients.iter().enumerate() {
             for d_i_j in &mut self.data[i] {
-                *d_i_j *= &q_i_inv;
+                *d_i_j *= q_i_inv;
             }
         }
         // Interpolate back, using the inverse skew
@@ -1465,7 +1478,68 @@ pub mod fuzz {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{algebra::Ring, fields::goldilocks::F};
+    use crate::{
+        algebra::{Random, Ring},
+        fields::goldilocks::F,
+    };
+    use commonware_utils::test_rng;
+
+    #[test]
+    fn test_divide_matches_pointwise_inversion() {
+        let mut rng = test_rng();
+        for lg_rows in [0, 1, 2, 3, 5, 8] {
+            let rows = 1 << lg_rows;
+            for cols in [1, 3] {
+                for zeros in 0..6 {
+                    let data = Matrix::<F>::rand(&mut rng, rows, cols);
+                    let mut expected = data.clone();
+                    let denominators: Vec<_> = (0..rows)
+                        .map(|i| {
+                            if match zeros {
+                                0 => false,
+                                1 => true,
+                                2 => i == 0,
+                                3 => i == rows - 1,
+                                4 => i % 2 == 0,
+                                _ => i != rows / 2,
+                            } {
+                                F::zero()
+                            } else {
+                                F::random(&mut rng)
+                            }
+                        })
+                        .collect();
+                    for (i, denominator) in denominators.iter().enumerate() {
+                        let inverse = denominator.inv();
+                        for value in &mut expected[i] {
+                            *value *= &inverse;
+                        }
+                    }
+
+                    // Construct polynomials with the chosen evaluations on the coset.
+                    let mut p = EvaluationVector {
+                        data,
+                        active_rows: VanishingPoints::all_non_vanishing(lg_rows),
+                    }
+                    .interpolate();
+                    let mut q = EvaluationColumn {
+                        evaluations: denominators,
+                    }
+                    .interpolate();
+                    p.divide_roots(F::coset_shift_inv());
+                    q.divide_roots(F::coset_shift_inv());
+
+                    p.divide(q);
+                    p.divide_roots(F::coset_shift());
+                    assert_eq!(
+                        p.evaluate().data,
+                        expected,
+                        "rows={rows} cols={cols} zeros={zeros}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_reverse_bits() {
