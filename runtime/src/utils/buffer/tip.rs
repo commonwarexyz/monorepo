@@ -199,13 +199,18 @@ impl Buffer {
         let mut writable = self.writable(end);
         let prev = writable.len();
 
-        // Extend logical length to end, zero-filling any gap.
-        if end > prev {
-            writable.put_bytes(0, end - prev);
-        }
+        if start == prev {
+            // Copy the provided data into the buffer.
+            writable.put_slice(data);
+        } else {
+            // Extend logical length to end, zero-filling any gap.
+            if end > prev {
+                writable.put_bytes(0, end - prev);
+            }
 
-        // Copy the provided data into the buffer.
-        writable.as_mut()[start..end].copy_from_slice(data.as_ref());
+            // Copy the provided data into the buffer.
+            writable.as_mut()[start..end].copy_from_slice(data.as_ref());
+        }
         self.len = writable.len();
         self.data = writable.freeze();
 
@@ -360,6 +365,51 @@ mod tests {
 
         assert!(buffer.merge(b"abc", 0));
         assert_eq!(buffer.data.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn test_tip_merge_append_after_truncate() {
+        for shared in [false, true] {
+            let mut buffer = Buffer::new(50, 8, test_pool());
+            assert!(buffer.merge(b"abcdefgh", 50));
+            let snapshot = shared.then(|| buffer.slice(..));
+
+            assert!(buffer.resize(53).is_none());
+            assert!(buffer.merge(b"XYZ", 53));
+            assert_eq!(buffer.as_ref(), b"abcXYZ");
+            assert_eq!(buffer.size(), 56);
+
+            assert!(buffer.merge(b"12", 56));
+            assert_eq!(buffer.as_ref(), b"abcXYZ12");
+            assert!(buffer.merge(b"", 58));
+            assert!(!buffer.merge(b"!", 58));
+            assert_eq!(buffer.as_ref(), b"abcXYZ12");
+            assert_eq!(buffer.size(), 58);
+            if let Some(snapshot) = snapshot {
+                assert_eq!(snapshot.as_ref(), b"abcdefgh");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tip_merge_append_after_drain_and_clear() {
+        let mut buffer = Buffer::new(50, 8, test_pool());
+        assert!(buffer.merge(b"abcdef", 50));
+        buffer.drop_prefix(3);
+        buffer.offset += 3;
+        assert!(buffer.merge(b"XYZ", 56));
+        assert_eq!(buffer.as_ref(), b"defXYZ");
+
+        let (snapshot, offset) = buffer.take().unwrap();
+        assert_eq!(offset, 53);
+        assert!(buffer.merge(b"12", 59));
+        assert_eq!(buffer.as_ref(), b"12");
+        assert_eq!(snapshot.as_ref(), b"defXYZ");
+
+        buffer.clear();
+        assert!(buffer.merge(b"!", 59));
+        assert_eq!(buffer.as_ref(), b"!");
+        assert_eq!(buffer.size(), 60);
     }
 
     #[test]
