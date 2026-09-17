@@ -412,6 +412,52 @@ impl Avx512 {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
+        // Skew uses `GF_MODULUS` for a zero coefficient, while multiplication tables use it
+        // for the duplicated identity exponent.
+        if log_m01 != GF_MODULUS && log_m23 != GF_MODULUS && log_m02 != GF_MODULUS {
+            // SAFETY: The target-feature wrapper matches the concrete multiplication backend.
+            let (lut01, lut23, lut02) = unsafe {
+                (
+                    backend.load(log_m01),
+                    backend.load(log_m23),
+                    backend.load(log_m02),
+                )
+            };
+
+            for (((s0_chunk, s1_chunk), s2_chunk), s3_chunk) in zip(
+                zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
+                s3.iter_mut(),
+            ) {
+                // SAFETY: The wrapper establishes the backend's features; all four disjoint chunks are exactly 64 bytes.
+                unsafe {
+                    let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s2_ptr = s2_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s3_ptr = s3_chunk.as_mut_ptr().cast::<__m512i>();
+                    let mut s0 = _mm512_loadu_si512(s0_ptr);
+                    let mut s1 = _mm512_loadu_si512(s1_ptr);
+                    let mut s2 = _mm512_loadu_si512(s2_ptr);
+                    let mut s3 = _mm512_loadu_si512(s3_ptr);
+
+                    s0 = Self::muladd_512::<M>(s0, s2, lut02);
+                    s2 = _mm512_xor_si512(s2, s0);
+                    s1 = Self::muladd_512::<M>(s1, s3, lut02);
+                    s3 = _mm512_xor_si512(s3, s1);
+
+                    s0 = Self::muladd_512::<M>(s0, s1, lut01);
+                    s1 = _mm512_xor_si512(s1, s0);
+                    s2 = Self::muladd_512::<M>(s2, s3, lut23);
+                    s3 = _mm512_xor_si512(s3, s2);
+
+                    _mm512_storeu_si512(s0_ptr, s0);
+                    _mm512_storeu_si512(s1_ptr, s1);
+                    _mm512_storeu_si512(s2_ptr, s2);
+                    _mm512_storeu_si512(s3_ptr, s3);
+                }
+            }
+            return;
+        }
+
         // FIRST LAYER
 
         if log_m02 == GF_MODULUS {
@@ -580,6 +626,52 @@ impl Avx512 {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
+        // Skew uses `GF_MODULUS` for a zero coefficient, while multiplication tables use it
+        // for the duplicated identity exponent.
+        if log_m01 != GF_MODULUS && log_m23 != GF_MODULUS && log_m02 != GF_MODULUS {
+            // SAFETY: The target-feature wrapper matches the concrete multiplication backend.
+            let (lut01, lut23, lut02) = unsafe {
+                (
+                    backend.load(log_m01),
+                    backend.load(log_m23),
+                    backend.load(log_m02),
+                )
+            };
+
+            for (((s0_chunk, s1_chunk), s2_chunk), s3_chunk) in zip(
+                zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
+                s3.iter_mut(),
+            ) {
+                // SAFETY: The wrapper establishes the backend's features; all four disjoint chunks are exactly 64 bytes.
+                unsafe {
+                    let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s2_ptr = s2_chunk.as_mut_ptr().cast::<__m512i>();
+                    let s3_ptr = s3_chunk.as_mut_ptr().cast::<__m512i>();
+                    let mut s0 = _mm512_loadu_si512(s0_ptr);
+                    let mut s1 = _mm512_loadu_si512(s1_ptr);
+                    let mut s2 = _mm512_loadu_si512(s2_ptr);
+                    let mut s3 = _mm512_loadu_si512(s3_ptr);
+
+                    s1 = _mm512_xor_si512(s1, s0);
+                    s0 = Self::muladd_512::<M>(s0, s1, lut01);
+                    s3 = _mm512_xor_si512(s3, s2);
+                    s2 = Self::muladd_512::<M>(s2, s3, lut23);
+
+                    s2 = _mm512_xor_si512(s2, s0);
+                    s0 = Self::muladd_512::<M>(s0, s2, lut02);
+                    s3 = _mm512_xor_si512(s3, s1);
+                    s1 = Self::muladd_512::<M>(s1, s3, lut02);
+
+                    _mm512_storeu_si512(s0_ptr, s0);
+                    _mm512_storeu_si512(s1_ptr, s1);
+                    _mm512_storeu_si512(s2_ptr, s2);
+                    _mm512_storeu_si512(s3_ptr, s3);
+                }
+            }
+            return;
+        }
+
         // FIRST LAYER
 
         if log_m01 == GF_MODULUS {
@@ -716,7 +808,7 @@ impl Avx512 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::NoSimd, *};
     use commonware_utils::TestRng;
     use rand::Rng as _;
 
@@ -811,6 +903,81 @@ mod tests {
                     gfni.fft(&mut actual_shards, 0, 128, truncated_size, 0);
                 }
                 assert_eq!(actual, expected, "inverse={inverse} chunks={chunk_count}");
+            }
+        }
+    }
+
+    #[test]
+    fn fused_butterflies_match_nosimd() {
+        let Some((shuffle, gfni)) = engines() else {
+            return;
+        };
+        let skew = tables::get_skew();
+        assert_eq!(skew[0], GF_MODULUS);
+        assert_eq!(skew[1], GF_MODULUS);
+        assert_eq!(skew[3], GF_MODULUS);
+        assert!(skew[2] != GF_MODULUS);
+        assert!(skew[4..=6].iter().all(|&log_m| log_m != GF_MODULUS));
+
+        let nosimd = NoSimd::new();
+        let mut rng = TestRng::new(10);
+        for (pos, size, truncated_size, skew_delta, chunk_count) in [
+            (1, 4, 4, 4, 0),
+            (1, 4, 0, 4, 1),
+            (1, 4, 4, 0, 1),
+            (2, 4, 3, 1, 65),
+            (3, 4, 2, 2, 1),
+            (2, 4, 4, 4, 65),
+            (1, 16, 13, 0, 1),
+            (2, 64, 37, 17, 17),
+        ] {
+            let shard_count = pos + size + 2;
+            let mut input = vec![[0u8; SHARD_CHUNK_BYTES]; shard_count * chunk_count];
+            rng.fill_bytes(input.as_flattened_mut());
+
+            for inverse in [false, true] {
+                let mut expected = input.clone();
+                if inverse {
+                    expected[(pos + truncated_size) * chunk_count..(pos + size) * chunk_count]
+                        .fill([0; SHARD_CHUNK_BYTES]);
+                }
+                let mut expected_shards =
+                    ShardsRefMut::new(shard_count, chunk_count, expected.as_mut_slice());
+                if inverse {
+                    nosimd.ifft(&mut expected_shards, pos, size, truncated_size, skew_delta);
+                } else {
+                    nosimd.fft(&mut expected_shards, pos, size, truncated_size, skew_delta);
+                }
+
+                for (backend, engine) in [("shuffle", shuffle), ("gfni", gfni)] {
+                    let mut actual = input.clone();
+                    if inverse {
+                        actual[(pos + truncated_size) * chunk_count..(pos + size) * chunk_count]
+                            .fill([0; SHARD_CHUNK_BYTES]);
+                    }
+                    let mut actual_shards =
+                        ShardsRefMut::new(shard_count, chunk_count, actual.as_mut_slice());
+                    if inverse {
+                        engine.ifft(&mut actual_shards, pos, size, truncated_size, skew_delta);
+                    } else {
+                        engine.fft(&mut actual_shards, pos, size, truncated_size, skew_delta);
+                    }
+
+                    assert_eq!(
+                        actual, expected,
+                        "backend={backend} inverse={inverse} pos={pos} size={size} truncated_size={truncated_size} skew_delta={skew_delta} chunks={chunk_count}"
+                    );
+                    assert_eq!(
+                        &actual[..pos * chunk_count],
+                        &input[..pos * chunk_count],
+                        "prefix changed"
+                    );
+                    assert_eq!(
+                        &actual[(pos + size) * chunk_count..],
+                        &input[(pos + size) * chunk_count..],
+                        "suffix changed"
+                    );
+                }
             }
         }
     }
