@@ -1035,7 +1035,8 @@ mod tests {
     }
 
     /// Outside Linux nothing flushes the filesystem at startup, so the first open of an existing
-    /// blob in a process flushes it. Later opens in that process, and blobs it created, owe nothing.
+    /// blob through a `Storage` flushes it. Later opens through that instance, and blobs it
+    /// created, owe nothing.
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_first_open_flushes_existing_blob() {
@@ -1068,6 +1069,50 @@ mod tests {
         settle(&storage).await;
         drop(storage.open("partition", b"fresh").await.unwrap());
         assert_eq!(storage.pending.completions(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn test_remove_forgets_first_open_names() {
+        let storage_directory = env::temp_dir().join(format!(
+            "storage_tokio_first_open_remove_{}",
+            random_suffix()
+        ));
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
+        for (partition, name) in [("a", b"1"), ("a", b"2"), ("b", b"1")] {
+            drop(storage.open(partition, name).await.unwrap());
+        }
+        assert_eq!(storage.pending.flushed.lock().len(), 3);
+
+        storage.remove("a", Some(b"1")).await.unwrap();
+        assert!(
+            !storage
+                .pending
+                .flushed
+                .lock()
+                .contains(&("a".to_owned(), b"1".to_vec()))
+        );
+        drop(storage.open("a", b"1").await.unwrap());
+        drop(storage.open("a", b"1").await.unwrap());
+        assert_eq!(storage.pending.completions(), 0);
+        assert_eq!(storage.pending.flushed.lock().len(), 3);
+
+        storage.remove("a", None).await.unwrap();
+        assert_eq!(storage.pending.flushed.lock().len(), 1);
+        assert!(
+            storage
+                .pending
+                .flushed
+                .lock()
+                .contains(&("b".to_owned(), b"1".to_vec()))
+        );
+        storage.remove("b", None).await.unwrap();
+        assert!(storage.pending.flushed.lock().is_empty());
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }

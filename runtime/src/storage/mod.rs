@@ -88,8 +88,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     #[derive(Default)]
     pub(crate) struct Pending {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
-        /// Names this process has created or flushed. Nothing flushes the filesystem at startup
-        /// here, so the first open of any other existing name owes a flush before trusting the file.
+        /// Names this instance has created or flushed. Nothing flushes the filesystem at startup
+        /// here, so the first open of any other existing name owes a flush before trusting the
+        /// file. Removing a name drops it: a later open of that name creates the blob and owes
+        /// nothing.
         #[cfg(not(target_os = "linux"))]
         flushed: Mutex<HashSet<(String, Vec<u8>)>>,
         #[cfg(test)]
@@ -312,15 +314,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
-                /// Whether the first open of `generation`'s name in this process owes a flush.
-                /// Linux flushes the filesystem at startup, so no open does.
+                /// Whether the first open of `generation`'s name through this instance owes a
+                /// flush. Linux flushes the filesystem at startup, so no open does.
                 pub(crate) const fn first_open(&self, _: &Generation, _: bool) -> bool {
                     false
                 }
             } else {
-                /// Whether the first open of `generation`'s name in this process owes a flush.
-                /// Nothing flushes the filesystem at startup here, so an existing blob owes one the
-                /// first time this process opens it. Creations are durable on return and owe nothing.
+                /// Whether the first open of `generation`'s name through this instance owes a
+                /// flush. Nothing flushes the filesystem at startup here, so an existing blob owes
+                /// one the first time this instance opens it. Creations are durable on return and
+                /// owe nothing.
                 pub(crate) fn first_open(&self, generation: &Generation, existing: bool) -> bool {
                     let first = self.flushed.lock().insert(generation.key.clone());
                     if !(first && existing) {
@@ -350,11 +353,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Detach a removed name, or every name in a removed partition.
         pub(crate) fn forget(&self, partition: &str, name: Option<&[u8]>) {
             if let Some(name) = name {
-                self.entries.lock().remove(&(partition.to_owned(), name.to_vec()));
+                let key = (partition.to_owned(), name.to_vec());
+                self.entries.lock().remove(&key);
+                #[cfg(not(target_os = "linux"))]
+                self.flushed.lock().remove(&key);
             } else {
                 self.entries.lock().retain(|(stored, _), _| {
                     stored != partition
                 });
+                #[cfg(not(target_os = "linux"))]
+                self.flushed.lock().retain(|(stored, _)| stored != partition);
             }
         }
     }
@@ -406,7 +414,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         pub(crate) fn completions(&self) -> u64 {
             self.test.completions.load(Ordering::Acquire)
         }
-
     }
 
     /// Tracks the writes to one blob file that no completed sync covers.
@@ -468,7 +475,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         pub(crate) fn failure(&self) -> Option<Error> {
             self.failed.lock().clone()
         }
-
     }
 
     #[cfg(test)]
