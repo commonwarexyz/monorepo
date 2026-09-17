@@ -495,7 +495,7 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                     3 => {
-                        // Settle every held pipeline, crediting the entries each request covered.
+                        // Await every held sync and record its covered entries as durable.
                         release_pending_syncs(&pending);
                         for (covered_section, covered, handle) in held.drain(..) {
                             handle.await.expect("pipelined sync failed");
@@ -528,8 +528,8 @@ fn fuzz(input: FuzzInput) {
                                 .expect("empty flush failed");
                     }
                     7 if tracked => {
-                        // Settle held pipelines first: a completion credited after the truncation
-                        // below would claim durability for entries the operation removed.
+                        // Await held syncs before pruning or rewinding so the durable counts can
+                        // be adjusted to match the retained entries.
                         release_pending_syncs(&pending);
                         for (covered_section, covered, handle) in held.drain(..) {
                             handle.await.expect("pipelined sync failed");
@@ -602,7 +602,8 @@ fn fuzz(input: FuzzInput) {
 
             // Settle every pipelined sync before the fault window opens: an abandoned lazy handle
             // never runs its underlying fsync, which would silently discard flushed bytes at the
-            // crash. After the window opens, completions are no longer credited as durable.
+            // crash. Sync completions during the fault window leave the recorded durable bounds
+            // unchanged.
             release_pending_syncs(&pending);
             for (covered_section, covered, handle) in held.drain(..) {
                 handle.await.expect("pipelined sync failed");

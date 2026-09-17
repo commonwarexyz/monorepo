@@ -26,8 +26,14 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq};
-use core::{cmp::Ordering, ops::Range};
+use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
+use core::{
+    cmp::Ordering,
+    ops::{
+        Bound::{Excluded, Included},
+        Range,
+    },
+};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, hash_map},
@@ -2053,7 +2059,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in results.iter().zip(&locations) {
+        for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2062,7 +2068,7 @@ where
                 emit(key, staged_base_old_loc(sloc), mutation);
             }
 
-            let key = op.key().expect("updates should have a key");
+            let key = op.into_key().expect("updates should have a key");
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
             // location. Without this guard, a stale snapshot collision (the pre-parent DB
@@ -2070,7 +2076,7 @@ where
             // wrong sort position, changing the operation order relative to the committed-state
             // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
             // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
+            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -2079,13 +2085,13 @@ where
                 Some(old_loc)
             };
 
-            let Some(mutation) = mutations.remove(key) else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
 
-            emit(key.clone(), base_old_loc, mutation);
+            emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
             emit(key, staged_base_old_loc(sloc), mutation);
@@ -2200,12 +2206,7 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in m
-            .read_ops(&locations, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(&locations)
-        {
+        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
             let update::Ordered {
                 key,
                 value,
@@ -2291,7 +2292,7 @@ where
 
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
-        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
+        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
@@ -2547,6 +2548,111 @@ where
             db,
         )
         .await
+    }
+}
+
+impl<F, K, V, D, S> MerkleizedBatch<F, D, update::Ordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+            return Ok((next > *key).then_some(next));
+        }
+        db.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+            return Ok((prev < *key).then_some(prev));
+        }
+        db.get_prev_key(key).await
+    }
+
+    /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        let find = |batch: &Self| {
+            let diff = batch.diff.as_slice();
+            let end = diff.partition_point(|(candidate, _)| {
+                if NEXT {
+                    candidate <= key
+                } else {
+                    candidate < key
+                }
+            });
+
+            // Search below the query first, wrapping only when that side has no active entry.
+            // An earlier key cannot own the span past a later active key in this layer.
+            let loc = diff[..end]
+                .iter()
+                .rev()
+                .chain(diff[end..].iter().rev())
+                .find_map(|(_, entry)| entry.loc())?;
+
+            // Active entries reference operations in their owning batch's journal suffix.
+            let index = (*loc - *batch.bounds.base.size) as usize;
+            let Operation::Update(data) = &batch.journal_batch.items()[index] else {
+                unreachable!("active diff entry must reference an update");
+            };
+
+            // Successor queries use [start, end). Predecessor queries use (start, end].
+            // Match the cyclic owner before the public methods suppress linear wraparound.
+            let bounds = if NEXT {
+                (Included(&data.key), Excluded(&data.next_key))
+            } else {
+                (Excluded(&data.key), Included(&data.next_key))
+            };
+            contains_cyclic(bounds, key).then(|| {
+                if NEXT {
+                    data.next_key.clone()
+                } else {
+                    data.key.clone()
+                }
+            })
+        };
+
+        // Membership changes emit affected predecessors and created keys, so the newest
+        // matching layer owns the query's span in the final batch view.
+        find(self).or_else(|| self.ancestors().find_map(|batch| find(&batch)))
     }
 }
 
