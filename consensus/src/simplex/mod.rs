@@ -245,6 +245,9 @@
 //!
 //! ### Pipelined Handoff
 //!
+//! Handoff preparation supports both publication after parent certification and pipelined
+//! publication before certification.
+//!
 //! A **handoff request** asks the incoming leader for a term-start candidate before its parent
 //! certifies. **Preparation** starts construction in response to that request.
 //! [`HandoffPublication::AfterCertification`] keeps the candidate unpublished until its exact

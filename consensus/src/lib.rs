@@ -191,7 +191,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Generate a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// Marshal applications choose whether to build through [`Application::handoff_policy`];
+        /// Marshal applications choose whether to prepare through [`Application::handoff_policy`];
         /// construction remains asynchronous.
         ///
         /// [`HandoffProposal::Proposed`] carries the same verification and certification
