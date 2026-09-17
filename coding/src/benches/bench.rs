@@ -75,7 +75,6 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
     for (data_length, shard_counts, concs, selections) in cases.into_iter().chain(extra_cases) {
         for &chunks in shard_counts {
             for &conc in concs {
-                // Consensus recovers from f + 1 shards.
                 let min = (N3f1::max_faults(chunks) + 1) as u16;
                 let config = Config {
                     minimum_shards: NZU16!(min),
