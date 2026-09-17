@@ -568,10 +568,12 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            // Items: page 0, page 1, straddling page 1 and the tail, pure tail.
+            // Items: page 0, straddling pages 0 and 1, page 1, straddling page 1 and the tail,
+            // and pure tail.
             let offsets = [
                 0u64,
-                page_size as u64,
+                (page_size - 2) as u64,
+                (page_size + 2) as u64,
                 (page_size * 2 - 2) as u64,
                 (page_size * 2 + 10) as u64,
             ];
@@ -591,15 +593,15 @@ mod tests {
             sealed.read_at(0, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![1, 2]);
-            check(&out, &[0, 3]);
+            assert_eq!(misses, vec![1, 2, 3]);
+            check(&out, &[0, 4]);
 
-            // With only page 1 cached, item 0 becomes the miss and the straddler is served.
+            // With only page 1 cached, the first two items need page 0.
             sealed.read_at(page_size as u64, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![0]);
-            check(&out, &[1, 2, 3]);
+            assert_eq!(misses, vec![0, 1]);
+            check(&out, &[2, 3, 4]);
         });
     }
 

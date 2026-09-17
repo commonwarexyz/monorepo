@@ -338,17 +338,12 @@ where
         let log_size = self.journal.size();
 
         for _ in 0..num_requests {
-            // Convert fetched operations to operation counts for shared gap detection
-            let operation_counts: BTreeMap<Location<DB::Family>, u64> = self
-                .fetched_operations
-                .iter()
-                .map(|(&start_loc, operations)| (start_loc, operations.len() as u64))
-                .collect();
-
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
                 Location::new(log_size)..self.target.range.end(),
-                &operation_counts,
+                self.fetched_operations.iter().map(|(&start, operations)| {
+                    start..start.checked_add(operations.len() as u64).unwrap()
+                }),
                 self.outstanding_requests.ranges(),
             ) else {
                 break; // No more gaps to fill
