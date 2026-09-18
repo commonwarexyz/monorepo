@@ -1,6 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
+    application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -177,7 +178,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        1024 * 1024, // 1MB
+        MAX_MESSAGE_SIZE,
     );
 
     // Start context
@@ -191,7 +192,7 @@ fn main() {
             .dial(
                 context.child("dialer"),
                 INDEXER_NAMESPACE,
-                1024 * 1024,
+                MAX_MESSAGE_SIZE,
                 indexer,
                 stream,
                 sink,

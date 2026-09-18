@@ -1,6 +1,6 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
@@ -257,7 +257,7 @@ fn main() {
                 .listen(
                     context.child("listener"),
                     INDEXER_NAMESPACE,
-                    1024 * 1024,
+                    MAX_MESSAGE_SIZE,
                     |peer| {
                         let out = validators.position(&peer).is_some();
                         async move { out }
