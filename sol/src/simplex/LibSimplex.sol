@@ -4,7 +4,7 @@ pragma solidity ^0.8.15;
 import { LibBLS12381 as BLS } from "../certificate/LibBLS12381.sol";
 import { LibCodec } from "../codec/LibCodec.sol";
 
-/// @notice Encode Commonware Simplex voting subjects.
+/// @notice Encode Commonware Simplex votes and calculate committee quorums.
 /// @dev Payload digests are 32 bytes.
 library LibSimplex {
     /// @dev The vote signing domain.
@@ -26,6 +26,12 @@ library LibSimplex {
         uint64 parent;
         /// The proposal's payload digest, ignored for nullifications.
         bytes32 payload;
+    }
+
+    /// @notice Minimum number of signers required by Simplex.
+    /// @param count The nonzero committee size.
+    function quorum(uint256 count) internal pure returns (uint256) {
+        return count - (count - 1) / 3;
     }
 
     /// @notice Construct the exact signed bytes for a Simplex certificate.

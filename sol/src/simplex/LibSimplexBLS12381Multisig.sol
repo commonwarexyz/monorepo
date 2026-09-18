@@ -26,7 +26,7 @@ library LibSimplexBLS12381Multisig {
     ) internal view returns (bool) {
         uint256 count = publicKeys.length;
         if (count == 0) return false;
-        uint256 quorum = _quorum(count);
+        uint256 quorum = Simplex.quorum(count);
         return Multisig.verifyMinSig(
             signature, signers, publicKeys, quorum, Simplex.namespace(namespace, subject.kind), Simplex.message(subject)
         );
@@ -50,13 +50,9 @@ library LibSimplexBLS12381Multisig {
     ) internal view returns (bool) {
         uint256 count = publicKeys.length;
         if (count == 0) return false;
-        uint256 quorum = _quorum(count);
+        uint256 quorum = Simplex.quorum(count);
         return Multisig.verifyMinPk(
             signature, signers, publicKeys, quorum, Simplex.namespace(namespace, subject.kind), Simplex.message(subject)
         );
-    }
-
-    function _quorum(uint256 count) private pure returns (uint256) {
-        return count - (count - 1) / 3;
     }
 }
