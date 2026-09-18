@@ -457,9 +457,10 @@ library LibQMDBCurrent {
             if (!rightValid || rightEnd != operation.length) return false;
             int256 afterLeft = _compare(key, 0, key.length, operation, left, leftEnd);
             int256 beforeRight = _compare(key, 0, key.length, operation, right, rightEnd);
-            return _compare(operation, left, leftEnd, operation, right, rightEnd) < 0
+            // Equal nonzero comparisons require a wrapping interval. Opposite signs determine inclusion directly.
+            return afterLeft != beforeRight
                 ? afterLeft > 0 && beforeRight < 0
-                : afterLeft > 0 || beforeRight < 0;
+                : afterLeft != 0 && _compare(operation, left, leftEnd, operation, right, rightEnd) >= 0;
         }
         if (operation[0] != 0xd3 || operation.length < 2 || uint8(operation[1]) > 1) return false;
         uint256 cursor = 2;

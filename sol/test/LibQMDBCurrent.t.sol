@@ -910,7 +910,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         _variableCase(hex"d20101000101", hex"01", false);
         _variableCase(hex"d200000100", hex"", false);
         _variableCase(hex"d2000000", hex"00", true);
-        uint256[8] memory lengths = [uint256(1), 31, 32, 33, 63, 64, 65, 128];
+        uint256[10] memory lengths = [uint256(1), 31, 32, 33, 63, 64, 65, 128, 256, 1024];
         for (uint256 i; i < lengths.length; ++i) {
             bytes memory left = new bytes(lengths[i]);
             bytes memory right = bytes.concat(left, hex"0001");
