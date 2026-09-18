@@ -123,6 +123,8 @@ test *args='':
 # Run Verus proofs
 test-verus:
     "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/current/grafting/count.rs
+    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/current/proof/geometry.rs
+    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/sync/gaps/step.rs
 
 # Run loom tests
 test-loom *args='':

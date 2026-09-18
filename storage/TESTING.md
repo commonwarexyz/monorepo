@@ -54,7 +54,11 @@ Errors from mutable operations, including `put`, `delete`, and `sync`, are unrec
 
 ## Verus proofs
 
-The production [graftable-chunk count](src/qmdb/current/grafting/count.rs) carries inline Verus contracts and proof blocks. This count determines which bitmap chunks have an operations-tree ancestor and can enter QMDB's grafted tree. MMR makes each complete chunk graftable immediately; MMB can leave one complete chunk pending.
+QMDB's verified helpers carry inline contracts, proof blocks, and supporting lemmas. `just test-verus` checks the same executable source that the storage crate calls.
+
+### Grafting counts
+
+The [graftable-chunk count](src/qmdb/current/grafting/count.rs) determines which bitmap chunks have an operations-tree ancestor and can enter QMDB's grafted tree. MMR makes each complete chunk graftable immediately; MMB can leave one complete chunk pending.
 
 For chunk size `C = 2^height` and first-chunk birth `B`, the specification places chunk `k`'s birth at `B + k*C`. The proofs cover every `u64` leaf count, heights `1..=62`, and birth thresholds `C <= B < 2*C`. They establish that:
 
@@ -62,6 +66,22 @@ For chunk size `C = 2^height` and first-chunk birth `B`, the specification place
 - At most one complete chunk is pending, with an exact remainder condition for that interval and no pending chunk when `B = C`.
 - Appending leaves never decreases the count, and one additional leaf increases it by at most one.
 - The machine arithmetic cannot overflow or divide by zero within the stated domain.
+
+An exhaustive native test calls the actual MMR and MMB subtree and birth functions at heights `1..=61`, checking `B = C` and `B = C + C/2 - 1`, respectively, along with threshold behavior. The scalar proof also covers height 62; the native family constructors have a narrower domain. The native test connects those constructors to the arithmetic assumptions. The proof does not establish the families' merge schedules or the threshold condition for custom `Graftable` implementations.
+
+### Bitmap geometry and activity
+
+The [bitmap geometry helpers](src/qmdb/current/proof/geometry.rs) validate chunk widths for proof decoding and select activity bits during operation-proof verification. The contracts cover every `usize` width and `u64` operation location, including zero, non-power-of-two widths, and maximum values.
+
+A byte width is accepted exactly when it is a nonzero power of two, multiplying by eight fits `usize`, and the resulting bit width is at most `2^62`. The proofs establish the exact byte-to-bit conversion and activity-bit selection, including the bounds of the byte index and shift. The `usize` overflow check is significant on 32-bit targets; verification leaves the pointer width symbolic, covering both 32-bit and 64-bit platforms.
+
+### Sync gap scanning
+
+The [gap transition helper](src/qmdb/sync/gaps/step.rs) handles each range consumed by the lazy sync gap scanner. It proves that empty or reversed coverage cannot split a gap, emitted gaps are nonempty and bounded by the target, and overlapping coverage advances the frontier without losing the covered prefix.
+
+The quantified coverage lemmas establish the first maximal gap under the scanner's prefix invariant and the ordering of remaining ranges. The generic two-iterator merge and its sorted-input obligation are connected by exhaustive native tests against an independent coverage oracle. They are outside the formal proof, as are request delivery, cancellation, and eventual sync progress.
+
+### Running
 
 Install the official [Verus release `0.2026.08.23.fbbbbcf`](https://github.com/verus-lang/verus/releases/tag/release/0.2026.08.23.fbbbbcf) for your platform and its Rust toolchain, then run:
 
@@ -72,12 +92,12 @@ VERUS_BIN=/path/to/verus just test-verus
 
 `VERUS_BIN` defaults to `verus` on `PATH`. The command verifies the production source directly with `--no-cheating`, which rejects local `assume`, `admit`, and `external_body` escapes. Verus enables `verus_keep_ghost` for the contracts, proof blocks, and supporting lemmas. Ordinary Cargo builds omit those annotations and use the same executable body, without a Verus dependency. Keep executable statements independent of that configuration.
 
-The [CI workflow](../.github/workflows/verus.yml) pins the release and archive SHA-256 and runs these proofs on pull requests, merge groups, and pushes to `main`.
-
-An exhaustive native test calls the actual MMR and MMB subtree and birth functions at heights `1..=61`, checking `B = C` and `B = C + C/2 - 1`, respectively, along with threshold behavior. It runs in the ordinary storage test suite:
+The [CI workflow](../.github/workflows/verus.yml) pins the release and archive SHA-256 and runs all these proofs on pull requests, merge groups, and pushes to `main`. Native integration tests run in the ordinary storage test suite and can also be selected locally:
 
 ```sh
 just test -p commonware-storage test_graftable_chunks_family_thresholds
+just test -p commonware-storage qmdb::current::proof::
+just test -p commonware-storage qmdb::sync::gaps::
 ```
 
-The scalar proof also covers height 62; the native family constructors have a narrower domain. The native test connects those constructors to the arithmetic assumptions. The Verus proof does not establish the families' merge schedules, root authenticity, proof reconstruction, bitmap consistency, pruning, crash recovery, or the threshold condition for custom `Graftable` implementations. Height zero and excessive family heights are outside its contract.
+These proofs cover the stated helpers and their contracts. They do not establish root authenticity, complete proof reconstruction, bitmap consistency across storage operations, pruning, or crash recovery.

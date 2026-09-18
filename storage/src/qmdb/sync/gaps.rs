@@ -3,6 +3,10 @@
 use crate::merkle::{Family, Location};
 use core::ops::Range;
 
+mod step;
+
+use step::{Step, scan_step};
+
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
 /// Empty coverage ranges are ignored, and returned gaps are bounded by `range`.
@@ -46,23 +50,15 @@ pub fn find_next<F: Family>(
             (None, None) => break,
         };
 
-        // Empty ranges cover no operations, so they must not split a gap.
-        if covered_range.is_empty() {
-            continue;
-        }
-
-        // Check if there's a gap before this covered range
-        if next_uncovered < covered_range.start {
-            // Found a gap between next_uncovered and the start of this range
-            return Some(next_uncovered..covered_range.start.min(range.end));
-        }
-
-        // Update next_uncovered to the end of this covered range (or keep current if overlapping)
-        next_uncovered = next_uncovered.max(covered_range.end);
-
-        // Early exit if we've covered everything up to range.end
-        if next_uncovered >= range.end {
-            return None;
+        match scan_step(
+            next_uncovered.as_u64(),
+            range.end.as_u64(),
+            covered_range.start.as_u64(),
+            covered_range.end.as_u64(),
+        ) {
+            Step::Gap(end) => return Some(next_uncovered..Location::new(end)),
+            Step::Advance(frontier) => next_uncovered = Location::new(frontier),
+            Step::Complete => return None,
         }
     }
 
@@ -78,7 +74,9 @@ pub fn find_next<F: Family>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::mmr::Family as MmrFamily;
     use rstest::rstest;
+    use std::num::NonZeroU64;
 
     /// Test case structure for find_next tests
     #[derive(Debug)]
@@ -269,7 +267,6 @@ mod tests {
         expected: Some(0..1),
     })]
     fn test_find_next(#[case] test_case: FindNextTestCase) {
-        use crate::merkle::mmr::Family as MmrFamily;
         let fetched_ranges = test_case
             .fetched_ops
             .iter()
@@ -290,6 +287,167 @@ mod tests {
             test_case
                 .expected
                 .map(|range| Location::new(range.start)..Location::new(range.end))
+        );
+    }
+
+    fn covered_at(point: u64, ranges: &[Range<u64>]) -> bool {
+        ranges
+            .iter()
+            .any(|range| range.start < range.end && range.contains(&point))
+    }
+
+    fn oracle(
+        target: Range<u64>,
+        fetched: &[Range<u64>],
+        outstanding: &[Range<u64>],
+    ) -> Option<Range<u64>> {
+        if target.start >= target.end {
+            return None;
+        }
+
+        let is_covered = |point| covered_at(point, fetched) || covered_at(point, outstanding);
+        let gap_start = (target.start..target.end).find(|&point| !is_covered(point))?;
+        let gap_end = (gap_start..target.end)
+            .find(|&point| is_covered(point))
+            .unwrap_or(target.end);
+        Some(gap_start..gap_end)
+    }
+
+    fn assert_maximal_gap(
+        target: Range<u64>,
+        fetched: &[Range<u64>],
+        outstanding: &[Range<u64>],
+        actual: Option<Range<u64>>,
+    ) {
+        let is_covered = |point| covered_at(point, fetched) || covered_at(point, outstanding);
+        assert_eq!(actual, oracle(target.clone(), fetched, outstanding));
+
+        let Some(gap) = actual else {
+            assert!((target.start..target.end).all(is_covered));
+            return;
+        };
+
+        assert!(target.start <= gap.start);
+        assert!(gap.start < gap.end);
+        assert!(gap.end <= target.end);
+        assert!((target.start..gap.start).all(&is_covered));
+        assert!((gap.clone()).all(|point| !is_covered(point)));
+        assert!(gap.end == target.end || is_covered(gap.end));
+
+        let size = gap.end.checked_sub(gap.start).unwrap();
+        assert!(NonZeroU64::try_from(size).is_ok());
+    }
+
+    fn sorted_range_lists() -> Vec<Vec<Range<u64>>> {
+        let ranges: Vec<_> = (0..=5)
+            .flat_map(|start| (0..=5).map(move |end| start..end))
+            .collect();
+        let mut lists = vec![Vec::new()];
+        for first in &ranges {
+            lists.push(vec![first.clone()]);
+            for second in ranges.iter().filter(|second| second.start >= first.start) {
+                lists.push(vec![first.clone(), second.clone()]);
+            }
+        }
+        lists
+    }
+
+    fn assert_engine_accepts_gap<F: Family>(gap: &Range<Location<F>>) {
+        let size = *gap.end.checked_sub(*gap.start).unwrap();
+        assert!(NonZeroU64::try_from(size).is_ok());
+    }
+
+    #[test]
+    fn exhaustive_sorted_range_pairs_match_oracle() {
+        let target = 1..4;
+        let lists = sorted_range_lists();
+        assert_eq!(lists.len(), 793);
+        for fetched in &lists {
+            for outstanding in &lists {
+                let actual = find_next(
+                    Location::<MmrFamily>::new(target.start)..Location::new(target.end),
+                    fetched
+                        .iter()
+                        .map(|range| Location::new(range.start)..Location::new(range.end)),
+                    outstanding
+                        .iter()
+                        .map(|range| Location::new(range.start)..Location::new(range.end)),
+                );
+                if let Some(gap) = &actual {
+                    assert_engine_accepts_gap(gap);
+                }
+                let actual = actual.map(|range| range.start.as_u64()..range.end.as_u64());
+                assert_maximal_gap(target.clone(), fetched, outstanding, actual);
+            }
+        }
+
+        assert_eq!(
+            find_next::<MmrFamily>(
+                Location::new(3)..Location::new(3),
+                [Location::new(0)..Location::new(5)],
+                [],
+            ),
+            None
+        );
+        assert_eq!(
+            find_next::<MmrFamily>(
+                Location::new(4)..Location::new(3),
+                [],
+                [Location::new(0)..Location::new(5)],
+            ),
+            None
+        );
+    }
+
+    fn assert_family_maximum<F: Family>() {
+        let end = F::MAX_LEAVES.as_u64();
+        let target = end - 3..end;
+        let fetched = end - 3..end - 2;
+        let outstanding = end - 1..end;
+        let actual = find_next(
+            Location::<F>::new(target.start)..Location::new(target.end),
+            core::iter::once(Location::new(fetched.start)..Location::new(fetched.end)),
+            core::iter::once(Location::new(outstanding.start)..Location::new(outstanding.end)),
+        );
+        if let Some(gap) = &actual {
+            assert_engine_accepts_gap(gap);
+        }
+        let actual = actual.map(|range| range.start.as_u64()..range.end.as_u64());
+        assert_maximal_gap(
+            target,
+            core::slice::from_ref(&fetched),
+            core::slice::from_ref(&outstanding),
+            actual,
+        );
+    }
+
+    #[test]
+    fn family_maximum_locations() {
+        assert_family_maximum::<crate::merkle::mmr::Family>();
+        assert_family_maximum::<crate::merkle::mmb::Family>();
+    }
+
+    #[test]
+    fn scalar_step_u64_maximum_boundaries() {
+        assert_eq!(
+            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 1, u64::MAX),
+            Step::Gap(u64::MAX - 1)
+        );
+        assert_eq!(
+            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 2, u64::MAX - 1),
+            Step::Advance(u64::MAX - 1)
+        );
+        assert_eq!(
+            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 2, u64::MAX),
+            Step::Complete
+        );
+        assert_eq!(
+            scan_step(u64::MAX - 1, u64::MAX, u64::MAX, u64::MAX),
+            Step::Advance(u64::MAX - 1)
+        );
+        assert_eq!(
+            scan_step(u64::MAX - 1, u64::MAX, u64::MAX, 0),
+            Step::Advance(u64::MAX - 1)
         );
     }
 }
