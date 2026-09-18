@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 mod actor;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::cups::{Receiver, Sender};
 mod ingress;
 
 /// Genesis message to use during initialization.

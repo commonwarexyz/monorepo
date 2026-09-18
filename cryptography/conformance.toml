@@ -150,23 +150,23 @@ hash = "9010ca9b2849258179377f855fb77967ff003c8f349258d868bab76b0bfa1c5a"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
-["commonware_cryptography::handshake::conformance::Handshake"]
+["commonware_cryptography::sake::conformance::Sake"]
 n_cases = 4096
 hash = "057cc42a74390f0b43250b8fba2c42abad651bee6beacb510f2f2a950185a694"
 
-["commonware_cryptography::handshake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
+["commonware_cryptography::sake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
-["commonware_cryptography::handshake::test::conformance::CodecConformance<Ack>"]
+["commonware_cryptography::sake::test::conformance::CodecConformance<Ack>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
-["commonware_cryptography::handshake::test::conformance::CodecConformance<Syn<crate::ed25519::Signature>>"]
+["commonware_cryptography::sake::test::conformance::CodecConformance<Syn<crate::ed25519::Signature>>"]
 n_cases = 65536
 hash = "6776e093b02edc1c846c2a1f2f7525709a7d51e9743f81ac388cdee53a601aaf"
 
-["commonware_cryptography::handshake::test::conformance::CodecConformance<SynAck<crate::ed25519::Signature>>"]
+["commonware_cryptography::sake::test::conformance::CodecConformance<SynAck<crate::ed25519::Signature>>"]
 n_cases = 65536
 hash = "b98d0717af705e8b60af88a8337154eaced6659c3cc9f604aa4f55585a28b77f"
 

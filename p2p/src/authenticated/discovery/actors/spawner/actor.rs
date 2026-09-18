@@ -172,9 +172,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
         Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        cups::{Receiver as CupsReceiver, Sake, Sender as CupsSender},
         utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
@@ -187,14 +185,11 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
+    fn handshake(signer: PrivateKey) -> Timeout<Sake<PrivateKey>> {
         Timeout::new(
-            StreamHandshake {
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
@@ -274,7 +269,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>,
+        Mailbox<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -296,8 +291,8 @@ mod tests {
         let (spawner, spawner_mailbox) =
             Actor::<
                 deterministic::Context,
-                EncryptedSender<mocks::Sink>,
-                EncryptedReceiver<mocks::Stream>,
+                CupsSender<mocks::Sink>,
+                CupsReceiver<mocks::Stream>,
                 PublicKey,
             >::new(context.child("spawner"), spawner_config(local));
         let handle = spawner.start(tracker_mailbox, router_mailbox);

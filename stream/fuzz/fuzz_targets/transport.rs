@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{Handshake as _, cups::Sake, utils::Timeout};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ fn fuzz(data: &[u8]) {
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = Timeout::new(
-            Handshake {
+            Sake {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -28,7 +28,7 @@ fn fuzz(data: &[u8]) {
         );
 
         let listener_handshake = Timeout::new(
-            Handshake {
+            Sake {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),

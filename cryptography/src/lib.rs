@@ -94,7 +94,7 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
-    pub mod handshake;
+    pub mod sake;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
     pub trait Signer: Random + Send + Sync + Clone + 'static {

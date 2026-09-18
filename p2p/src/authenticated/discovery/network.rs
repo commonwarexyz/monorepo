@@ -317,7 +317,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::cups::Sake;
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 
@@ -331,7 +331,7 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                StreamHandshake::new(signer.clone()),
+                Sake::new(signer.clone()),
                 b"discovery-test",
                 address,
                 address,
