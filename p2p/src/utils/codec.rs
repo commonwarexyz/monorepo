@@ -9,7 +9,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
 };
-use commonware_utils::futures::Pool;
+use futures::{StreamExt, future, stream::FuturesUnordered};
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
@@ -232,7 +232,7 @@ where
     /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
     async fn run(mut self) {
         let decode_queue_capacity = self.strategy.manual().parallelism();
-        let mut decode_pool = Pool::default();
+        let mut decode_pool = FuturesUnordered::new();
         let mut receiver_closed = false;
 
         select_loop! {
@@ -241,7 +241,7 @@ where
                 while decode_pool.len() >= decode_queue_capacity
                     || (receiver_closed && !decode_pool.is_empty())
                 {
-                    let result = decode_pool.next_completed().await;
+                    let result = decode_pool.select_next_some().await;
                     Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
                 }
                 if receiver_closed && decode_pool.is_empty() {
@@ -250,7 +250,13 @@ where
             },
             on_stopped => {},
             // Process decode completions as they arrive
-            result = decode_pool.next_completed() => {
+            result = async {
+                // An idle receiver must wait for input without polling an empty stream.
+                if decode_pool.is_empty() {
+                    future::pending::<()>().await;
+                }
+                decode_pool.select_next_some().await
+            } => {
                 Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
             },
             // Receive raw bytes and submit decode work to the strategy.
@@ -717,6 +723,57 @@ mod tests {
             }
 
             drop(handle);
+        });
+    }
+
+    #[test_traced]
+    fn test_background_receiver_resumes_after_idle() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let sender = pk(0);
+            let (tx, receiver) = mpsc::unbounded_channel();
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
+                context.child("bg"),
+                MockReceiver { receiver },
+                (),
+                NoopBlocker,
+                NZUsize!(1),
+                mocks::inline(NZUsize!(2)),
+            );
+            let handle = bg.start();
+
+            // Exercise both an initially empty pool and a pool emptied by completion.
+            for value in 0..3u32 {
+                context.sleep(Duration::from_millis(1)).await;
+                tx.send((sender.clone(), IoBuf::from(value.encode())))
+                    .expect("mock receiver should be open");
+                assert_eq!(rx.recv().await, Some((sender.clone(), value)));
+            }
+
+            drop(tx);
+            handle.await.expect("background receiver should complete");
+            assert!(rx.recv().await.is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_background_receiver_closes_without_messages() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (tx, receiver) = mpsc::unbounded_channel();
+            drop(tx);
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
+                context.child("bg"),
+                MockReceiver { receiver },
+                (),
+                NoopBlocker,
+                NZUsize!(1),
+                Sequential,
+            );
+            bg.start()
+                .await
+                .expect("background receiver should complete");
+            assert!(rx.recv().await.is_none());
         });
     }
 
