@@ -182,8 +182,7 @@ mod tests {
             term_length,
             optimistic_views: ViewDelta::new(term_length.get()),
             heterogeneous_optimism: true,
-            accept_handoffs: false,
-            handoff_publication: HandoffPublication::AfterCertification,
+            handoff: None,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
@@ -246,10 +245,10 @@ mod tests {
     }
 
     /// Honest handoff modes: defer every handoff, prepare and hold, or publish early.
-    const HANDOFF_MODES: [(bool, HandoffPublication); 3] = [
-        (false, HandoffPublication::AfterCertification),
-        (true, HandoffPublication::AfterCertification),
-        (true, HandoffPublication::AllowBeforeCertification),
+    const HANDOFF_MODES: [Option<HandoffPublication>; 3] = [
+        None,
+        Some(HandoffPublication::AfterCertification),
+        Some(HandoffPublication::AllowBeforeCertification),
     ];
 
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
@@ -258,13 +257,10 @@ mod tests {
             prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
             prop::sample::select(HANDOFF_MODES.as_slice()),
         )
-            .prop_map(
-                move |(seed, term_length, (accept_handoffs, handoff_publication))| FuzzInput {
-                    accept_handoffs,
-                    handoff_publication,
-                    ..test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
-                },
-            )
+            .prop_map(move |(seed, term_length, handoff)| FuzzInput {
+                handoff,
+                ..test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
+            })
     }
 
     proptest! {
