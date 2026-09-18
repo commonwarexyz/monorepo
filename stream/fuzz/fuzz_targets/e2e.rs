@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey, sake::TAG_SIZE};
+use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::sake::TAG_SIZE};
 use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,

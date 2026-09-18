@@ -3,7 +3,7 @@
 use crate::{
     Signer,
     ed25519::PrivateKey,
-    sake::{Context, dial_end, dial_start, listen_end, listen_start},
+    handshake::sake::{Context, dial_end, dial_start, listen_end, listen_start},
 };
 use commonware_codec::Encode;
 use commonware_conformance::{Conformance, conformance_tests};

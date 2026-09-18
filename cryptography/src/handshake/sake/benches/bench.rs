@@ -1,7 +1,7 @@
 use commonware_cryptography::{
     Signer,
     ed25519::PrivateKey,
-    sake::{
+    handshake::sake::{
         Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
     },
 };
