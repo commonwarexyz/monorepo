@@ -216,7 +216,6 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// replay.
     propose_observer: Option<ProposeObserver<H, P>>,
 
-    /// Takes ownership of handoff proposal responses when configured.
     handoff_propose_controller: Option<HandoffProposeController<H::Digest>>,
 
     /// Invoked on every `Message::Verify` request received by the application.

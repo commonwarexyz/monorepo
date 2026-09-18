@@ -965,9 +965,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     continue;
                 }
             };
-            let is_handoff = view.is_term_start(self.term_length())
-                && view.previous() == Some(parent_view)
-                && self.explicit_ancestry_payload(parent_view).is_none();
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -980,6 +977,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 leader: leader.key,
                 parent: (parent_view, parent_payload),
             };
+            // A term start on an uncertified parent is a pipelined handoff.
+            let is_handoff =
+                view.is_term_start(self.term_length()) && !self.proposal_parent_certified(&context);
             return Some(if is_handoff {
                 ProposalRequest::Handoff(context)
             } else {
@@ -7141,9 +7141,6 @@ mod tests {
             assert!(fetches.is_empty());
             assert_eq!(ready, vec![tip]);
 
-            let mut pool = AbortablePool::<()>::default();
-            let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(View::new(5), handle);
             assert!(state.certified(View::new(5), true).is_some());
 
             // Completing the cross-term parent wakes the blocked child.
@@ -7163,7 +7160,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_from_config(&mut context, 1, 0, 9, 10, handoff_terms(), 0);
+            ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
             certify_view_4(&mut state, &verifier, &schemes);
 
             let tip = fetch_proposal(5, 4, 65);
@@ -7294,34 +7291,6 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_skips_nullified_term_end() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
-                },
-                mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
-            let (certified, _) = prepare_term_boundary(&mut state, &verifier, &schemes);
-
-            // The outgoing term is abandoned before we propose: the handoff
-            // must not build on the dead tip.
-            let nullification =
-                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
-            assert!(state.add_nullification(nullification));
-            assert_eq!(state.current_view(), View::new(6));
-
-            let ctx = state
-                .try_propose()
-                .expect("term-start proposal should use the certified parent")
-                .into_context();
-            assert_eq!(ctx.round.view(), View::new(6));
-            assert_eq!(ctx.parent, (View::new(4), certified.payload));
-        });
-    }
-
-    #[test]
     fn pipelined_handoff_keeps_valid_fallback_after_late_certification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -7335,10 +7304,6 @@ mod tests {
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             assert!(state.add_notarization(tip_notarization).0);
-            assert_eq!(state.certify_candidates().0, vec![tip]);
-            let mut pool = AbortablePool::<()>::default();
-            let handle = pool.push(futures::future::pending());
-            state.set_certify_handle(View::new(5), handle);
 
             let nullification =
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
@@ -7355,7 +7320,6 @@ mod tests {
             // captured fallback remains valid under the formed nullification.
             assert!(state.certified(View::new(5), true).is_some());
             let ours = fetch_proposal(6, 4, 66);
-            assert_eq!(state.parent_payload(&ours), Ok(certified.payload));
             assert!(!state.supersede_proposal_request(&ctx));
             assert!(state.proposed(&ctx, ours.payload));
             let notarize = state

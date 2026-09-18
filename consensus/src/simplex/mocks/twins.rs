@@ -337,13 +337,6 @@ where
         // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
-
-    fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {
-        // Scripted `round_leaders` control `elect` during the attack prefix.
-        // Delegating here could contradict the script and violate the
-        // `elect_without_certificate == elect` contract.
-        None
-    }
 }
 
 /// Controls how multi-round scenarios are constructed.
