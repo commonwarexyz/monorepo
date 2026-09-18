@@ -60,7 +60,7 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     }
 }
 
-impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
+impl<K: Read + Ord + Hash + Eq> Read for HashSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {

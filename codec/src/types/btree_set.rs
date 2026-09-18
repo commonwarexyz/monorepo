@@ -56,7 +56,7 @@ impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     }
 }
 
-impl<K: Read + Clone + Ord + Eq> Read for BTreeSet<K> {
+impl<K: Read + Ord + Eq> Read for BTreeSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
