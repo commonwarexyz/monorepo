@@ -117,6 +117,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
+    type ProposeContexts = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
     type HandoffRequests = Arc<Mutex<Vec<View>>>;
     type ProposeResponses = Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<Sha256Digest>)>>>;
     type HandoffProposeResponses =
@@ -275,6 +276,8 @@ mod tests {
         certify_latency_ms: f64,
         /// Views and parents supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
+        /// Full contexts supplied to mock application proposal requests.
+        propose_contexts: Option<ProposeContexts>,
         /// Views supplied with handoff proposal requests.
         handoff_requests: Option<HandoffRequests>,
         /// Regular proposal responses controlled by the test.
@@ -310,6 +313,7 @@ mod tests {
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 propose_requests: None,
+                propose_contexts: None,
                 handoff_requests: None,
                 propose_responses: None,
                 handoff_propose_responses: None,
@@ -356,6 +360,7 @@ mod tests {
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
+        let propose_contexts = options.propose_contexts;
         let handoff_requests = options.handoff_requests;
         let propose_responses = options.propose_responses;
         let handoff_propose_responses = options.handoff_propose_responses;
@@ -376,11 +381,14 @@ mod tests {
         actor.set_accept_handoffs(options.accept_handoffs);
         actor.set_handoff_publication(options.handoff_publication);
         actor.set_fail_verification(options.fail_verification);
-        if let Some(propose_requests) = propose_requests {
+        if propose_requests.is_some() || propose_contexts.is_some() {
             actor.set_propose_observer(Box::new(move |context| {
-                propose_requests
-                    .lock()
-                    .push((context.view(), context.parent.0));
+                if let Some(requests) = &propose_requests {
+                    requests.lock().push((context.view(), context.parent.0));
+                }
+                if let Some(contexts) = &propose_contexts {
+                    contexts.lock().push(context);
+                }
             }));
         }
         if let Some(handoff_requests) = handoff_requests {
@@ -3964,6 +3972,7 @@ mod tests {
                     .await;
 
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let propose_contexts = Arc::new(Mutex::new(Vec::new()));
             let handoff_requests = Arc::new(Mutex::new(Vec::new()));
             let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
             let controlled = certification_requests.clone();
@@ -3983,6 +3992,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     propose_requests: Some(propose_requests.clone()),
+                    propose_contexts: Some(propose_contexts.clone()),
                     handoff_requests: Some(handoff_requests.clone()),
                     certifier,
                     ..Default::default()
@@ -4052,6 +4062,18 @@ mod tests {
                 2,
                 "ordinary proposal should follow the deferred optimistic request"
             );
+            let contexts: Vec<_> = propose_contexts
+                .lock()
+                .iter()
+                .filter(|request| request.round.view() == View::new(2))
+                .cloned()
+                .collect();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(
+                contexts[0], contexts[1],
+                "ordinary request must reuse the deferred context"
+            );
+            assert_eq!(contexts[1].parent, (View::new(1), parent.payload));
             let metrics = context.encode();
             assert_handoff_metrics(&metrics, "actor", &[("Deferred", 1), ("Requested", 1)], &[]);
         });
@@ -4200,6 +4222,7 @@ mod tests {
         resolver: mailbox::Receiver<resolver::MailboxMessage<ed25519::Scheme, Sha256Digest>>,
         relay: Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
         propose_requests: ProposeRequests,
+        propose_contexts: ProposeContexts,
         propose_responses: ProposeResponses,
         handoff_responses: HandoffProposeResponses,
     }
@@ -4232,6 +4255,7 @@ mod tests {
                 usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
             let outgoing = participants[outgoing_index].clone();
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let propose_contexts = Arc::new(Mutex::new(Vec::new()));
             let propose_responses = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses = Arc::new(Mutex::new(Vec::new()));
             let certification_requests = Arc::new(Mutex::new(Vec::new()));
@@ -4265,6 +4289,7 @@ mod tests {
                     )),
                     propose_responses: Some(propose_responses.clone()),
                     propose_requests: Some(propose_requests.clone()),
+                    propose_contexts: Some(propose_contexts.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
                     accept_handoffs: true,
                     handoff_publication,
@@ -4302,9 +4327,29 @@ mod tests {
                 resolver,
                 relay,
                 propose_requests,
+                propose_contexts,
                 propose_responses,
                 handoff_responses,
             }
+        }
+
+        /// Declines the pending handoff until the parent certifies.
+        fn defer(&mut self) {
+            self.response
+                .take()
+                .expect("handoff response must be pending")
+                .send(HandoffProposal::AwaitCertification)
+                .expect("handoff request must remain open");
+        }
+
+        /// Counts proposal requests the application received for `view`,
+        /// including the handoff request.
+        fn requests_for(&self, view: View) -> usize {
+            self.propose_requests
+                .lock()
+                .iter()
+                .filter(|(request_view, _)| *request_view == view)
+                .count()
         }
 
         fn respond(&mut self) {
@@ -4489,24 +4534,77 @@ mod tests {
         });
     }
 
+    /// Certification completes before the application answers. The single
+    /// build is published once, after certification, for either permission.
+    async fn certification_first_reuses_build(
+        context: &mut deterministic::Context,
+        publication: HandoffPublication,
+    ) {
+        let mut fixture = HandoffFixture::new(context, publication).await;
+        let mut relayed = fixture.observer();
+        let parent = fixture.parent.clone();
+        let certified = fixture.certification_request(context, &parent).await;
+
+        fixture.finish_certification(certified).await;
+        fixture.wait_for_parent_certified().await;
+        assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
+        fixture.respond();
+        observe_handoff_publication(context, &mut relayed, &mut fixture.batcher, fixture.digest)
+            .await;
+        assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
+        assert!(fixture.propose_responses.lock().is_empty());
+        assert_handoff_metrics(
+            &context.encode(),
+            HANDOFF_ACTOR_METRICS,
+            &[
+                ("PublishedAfterCertification", 1),
+                ("Received", 1),
+                ("Requested", 1),
+            ],
+            &[],
+        );
+    }
+
     #[test_traced]
     fn test_pipelined_handoff_certification_before_build() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            certification_first_reuses_build(&mut context, HandoffPublication::AfterCertification)
+                .await;
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            certification_first_reuses_build(
+                &mut context,
+                HandoffPublication::AllowBeforeCertification,
+            )
+            .await;
+        });
+    }
+
+    /// Parent finalization releases a held build like certification does.
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_released_by_parent_finalization() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
-
-            fixture.finish_certification(certified).await;
-            fixture.wait_for_parent_certified().await;
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Requested").await;
-            assert!(
-                fixture.propose_responses.lock().is_empty(),
-                "must not rebuild"
-            );
             fixture.respond();
+            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
+
+            let (_, finalization) = build_finalization(
+                &fixture.schemes,
+                &fixture.parent,
+                quorum(fixture.schemes.len() as u32),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Finalization(finalization));
             observe_handoff_publication(
                 &context,
                 &mut relayed,
@@ -4514,10 +4612,16 @@ mod tests {
                 fixture.digest,
             )
             .await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "held handoff must not rebuild"
+            );
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
                 &[
+                    ("Held", 1),
                     ("PublishedAfterCertification", 1),
                     ("Received", 1),
                     ("Requested", 1),
@@ -4527,40 +4631,105 @@ mod tests {
         });
     }
 
+    /// A deferred handoff waits in the pending slot. The ordinary request for
+    /// the same context follows the durable parent certification.
     #[test_traced]
-    fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
+    fn test_pipelined_handoff_deferred_request_waits_for_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AllowBeforeCertification)
-                    .await;
-            let mut relayed = fixture.observer();
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            fixture.defer();
+            wait_for_handoff_metric(&context, "handoff_events", "event", "Deferred").await;
             let parent = fixture.parent.clone();
             let certified = fixture.certification_request(&context, &parent).await;
 
-            fixture.finish_certification(certified).await;
-            fixture.wait_for_parent_certified().await;
-            assert!(
-                fixture.propose_responses.lock().is_empty(),
-                "must not rebuild"
+            fixture.pending_syncs.arm();
+            certified.send(true).unwrap();
+            let certification_journal = next_pending_sync(&fixture.pending_syncs);
+            certification_journal
+                .blocked
+                .await
+                .expect("certification journal sync started");
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "ordinary request must wait for the certification sync"
             );
-            fixture.respond();
-            observe_handoff_publication(
-                &context,
-                &mut relayed,
-                &mut fixture.batcher,
-                fixture.digest,
-            )
-            .await;
+
+            certification_journal.release.send(Ok(())).unwrap();
+            fixture.pending_syncs.unblock();
+            let deadline = context.current() + Duration::from_secs(1);
+            while fixture.requests_for(View::new(3)) < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary request did not follow parent certification"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let contexts: Vec<_> = fixture
+                .propose_contexts
+                .lock()
+                .iter()
+                .filter(|request| request.round.view() == View::new(3))
+                .cloned()
+                .collect();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(
+                contexts[0], contexts[1],
+                "ordinary request must reuse the deferred context"
+            );
+            assert_eq!(contexts[1].parent, (View::new(2), parent.payload));
+            assert!(fixture.handoff_responses.lock().is_empty());
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[
-                    ("PublishedAfterCertification", 1),
-                    ("Received", 1),
-                    ("Requested", 1),
-                ],
+                &[("Deferred", 1), ("Requested", 1)],
                 &[],
+            );
+        });
+    }
+
+    /// A deferred handoff request is abandoned when its view exits.
+    #[test_traced]
+    fn test_pipelined_handoff_deferred_request_exits_view() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            fixture.defer();
+            wait_for_handoff_metric(&context, "handoff_events", "event", "Deferred").await;
+            let parent = fixture.parent.clone();
+            let certified = fixture.certification_request(&context, &parent).await;
+
+            let (_, nullification) = build_nullification(
+                &fixture.schemes,
+                Round::new(Epoch::new(333), View::new(3)),
+                quorum(fixture.schemes.len() as u32),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Nullification(nullification));
+            loop {
+                if matches!(fixture.batcher.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                    if current > View::new(3))
+                {
+                    break;
+                }
+            }
+            fixture.finish_certification(certified).await;
+            wait_for_handoff_metric(&context, "handoff_abandoned", "reason", "ViewExit").await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "no ordinary request follows an exited view"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Deferred", 1), ("Requested", 1)],
+                &[("ViewExit", 1)],
             );
         });
     }

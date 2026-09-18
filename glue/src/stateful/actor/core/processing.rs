@@ -372,9 +372,9 @@ where
                                         },
                                     ),
                                     Some(message) => {
-                                        // Independent requests may overtake an active proposal.
-                                        // The first state-mutating message becomes a FIFO barrier
-                                        // for later mailbox work.
+                                        // Only verification may overtake an active proposal. The
+                                        // first other message becomes a FIFO barrier for later
+                                        // mailbox work.
                                         deferred_message = Some(message);
                                         receive_messages = false;
                                     }

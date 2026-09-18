@@ -279,7 +279,7 @@
 //! withholding publication. It uses the ordinary construction path, which may reuse an existing
 //! block without calling the application builder. `Prepare(AllowBeforeCertification)` also
 //! permits early publication. An application that publishes early by default can still hold an
-//! individual handoff, for example when it does not trust the parent's builder. The decision is
+//! individual handoff, for example when it does not trust the outgoing leader. The decision is
 //! fixed for the request.
 //!
 //! With [`crate::HandoffPublication::AllowBeforeCertification`], the gain is largest with rotating

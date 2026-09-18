@@ -245,14 +245,26 @@ mod tests {
         fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS, TermLength::ONE));
     }
 
+    /// Honest handoff modes: defer every handoff, prepare and hold, or publish early.
+    const HANDOFF_MODES: [(bool, HandoffPublication); 3] = [
+        (false, HandoffPublication::AfterCertification),
+        (true, HandoffPublication::AfterCertification),
+        (true, HandoffPublication::AllowBeforeCertification),
+    ];
+
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
         (
             any::<u64>(),
             prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
+            prop::sample::select(HANDOFF_MODES.as_slice()),
         )
-            .prop_map(move |(seed, term_length)| {
-                test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
-            })
+            .prop_map(
+                move |(seed, term_length, (accept_handoffs, handoff_publication))| FuzzInput {
+                    accept_handoffs,
+                    handoff_publication,
+                    ..test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
+                },
+            )
     }
 
     proptest! {

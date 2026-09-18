@@ -258,6 +258,9 @@ fn retained_pipeline_handoff(certification_first: bool) {
                 marshal.get_verified(round).await.is_none(),
                 "the completed candidate must remain staged until its parent certifies"
             );
+            // Keep certification blocked well past link delivery, so an early
+            // vote sent at build completion would reach the observer.
+            let quiet_until = context.current() + 3 * LINK.latency;
             loop {
                 select! {
                     result = vote_receiver.recv() => {
@@ -274,7 +277,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
                             "default handoff mode must not vote before parent certification"
                         );
                     },
-                    _ = context.sleep(Duration::from_millis(10)) => break,
+                    _ = context.sleep_until(quiet_until) => break,
                 }
             }
             verify_release_tx.send_lossy(());
