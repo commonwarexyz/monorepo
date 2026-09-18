@@ -25,10 +25,10 @@ pub(crate) struct ExcludeVariableArgs {
     #[command(flatten)]
     tree: GenerateArgs,
     keyhex: String,
-    /// Fixed key width (0, 1, 4, or 32). Omitted means length-prefixed Vec<u8>.
+    /// Fixed key width (0, 1, 4, or 32). Omitted means length-prefixed `Vec<u8>`.
     #[arg(long)]
     key_size: Option<usize>,
-    /// Fixed value width (0, 1, 4, or 32). Omitted means length-prefixed Vec<u8>.
+    /// Fixed value width (0, 1, 4, or 32). Omitted means length-prefixed `Vec<u8>`.
     #[arg(long)]
     value_size: Option<usize>,
     /// Raw vector value or metadata length, otherwise selected by the seed.
