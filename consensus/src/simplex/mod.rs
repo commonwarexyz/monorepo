@@ -302,9 +302,10 @@
 //! finalized at that point. They do not imply network delivery.
 //!
 //! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
-//! view exit, superseded ancestry, response closure, or ineligibility at recording. Explicit
-//! deferrals are counted only in `handoff_events`. Neither family tracks losses across restart
-//! or distinguishes newly built candidates from reused blocks.
+//! view exit, superseded ancestry, response closure, or ineligibility at recording. A deferral
+//! is counted once in `handoff_events`; the deferred request can still be abandoned later.
+//! Neither family tracks losses across restart or distinguishes newly built candidates from
+//! reused blocks.
 //!
 //! ### Latency Metrics
 //!

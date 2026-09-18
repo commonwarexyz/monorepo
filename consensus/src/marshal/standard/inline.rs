@@ -607,8 +607,6 @@ where
         let mut handoff = self.clone();
         let context = self
             .context
-            .lock()
-            .await
             .child("propose_handoff")
             .with_attribute("round", consensus_context.round);
         context.spawn(move |_| async move {
