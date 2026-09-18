@@ -4,9 +4,9 @@ use super::{
     state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, HandoffProposal, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, HandoffProposal, HandoffPublication, LATENCY, Relay, Reporter, Viewable,
     simplex::{
-        Floor, HandoffPublication, Plan,
+        Floor, Plan,
         actors::{Kind, batcher, resolver},
         elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
@@ -111,7 +111,10 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 
 /// Unified response from a regular or handoff proposal request.
 enum ProposalResponse<D> {
-    Proposed(D),
+    Proposed {
+        payload: D,
+        publication: Option<HandoffPublication>,
+    },
     AwaitCertification,
 }
 
@@ -135,12 +138,21 @@ impl<D> Future for ProposalReceiver<D> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            Self::Regular(receiver) => Pin::new(receiver)
-                .poll(cx)
-                .map(|result| result.map(ProposalResponse::Proposed)),
+            Self::Regular(receiver) => Pin::new(receiver).poll(cx).map(|result| {
+                result.map(|payload| ProposalResponse::Proposed {
+                    payload,
+                    publication: None,
+                })
+            }),
             Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
                 result.map(|proposal| match proposal {
-                    HandoffProposal::Proposed(payload) => ProposalResponse::Proposed(payload),
+                    HandoffProposal::Proposed {
+                        payload,
+                        publication,
+                    } => ProposalResponse::Proposed {
+                        payload,
+                        publication: Some(publication),
+                    },
                     HandoffProposal::AwaitCertification => ProposalResponse::AwaitCertification,
                 })
             }),
@@ -746,7 +758,9 @@ impl<
         // Try to use result
         let context = request.into_context();
         let proposed = match proposed {
-            Ok(ProposalResponse::Proposed(proposed)) => proposed,
+            Ok(ProposalResponse::Proposed {
+                payload: proposed, ..
+            }) => proposed,
             Ok(ProposalResponse::AwaitCertification) => {
                 self.state.defer_handoff(&context);
                 return None;
@@ -1248,7 +1262,10 @@ impl<
                     let proposed = match pending_propose.as_mut() {
                         Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
                         Some(Request(_, _, ProposalState::Ready(payload))) => {
-                            Ok(ProposalResponse::Proposed(*payload))
+                            Ok(ProposalResponse::Proposed {
+                                payload: *payload,
+                                publication: None,
+                            })
                         }
                         _ => core::future::pending().await,
                     };
@@ -1289,10 +1306,17 @@ impl<
 
                 // Keep an unpublished build outside the round proposal slot. The
                 // captured request and build latch remain live until promotion.
-                if self.handoff_publication == HandoffPublication::AfterCertification
-                    && matches!(&request, ProposalRequest::Handoff(_))
+                if matches!(&request, ProposalRequest::Handoff(_))
+                    && (self.handoff_publication == HandoffPublication::AfterCertification
+                        || matches!(
+                            &proposed,
+                            Ok(ProposalResponse::Proposed {
+                                publication: Some(HandoffPublication::AfterCertification),
+                                ..
+                            })
+                        ))
                     && !self.state.proposal_parent_certified(request.context())
-                    && let Ok(ProposalResponse::Proposed(payload)) = &proposed
+                    && let Ok(ProposalResponse::Proposed { payload, .. }) = &proposed
                 {
                     pending_propose = Some(Request(request, span, ProposalState::Held(*payload)));
                     continue;

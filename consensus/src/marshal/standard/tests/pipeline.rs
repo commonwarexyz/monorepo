@@ -12,6 +12,7 @@ struct PipelineApp {
     policies: Arc<AtomicUsize>,
     builds: Arc<AtomicUsize>,
     block: B,
+    publication: HandoffPublication,
 }
 
 struct DropSignal(Option<oneshot::Sender<()>>);
@@ -32,7 +33,7 @@ impl crate::Application<Runtime> for PipelineApp {
 
     fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Prepare
+        HandoffPolicy::Prepare(self.publication)
     }
 
     async fn propose(
@@ -157,6 +158,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
             policies: policies.clone(),
             builds: builds.clone(),
             block,
+            publication: HandoffPublication::AllowBeforeCertification,
         };
         let control = oracle.control(victim.clone());
         let vote_network = control.register(3, TEST_QUOTA).await.unwrap();

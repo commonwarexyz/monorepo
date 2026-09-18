@@ -14,9 +14,9 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Monitor, Viewable,
+    HandoffPublication, Monitor, Viewable,
     simplex::{
-        Engine, Floor, ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy, config,
+        Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },

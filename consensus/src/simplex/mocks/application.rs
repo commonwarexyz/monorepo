@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, HandoffProposal, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, HandoffProposal, HandoffPublication, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -207,6 +207,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     drop_proposals: bool,
     stall_proposals: bool,
     accept_handoffs: bool,
+    handoff_publication: HandoffPublication,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -273,6 +274,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 drop_proposals: false,
                 stall_proposals: false,
                 accept_handoffs: false,
+                handoff_publication: HandoffPublication::AllowBeforeCertification,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -311,6 +313,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     /// Configures whether the mock accepts pipelined handoff proposal requests.
     pub const fn set_accept_handoffs(&mut self, enabled: bool) {
         self.accept_handoffs = enabled;
+    }
+
+    /// Configures the publication ceiling returned with accepted handoff proposals.
+    pub const fn set_handoff_publication(&mut self, publication: HandoffPublication) {
+        self.handoff_publication = publication;
     }
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
@@ -540,7 +547,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         if let Some(controller) = &self.handoff_propose_controller {
                             controller(digest, response);
                         } else {
-                            response.send_lossy(HandoffProposal::Proposed(digest));
+                            response.send_lossy(HandoffProposal::Proposed {
+                                payload: digest,
+                                publication: self.handoff_publication,
+                            });
                         }
                     }
                     Message::Verify {
