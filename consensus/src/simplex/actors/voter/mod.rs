@@ -117,8 +117,14 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
-    type HandoffProposeResponses =
-        Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<HandoffProposal<Sha256Digest>>)>>>;
+    type HandoffProposeResponses = Arc<
+        Mutex<
+            Vec<(
+                HandoffProposal<Sha256Digest>,
+                oneshot::Sender<HandoffProposal<Sha256Digest>>,
+            )>,
+        >,
+    >;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     fn labeled_metric_snapshot(
@@ -369,8 +375,8 @@ mod tests {
             }));
         }
         if let Some(handoff_propose_responses) = handoff_propose_responses {
-            actor.set_handoff_propose_controller(Box::new(move |digest, response| {
-                handoff_propose_responses.lock().push((digest, response));
+            actor.set_handoff_propose_controller(Box::new(move |proposal, response| {
+                handoff_propose_responses.lock().push((proposal, response));
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -4045,9 +4051,11 @@ mod tests {
         elector: RoundRobin<Sha256>,
         local_index: usize,
         parent: Proposal<Sha256Digest>,
+        /// The candidate the mock built, forwarded unchanged by `respond`.
+        proposal: HandoffProposal<Sha256Digest>,
+        /// The candidate's payload, for observing relays and votes.
         digest: Sha256Digest,
         response: Option<oneshot::Sender<HandoffProposal<Sha256Digest>>>,
-        publication: HandoffPublication,
         certification_requests: CertificationRequests,
         pending_syncs: PendingSyncs,
         actor_handle: Arc<Mutex<Option<commonware_runtime::Handle<()>>>>,
@@ -4118,8 +4126,6 @@ mod tests {
                     )),
                     propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
-                    // Any `Some` enables the controller, which sends the
-                    // fixture's `publication` field instead of this value.
                     handoff: Some(handoff_publication),
                     ..Default::default()
                 },
@@ -4135,7 +4141,15 @@ mod tests {
                 &relay,
             )
             .await;
-            let (digest, response) = take_proposal_response(context, &handoff_responses).await;
+            let (proposal, response) = take_proposal_response(context, &handoff_responses).await;
+            let HandoffProposal::Proposed {
+                payload: digest,
+                publication,
+            } = proposal
+            else {
+                panic!("mock must return a candidate");
+            };
+            assert_eq!(publication, handoff_publication);
 
             Self {
                 participants,
@@ -4144,9 +4158,9 @@ mod tests {
                 elector,
                 local_index,
                 parent,
+                proposal,
                 digest,
                 response: Some(response),
-                publication: handoff_publication,
                 certification_requests,
                 pending_syncs,
                 actor_handle,
@@ -4185,10 +4199,7 @@ mod tests {
             self.response
                 .take()
                 .expect("handoff response must be pending")
-                .send(HandoffProposal::Proposed {
-                    payload: self.digest,
-                    publication: self.publication,
-                })
+                .send(self.proposal)
                 .expect("handoff request must remain open");
         }
 
