@@ -5,13 +5,13 @@ use std::future::Future;
 
 /// Reuses a handshake with a fixed namespace and plaintext message limit.
 ///
-/// Each connection attempt uses a clone of the handshake.
+/// Works with any [Handshake] implementation, cloning it for each connection attempt.
 ///
 /// # Examples
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{Config, cups::Handshake, utils::Timeout};
+/// use commonware_stream::{cups::{Config, Handshake}, utils::Timeout};
 /// use std::time::Duration;
 ///
 /// let config = Config::new(

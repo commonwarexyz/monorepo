@@ -11,7 +11,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::{Handshake, cups::Config as StreamConfig};
 use commonware_utils::{IpAddrExt, concurrency::Limiter, net::SubnetMask};
 use rand_core::CryptoRng;
 use std::{net::SocketAddr, num::NonZeroU32, sync::Arc};

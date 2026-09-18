@@ -1,4 +1,4 @@
-//! Commonware CUPS (Counter Unidirectional Packet Stream).
+//! Counter Unidirectional Packet Stream (CUPS).
 //!
 //! CUPS protects ordered message records using a separate key and implicit counter for each
 //! direction. "Packet" refers to a framed message on an ordered byte stream, not a datagram.
@@ -7,8 +7,8 @@
 //!
 //! # Handshake
 //!
-//! [Handshake] implements [crate::Handshake] using Commonware
-//! [SAKE](commonware_cryptography::handshake::sake) (Simple Authenticated Key Exchange) and returns CUPS
+//! [Handshake] implements [crate::Handshake] using
+//! [Simple Authenticated Key Exchange (SAKE)](commonware_cryptography::handshake::sake) and returns CUPS
 //! [Sender] and [Receiver] halves. SAKE uses a fixed three-message exchange with ephemeral X25519
 //! keys, identity signatures, and BLAKE3 transcript derivation to establish directional ciphers.
 //!
@@ -60,6 +60,9 @@ use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
+mod config;
+pub use config::Config;
+
 const TAG_SIZE: u32 = {
     assert!(sake::TAG_SIZE <= u32::MAX as usize);
     sake::TAG_SIZE as u32
@@ -105,7 +108,7 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Establishes CUPS streams with Commonware SAKE (Simple Authenticated Key Exchange).
+/// Establishes CUPS streams with Simple Authenticated Key Exchange (SAKE).
 ///
 /// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake].
 #[derive(Clone)]

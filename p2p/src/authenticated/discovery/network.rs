@@ -20,7 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, utils::Timeout};
+use commonware_stream::{cups::Config as StreamConfig, utils::Timeout};
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
