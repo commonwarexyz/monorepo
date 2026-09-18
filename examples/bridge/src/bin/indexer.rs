@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::{Config as StreamConfig, cups::Sake, utils::Timeout};
+use commonware_stream::{Config as StreamConfig, cups::Handshake, utils::Timeout};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -239,7 +239,7 @@ fn main() {
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
         let handshake = StreamConfig::new(
             Timeout::new(
-                Sake {
+                Handshake {
                     signer,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),

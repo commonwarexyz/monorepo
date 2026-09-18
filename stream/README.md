@@ -6,7 +6,7 @@
 Exchange messages over arbitrary transport.
 
 Commonware CUPS (Counter Unidirectional Packet Stream) protects ordered messages with
-implicit counter nonces. `cups::Sake` establishes these streams using Commonware SAKE
+implicit counter nonces. `cups::Handshake` establishes these streams using Commonware SAKE
 (Simple Authenticated Key Exchange). `Handshake`, `Sender`, and `Receiver` are the
 generic interfaces for connection setup and message exchange.
 

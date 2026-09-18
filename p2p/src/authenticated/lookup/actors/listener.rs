@@ -328,7 +328,7 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
-    use commonware_stream::{cups::Sake, utils::Timeout};
+    use commonware_stream::{cups::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -362,7 +362,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = Sake {
+            let handshake = StreamHandshake {
                 signer: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -531,7 +531,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = Sake {
+            let handshake = StreamHandshake {
                 signer: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -617,7 +617,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = Sake {
+            let handshake = StreamHandshake {
                 signer: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -703,7 +703,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = Sake {
+            let handshake = StreamHandshake {
                 signer: PrivateKey::from_seed(1),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),

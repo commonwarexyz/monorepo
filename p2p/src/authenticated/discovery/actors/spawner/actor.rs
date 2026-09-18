@@ -172,7 +172,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
         Handshake as _,
-        cups::{Receiver as CupsReceiver, Sake, Sender as CupsSender},
+        cups::{Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender},
         utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
@@ -187,9 +187,9 @@ mod tests {
 
     type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
 
-    fn handshake(signer: PrivateKey) -> Timeout<Sake<PrivateKey>> {
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
         Timeout::new(
-            Sake {
+            StreamHandshake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
