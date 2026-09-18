@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-p2p.svg)](https://crates.io/crates/commonware-p2p)
 [![Docs.rs](https://docs.rs/commonware-p2p/badge.svg)](https://docs.rs/commonware-p2p)
 
-Communicate with authenticated peers over encrypted connections.
+Communicate with authenticated peers.
 
 ## Status 
 

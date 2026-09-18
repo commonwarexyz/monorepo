@@ -436,14 +436,14 @@ macro_rules! forward_context {
             fn sleep(
                 &self,
                 duration: std::time::Duration,
-            ) -> impl Future<Output = ()> + Send + 'static {
+            ) -> impl Future<Output = ()> + Send + 'static + use<E> {
                 self.inner.sleep(duration)
             }
 
             fn sleep_until(
                 &self,
                 deadline: std::time::SystemTime,
-            ) -> impl Future<Output = ()> + Send + 'static {
+            ) -> impl Future<Output = ()> + Send + 'static + use<E> {
                 self.inner.sleep_until(deadline)
             }
         }

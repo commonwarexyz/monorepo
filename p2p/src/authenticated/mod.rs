@@ -1,4 +1,4 @@
-//! Communicate with a fixed set of authenticated peers over encrypted connections.
+//! Communicate with a fixed set of authenticated peers.
 //!
 //! [discovery] operates under the assumption that peer addresses aren't known in
 //! advance, and that they need to be discovered. Bootstrappers are used to
@@ -10,7 +10,7 @@
 mod channels;
 mod data;
 pub use crate::sizing::peer_set_limit;
-pub use data::{MAX_PAYLOAD_OVERHEAD, MAX_SIZE};
+pub use data::{MAX_PAYLOAD_OVERHEAD, max_size};
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
