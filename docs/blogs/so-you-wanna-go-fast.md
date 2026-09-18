@@ -13,12 +13,14 @@ katex: false
 
 A blockchain that produces several gigabytes of blocks per second asks every replica to receive, store, and process that data. If a replica falls behind or crashes, it has to recover its place and catch up while new blocks keep arriving.
 
-We're building [Multimmit](/blogs/multimmit) to reach that scale by letting producers build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
+We're building [Multimmit](/blogs/multimmit) to reach that scale by enabling producers to build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
+
+In healthy tests with fsync disabled, Multimmit trivially sustained one million 512-byte transactions per second across 50 validators, with median submission-to-finality latency of 400 ms globally and 63 ms in North America. The [results below](#how-fast-does-it-go) show the comparisons and fault scenarios. Getting there takes more than a fast consensus protocol.
 
 Let's follow three producers, Alice, Bob, and Carol. Their blocks might appear in the application log like this:
 
 ```{=html}
-<link rel="stylesheet" href="so-you-wanna-go-fast.css">
+<link rel="stylesheet" href="so-you-wanna-go-fast.css?v=fc77aa645b03">
 <figure class="log-stream" aria-describedby="log-stream-caption">
   <ol role="list">
     <li><span class="log-position">1</span><strong>Alice</strong><span>block 1</span></li>
@@ -185,7 +187,7 @@ Traces include time spent waiting for disk, so we use [samply](https://github.co
 
 Batching writes, overlapping independent work, and avoiding repeated reads give us more room to handle incoming blocks. To see how that work adds up, we've been measuring Multimmit in two deployments of 50 validators, spread across either 13 regions around the world or three regions in North America.
 
-The charts compare Multimmit with BlueBottle and Raptr, running consensus-only workloads on the same testbeds. Each validator runs on an AWS `c8g.12xlarge` instance with 48 vCPUs and 96 GiB of RAM, processing synthetic 512-byte transactions. These measurements cover the whole consensus implementation, including work beyond marshal.
+The charts compare Multimmit with [BlueBottle](https://arxiv.org/abs/2511.15361) and [Raptr](https://arxiv.org/abs/2504.18649), running consensus-only workloads on the same testbeds. Each validator runs on an AWS `c8g.12xlarge` instance with 48 vCPUs and 96 GiB of RAM, processing synthetic 512-byte transactions. These measurements cover the whole consensus implementation, including work beyond marshal.
 
 **Submission-to-finality latency** runs from a transaction's scheduled submission to its first local consensus finality at the producer. The clock starts before admission, block construction, and signing, so those delays count too.
 
@@ -205,17 +207,17 @@ In healthy runs with fsync disabled, increasing the offered load from 50,000 to 
     <p>Virginia · Ohio · Canada · 50 validators</p>
     <p class="mm-result-fallback">At one million offered transactions per second, median submission-to-finality latency is 63 ms and P99 is 100 ms.</p>
   </div>
-  <figcaption id="mm-results-caption">Figure 9. Scheduled submission to first local consensus finality at the producer, measured on the same testbeds. Use the controls inside each chart to select its scenario, enable fsync, or switch between median and P99. Median plots include P25–P75 range bars. Fsync off compares all three implementations. Fsync on shows only Multimmit. Each point is one 120-second submission cohort after a 120-second warmup. Throughput counts transactions finalized during the measurement window. Hover, tap, or focus a load point to compare the measurements. Latency uses a logarithmic scale, fitted to each chart. Throughput uses a linear scale. <a href="#missing-measurements">About the missing results.</a></figcaption>
+  <figcaption id="mm-results-caption">Figure 9. Scheduled submission to first local consensus finality at the producer, measured on the same testbeds. Use the controls inside each chart to select its scenario, enable fsync, or switch between median and P99. Median plots include P25–P75 range bars. Fsync off compares all three implementations. Fsync on shows only Multimmit. Each point is one 120-second submission cohort after a 120-second warmup. Throughput counts transactions finalized during the measurement window. Hover, tap, or focus a load point to compare the measurements. Latency uses a logarithmic scale, fitted to each chart. Throughput uses a linear scale.</figcaption>
 </figure>
-<script type="module" src="so-you-wanna-go-fast.results.js?v=9b1d703ec0aa"></script>
+<script type="module" src="so-you-wanna-go-fast.results.js?v=4e2bc62ff535"></script>
 ```
 
 The fault scenarios stop one or nine validators, or drop 0.1% of complete application messages at the receiver, after decoding and before protocol delivery. TCP cannot retransmit those injected drops.
 
-The [measurement dataset](/artifacts/multimmit-measurements.json.zst) contains the throughput, latency, and traffic measurements plotted here. Raptr also includes a small payload-retention fix needed to complete the measurements. Its quorum is 34 out of 50 validators, compared with 41 for Multimmit and BlueBottle.
+The [measurement dataset](/artifacts/multimmit-measurements.json.zst) contains the throughput, latency, and traffic measurements plotted here. Raptr also includes a small [payload-retention fix](https://github.com/clabby/aptos-core/commit/cffe99b0f3b9def4693a6e7893056ed411b20229) needed to complete the measurements. Its quorum is 34 out of 50 validators, compared with 41 for Multimmit and BlueBottle.
 
 ```{=html}
-<p id="missing-measurements">BlueBottle and Raptr's sweeps stop at 500,000 offered transactions per second because neither implementation achieved a steady result above that rate in our tests. BlueBottle exhausted memory in the global one-million-tx/s test. With nine crashes at 500,000 tx/s globally, additional validators exhausted memory, leaving fewer live validators than quorum. With 0.1% message loss, the 250,000 and 500,000 tx/s runs in both deployments failed to sustain the offered load and finalize the full submission cohort. Raptr's backlog kept growing in the healthy global runs at 250,000 and 500,000 tx/s, preventing us from capturing a steady-state result. Those rates are excluded from its global results, and the corresponding fault scenarios were not run. In North America, its nine-crash runs at those rates did not sustain the required throughput, and the 500,000 tx/s run also failed to finalize the full submission cohort. We're happy to update these results with updated binaries from the authors of these projects.</p>
+<p id="missing-measurements">BlueBottle and Raptr's sweeps stop at 500,000 offered transactions per second because neither implementation achieved a steady result above that rate in our tests. BlueBottle exhausted memory in the global one-million-tx/s test. With nine crashes at 500,000 tx/s globally, additional validators exhausted memory, leaving fewer live validators than quorum. With 0.1% message loss, the 250,000 and 500,000 tx/s runs in both deployments failed to sustain the offered load and finalize the full submission cohort. Raptr's backlog kept growing in the healthy global runs at 250,000 and 500,000 tx/s, preventing us from capturing a steady-state result. Those rates are excluded from its global results, and the corresponding fault scenarios were not run. In North America, its nine-crash runs at those rates did not sustain the required throughput, and the 500,000 tx/s run also failed to finalize the full submission cohort. If anyone is interested in further updating these binaries to run at this load for a complete comparison, please reach out!</p>
 ```
 
-We're working to bring Multimmit to production in the coming months. These measurements give us a way to keep checking that the work pays off as we get there.
+We're working to bring Multimmit to production in the coming months. These measurements help ensure we're on the right track on such a large change.

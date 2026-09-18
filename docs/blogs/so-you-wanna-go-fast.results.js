@@ -210,10 +210,6 @@ for (const panel of document.querySelectorAll('[data-mm-results]')) {
   syncInput.type = 'checkbox';
   syncInput.addEventListener('change', () => { fsync = syncInput.checked; render(); });
   syncLabel.append(syncInput, 'Fsync on');
-  const syncNote = document.createElement('small');
-  syncNote.textContent = 'Multimmit only';
-  syncNote.hidden = true;
-  syncLabel.append(syncNote);
   toolbar.append(syncLabel);
   const legend = document.createElement('div');
   legend.className = 'mm-result-legend';
@@ -242,13 +238,12 @@ for (const panel of document.querySelectorAll('[data-mm-results]')) {
   panel.querySelector('.mm-result-fallback').remove();
 
   function render() {
-    syncNote.hidden = !fsync;
     const conditions = results.filter(row => row.topology === panel.dataset.mmResults && row.scenario === scenario && row.fsync === fsync);
     const rows = conditions.filter(row => row.paper_eligible).sort((a, b) => protocols.indexOf(a.protocol) - protocols.indexOf(b.protocol) || a.offered_tps - b.offered_tps);
     for (const [index, item] of [...legend.children].entries()) item.hidden = fsync && protocols[index] !== 'Multimmit';
     for (const button of controls.children) button.setAttribute('aria-pressed', button.dataset.metric === metric);
     const width = plot.clientWidth;
-    const height = width < 480 ? 285 : 330;
+    const height = width < 480 ? 260 : 280;
     const left = 104, right = width - 24, top = 16, bottom = height - 48;
     const minY = 10 ** Math.floor(Math.log10(Math.min(...rows.map(r => metric === 'p50_ms' ? r.p25_ms : r.p99_ms)) / 1.05));
     const upper = Math.max(...rows.map(r => metric === 'p50_ms' ? r.p75_ms : r.p99_ms)) * 1.05;

@@ -1,7 +1,7 @@
 .log-forward {
   max-width: 640px;
   margin: 28px auto;
-  font: 13px/1.5 monospace;
+  font: 12px/1.5 monospace;
 }
 .log-forward figcaption { margin-top: 14px; }
 
@@ -34,7 +34,7 @@
 .log-stream {
   max-width: 640px;
   margin: 28px auto;
-  font: 13px/1.5 monospace;
+  font: 12px/1.5 monospace;
 }
 .log-stream figcaption {
   margin-top: 14px;
@@ -87,21 +87,21 @@
   border: 1px solid #bdbdbd;
   background: #fff;
   color: #111;
-  font: 13px/1.45 monospace;
+  font: 12px/1.4 monospace;
 }
 
 .log-figure .log-heading {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 8px 12px;
   border-bottom: 1px solid #ddd;
 }
 
 .log-figure .log-svg {
   display: block;
   width: 100%;
-  max-width: 480px;
+  max-width: 320px;
   height: auto;
   margin: 8px auto;
   overflow: visible;
@@ -139,7 +139,7 @@
 .log-figure .log-caption {
   min-height: 4.4em;
   margin: 0;
-  padding: 12px 14px;
+  padding: 8px 12px;
   border-top: 1px solid #ddd;
 }
 .log-figure .log-controls {
@@ -147,7 +147,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-top: 1px solid #ddd;
 }
 .log-figure .log-controls button {
@@ -230,11 +230,11 @@
   .log-recovery .log-route { transition: none; }
 }
 
-.mm-results { margin: 28px 0; font: 13px/1.5 monospace; }
-.mm-result-panel { margin-bottom: 20px; padding: 18px 20px 14px; border: 1px solid #bdbdbd; background: #fff; }
-.mm-result-panel h3 { margin: 0; font-size: 16px; }
-.mm-result-panel > p { margin: 3px 0 16px; color: #666; font-size: 12px; }
-.mm-result-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-bottom: 16px; font-size: 12px; }
+.mm-results { margin: 28px 0; font: 12px/1.5 monospace; }
+.mm-result-panel { margin-bottom: 20px; padding: 12px 16px 10px; border: 1px solid #bdbdbd; background: #fff; }
+.mm-result-panel h3 { margin: 0; font-size: 14px; }
+.mm-result-panel > p { margin: 3px 0 10px; color: #666; font-size: 12px; }
+.mm-result-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-bottom: 10px; font-size: 12px; }
 .mm-result-legend span { display: inline-flex; align-items: center; gap: 8px; }
 .mm-result-plot { position: relative; }
 .mm-result-plot svg { display: block; width: 100%; height: auto; overflow: visible; font: 11px monospace; fill: #666; }
@@ -243,7 +243,7 @@
 .mm-guide { stroke: #1f1fd1; stroke-opacity: .3; stroke-dasharray: 3 4; }
 .mm-hit { fill: transparent; cursor: crosshair; }
 .mm-hit:focus-visible { outline: 2px solid #1f1fd1; outline-offset: -2px; }
-.mm-result-tooltip { position: absolute; z-index: 1; width: 340px; max-width: 100%; padding: 12px 14px; border: 1px solid #1f1fd1; background: #fff; color: #111; box-shadow: 3px 3px 0 #e9e9f8; pointer-events: none; font-size: 12px; }
+.mm-result-tooltip { position: absolute; z-index: 1; width: 340px; max-width: 100%; padding: 8px 12px; border: 1px solid #1f1fd1; background: #fff; color: #111; box-shadow: 3px 3px 0 #e9e9f8; pointer-events: none; font-size: 12px; }
 .mm-result-tooltip strong { display: block; }
 .mm-result-tooltip strong { color: #1f1fd1; font-size: 14px; }
 .mm-results figcaption { line-height: 1.5; }
@@ -262,12 +262,11 @@
 .mm-result-tooltip th:first-child { text-align: left; }
 .mm-result-tooltip .mm-detail { text-align: left; color: #666; font-size: 10px; padding: 0 0 8px; white-space: normal; }
 
-.mm-result-scenarios { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #ddd; margin-top: 14px; }
-.mm-result-scenarios button { margin: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 10px 2px; }
+.mm-result-scenarios { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid #ddd; margin-top: 10px; }
+.mm-result-scenarios button { margin: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 6px 2px; }
 .mm-result-scenarios button[aria-pressed="true"] { background: transparent; border-color: #1f1fd1; }
-.mm-result-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 18px; }
+.mm-result-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 10px; }
 .mm-result-controls button { margin: 0; }
 .mm-result-controls button + button { border-left: 0; }
 .mm-result-sync { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; cursor: pointer; min-height: 36px; }
 .mm-result-sync input { accent-color: #1f1fd1; width: 16px; height: 16px; margin: 0; }
-.mm-result-sync small { color: #666; font-size: 10px; }
