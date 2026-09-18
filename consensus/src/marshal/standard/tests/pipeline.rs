@@ -78,7 +78,7 @@ async fn next_vote(
 }
 
 /// A handoff build that outlives or precedes its parent's certification is
-/// published once, after that certification, and never rebuilt.
+/// published after that certification and is never rebuilt.
 fn retained_pipeline_handoff(first: First) {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
         let Fixture {
@@ -245,8 +245,8 @@ fn retained_pipeline_handoff(first: First) {
             First::Build => {
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
-                // Block certification for three link delays so the observer would
-                // receive any vote published when the build completes.
+                // Block certification for three link delays so the observer
+                // receives any vote published when the build completes.
                 let quiet_until = context.current() + 3 * LINK.latency;
                 loop {
                     select! {

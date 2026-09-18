@@ -3235,6 +3235,22 @@ mod tests {
                     "{kind:?}: failed application builds should not be timed"
                 );
 
+                // A failed build closes the handoff response as it closes the ordinary one.
+                let failing_app = MockVerifyingApp::new().with_handoff_policy(
+                    HandoffPolicy::Prepare(HandoffPublication::AfterCertification),
+                );
+                let mut failing = Wrapper::new(
+                    kind,
+                    context.child("failed_handoff"),
+                    failing_app,
+                    marshal.clone(),
+                );
+                let handoff_rx = failing.propose_handoff(non_boundary_context.clone()).await;
+                assert!(
+                    handoff_rx.await.is_err(),
+                    "{kind:?}: handoff response should close when application returns no block"
+                );
+
                 // Dropping a handoff response must cancel the ordinary build it forwards.
                 let (gated_app, started, dropped) = MockVerifyingApp::new()
                     .with_handoff_policy(HandoffPolicy::Prepare(
