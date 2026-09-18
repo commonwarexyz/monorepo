@@ -566,7 +566,7 @@ contract LibQMDBBatchTest is HashTest {
         string memory variant,
         string memory activity
     ) internal returns (BatchCase memory c) {
-        return generate(n, selected, floor, sparse, current, variant, activity, 32);
+        return generate(n, selected, floor, sparse, current, variant, activity, 32, "fixed");
     }
 
     /// @dev Decode a Rust batch fixture with a caller-selected Current chunk size.
@@ -578,9 +578,10 @@ contract LibQMDBBatchTest is HashTest {
         bool current,
         string memory variant,
         string memory activity,
-        uint256 chunkBytes
+        uint256 chunkBytes,
+        string memory encoding
     ) internal returns (BatchCase memory c) {
-        string[] memory args = new string[]((sparse ? 12 : 13) + (current ? 5 : 0));
+        string[] memory args = new string[]((sparse ? 14 : 15) + (current ? 5 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = sparse ? "multi" : "range";
@@ -601,6 +602,8 @@ contract LibQMDBBatchTest is HashTest {
         args[offset++] = _mmb() ? "mmb" : "mmr";
         args[offset++] = "--variant";
         args[offset++] = variant;
+        args[offset++] = "--encoding";
+        args[offset++] = encoding;
         args[offset++] = "--inactivity-floor";
         args[offset++] = vm.toString(floor);
         if (current) {
@@ -688,6 +691,34 @@ contract LibQMDBBatchTest is HashTest {
         }
     }
 
+    /// @dev Variable operation codecs authenticate values across word and varint length boundaries.
+    function test_DifferentialVariableOperationCodecs() public {
+        string[4] memory variants = [string("ordered"), "unordered", "keyless", "immutable"];
+        uint256[8] memory lengths = [uint256(129), 0, 1, 31, 32, 33, 127, 128];
+        for (uint256 i; i < variants.length; ++i) {
+            for (uint256 mode; mode < (i < 2 ? 4 : 2); ++mode) {
+                BatchCase memory c = generate(
+                    17,
+                    sequence(0, 8),
+                    0,
+                    mode % 2 != 0,
+                    mode >= 2,
+                    variants[i],
+                    mode >= 2 ? "mixed" : "all",
+                    1,
+                    "variable"
+                );
+                uint256 overhead = i == 0 ? 65 : i == 2 ? 1 : 33;
+                for (uint256 j; j < lengths.length; ++j) {
+                    assertEq(c.operations[j].length, overhead + lengths[j] + (lengths[j] < 128 ? 1 : 2));
+                }
+                assertTrue(this.checked(c), "variable codec batch");
+                if (c.current) rejectCurrentMutations(c);
+                else rejectMutations(c);
+            }
+        }
+    }
+
     /// @dev Rust Current proofs cover inactive chunks, mixed bits, and pending plus partial commitments.
     function test_DifferentialCurrentBoundaries() public {
         uint256[6] memory sizes = [uint256(256), 257, 383, 512, 639, 1023];
@@ -713,16 +744,16 @@ contract LibQMDBBatchTest is HashTest {
             uint256 chunkBits = chunkBytes * 8;
             uint256 n = 2 * chunkBits + 1;
             BatchCase memory range =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "zero", chunkBytes);
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "zero", chunkBytes, "fixed");
             assertEq(range.currentRange.chunks.length, 2 * chunkBytes, "packed touched chunks");
             assertTrue(this.checked(range), "variable Current range");
             rejectCurrentMutations(range);
 
             BatchCase memory mixed =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "mixed", chunkBytes);
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "mixed", chunkBytes, "fixed");
             assertTrue(this.checked(mixed), "variable mixed Current range");
             BatchCase memory active =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "all", chunkBytes);
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "all", chunkBytes, "fixed");
             assertTrue(this.checked(active), "variable active Current range");
             if (chunkBytes > 32) {
                 uint256 last = active.currentRange.chunks.length - 1;
@@ -734,7 +765,7 @@ contract LibQMDBBatchTest is HashTest {
             selected[0] = n - 1;
             selected[1] = 0;
             selected[2] = chunkBits;
-            BatchCase memory historical = generate(n, selected, 0, true, true, "unordered", "zero", chunkBytes);
+            BatchCase memory historical = generate(n, selected, 0, true, true, "unordered", "zero", chunkBytes, "fixed");
             assertTrue(this.checked(historical), "variable historical operation witness");
             rejectCurrentMutations(historical);
         }

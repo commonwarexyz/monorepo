@@ -1,10 +1,11 @@
 //! Range and sparse QMDB fixtures verified by the production Rust proof APIs.
 //!
-//! Operations use production fixed codecs. Current bitmaps are materialized test
+//! Operations use production fixed and variable codecs. Current bitmaps are materialized test
 //! inputs for grafting geometry; their status does not claim a database lifecycle.
 
 use super::{
-    GenerateArgs, Uint256, key, materialize_current, materialize_ops, operation, with_chunk_bytes,
+    Encoding, GenerateArgs, Uint256, VARIABLE_LENGTHS, key, materialize_current, materialize_ops,
+    operation, with_chunk_bytes,
 };
 use crate::{
     Hash,
@@ -19,7 +20,10 @@ use commonware_storage::{
     merkle::{Bagging, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
     qmdb::{
         self,
-        any::{unordered, value::FixedEncoding},
+        any::{
+            ordered, unordered,
+            value::{FixedEncoding, VariableEncoding},
+        },
         current::proof::RangeProof,
         immutable, keyless,
     },
@@ -74,6 +78,9 @@ struct Options {
     family: TreeKind,
     #[arg(long, value_enum, default_value = "ordered")]
     variant: Variant,
+    /// Production operation codec; variable values span word and varint boundaries.
+    #[arg(long, value_enum, default_value = "fixed")]
+    encoding: Encoding,
     /// Use a canonical Current root; sparse proofs authenticate historical operations only.
     #[arg(long)]
     current: bool,
@@ -203,26 +210,70 @@ fn generate<F: Graftable, H: Hasher, const N: usize>(
         chunk_bytes: options.chunk_bytes,
     };
     super::validate_tree(&tree)?;
-    match options.variant {
-        Variant::Ordered => prove::<F, H, _, N>(&tree, options, selection, |index| {
-            operation::<F>(seed, index, leaves)
-        }),
-        Variant::Unordered => prove::<F, H, _, N>(&tree, options, selection, |index| {
-            unordered::fixed::Operation::<F, FixedBytes<32>, FixedBytes<32>>::Update(
-                unordered::Update(key(index), FixedBytes::new(leaf(seed, index))),
-            )
-        }),
-        Variant::Keyless => prove::<F, H, _, N>(&tree, options, selection, |index| {
-            keyless::Operation::<F, FixedEncoding<FixedBytes<32>>>::Append(FixedBytes::new(leaf(
-                seed, index,
-            )))
-        }),
-        Variant::Immutable => prove::<F, H, _, N>(&tree, options, selection, |index| {
-            immutable::Operation::<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>>::Set(
-                key(index),
-                FixedBytes::new(leaf(seed, index)),
-            )
-        }),
+    let value = |index| {
+        let length = VARIABLE_LENGTHS[((seed % VARIABLE_LENGTHS.len() as u64 + index)
+            % VARIABLE_LENGTHS.len() as u64) as usize];
+        leaf(seed, index).into_iter().cycle().take(length).collect()
+    };
+    match (options.variant, options.encoding) {
+        (Variant::Ordered, Encoding::Fixed) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                operation::<F>(seed, index, leaves)
+            })
+        }
+        (Variant::Unordered, Encoding::Fixed) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                unordered::fixed::Operation::<F, FixedBytes<32>, FixedBytes<32>>::Update(
+                    unordered::Update(key(index), FixedBytes::new(leaf(seed, index))),
+                )
+            })
+        }
+        (Variant::Keyless, Encoding::Fixed) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                keyless::Operation::<F, FixedEncoding<FixedBytes<32>>>::Append(FixedBytes::new(
+                    leaf(seed, index),
+                ))
+            })
+        }
+        (Variant::Immutable, Encoding::Fixed) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                immutable::Operation::<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>>::Set(
+                    key(index),
+                    FixedBytes::new(leaf(seed, index)),
+                )
+            })
+        }
+        (Variant::Ordered, Encoding::Variable) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                ordered::variable::Operation::<F, FixedBytes<32>, Vec<u8>>::Update(
+                    ordered::variable::Update {
+                        key: key(index),
+                        value: value(index),
+                        next_key: key((index + 1) % leaves),
+                    },
+                )
+            })
+        }
+        (Variant::Unordered, Encoding::Variable) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                unordered::variable::Operation::<F, FixedBytes<32>, Vec<u8>>::Update(
+                    unordered::Update(key(index), value(index)),
+                )
+            })
+        }
+        (Variant::Keyless, Encoding::Variable) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                keyless::Operation::<F, VariableEncoding<Vec<u8>>>::Append(value(index))
+            })
+        }
+        (Variant::Immutable, Encoding::Variable) => {
+            prove::<F, H, _, N>(&tree, options, selection, |index| {
+                immutable::Operation::<F, FixedBytes<32>, VariableEncoding<Vec<u8>>>::Set(
+                    key(index),
+                    value(index),
+                )
+            })
+        }
     }
 }
 
@@ -514,6 +565,80 @@ mod tests {
                         );
                         assert_eq!(multi.positions.len(), multi.digests.len());
                         assert!(multi.positions.windows(2).all(|pair| pair[0] < pair[1]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variable_batches_cover_codecs_and_length_boundaries() {
+        for family in ["mmr", "mmb"] {
+            for hash in ["keccak", "sha256"] {
+                for (variant, overhead) in [
+                    ("ordered", 65),
+                    ("unordered", 33),
+                    ("keyless", 1),
+                    ("immutable", 33),
+                ] {
+                    for current in [false, true] {
+                        if current && matches!(variant, "keyless" | "immutable") {
+                            continue;
+                        }
+                        let mut options = vec![
+                            "--family",
+                            family,
+                            "--hash",
+                            hash,
+                            "--variant",
+                            variant,
+                            "--encoding",
+                            "variable",
+                            "--chunk-bytes",
+                            "1",
+                        ];
+                        if current {
+                            options.extend(["--current", "--activity", "mixed"]);
+                        }
+                        let mut args = vec!["range", "17", "0", "8", "0"];
+                        args.extend_from_slice(&options);
+                        let encoded = run(&args).unwrap();
+                        let (root, operations) = if current {
+                            let range = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
+                            (range.0, range.5)
+                        } else {
+                            let range =
+                                <RangeOutput as SolValue>::abi_decode_params_validate(&encoded)
+                                    .unwrap();
+                            (range.root, range.operations)
+                        };
+                        for (operation, length) in operations.iter().zip(VARIABLE_LENGTHS) {
+                            assert_eq!(
+                                operation.len(),
+                                overhead + length + if length < 128 { 1 } else { 2 }
+                            );
+                        }
+                        let mut args = vec!["multi", "17", "7,0,7", "0"];
+                        args.extend_from_slice(&options);
+                        let encoded = run(&args).unwrap();
+                        let (multi_root, multi_operations) = if current {
+                            let multi = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
+                            (multi.0, multi.6)
+                        } else {
+                            let multi =
+                                <MultiOutput as SolValue>::abi_decode_params_validate(&encoded)
+                                    .unwrap();
+                            (multi.root, multi.operations)
+                        };
+                        assert_eq!(multi_root, root);
+                        assert_eq!(
+                            multi_operations,
+                            vec![
+                                operations[7].clone(),
+                                operations[0].clone(),
+                                operations[7].clone()
+                            ]
+                        );
                     }
                 }
             }

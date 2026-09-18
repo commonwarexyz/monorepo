@@ -23,6 +23,7 @@ target/release/commonware-sol-fuzz simplex --help
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.
 
 QMDB commands use MMB by default. Pass `--family mmr` for MMR proofs.
+Range and sparse commands accept `--encoding variable` for variable-length values.
 
 - `qmdb current` generates active operation proofs for current QMDBs.
 - `qmdb any` generates ordered operation proofs, including overwrite and deletion histories.
