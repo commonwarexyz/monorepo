@@ -48,6 +48,7 @@ impl<
 > Db<F, E, K, V, H, T, N, S>
 {
     /// Initializes a [Db] authenticated database from the given `config`.
+    ///
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
@@ -103,6 +104,7 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
+        ///
         /// The configured [`Strategy`] is used to parallelize merkleization.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
@@ -145,7 +147,7 @@ pub mod test {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, num::NonZeroU16};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -566,18 +568,19 @@ pub mod test {
         fn key(i: u8) -> Digest {
             Digest::from([i; 32])
         }
+
         fn value(branch: u8, i: u8) -> Digest {
             let mut bytes = [branch; 32];
             bytes[31] = i;
             Digest::from(bytes)
         }
+
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
         fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
-            let page_size = std::num::NonZeroU16::new(
-                <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
-            )
-            .unwrap();
+            let page_size =
+                NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
+                    .unwrap();
             FixedConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "rebranch-merkle-journal".into(),

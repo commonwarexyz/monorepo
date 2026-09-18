@@ -29,7 +29,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::contiguous::variable::Config as JournalConfig,
-        merkle::{Family, full::Config as MmrConfig, mmb, mmr},
+        merkle::{Family, Location, full::Config as MmrConfig, mmb, mmr},
         qmdb::{
             Error,
             immutable::tests::{self, immutable_tests},
@@ -125,7 +125,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn open_with_max<F: Family>(
         ctx: deterministic::Context,
-        cap: Option<crate::merkle::Location<F>>,
+        cap: Option<Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<
@@ -196,7 +196,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn open_small_sections_with_max<F: Family>(
         ctx: deterministic::Context,
-        cap: Option<crate::merkle::Location<F>>,
+        cap: Option<Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<

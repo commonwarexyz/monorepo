@@ -60,6 +60,7 @@ stability_scope!(BETA {
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        ops::RangeInclusive,
         sync::Arc,
         time::{Duration, SystemTime},
     };
@@ -106,7 +107,7 @@ stability_scope!(BETA {
     impl BlobLayout {
         /// All blob layouts supported by this runtime.
         #[allow(deprecated)]
-        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
+        pub const ALL: RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
     }
 
     /// Application-owned version of a [`Blob`]'s contents.
@@ -194,12 +195,12 @@ stability_scope!(BETA {
         BlobCorrupt(String, String, String),
         #[error("blob layout mismatch: expected one of {expected:?}, found {found:?}")]
         BlobLayoutMismatch {
-            expected: std::ops::RangeInclusive<BlobLayout>,
+            expected: RangeInclusive<BlobLayout>,
             found: BlobLayout,
         },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
-            expected: std::ops::RangeInclusive<BlobVersion>,
+            expected: RangeInclusive<BlobVersion>,
             found: BlobVersion,
         },
         #[error("invalid or missing checksum")]
@@ -740,7 +741,7 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: &[u8],
-            versions: std::ops::RangeInclusive<BlobVersion>,
+            versions: RangeInclusive<BlobVersion>,
         ) -> impl Future<Output = Result<(Self::Blob, u64, BlobVersion), Error>> + Send;
 
         /// Remove a blob from a given partition.
@@ -878,7 +879,7 @@ stability_scope!(BETA {
     ///
     /// # Durability
     ///
-    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
     #[allow(clippy::len_without_is_empty)]

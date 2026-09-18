@@ -288,7 +288,10 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _, WriteOptions,
-        storage::{Layout, tests::run_storage_tests},
+        storage::{
+            Layout,
+            tests::{run_storage_tests, shared},
+        },
         telemetry::metrics::Registry,
         tokio::Runner,
     };
@@ -1110,7 +1113,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_recreate_reopen(&storage, &storage.pending).await;
+        shared::check_recreate_reopen(&storage, &storage.pending).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -1123,7 +1126,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_failed_creation(&storage, &storage.pending).await;
+        shared::check_failed_creation(&storage, &storage.pending).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -1136,8 +1139,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_remove_live_dirty_owner(&storage, &storage.pending, &storage.pool)
-            .await;
+        shared::check_remove_live_dirty_owner(&storage, &storage.pending, &storage.pool).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -1150,7 +1152,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_sync_writes(&storage, &storage.pending).await;
+        shared::check_sync_writes(&storage, &storage.pending).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -1163,7 +1165,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_orphaned_write(&storage).await;
+        shared::check_orphaned_write(&storage).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }
@@ -1176,7 +1178,7 @@ mod tests {
             Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
-        super::super::check_untouched_creation_leaves_no_debt(&storage, &storage.pending).await;
+        shared::check_untouched_creation_leaves_no_debt(&storage, &storage.pending).await;
         drop(storage);
         std::fs::remove_dir_all(storage_directory).unwrap();
     }

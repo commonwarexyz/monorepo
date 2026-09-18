@@ -120,6 +120,10 @@ mod tests {
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
+    /// Check standard Keyless recovery at and around retained commit sizes.
+    ///
+    /// Zero must be rejected. Every other cap selects the latest eligible commit, which survives
+    /// an unbounded reopen and supports a durable append.
     async fn bounded_standard<F: Family>(context: deterministic::Context) {
         for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
             let cfg = db_config(&format!("caps-{cap}"), &context, Sequential);
@@ -179,15 +183,19 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_standard_bounded_initialization_mmr() {
+    fn test_keyless_fixed_standard_bounded_initialization_mmr() {
         deterministic::Runner::default().start(bounded_standard::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_standard_bounded_initialization_mmb() {
+    fn test_keyless_fixed_standard_bounded_initialization_mmb() {
         deterministic::Runner::default().start(bounded_standard::<mmb::Family>);
     }
 
+    /// Check compact Keyless recovery at and around retained commit sizes.
+    ///
+    /// Zero must be rejected. Every other cap selects the latest eligible commit, which survives
+    /// an unbounded reopen and supports a durable append.
     async fn bounded_compact<F: Family>(context: deterministic::Context) {
         for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
             let cfg = CompactConfig {
@@ -262,12 +270,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_compact_bounded_initialization_mmr() {
+    fn test_keyless_fixed_compact_bounded_initialization_mmr() {
         deterministic::Runner::default().start(bounded_compact::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_compact_bounded_initialization_mmb() {
+    fn test_keyless_fixed_compact_bounded_initialization_mmb() {
         deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
     }
 

@@ -723,7 +723,10 @@ mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _, Storage as _,
         iouring,
-        storage::{Layout, tests::run_storage_tests},
+        storage::{
+            Layout,
+            tests::{run_storage_tests, shared},
+        },
         telemetry::metrics::{Register, Registry},
     };
     use std::{
@@ -1864,7 +1867,7 @@ mod tests {
     fn test_failed_creation_does_not_publish_unsynced_header() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            super::super::check_failed_creation(&storage, &storage.pending).await;
+            shared::check_failed_creation(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
@@ -1874,7 +1877,7 @@ mod tests {
     fn test_durable_writes_need_no_reopen_sync() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            super::super::check_sync_writes(&storage, &storage.pending).await;
+            shared::check_sync_writes(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
@@ -1931,7 +1934,7 @@ mod tests {
     fn test_orphaned_write_lands_before_reopen() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            super::super::check_orphaned_write(&storage).await;
+            shared::check_orphaned_write(&storage).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
@@ -2177,7 +2180,7 @@ mod tests {
     fn test_untouched_creation_needs_no_reopen_flush() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            super::super::check_untouched_creation_leaves_no_debt(&storage, &storage.pending).await;
+            shared::check_untouched_creation_leaves_no_debt(&storage, &storage.pending).await;
             drop(storage);
             std::fs::remove_dir_all(storage_directory).unwrap();
         });

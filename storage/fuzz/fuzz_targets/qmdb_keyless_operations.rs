@@ -7,7 +7,7 @@ use commonware_runtime::{
     BufferPooler, Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
+    journal::{Error as JournalError, contiguous::variable::Config as VConfig},
     merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         Error,
@@ -17,7 +17,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU16;
+use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PROOF_OPS: u64 = 100;
@@ -258,7 +258,7 @@ fn fuzz_family<F: Family, S: Strategy>(
         let mut restarts = 0usize;
 
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
-        let mut commits = std::collections::BTreeMap::new();
+        let mut commits = BTreeMap::new();
 
         for op in &input.ops {
             commits.insert(db.bounds().end, (db.root(), db.inactivity_floor_loc()));
@@ -557,7 +557,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             reopened
                         }
                         Err(error @ (Error::InvalidInitializationBound
-                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            | Error::Journal(JournalError::ItemPruned(_)))) => {
                             match error {
                                 Error::InvalidInitializationBound => assert_eq!(cap, 0),
                                 Error::Journal(_) => {

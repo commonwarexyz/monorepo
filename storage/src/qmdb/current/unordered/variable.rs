@@ -50,6 +50,7 @@ where
     Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
+    ///
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
@@ -104,6 +105,7 @@ pub mod partitioned {
         Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
+        ///
         /// The configured [`Strategy`] is used to parallelize merkleization.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that

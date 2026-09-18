@@ -546,6 +546,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
     /// Construct the database set from its configuration.
+    ///
     /// Every returned database must match its expected target when one is supplied.
     fn init(
         context: E,

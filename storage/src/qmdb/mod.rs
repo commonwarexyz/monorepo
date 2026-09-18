@@ -64,24 +64,28 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
+    Context,
     index::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
     journal::{
         Error as JournalError,
+        authenticated::{Backing, Journal as AuthenticatedJournal, Recovery},
         contiguous::{Contiguous, Mutable},
     },
     merkle::{
         Bagging, Family, Location,
+        full::Config as MerkleConfig,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
 use cache::Cache;
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -154,18 +158,20 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
-/// additionally requires retaining that floor. Keyless only restores commit fields.
+/// Check the selected commit before recovery discards history.
+///
+/// Rebuilding a snapshot from its floor additionally requires retaining that floor. Keyless only
+/// restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
-    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Floored<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let bounds = pending.bounds();
     let commit = if bounds.end == 0 {
@@ -185,19 +191,19 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+) -> Result<Recovery<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Floored<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    Ok(crate::journal::authenticated::Journal::prepare(
+    Ok(AuthenticatedJournal::prepare(
         context,
         merkle,
         journal,
@@ -212,17 +218,17 @@ where
 #[commonware_macros::boxed]
 pub(crate) async fn init_journal<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
     replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
+) -> Result<AuthenticatedJournal<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Floored<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let pending = prepare_initialization(context, merkle, journal, max_size).await?;
     validate_initialization(&pending, replay_from_floor).await?;
@@ -369,6 +375,7 @@ pub enum Error<F: Family> {
     FloorBeyondSize(Location<F>, Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
+    ///
     /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
