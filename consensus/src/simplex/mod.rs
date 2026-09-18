@@ -249,7 +249,7 @@
 //! publication before certification.
 //!
 //! A **handoff request** asks the incoming leader for a term-start candidate before its parent
-//! certifies. **Preparation** starts construction in response to that request.
+//! certifies. **Preparation** builds or reuses a candidate in response to that request.
 //! [`HandoffPublication::AfterCertification`] keeps the candidate unpublished until its exact
 //! parent certifies or finalizes. [`HandoffPublication::AllowBeforeCertification`] permits
 //! publication and the proposer's notarize vote before parent certification.
@@ -276,8 +276,7 @@
 //! information. [`crate::HandoffPolicy::Prepare`] with
 //! [`HandoffPublication::AfterCertification`] overlaps construction with certification while
 //! withholding publication. It uses the ordinary construction path, which may reuse an existing
-//! block without calling the application builder. Publication before certification permits both
-//! early relay and the proposer's notarize vote, and trusts the outgoing leader not to equivocate.
+//! block without calling the application builder.
 //!
 //! With [`HandoffPublication::AllowBeforeCertification`], the gain is largest with rotating
 //! leaders, where every view is a term boundary. Each proposal is distributed in parallel with its
