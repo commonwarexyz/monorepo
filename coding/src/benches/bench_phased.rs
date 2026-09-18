@@ -11,21 +11,18 @@ mod zoda_phased;
 
 pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [12, 16, 20, 22, 23].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
-        for chunks in [10u16, 20, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
-                // Match the f + 1 recovery threshold used by consensus.
-                let min = chunks.div_ceil(3);
+        for chunks in [10u16, 25, 50, 100, 250] {
+            for conc in [1, 8] {
+                let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
-                    &format!(
-                        "{name}/msg_len={data_length} chunks={chunks} min_shards={min} conc={conc}"
-                    ),
+                    &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
                         b.iter_batched(
                             || {
@@ -51,12 +48,11 @@ pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
 
 pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [12, 16, 20, 22, 23].map(|i| 2usize.pow(i));
+    let cases = [20, 22, 23].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
-        for chunks in [10u16, 20, 25, 50, 100, 250] {
-            for conc in [1, 4, 8] {
-                // Match the f + 1 recovery threshold used by consensus.
-                let min = chunks.div_ceil(3);
+        for chunks in [10u16, 25, 50, 100, 250] {
+            for conc in [1, 8] {
+                let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
@@ -66,7 +62,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                     let sel = selection.label();
                     c.bench_function(
                         &format!(
-                            "{name}/msg_len={data_length} chunks={chunks} min_shards={min} conc={conc} shard_selection={sel}"
+                            "{name}/msg_len={data_length} chunks={chunks} conc={conc} shard_selection={sel}"
                         ),
                         |b| {
                             b.iter_batched(
