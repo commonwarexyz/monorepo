@@ -444,8 +444,8 @@ mod tests {
         )
     }
 
-    /// Certifies view 1 and drives a follower through its notarize vote for
-    /// view 2, leaving the outgoing tip uncertified for handoff tests.
+    /// Certifies view 1 and drives the local validator through its notarize
+    /// vote for view 2, leaving the outgoing tip uncertified for handoff tests.
     async fn prepare_pipelined_handoff_tip(
         context: &mut deterministic::Context,
         schemes: &[ed25519::Scheme],
@@ -3806,7 +3806,7 @@ mod tests {
     }
 
     /// A pipelined handoff proposes and notarizes across the term boundary
-    /// before any certificate forms: voting for the outgoing term's final
+    /// before any certificate forms. Voting for the outgoing term's final
     /// view is enough for the incoming leader to issue its proposal.
     #[test_traced]
     fn test_pipelined_handoff_proposes_across_term_boundary() {
@@ -4213,8 +4213,8 @@ mod tests {
             self.certification_request(context, &parent).await
         }
 
-        /// Delivers `parent`'s notarization and returns the certification
-        /// request for view 2.
+        /// Delivers `parent`'s notarization and returns its certification
+        /// request.
         async fn certification_request(
             &mut self,
             context: &deterministic::Context,
@@ -4223,7 +4223,7 @@ mod tests {
             let (_, notarization) = build_notarization(&self.schemes, parent, self.quorum());
             self.mailbox
                 .recovered(Certificate::Notarization(notarization));
-            take_certification_request(context, &self.certification_requests, View::new(2)).await
+            take_certification_request(context, &self.certification_requests, parent.view()).await
         }
 
         /// Answers the parent's certification request and returns the handle
@@ -4262,6 +4262,8 @@ mod tests {
             }
         }
 
+        /// Answers the parent's certification request and waits until the
+        /// voter has processed it.
         async fn finish_certification(&mut self, certified: oneshot::Sender<bool>) {
             let release = self.block_certification(certified).await;
             self.release_certification(release).await;
@@ -4287,7 +4289,7 @@ mod tests {
         wait_for_handoff_metric(context, "handoff_events", "event", event).await;
     }
 
-    /// Waits for a `handoff_abandoned` label to count an event.
+    /// Waits for a `handoff_abandoned` reason to count an abandonment.
     async fn wait_for_handoff_abandoned(context: &deterministic::Context, reason: &str) {
         wait_for_handoff_metric(context, "handoff_abandoned", "reason", reason).await;
     }
@@ -4646,9 +4648,18 @@ mod tests {
                 }
             }
             fixture.finish_certification(certified).await;
-            wait_for_handoff_abandoned(&context, "AncestrySuperseded")
-            .await;
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            // The nullified tip leaves certified ancestry, so the replacement
+            // is an ordinary request rather than a second handoff.
+            let deadline = context.current() + Duration::from_secs(1);
+            while fixture.requests_for(View::new(3)) < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "fallback request on certified ancestry missing"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4726,6 +4737,9 @@ mod tests {
         });
     }
 
+    /// Restart discards a held candidate. Replay re-issues the handoff
+    /// request, and dropping it nullifies the view without relaying the old
+    /// candidate.
     #[test_traced]
     fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -4734,7 +4748,6 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
-            let _certified = fixture.certify_parent(&context).await;
 
             let handle = fixture.actor_handle.lock().take().unwrap();
             handle.abort();

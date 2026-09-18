@@ -7312,10 +7312,11 @@ mod tests {
             assert!(state.add_nullification(nullification));
             assert_eq!(state.current_view(), View::new(6));
 
-            let ctx = state
+            let request = state
                 .try_propose()
-                .expect("term-start proposal should use the certified fallback")
-                .into_context();
+                .expect("term-start proposal should use the certified fallback");
+            assert!(matches!(request, ProposalRequest::Regular(_)));
+            let ctx = request.into_context();
             assert_eq!(ctx.parent, (View::new(4), certified.payload));
 
             // Late certification makes the outgoing tip preferred, but the
@@ -7364,8 +7365,9 @@ mod tests {
             // certified fallback and still permits only one pending build.
             let retry = state
                 .try_propose()
-                .expect("rejected handoff should retry on certified ancestry")
-                .into_context();
+                .expect("rejected handoff should retry on certified ancestry");
+            assert!(matches!(retry, ProposalRequest::Regular(_)));
+            let retry = retry.into_context();
             assert_eq!(retry.round.view(), View::new(6));
             assert_eq!(retry.parent, (View::new(4), certified.payload));
             assert!(state.try_propose().is_none());
@@ -7477,6 +7479,9 @@ mod tests {
                 mut state,
             ) = setup_state_with_handoff(&mut context, 4, 1, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
+
+            // Only the incoming leader receives a handoff request.
+            assert!(state.try_propose().is_none());
 
             // A validator that receives the pipelined proposal early still
             // waits for the tip's certification before verifying it.
