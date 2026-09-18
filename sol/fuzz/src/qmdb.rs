@@ -1,4 +1,4 @@
-//! Materialized MMR and MMB fixtures for any and current QMDB.
+//! Materialized MMR and MMB fixtures for any, keyless, and current QMDB.
 //!
 //! Deterministic operation logs and activity bitmaps exercise the production tree,
 //! codec, and proof APIs without a persistent database lifecycle.
@@ -22,6 +22,7 @@ use commonware_storage::{
             ordered::proof::ExclusionProof,
             proof::{OpsRootWitness, operation},
         },
+        keyless,
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
@@ -57,6 +58,8 @@ sol! {
 pub(crate) enum Command {
     /// Prove membership of an ordered operation in the plain operations root.
     Any(AnyArgs),
+    /// Prove membership of an encoded keyless append or commit.
+    Keyless(KeylessArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
     Generate(GenerateArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
@@ -93,6 +96,32 @@ pub(crate) struct AnyArgs {
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
+enum Encoding {
+    Fixed,
+    Variable,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KeylessOperation {
+    Append,
+    Commit,
+    CommitMetadata,
+}
+
+#[derive(Args)]
+pub(crate) struct KeylessArgs {
+    #[command(flatten)]
+    tree: GenerateArgs,
+    #[arg(long, value_enum, default_value = "fixed")]
+    encoding: Encoding,
+    #[arg(long, value_enum, default_value = "append")]
+    operation: KeylessOperation,
+    /// Variable value and metadata length; defaults to a boundary size selected by the seed.
+    #[arg(long)]
+    value_length: Option<u16>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
 enum ExclusionMode {
     Interval,
     Single,
@@ -124,9 +153,9 @@ fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
     })
 }
 
-fn materialize_ops<F: Family, H: Hasher>(
+fn materialize_ops<F: Family, H: Hasher, O: Encode>(
     args: &GenerateArgs,
-    operation: &impl Fn(u64) -> Operation<F>,
+    operation: &impl Fn(u64) -> O,
 ) -> Result<Mem<F, H::Digest>, String> {
     if args.leaves == 0
         || args.leaves > 1_000_000
@@ -165,7 +194,14 @@ fn any<F: Family, H: Hasher>(args: &AnyArgs) -> Result<AnyOutput, String> {
     if args.history.is_some() && (tree.leaves < 2 || tree.location != 0) {
         return Err("history requires leaves >= 2 and location = 0".into());
     }
-    let ops = materialize_ops::<F, H>(tree, &|index| any_operation::<F>(args, index))?;
+    plain_proof::<F, H, _>(tree, |index| any_operation::<F>(args, index))
+}
+
+fn plain_proof<F: Family, H: Hasher, O: Encode>(
+    tree: &GenerateArgs,
+    operation: impl Fn(u64) -> O,
+) -> Result<AnyOutput, String> {
+    let ops = materialize_ops::<F, H, _>(tree, &operation)?;
     let hasher = qmdb::hasher::<H>();
     let inactive = F::inactive_peaks(
         Location::new(tree.leaves),
@@ -180,9 +216,9 @@ fn any<F: Family, H: Hasher>(args: &AnyArgs) -> Result<AnyOutput, String> {
             inactive,
         )
         .map_err(|e| e.to_string())?;
-    let op = any_operation::<F>(args, tree.location);
+    let op = operation(tree.location);
     if !qmdb::verify_proof::<H, F, _>(&proof, location, core::slice::from_ref(&op), &root) {
-        return Err("Commonware rejected the materialized any proof".into());
+        return Err("Commonware rejected the materialized operations proof".into());
     }
     let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
     Ok(AnyOutput {
@@ -193,6 +229,63 @@ fn any<F: Family, H: Hasher>(args: &AnyArgs) -> Result<AnyOutput, String> {
         digests: proof.digests.iter().map(|d| bytes32(*d).into()).collect(),
         operation: op.encode().to_vec().into(),
     })
+}
+
+// The seed selects sizes around word and varint boundaries for both values and metadata.
+const VARIABLE_LENGTHS: [usize; 8] = [0, 1, 31, 32, 33, 127, 128, 129];
+
+fn keyless_operation<F: Family, V: qmdb::any::value::ValueEncoding>(
+    args: &KeylessArgs,
+    index: u64,
+    value: V::Value,
+) -> keyless::Operation<F, V> {
+    use keyless::Operation::{Append, Commit};
+    if index == 0 {
+        return Commit(None, Location::new(0));
+    }
+    if index == args.tree.location {
+        return match args.operation {
+            KeylessOperation::Append => Append(value),
+            KeylessOperation::Commit => Commit(None, Location::new(args.tree.inactivity_floor)),
+            KeylessOperation::CommitMetadata => {
+                Commit(Some(value), Location::new(args.tree.inactivity_floor))
+            }
+        };
+    }
+    if index == args.tree.leaves - 1 {
+        return Commit(None, Location::new(args.tree.inactivity_floor));
+    }
+    Append(value)
+}
+
+fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String> {
+    if args.tree.location == 0 && !matches!(args.operation, KeylessOperation::Commit) {
+        return Err("location 0 is the bootstrap commit; require --operation commit".into());
+    }
+    if args.value_length.is_some() && matches!(args.encoding, Encoding::Fixed) {
+        return Err("value-length requires --encoding variable".into());
+    }
+    match args.encoding {
+        Encoding::Fixed => plain_proof::<F, H, _>(&args.tree, |index| {
+            keyless_operation::<F, FixedEncoding<FixedBytes<32>>>(
+                args,
+                index,
+                FixedBytes::new(leaf(args.tree.seed, index)),
+            )
+        }),
+        Encoding::Variable => plain_proof::<F, H, _>(&args.tree, |index| {
+            let bytes = leaf(args.tree.seed, index);
+            let len = args.value_length.map_or_else(
+                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
+                usize::from,
+            );
+            keyless_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                args,
+                index,
+                bytes.into_iter().cycle().take(len).collect(),
+            )
+        }),
+    }
 }
 
 struct Materialized<F: Graftable, D: Digest> {
@@ -212,7 +305,7 @@ fn materialize<F: Graftable, H: Hasher>(
         inactivity_floor,
         ..
     } = *args;
-    let ops = materialize_ops::<F, H>(args, &operation)?;
+    let ops = materialize_ops::<F, H, _>(args, &operation)?;
     let mut status = Prunable::<32>::new();
     for index in 0..leaves {
         status.push(active(index));
@@ -389,6 +482,15 @@ impl Command {
                 }?;
                 Ok(output.abi_encode_params())
             }
+            Self::Keyless(args) => {
+                let output = match (args.tree.family, args.tree.hash) {
+                    (TreeKind::Mmr, Hash::Keccak) => keyless::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Sha256) => keyless::<mmr::Family, Sha256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak) => keyless::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Sha256) => keyless::<mmb::Family, Sha256>(&args),
+                }?;
+                Ok(output.abi_encode_params())
+            }
             Self::Generate(args) => {
                 let output = match (args.family, args.hash) {
                     (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(&args),
@@ -490,6 +592,252 @@ mod tests {
             bytes[0] ^= 1;
             changed.digests[0] = digest(&bytes);
             assert!(!verify(&changed, &op, &root));
+        }
+    }
+
+    fn verify_keyless_output<F: Family, H: Hasher>(
+        output: &AnyOutput,
+        encoding: &str,
+        operation: &str,
+        seed: u64,
+        floor: u64,
+    ) {
+        use commonware_codec::Decode;
+        use keyless::Operation::{Append, Commit};
+        let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
+        let proof = Proof::<F, H::Digest> {
+            leaves: Location::new(u64::try_from(output.leaves).unwrap()),
+            inactive_peaks: usize::try_from(output.inactivePeaks).unwrap(),
+            digests: output
+                .digests
+                .iter()
+                .map(|d| digest(d.as_slice()))
+                .collect(),
+        };
+        let location = Location::new(u64::try_from(output.location).unwrap());
+        let root = digest(output.root.as_slice());
+        let expected_value = leaf(seed, *location);
+        let encoded = output.operation.as_ref();
+        let verify = |bytes: &[u8]| {
+            proof.verify_element_inclusion(&qmdb::hasher::<H>(), bytes, location, &root)
+        };
+        match encoding {
+            "fixed" => {
+                let op = keyless::fixed::Operation::<F, FixedBytes<32>>::decode(Copying(encoded))
+                    .unwrap();
+                assert_eq!(encoded.len(), 42);
+                match (&op, operation) {
+                    (Append(value), "append") => {
+                        assert_eq!(value.as_ref(), expected_value);
+                        assert_eq!(&encoded[33..], &[0; 9]);
+                    }
+                    (Commit(metadata, actual_floor), "commit" | "commit-metadata") => {
+                        assert_eq!(**actual_floor, floor);
+                        assert_eq!(
+                            *metadata,
+                            (operation == "commit-metadata")
+                                .then(|| FixedBytes::new(expected_value))
+                        );
+                    }
+                    _ => panic!("unexpected operation"),
+                }
+                assert!(qmdb::verify_proof::<H, F, _>(
+                    &proof,
+                    location,
+                    &[op],
+                    &root
+                ));
+            }
+            _ => {
+                let op = keyless::variable::Operation::<F, Vec<u8>>::decode_cfg(
+                    Copying(encoded),
+                    &((0..=129).into(), ()),
+                )
+                .unwrap();
+                let len = VARIABLE_LENGTHS[seed as usize % VARIABLE_LENGTHS.len()];
+                let value: Vec<_> = expected_value.into_iter().cycle().take(len).collect();
+                match (&op, operation) {
+                    (Append(actual), "append") => assert_eq!(*actual, value),
+                    (Commit(metadata, actual_floor), "commit" | "commit-metadata") => {
+                        assert_eq!(**actual_floor, floor);
+                        assert_eq!(*metadata, (operation == "commit-metadata").then_some(value));
+                    }
+                    _ => panic!("unexpected operation"),
+                }
+                assert!(qmdb::verify_proof::<H, F, _>(
+                    &proof,
+                    location,
+                    &[op],
+                    &root
+                ));
+            }
+        }
+        if *proof.leaves == 1 {
+            let initial = match encoding {
+                "fixed" => keyless::initial_root::<F, FixedEncoding<FixedBytes<32>>, H>(),
+                _ => keyless::initial_root::<F, qmdb::any::value::VariableEncoding<Vec<u8>>, H>(),
+            };
+            assert_eq!(root, initial);
+        }
+        assert!(verify(encoded));
+        let mut changed = encoded.to_vec();
+        *changed.last_mut().unwrap() ^= 1;
+        assert!(!verify(&changed));
+    }
+
+    #[test]
+    fn keyless_cli_variable_length_overrides_seed() {
+        use commonware_codec::Decode;
+        for length in [0u16, 31, 32, 33, 127, 128, 65535] {
+            for operation in ["append", "commit-metadata"] {
+                let args = [
+                    "fuzz",
+                    "qmdb",
+                    "keyless",
+                    "3",
+                    "1",
+                    "42",
+                    "--encoding",
+                    "variable",
+                    "--operation",
+                    operation,
+                    "--value-length",
+                    &length.to_string(),
+                ];
+                let encoded = Cli::try_parse_from(args)
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
+                let output = <AnyOutput as SolValue>::abi_decode_params_validate(&encoded).unwrap();
+                let op = keyless::variable::Operation::<mmb::Family, Vec<u8>>::decode_cfg(
+                    Copying(output.operation.as_ref()),
+                    &((0..=65535).into(), ()),
+                )
+                .unwrap();
+                let expected: Vec<_> = leaf(42, 1)
+                    .into_iter()
+                    .cycle()
+                    .take(usize::from(length))
+                    .collect();
+                assert_eq!(op.into_value(), Some(expected));
+            }
+        }
+        let result = Cli::try_parse_from([
+            "fuzz",
+            "qmdb",
+            "keyless",
+            "3",
+            "1",
+            "42",
+            "--value-length",
+            "32",
+        ])
+        .unwrap()
+        .command
+        .execute();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn keyless_cli_rejects_invalid_log_boundaries() {
+        for (leaves, location, floor, operation) in [
+            (0, 0, 0, "commit"),
+            (1_000_001, 1, 0, "append"),
+            (3, 3, 0, "append"),
+            (3, 1, 2, "append"),
+            (1, 0, 0, "append"),
+            (1, 0, 0, "commit-metadata"),
+        ] {
+            let result = Cli::try_parse_from([
+                "fuzz",
+                "qmdb",
+                "keyless",
+                &leaves.to_string(),
+                &location.to_string(),
+                "42",
+                "--inactivity-floor",
+                &floor.to_string(),
+                "--operation",
+                operation,
+            ])
+            .unwrap()
+            .command
+            .execute();
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes() {
+        for family in ["mmr", "mmb"] {
+            for hash in ["keccak", "sha256"] {
+                for encoding in ["fixed", "variable"] {
+                    for operation in ["append", "commit", "commit-metadata"] {
+                        for (leaves, location, floor) in [
+                            (1u64, 0u64, 0u64),
+                            (3, 1, 0),
+                            (11, 9, 8),
+                            (257, 256, 128),
+                            (1793, 1792, 1792),
+                        ] {
+                            if location == 0 && operation != "commit" {
+                                continue;
+                            }
+                            for seed in 0..8u64 {
+                                let encoded = Cli::try_parse_from([
+                                    "fuzz",
+                                    "qmdb",
+                                    "keyless",
+                                    &leaves.to_string(),
+                                    &location.to_string(),
+                                    &seed.to_string(),
+                                    "--family",
+                                    family,
+                                    "--hash",
+                                    hash,
+                                    "--inactivity-floor",
+                                    &floor.to_string(),
+                                    "--encoding",
+                                    encoding,
+                                    "--operation",
+                                    operation,
+                                ])
+                                .unwrap()
+                                .command
+                                .execute()
+                                .unwrap();
+                                let output =
+                                    <AnyOutput as SolValue>::abi_decode_params_validate(&encoded)
+                                        .unwrap();
+                                assert_eq!(output.leaves, leaves);
+                                assert_eq!(output.location, location);
+                                if leaves == 1793 {
+                                    assert_ne!(output.inactivePeaks, 0);
+                                }
+                                match (family, hash) {
+                                    ("mmr", "keccak") => {
+                                        verify_keyless_output::<mmr::Family, Keccak256>(
+                                            &output, encoding, operation, seed, floor,
+                                        )
+                                    }
+                                    ("mmr", _) => verify_keyless_output::<mmr::Family, Sha256>(
+                                        &output, encoding, operation, seed, floor,
+                                    ),
+                                    (_, "keccak") => {
+                                        verify_keyless_output::<mmb::Family, Keccak256>(
+                                            &output, encoding, operation, seed, floor,
+                                        )
+                                    }
+                                    _ => verify_keyless_output::<mmb::Family, Sha256>(
+                                        &output, encoding, operation, seed, floor,
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

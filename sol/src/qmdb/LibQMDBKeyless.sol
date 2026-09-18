@@ -3,13 +3,12 @@ pragma solidity ^0.8.15;
 
 import { Common } from "./Common.sol";
 
-/// @notice Verify inclusion of encoded operations in an ordered any QMDB.
-/// @dev Inclusion authenticates operation bytes at a location, not their current activity or key exclusion.
-/// Uses QMDB's backward peak fold and big-endian position and count encodings.
-/// The caller supplies an authenticated root and a trusted hash target.
-/// Hash targets receive raw bytes and must return exactly 32 bytes.
+/// @notice Verify inclusion of encoded operations in a keyless QMDB.
+/// @dev Operations include their append or commit tag and the database's fixed or variable encoding.
+/// Locations count all operations, including commits. The caller supplies an authenticated
+/// root and a trusted hash target. Targets receive raw bytes and must return exactly 32 bytes.
 /// A failed call or any other return length reverts with `HashFailed()`.
-library LibQMDBAny {
+library LibQMDBKeyless {
     /// @dev A single-operation proof with the inactive peak boundary committed by the root.
     struct Proof {
         uint256 leaves;
@@ -18,9 +17,9 @@ library LibQMDBAny {
         bytes32[] digests;
     }
 
-    /// @notice Verify an encoded operation against a trusted ordered any MMB root.
+    /// @notice Verify an encoded operation against a trusted keyless MMB root.
     /// @param root Authenticated QMDB root.
-    /// @param operation Exact Commonware operation encoding, without a length prefix.
+    /// @param operation Exact Commonware operation encoding, including any codec padding or length prefixes.
     /// @param proof Single-operation membership proof.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the operation reconstructs `root` and consumes every digest.
@@ -34,9 +33,9 @@ library LibQMDBAny {
         );
     }
 
-    /// @notice Verify an encoded operation against a trusted ordered any MMR root.
+    /// @notice Verify an encoded operation against a trusted keyless MMR root.
     /// @param root Authenticated QMDB root.
-    /// @param operation Exact Commonware operation encoding, without a length prefix.
+    /// @param operation Exact Commonware operation encoding, including any codec padding or length prefixes.
     /// @param proof Single-operation membership proof.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the operation reconstructs `root` and consumes every digest.

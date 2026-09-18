@@ -6,6 +6,25 @@ import { LibMerkle } from "../merkle/LibMerkle.sol";
 
 /// @dev Shared QMDB operation proof reconstruction.
 library Common {
+    /// @dev Authenticate an operation root without activity bitmap grafting.
+    function verify(
+        bytes32 root,
+        bytes memory operation,
+        uint256 leaves,
+        uint256 location,
+        bytes32[] calldata digests,
+        uint256 inactivePeaks,
+        bool mmb,
+        address hasher
+    ) internal view returns (bool) {
+        if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0) || location >= leaves) {
+            return false;
+        }
+        (bytes32 reconstructed, bool valid) =
+            reconstruct(leaves, location, operation, digests, inactivePeaks, LibMerkle.Graft(0, 0), mmb, hasher);
+        return valid && reconstructed == root;
+    }
+
     /// @dev Reconstruct a backward-folded root from an encoded operation at its physical position.
     /// A zero graft width keeps the positioned leaf digest and binds no ancestor prefix.
     /// Callers validate the family's leaf bound and require `location < leaves` before hashing.

@@ -20,7 +20,8 @@ target/release/commonware-sol-fuzz simplex --help
 - `qmdb` generates active operation proofs for current QMDBs. Pass `--family mmr`
   for MMR proofs or use the default MMB family. The `any` subcommand generates
   ordered operation proofs, including overwrite and deletion histories. The `exclude`
-  subcommand generates ordered exclusion proofs with 32-byte keys and values.
+  subcommand generates ordered exclusion proofs with 32-byte keys and values. The
+  `keyless` subcommand generates append and commit proofs with fixed or variable encodings.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.
