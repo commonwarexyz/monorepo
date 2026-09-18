@@ -43,8 +43,8 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, HandoffPolicy, HandoffProposal,
-    Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, HandoffProposal, Relay,
+    Reporter,
     marshal::{
         Update,
         application::gates::{self, GateOutcome, Gates},
@@ -596,30 +596,14 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
-        let (tx, rx) = oneshot::channel();
-        let publication = match self.application.handoff_policy(&consensus_context) {
-            HandoffPolicy::Prepare(publication) => publication,
-            HandoffPolicy::AwaitCertification => {
-                tx.send_lossy(HandoffProposal::AwaitCertification);
-                return rx;
-            }
-        };
-        let mut handoff = self.clone();
-        let context = self
-            .context
-            .child("propose_handoff")
-            .with_attribute("round", consensus_context.round);
-        context.spawn(move |_| async move {
-            let proposal = Automaton::propose(&mut handoff, consensus_context).await;
-            gates::forward(tx, proposal, |payload| {
-                Some(HandoffProposal::Proposed {
-                    payload,
-                    publication,
-                })
-            })
-            .await;
-        });
-        rx
+        let policy = self.application.handoff_policy(&consensus_context);
+        gates::propose_handoff(
+            &*self.context,
+            self,
+            policy,
+            consensus_context.round,
+            consensus_context,
+        )
     }
 
     #[allow(clippy::async_yields_async)]
