@@ -292,6 +292,20 @@
 //! tip never notarizes, validators cannot use the proposal built on it. The usual timeout path
 //! then nullifies the incoming term.
 //!
+//! ### Handoff Metrics
+//!
+//! `handoff_events` counts nonexclusive lifecycle events. `Requested` counts requests to the
+//! automaton, not unique views. `Deferred` counts explicit deferrals, `Received` counts returned
+//! candidates, and `Held` counts candidates retained for parent certification. A held candidate
+//! is not received again when released. Publication events count local relay attempts after
+//! proposal acceptance, classified by whether the exact captured parent has certified or
+//! finalized at that point. They do not imply network delivery.
+//!
+//! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
+//! view exit, superseded ancestry, response closure, or ineligibility at recording. Explicit
+//! deferrals are counted only in `handoff_events`. Neither family tracks losses across restart
+//! or distinguishes newly built candidates from reused blocks.
+//!
 //! ### Latency Metrics
 //!
 //! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
