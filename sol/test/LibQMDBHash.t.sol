@@ -2,13 +2,18 @@
 pragma solidity ^0.8.15;
 
 import { RawSha256Hasher } from "./Common.t.sol";
-import { Common } from "../src/merkle/Common.sol";
+import { Common as MerkleCommon } from "../src/merkle/Common.sol";
+import { Common } from "../src/qmdb/Common.sol";
 import { LibQMDBBatchTest, BatchCase } from "./LibQMDBBatch.t.sol";
 import { LibQMDBCurrentTest, QMDBCase } from "./LibQMDBCurrent.t.sol";
-import { LibQMDBAny } from "../src/qmdb/LibQMDBAny.sol";
-import { LibQMDBKeyless } from "../src/qmdb/LibQMDBKeyless.sol";
-import { LibQMDBImmutable } from "../src/qmdb/LibQMDBImmutable.sol";
-import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
+import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
+import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
+import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
+import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
+import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
+import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
+import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
+import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
 /// @dev Hash all other preimages correctly so failures can be isolated by hashing stage.
 contract QMDBLengthFaultHasher {
@@ -61,60 +66,59 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
     }
 
     /// @dev Expose the Any singleton facade with an explicit raw hash target.
-    function singleAny(bytes32 root, bytes memory operation, LibQMDBAny.Proof calldata proof, address hasher)
+    function singleAny(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
         external
         view
         returns (bool)
     {
         return _mmb()
-            ? LibQMDBAny.verify(root, operation, proof, hasher)
-            : LibQMDBAny.verifyMMR(root, operation, proof, hasher);
+            ? LibQMDBAnyMMB.verify(root, operation, proof, hasher)
+            : LibQMDBAnyMMR.verify(root, operation, proof, hasher);
     }
 
     /// @dev Expose the Keyless singleton facade with the same wire-shaped proof fields.
-    function singleKeyless(bytes32 root, bytes memory operation, LibQMDBKeyless.Proof calldata proof, address hasher)
+    function singleKeyless(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
         external
         view
         returns (bool)
     {
         return _mmb()
-            ? LibQMDBKeyless.verify(root, operation, proof, hasher)
-            : LibQMDBKeyless.verifyMMR(root, operation, proof, hasher);
+            ? LibQMDBKeylessMMB.verify(root, operation, proof, hasher)
+            : LibQMDBKeylessMMR.verify(root, operation, proof, hasher);
     }
 
     /// @dev Expose the Immutable singleton facade with the same wire-shaped proof fields.
-    function singleImmutable(
-        bytes32 root,
-        bytes memory operation,
-        LibQMDBImmutable.Proof calldata proof,
-        address hasher
-    ) external view returns (bool) {
+    function singleImmutable(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
+        external
+        view
+        returns (bool)
+    {
         return _mmb()
-            ? LibQMDBImmutable.verify(root, operation, proof, hasher)
-            : LibQMDBImmutable.verifyMMR(root, operation, proof, hasher);
+            ? LibQMDBImmutableMMB.verify(root, operation, proof, hasher)
+            : LibQMDBImmutableMMR.verify(root, operation, proof, hasher);
     }
 
     /// @dev Select membership or a proper interior query in a fixed-width exclusion interval.
     function singleCurrent(QMDBCase calldata c, address hasher, bool exclusion) external view returns (bool) {
         if (exclusion) {
             return _mmb()
-                ? LibQMDBCurrent.verifyExclusion(
+                ? LibQMDBCurrentMMB.verifyExclusion(
                     c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
                 )
-                : LibQMDBCurrent.verifyExclusionMMR(
+                : LibQMDBCurrentMMR.verifyExclusion(
                     c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
                 );
         }
         return _mmb()
-            ? LibQMDBCurrent.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher)
-            : LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, c.chunkBytes, hasher);
+            ? LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher)
+            : LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher);
     }
 
     /// @dev Singleton facades use identical ABI tuple fields, allowing one shared fixture.
     function singletonCall(BatchCase memory c, uint256 facade, address hasher) internal pure returns (bytes memory) {
         bytes4[3] memory selectors =
             [this.singleAny.selector, this.singleKeyless.selector, this.singleImmutable.selector];
-        LibQMDBAny.Proof memory proof = LibQMDBAny.Proof(c.range.leaves, c.range.start, 0, c.range.digests);
+        Common.Proof memory proof = Common.Proof(c.range.leaves, c.range.start, 0, c.range.digests);
         return abi.encodeWithSelector(selectors[facade], c.root, c.operations[0], proof, hasher);
     }
 
@@ -180,7 +184,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
             vm.etch(_hasher(), address(new QMDBLengthFaultHasher(length, lengths[mode], mode == 0)).code);
             (bool success, bytes memory output) = address(this).staticcall(input);
             assertFalse(success, "hash failure did not revert");
-            assertEq(output, abi.encodeWithSelector(Common.HashFailed.selector), "wrong hash failure");
+            assertEq(output, abi.encodeWithSelector(MerkleCommon.HashFailed.selector), "wrong hash failure");
         }
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         accepted(input);
@@ -230,9 +234,9 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
         BatchCase memory plain = build(13, sequence(0, 2), false);
         QMDBCase memory current = currentBuilder.buildChunk(33, 0, hex"010203", true, 2);
         vm.etch(_hasher(), hex"");
-        vm.expectRevert(Common.HashFailed.selector);
+        vm.expectRevert(MerkleCommon.HashFailed.selector);
         this.checked(plain);
-        vm.expectRevert(Common.HashFailed.selector);
+        vm.expectRevert(MerkleCommon.HashFailed.selector);
         this.singleCurrent(current, _hasher(), false);
     }
 }

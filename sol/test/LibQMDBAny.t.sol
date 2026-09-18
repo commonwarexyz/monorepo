@@ -2,12 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { UnorderedOracle } from "./Common.t.sol";
-import { LibQMDBAny } from "../src/qmdb/LibQMDBAny.sol";
+import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
+import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
 
 struct AnyCase {
     bytes32 root;
     bytes operation;
-    LibQMDBAny.Proof proof;
+    Common.Proof proof;
 }
 
 struct AnyNode {
@@ -27,8 +29,8 @@ contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev Expose the selected family through a calldata proof entrypoint.
     function verify(AnyCase calldata c) external view returns (bool) {
         return _mmb()
-            ? LibQMDBAny.verify(c.root, c.operation, c.proof, _hasher())
-            : LibQMDBAny.verifyMMR(c.root, c.operation, c.proof, _hasher());
+            ? LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher())
+            : LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher());
     }
 
     /// @dev Caller allocations and reusable scratch survive successful and rejected proofs.
@@ -47,8 +49,8 @@ contract LibQMDBAnyTest is UnorderedOracle {
                 }
             }
             bool result = _mmb()
-                ? LibQMDBAny.verify(c.root, operation, c.proof, _hasher())
-                : LibQMDBAny.verifyMMR(c.root, operation, c.proof, _hasher());
+                ? LibQMDBAnyMMB.verify(c.root, operation, c.proof, _hasher())
+                : LibQMDBAnyMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)
@@ -243,8 +245,8 @@ contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev A root and proof from a distinct topology fail under the other family.
     function rejectOtherFamily(AnyCase calldata c) external view {
         bool valid = _mmb()
-            ? LibQMDBAny.verifyMMR(c.root, c.operation, c.proof, _hasher())
-            : LibQMDBAny.verify(c.root, c.operation, c.proof, _hasher());
+            ? LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher())
+            : LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
     }
 

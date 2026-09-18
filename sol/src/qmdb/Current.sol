@@ -9,9 +9,9 @@ import { Common as QMDBCommon } from "./Common.sol";
 /// @dev Uses QMDB's backward peak fold and big-endian position and count encodings.
 /// The caller supplies an authenticated root and a trusted hash target and chunk byte size.
 /// Chunk bytes must be a nonzero power of two below `2^60`, matching the authenticated database.
-/// Hash targets receive raw bytes and must return exactly 32 bytes.
+/// Nonzero hash targets receive raw bytes via `STATICCALL` and must return exactly 32 bytes.
 /// A failed call or any other return length reverts with `Common.HashFailed()`.
-library LibQMDBCurrent {
+library Current {
     /// @dev Absent pending and partial digests are zero. Their presence follows from
     /// `leaves` and the tree family. MMR proofs never have a pending digest.
     /// `chunk` contains exactly the configured number of bitmap bytes.
@@ -59,95 +59,16 @@ library LibQMDBCurrent {
     /// @dev Select a length-prefixed byte vector in `ExclusionEncoding`.
     uint256 internal constant VARIABLE_SIZE = type(uint256).max;
 
-    /// @notice Verify operation bytes and activity status for a Current MMB range.
-    /// @dev Inactive operations are valid and every touched activity chunk is authenticated.
-    function verifyRange(
-        bytes32 root,
-        bytes[] memory operations,
-        RangeProof calldata proof,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _verifyRange(root, operations, proof, true, chunkBytes, hasher);
-    }
-
-    /// @notice Verify operation bytes and activity status for a Current MMR range.
-    /// @dev Inactive operations are valid and every touched activity chunk is authenticated.
-    function verifyRangeMMR(
-        bytes32 root,
-        bytes[] memory operations,
-        RangeProof calldata proof,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _verifyRange(root, operations, proof, false, chunkBytes, hasher);
-    }
-
-    /// @notice Verify historical operation inclusion under a canonical Current MMB root.
-    /// @dev The witness authenticates the operation root and does not establish activity of selected operations.
-    function verifyOpsMulti(
-        bytes32 root,
-        bytes[] memory operations,
-        QMDBCommon.MultiProof calldata proof,
-        OpsRootWitness calldata witness,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _verifyOpsMulti(root, operations, proof, witness, true, chunkBytes, hasher);
-    }
-
-    /// @notice Verify historical operation inclusion under a canonical Current MMR root.
-    /// @dev The witness authenticates the operation root and does not establish activity of selected operations.
-    function verifyOpsMultiMMR(
-        bytes32 root,
-        bytes[] memory operations,
-        QMDBCommon.MultiProof calldata proof,
-        OpsRootWitness calldata witness,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _verifyOpsMulti(root, operations, proof, witness, false, chunkBytes, hasher);
-    }
-
-    /// @notice Verify an encoded operation and its active bit against a trusted current MMB root.
-    /// @param root Authenticated QMDB root.
-    /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with an activity chunk.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation reconstructs `root` and consumes every digest.
-    function verify(bytes32 root, bytes memory operation, Proof calldata proof, uint256 chunkBytes, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _verify(root, operation, proof, true, chunkBytes, hasher);
-    }
-
-    /// @notice Verify an encoded operation and its active bit against a trusted current MMR root.
-    /// @param root Authenticated QMDB root.
-    /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with an activity chunk.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation reconstructs `root` and consumes every digest.
-    function verifyMMR(bytes32 root, bytes memory operation, Proof calldata proof, uint256 chunkBytes, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _verify(root, operation, proof, false, chunkBytes, hasher);
-    }
-
-    /// @notice Verify key exclusion against a trusted ordered current MMB root.
-    /// @dev The database must use 32-byte keys and fixed value encoding. For value size `V`,
-    /// operations have `65 + V` bytes. Updates encode tag, key, value, then next key.
-    /// Commits encode tag, metadata flag, `V` metadata bytes, big-endian `uint64` floor,
-    /// then 55 zero bytes. The authenticated database's schema determines `V`.
+    /// @notice Verify key exclusion in an ordered current QMDB with fixed operation encoding.
+    /// @dev The authenticated database uses 32-byte keys and fixed values of size `V`.
+    /// Updates encode tag, key, value, and next key in `65 + V` bytes. Commits encode tag,
+    /// metadata flag, `V` metadata bytes, big-endian `uint64` floor, and 55 zero bytes.
+    /// Exclusion framing is checked before the operation and its active bit are authenticated.
     /// @param root Authenticated root of a database with this fixed ordered schema.
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with an activity chunk.
+    /// @param proof Single-operation proof with an activity chunk.
+    /// @param mmb True for MMB and false for MMR.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -156,40 +77,23 @@ library LibQMDBCurrent {
         bytes32 key,
         bytes memory operation,
         Proof calldata proof,
+        bool mmb,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, true, chunkBytes, hasher);
+        return _excludes(key, operation, proof.location) && verify(root, operation, proof, mmb, chunkBytes, hasher);
     }
 
-    /// @notice Verify key exclusion against a trusted ordered current MMR root.
-    /// @dev Requires the same fixed ordered database schema as `verifyExclusion`.
-    /// @param root Authenticated root of a database with 32-byte keys and fixed value encoding.
-    /// @param key Key whose absence is being proven.
-    /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with an activity chunk.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusionMMR(
-        bytes32 root,
-        bytes32 key,
-        bytes memory operation,
-        Proof calldata proof,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, false, chunkBytes, hasher);
-    }
-
-    /// @notice Verify ordered key exclusion under a current MMB root with variable operation encoding.
-    /// @dev Keys use raw byte lexicographic ordering. Fields use fixed-width bytes or
-    /// Commonware length-prefixed byte vectors as specified by the trusted database schema.
+    /// @notice Verify ordered key exclusion in a current QMDB with variable operation encoding.
+    /// @dev Keys use raw byte lexicographic ordering. The trusted schema selects fixed-width
+    /// fields or byte vectors with canonical unsigned 32-bit varint lengths.
+    /// Exclusion framing is checked before the operation and its active bit are authenticated.
     /// @param root Authenticated root of an ordered current QMDB using variable operation encoding.
     /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Active operation membership proof.
     /// @param encoding Trusted key and value encoding configuration bound to `root`.
+    /// @param mmb True for MMB and false for MMR.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -199,34 +103,12 @@ library LibQMDBCurrent {
         bytes memory operation,
         Proof calldata proof,
         ExclusionEncoding memory encoding,
+        bool mmb,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
         return _excludesVariable(key, operation, proof.location, encoding)
-            && _verify(root, operation, proof, true, chunkBytes, hasher);
-    }
-
-    /// @notice Verify ordered key exclusion under a current MMR root with variable operation encoding.
-    /// @dev Uses the raw byte ordering and trusted field encodings of `verifyExclusionVariable`.
-    /// @param root Authenticated root of an ordered current QMDB using variable operation encoding.
-    /// @param key Raw key whose absence is being proven.
-    /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Active operation membership proof.
-    /// @param encoding Trusted key and value encoding configuration bound to `root`.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusionVariableMMR(
-        bytes32 root,
-        bytes memory key,
-        bytes memory operation,
-        Proof calldata proof,
-        ExclusionEncoding memory encoding,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _excludesVariable(key, operation, proof.location, encoding)
-            && _verify(root, operation, proof, false, chunkBytes, hasher);
+            && verify(root, operation, proof, mmb, chunkBytes, hasher);
     }
 
     /// @dev An active update excludes the open cyclic interval between its keys, including
@@ -260,15 +142,16 @@ library LibQMDBCurrent {
         return true;
     }
 
-    /// @dev Validate touched chunks before reconstructing their grafted operation range.
-    function _verifyRange(
+    /// @dev Authenticate operation bytes and every touched activity chunk. Inactive operations are valid.
+    /// Chunks are validated before reconstructing their grafted range. `mmb` selects MMB when true and MMR otherwise.
+    function verifyRange(
         bytes32 root,
         bytes[] memory operations,
         RangeProof calldata proof,
         bool mmb,
         uint256 chunkBytes,
         address hasher
-    ) private view returns (bool) {
+    ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
@@ -321,7 +204,8 @@ library LibQMDBCurrent {
     }
 
     /// @dev Authenticate an operation root from the same snapshot before verifying its sparse inclusion proof.
-    function _verifyOpsMulti(
+    /// This proves historical inclusion without establishing activity. `mmb` selects MMB when true and MMR otherwise.
+    function verifyOpsMulti(
         bytes32 root,
         bytes[] memory operations,
         QMDBCommon.MultiProof calldata proof,
@@ -329,7 +213,7 @@ library LibQMDBCurrent {
         bool mmb,
         uint256 chunkBytes,
         address hasher
-    ) private view returns (bool) {
+    ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
@@ -353,15 +237,16 @@ library LibQMDBCurrent {
         return QMDBCommon.verifyMulti(witness.opsRoot, operations, proof, mmb, hasher);
     }
 
-    /// @dev The tree family determines the leaf bound, physical positions, and graftable chunks.
-    function _verify(
+    /// @dev Authenticate an encoded operation and its active bit against the supplied current root.
+    /// `mmb` selects MMB when true and MMR otherwise, determining leaf bounds, physical positions, and graftable chunks.
+    function verify(
         bytes32 root,
         bytes memory operation,
         Proof calldata proof,
         bool mmb,
         uint256 chunkBytes,
         address hasher
-    ) private view returns (bool) {
+    ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;

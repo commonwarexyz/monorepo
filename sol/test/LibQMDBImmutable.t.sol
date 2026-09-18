@@ -2,12 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { LibQMDBImmutable } from "../src/qmdb/LibQMDBImmutable.sol";
+import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
+import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
 
 struct ImmutableCase {
     bytes32 root;
     bytes operation;
-    LibQMDBImmutable.Proof proof;
+    Common.Proof proof;
 }
 
 contract LibQMDBImmutableTest is HashTest {
@@ -32,8 +34,8 @@ contract LibQMDBImmutableTest is HashTest {
                 }
             }
             bool result = _mmb()
-                ? LibQMDBImmutable.verify(c.root, operation, c.proof, _hasher())
-                : LibQMDBImmutable.verifyMMR(c.root, operation, c.proof, _hasher());
+                ? LibQMDBImmutableMMB.verify(c.root, operation, c.proof, _hasher())
+                : LibQMDBImmutableMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)

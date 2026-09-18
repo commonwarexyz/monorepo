@@ -2,12 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { LibQMDBKeyless } from "../src/qmdb/LibQMDBKeyless.sol";
+import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
+import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
 
 struct KeylessCase {
     bytes32 root;
     bytes operation;
-    LibQMDBKeyless.Proof proof;
+    Common.Proof proof;
 }
 
 contract LibQMDBKeylessTest is HashTest {
@@ -32,8 +34,8 @@ contract LibQMDBKeylessTest is HashTest {
                 }
             }
             bool result = _mmb()
-                ? LibQMDBKeyless.verify(c.root, operation, c.proof, _hasher())
-                : LibQMDBKeyless.verifyMMR(c.root, operation, c.proof, _hasher());
+                ? LibQMDBKeylessMMB.verify(c.root, operation, c.proof, _hasher())
+                : LibQMDBKeylessMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)
@@ -283,8 +285,8 @@ contract LibQMDBKeylessTest is HashTest {
     /// @dev A distinct merge history must not authenticate under the other tree family.
     function rejectOtherFamily(KeylessCase calldata c) external view {
         bool valid = _mmb()
-            ? LibQMDBKeyless.verifyMMR(c.root, c.operation, c.proof, _hasher())
-            : LibQMDBKeyless.verify(c.root, c.operation, c.proof, _hasher());
+            ? LibQMDBKeylessMMR.verify(c.root, c.operation, c.proof, _hasher())
+            : LibQMDBKeylessMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
     }
 

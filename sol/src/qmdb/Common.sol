@@ -7,6 +7,14 @@ import { LibMerkleSparse } from "../merkle/LibMerkleSparse.sol";
 
 /// @dev Shared QMDB operation proof reconstruction.
 library Common {
+    /// @dev A single-operation proof with the inactive peak boundary committed by the root.
+    struct Proof {
+        uint256 leaves;
+        uint256 location;
+        uint256 inactivePeaks;
+        bytes32[] digests;
+    }
+
     /// @dev A contiguous operation range with backward-folded Merkle witnesses.
     struct RangeProof {
         uint256 leaves;

@@ -3,10 +3,15 @@ pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
 import { Common } from "../src/qmdb/Common.sol";
-import { LibQMDBAny } from "../src/qmdb/LibQMDBAny.sol";
-import { LibQMDBKeyless } from "../src/qmdb/LibQMDBKeyless.sol";
-import { LibQMDBImmutable } from "../src/qmdb/LibQMDBImmutable.sol";
-import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
+import { Current } from "../src/qmdb/Current.sol";
+import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
+import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
+import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
+import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
+import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
+import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
+import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
+import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
 struct BatchCase {
     bytes32 root;
@@ -16,8 +21,8 @@ struct BatchCase {
     bool sparse;
     bool current;
     uint256 chunkBytes;
-    LibQMDBCurrent.RangeProof currentRange;
-    LibQMDBCurrent.OpsRootWitness witness;
+    Current.RangeProof currentRange;
+    Current.OpsRootWitness witness;
 }
 
 struct BatchNode {
@@ -41,41 +46,41 @@ contract LibQMDBBatchTest is HashTest {
         if (c.current) {
             if (c.sparse) {
                 return _mmb()
-                    ? LibQMDBCurrent.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
-                    : LibQMDBCurrent.verifyOpsMultiMMR(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
+                    ? LibQMDBCurrentMMB.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
+                    : LibQMDBCurrentMMR.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
             }
             return _mmb()
-                ? LibQMDBCurrent.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
-                : LibQMDBCurrent.verifyRangeMMR(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
+                ? LibQMDBCurrentMMB.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
+                : LibQMDBCurrentMMR.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
         }
         if (c.sparse) {
             if (facade == 0) {
                 return _mmb()
-                    ? LibQMDBAny.verifyMulti(c.root, operations, c.multi, _hasher())
-                    : LibQMDBAny.verifyMultiMMR(c.root, operations, c.multi, _hasher());
+                    ? LibQMDBAnyMMB.verifyMulti(c.root, operations, c.multi, _hasher())
+                    : LibQMDBAnyMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
             if (facade == 1) {
                 return _mmb()
-                    ? LibQMDBKeyless.verifyMulti(c.root, operations, c.multi, _hasher())
-                    : LibQMDBKeyless.verifyMultiMMR(c.root, operations, c.multi, _hasher());
+                    ? LibQMDBKeylessMMB.verifyMulti(c.root, operations, c.multi, _hasher())
+                    : LibQMDBKeylessMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
             return _mmb()
-                ? LibQMDBImmutable.verifyMulti(c.root, operations, c.multi, _hasher())
-                : LibQMDBImmutable.verifyMultiMMR(c.root, operations, c.multi, _hasher());
+                ? LibQMDBImmutableMMB.verifyMulti(c.root, operations, c.multi, _hasher())
+                : LibQMDBImmutableMMR.verifyMulti(c.root, operations, c.multi, _hasher());
         }
         if (facade == 0) {
             return _mmb()
-                ? LibQMDBAny.verifyRange(c.root, operations, c.range, _hasher())
-                : LibQMDBAny.verifyRangeMMR(c.root, operations, c.range, _hasher());
+                ? LibQMDBAnyMMB.verifyRange(c.root, operations, c.range, _hasher())
+                : LibQMDBAnyMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
         if (facade == 1) {
             return _mmb()
-                ? LibQMDBKeyless.verifyRange(c.root, operations, c.range, _hasher())
-                : LibQMDBKeyless.verifyRangeMMR(c.root, operations, c.range, _hasher());
+                ? LibQMDBKeylessMMB.verifyRange(c.root, operations, c.range, _hasher())
+                : LibQMDBKeylessMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
         return _mmb()
-            ? LibQMDBImmutable.verifyRange(c.root, operations, c.range, _hasher())
-            : LibQMDBImmutable.verifyRangeMMR(c.root, operations, c.range, _hasher());
+            ? LibQMDBImmutableMMB.verifyRange(c.root, operations, c.range, _hasher())
+            : LibQMDBImmutableMMR.verifyRange(c.root, operations, c.range, _hasher());
     }
 
     /// @dev Reused caller arrays, the zero slot, and subsequent allocations survive every facade.
