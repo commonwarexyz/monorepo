@@ -981,6 +981,39 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.values.get(section, offset, size).await
     }
 
+    /// Capture an owned reader of the values currently appended to `section`.
+    ///
+    /// Flushes and syncs the values through [Glob::snapshot]. This does not sync the index or
+    /// publish a tracked recovery marker. The reader supports concurrent appends and removal,
+    /// but truncation into its captured extent makes affected reads unspecified.
+    pub async fn value_snapshot(
+        mut self,
+        section: u64,
+    ) -> Result<(Self, super::glob::Reader<E::Blob, V>), Error> {
+        let reader;
+        (self.values, reader) = self.values.snapshot(section).await?;
+        Ok((self, reader))
+    }
+
+    /// Start a joint index/value sync and capture a reader at the same value boundary.
+    ///
+    /// The reader is available once buffered values have been flushed; the returned handle
+    /// separately reports whether both journals became durable. The in-flight or completed value sync
+    /// is reused when capturing the reader. An error from the returned handle is fatal to the
+    /// returned journal.
+    pub async fn start_sync_with_snapshot(
+        mut self,
+        section: u64,
+    ) -> Result<(Self, Handle<()>, super::glob::Reader<E::Blob, V>), Error> {
+        let handle;
+        (self, handle) = self.start_sync(section).await?;
+        let value_handle;
+        let reader;
+        (self.values, value_handle, reader) = self.values.start_sync_with_snapshot(section).await?;
+        drop(value_handle);
+        Ok((self, handle, reader))
+    }
+
     /// Consumes the journal and returns an owned [Replay] reader over index entries
     /// starting from `start_position` in `start_section`.
     ///
@@ -1865,6 +1898,91 @@ mod tests {
                 .destroy()
                 .await
                 .unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_with_snapshot_reuses_value_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&delayed);
+            let journal = Oversized::<_, TestEntry, TestValue>::init(delayed, cfg)
+                .await
+                .expect("failed to init");
+            let (journal, _, offset, size) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+
+            let starts = pending.starts();
+            let (journal, handle, reader) = journal
+                .start_sync_with_snapshot(1)
+                .await
+                .expect("failed to start sync and capture reader");
+            assert_eq!(
+                pending.starts() - starts,
+                2,
+                "snapshot must reuse the value sync started by the joint cut"
+            );
+            handle.await.expect("joint sync failed");
+            assert_eq!(reader.get(offset, size).await.unwrap(), [1; 16]);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_with_snapshot_preserves_value_sync_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let faulty = SyncFaultContext {
+                inner: context,
+                fail_partition: cfg.value_partition.clone(),
+            };
+            let journal = Oversized::<_, TestEntry, TestValue>::init(faulty, cfg)
+                .await
+                .expect("failed to init");
+            let (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+
+            let (_journal, handle, _reader) = journal
+                .start_sync_with_snapshot(1)
+                .await
+                .expect("failed to start sync and capture reader");
+            assert!(
+                handle.await.is_err(),
+                "value sync failure must reach caller"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_value_snapshot() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Oversized::<_, TestEntry, TestValue>::init(context, cfg)
+                .await
+                .unwrap();
+            let (journal, _, offset, size) = journal
+                .append(1, TestEntry::new(0, 0, 0), &[7; 16])
+                .await
+                .unwrap();
+            let (journal, reader) = journal.value_snapshot(1).await.unwrap();
+            let (journal, _, next_offset, next_size) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[9; 16])
+                .await
+                .unwrap();
+            let journal = journal.sync(1).await.unwrap();
+            assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
+            assert!(reader.get(next_offset, next_size).await.is_err());
+            journal.destroy().await.unwrap();
+            assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
         });
     }
 
