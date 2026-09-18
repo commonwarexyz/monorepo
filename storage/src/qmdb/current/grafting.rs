@@ -60,6 +60,8 @@
 //!
 //! The grafted tree is incrementally maintained when grafted leaves change.
 
+mod count;
+
 use crate::{
     merkle::{
         self, Family, Graftable, Location, Position, Readable, hasher::Hasher as HasherTrait,
@@ -97,11 +99,7 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     assert!(grafting_height >= 1, "grafting_height must be >= 1");
     let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
     let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
-    if ops_leaves < birth_chunk_0 {
-        return 0;
-    }
-    let chunk_size = 1u64 << grafting_height;
-    (ops_leaves - birth_chunk_0) / chunk_size + 1
+    count::graftable_chunks(ops_leaves, grafting_height, birth_chunk_0)
 }
 
 /// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
@@ -628,6 +626,71 @@ mod tests {
     #[test]
     fn test_graftable_chunks_mmb_matches_chunk_peaks() {
         graftable_chunks_matches_oracle::<mmb::Family>();
+    }
+
+    fn assert_graftable_chunks_threshold<F: Graftable>(grafting_height: u32, expected_birth: u64) {
+        let chunk_size = 1u64 << grafting_height;
+        assert!(
+            expected_birth <= F::MAX_LEAVES.as_u64(),
+            "birth exceeds family leaf domain: birth={expected_birth}, G={grafting_height}"
+        );
+
+        let root = F::subtree_root_position(crate::merkle::Location::<F>::new(0), grafting_height);
+        assert!(
+            root.is_valid_index(),
+            "first chunk root exceeds family node domain: root={root}, G={grafting_height}"
+        );
+        assert_eq!(
+            F::leftmost_leaf(root, grafting_height),
+            crate::merkle::Location::new(0),
+            "first chunk root has the wrong leftmost leaf at G={grafting_height}"
+        );
+        assert_eq!(
+            F::peak_birth_size(root, grafting_height),
+            expected_birth,
+            "first chunk birth mismatch at G={grafting_height}"
+        );
+
+        let max_leaves = F::MAX_LEAVES.as_u64();
+        for (ops_leaves, expected) in [
+            (expected_birth - 1, 0),
+            (expected_birth, 1),
+            (expected_birth + 1, 1),
+            (expected_birth + chunk_size, 2),
+        ]
+        .into_iter()
+        .filter(|&(leaves, _)| leaves <= max_leaves)
+        {
+            let actual = graftable_chunks::<F>(ops_leaves, grafting_height);
+            assert_eq!(
+                actual, expected,
+                "graftable chunk count mismatch: leaves={ops_leaves}, G={grafting_height}"
+            );
+
+            let complete = ops_leaves / chunk_size;
+            assert!(actual <= complete);
+            assert!(complete - actual <= 1);
+        }
+    }
+
+    #[test]
+    fn test_graftable_chunks_family_thresholds() {
+        for grafting_height in 1u32..=61 {
+            let chunk_size = 1u64 << grafting_height;
+            assert_graftable_chunks_threshold::<mmr::Family>(grafting_height, chunk_size);
+        }
+
+        for grafting_height in 1u32..=61 {
+            let chunk_size = 1u64 << grafting_height;
+            let expected_birth = chunk_size + chunk_size / 2 - 1;
+            assert_graftable_chunks_threshold::<mmb::Family>(grafting_height, expected_birth);
+        }
+
+        let max_mmr_chunk_size = 1u64 << 62;
+        assert_eq!(max_mmr_chunk_size, mmr::Family::MAX_LEAVES.as_u64());
+
+        let first_unsupported_mmb_birth = 3 * (1u64 << 61) - 1;
+        assert!(first_unsupported_mmb_birth > mmb::Family::MAX_LEAVES.as_u64());
     }
 
     /// MMR has no pending state: graftable_chunks always equals complete_chunks.

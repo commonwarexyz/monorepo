@@ -120,6 +120,10 @@ benchmark-tracking mode='generate' *args='':
 test *args='':
     cargo nextest run $@
 
+# Run Verus proofs
+test-verus:
+    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/current/grafting/count.rs
+
 # Run loom tests
 test-loom *args='':
     #!/usr/bin/env bash

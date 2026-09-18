@@ -53,6 +53,7 @@ For component-specific test and conformance guidance, see:
 - [Simulated network tests](p2p/TESTING.md)
 - [Storage tests](storage/TESTING.md)
 - [Conformance tests](conformance/TESTING.md)
+- [Verus proofs](storage/TESTING.md#verus-proofs)
 
 ## Benchmark authoring
 
