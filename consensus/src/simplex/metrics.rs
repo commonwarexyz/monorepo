@@ -8,6 +8,38 @@ pub struct Peer<P: PublicKey> {
     pub peer: P,
 }
 
+/// Handoff lifecycle event.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum HandoffEventKind {
+    Requested,
+    Deferred,
+    Received,
+    Held,
+    PublishedBeforeCertification,
+    PublishedAfterCertification,
+}
+
+/// Handoff event label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct HandoffEvent {
+    pub event: HandoffEventKind,
+}
+
+/// Reason a pending handoff was abandoned.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum HandoffAbandonedReason {
+    ViewExit,
+    AncestrySuperseded,
+    ResponseClosed,
+    IneligibleAtRecording,
+}
+
+/// Handoff abandonment label.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct HandoffAbandoned {
+    pub reason: HandoffAbandonedReason,
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum TimeoutReason {
     Retry,
