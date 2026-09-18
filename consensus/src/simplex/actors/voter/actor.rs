@@ -205,7 +205,7 @@ impl<
         let outbound_messages = context.family("outbound_messages", "number of outbound messages");
         let handoff_events = context.family(
             "handoff_events",
-            "number of nonexclusive handoff lifecycle events; Requested counts application requests, not unique views; publication counts local relay attempts classified by captured-parent certification or finalization observed at publication",
+            "number of handoff lifecycle events (nonexclusive)",
         );
         let handoff_abandoned = context.family(
             "handoff_abandoned",
