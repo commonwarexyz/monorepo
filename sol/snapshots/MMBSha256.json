@@ -1,10 +1,10 @@
 {
-  "individual-1024-last": "6572",
-  "individual-1024-last-calldata": "6289",
-  "individual-2": "3115",
-  "individual-2-calldata": "2912",
-  "range-1024-middle-64": "127291",
-  "range-1024-middle-64-calldata": "120596",
-  "range-2": "4584",
-  "range-2-calldata": "4096"
+  "individual-1024-last": "6575",
+  "individual-1024-last-calldata": "6292",
+  "individual-2": "3118",
+  "individual-2-calldata": "2915",
+  "range-1024-middle-64": "126070",
+  "range-1024-middle-64-calldata": "119374",
+  "range-2": "4570",
+  "range-2-calldata": "4082"
 }
