@@ -1737,7 +1737,7 @@ pub(crate) mod test {
 
             // Start key is in the DB.
             {
-                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(key1.clone()..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert!(stream.next().await.is_none());
             }
@@ -1745,7 +1745,7 @@ pub(crate) mod test {
             // Start key collides & precedes the only key in the db.
             {
                 let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x01]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert!(stream.next().await.is_none());
             }
@@ -1753,14 +1753,14 @@ pub(crate) mod test {
             // Start key collides & follows the only key in the db.
             {
                 let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert!(stream.next().await.is_none());
             }
 
             // Start key precedes the key in the DB without colliding.
             {
                 let start = FixedBytes::from([0x00u8, 0x00, 0x00, 0x01]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert!(stream.next().await.is_none());
             }
@@ -1768,7 +1768,7 @@ pub(crate) mod test {
             // Start key follows the key in the DB without colliding.
             {
                 let start = FixedBytes::from([0xFFu8, 0x00, 0x00, 0x11]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert!(stream.next().await.is_none());
             }
 
@@ -1789,7 +1789,7 @@ pub(crate) mod test {
 
             // Start key is in the DB.
             {
-                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(key1.clone()..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
@@ -1800,7 +1800,7 @@ pub(crate) mod test {
             // Start key is not in DB but collides with an earlier key.
             {
                 let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
@@ -1810,7 +1810,7 @@ pub(crate) mod test {
             // Start key is not in the DB but collides with a later key.
             {
                 let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
@@ -1821,7 +1821,7 @@ pub(crate) mod test {
             // Start key is not in the DB but falls between two colliding keys.
             {
                 let start = FixedBytes::from([0x20u8, 0x00, 0x00, 0x06]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
                 assert!(stream.next().await.is_none());
@@ -1829,7 +1829,7 @@ pub(crate) mod test {
 
             // Start key is in the DB and collides with an earlier key.
             {
-                let mut stream = db.stream_range(key2_2.clone()).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(key2_2.clone()..).boxed_local();
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
                 assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
                 assert!(stream.next().await.is_none());
@@ -1837,7 +1837,7 @@ pub(crate) mod test {
             // Start key is > key3. Should yield nothing.
             {
                 let start = FixedBytes::from([0x40u8, 0x00, 0x00, 0x00]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                let mut stream = db.stream_range(start..).boxed_local();
                 assert!(stream.next().await.is_none());
             }
 
