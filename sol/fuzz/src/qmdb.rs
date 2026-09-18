@@ -1,7 +1,7 @@
-//! Materialized MMR and MMB fixtures for current QMDB with 32-byte bitmap chunks.
+//! Materialized MMR and MMB fixtures for any and current QMDB.
 //!
-//! The operations and bitmap form a deterministic proof snapshot. This exercises the
-//! production tree, codec, and current-proof APIs without a persistent database lifecycle.
+//! Deterministic operation logs and activity bitmaps exercise the production tree,
+//! codec, and proof APIs without a persistent database lifecycle.
 
 use crate::{
     Hash,
@@ -30,6 +30,15 @@ type Uint256 = <sol!(uint256) as SolType>::RustType;
 type Operation<F> = fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>;
 
 sol! {
+    struct AnyOutput {
+        bytes32 root;
+        uint256 leaves;
+        uint256 location;
+        uint256 inactivePeaks;
+        bytes32[] digests;
+        bytes operation;
+    }
+
     struct OperationOutput {
         bytes32 root;
         uint256 leaves;
@@ -46,6 +55,8 @@ sol! {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Prove membership of an ordered operation in the plain operations root.
+    Any(AnyArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
     Generate(GenerateArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
@@ -61,9 +72,24 @@ pub(crate) struct GenerateArgs {
     hash: Hash,
     #[arg(long, value_enum, default_value = "mmb")]
     family: TreeKind,
-    /// Operations below this location are inactive; proofs fold only chunk-aligned peaks.
+    /// Operations below this location are inactive; current proofs fold chunk-aligned peaks.
     #[arg(long, default_value_t = 0)]
     inactivity_floor: u64,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum History {
+    Updated,
+    Deleted,
+}
+
+#[derive(Args)]
+pub(crate) struct AnyArgs {
+    #[command(flatten)]
+    tree: GenerateArgs,
+    /// Authenticate the first update after later updates or deletion of its key.
+    #[arg(long, value_enum)]
+    history: Option<History>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -98,6 +124,77 @@ fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
     })
 }
 
+fn materialize_ops<F: Family, H: Hasher>(
+    args: &GenerateArgs,
+    operation: &impl Fn(u64) -> Operation<F>,
+) -> Result<Mem<F, H::Digest>, String> {
+    if args.leaves == 0
+        || args.leaves > 1_000_000
+        || args.location >= args.leaves
+        || args.location < args.inactivity_floor
+    {
+        return Err(
+            "require 1 <= leaves <= 1000000 and inactivity-floor <= location < leaves".into(),
+        );
+    }
+    let hasher = qmdb::hasher::<H>();
+    let mut ops = Mem::<F, H::Digest>::new();
+    let mut batch = ops.new_batch();
+    for index in 0..args.leaves {
+        batch = batch.add(&hasher, &operation(index).encode());
+    }
+    let batch = batch.merkleize(&ops, &hasher);
+    ops.apply_batch(&batch).map_err(|e| e.to_string())?;
+    Ok(ops)
+}
+
+fn any_operation<F: Family>(args: &AnyArgs, index: u64) -> Operation<F> {
+    match args.history {
+        Some(History::Deleted) if index == args.tree.leaves - 1 => Operation::Delete(key(0)),
+        Some(_) => Operation::Update(fixed::Update {
+            key: key(0),
+            value: FixedBytes::new(leaf(args.tree.seed, index)),
+            next_key: key(0),
+        }),
+        None => operation(args.tree.seed, index, args.tree.leaves),
+    }
+}
+
+fn any<F: Family, H: Hasher>(args: &AnyArgs) -> Result<AnyOutput, String> {
+    let tree = &args.tree;
+    if args.history.is_some() && (tree.leaves < 2 || tree.location != 0) {
+        return Err("history requires leaves >= 2 and location = 0".into());
+    }
+    let ops = materialize_ops::<F, H>(tree, &|index| any_operation::<F>(args, index))?;
+    let hasher = qmdb::hasher::<H>();
+    let inactive = F::inactive_peaks(
+        Location::new(tree.leaves),
+        Location::new(tree.inactivity_floor),
+    );
+    let root = ops.root(&hasher, inactive).map_err(|e| e.to_string())?;
+    let location = Location::new(tree.location);
+    let proof = ops
+        .range_proof(
+            &hasher,
+            location..Location::new(tree.location + 1),
+            inactive,
+        )
+        .map_err(|e| e.to_string())?;
+    let op = any_operation::<F>(args, tree.location);
+    if !qmdb::verify_proof::<H, F, _>(&proof, location, core::slice::from_ref(&op), &root) {
+        return Err("Commonware rejected the materialized any proof".into());
+    }
+    let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
+    Ok(AnyOutput {
+        root: bytes32(root).into(),
+        leaves: Uint256::from(tree.leaves),
+        location: Uint256::from(tree.location),
+        inactivePeaks: Uint256::from(inactive),
+        digests: proof.digests.iter().map(|d| bytes32(*d).into()).collect(),
+        operation: op.encode().to_vec().into(),
+    })
+}
+
 struct Materialized<F: Graftable, D: Digest> {
     output: OperationOutput,
     proof: operation::Proof<F, D, [u8; 32]>,
@@ -115,11 +212,7 @@ fn materialize<F: Graftable, H: Hasher>(
         inactivity_floor,
         ..
     } = *args;
-    if leaves == 0 || leaves > 1_000_000 || location >= leaves || location < inactivity_floor {
-        return Err(
-            "require 1 <= leaves <= 1000000 and inactivity-floor <= location < leaves".into(),
-        );
-    }
+    let ops = materialize_ops::<F, H>(args, &operation)?;
     let mut status = Prunable::<32>::new();
     for index in 0..leaves {
         status.push(active(index));
@@ -130,18 +223,13 @@ fn materialize<F: Graftable, H: Hasher>(
     let graftable = grafting::graftable_chunks::<F>(leaves, 8);
     let hasher = qmdb::hasher::<H>();
     let verifier = grafting::Verifier::<F, H>::new(8, 0, chunks, graftable);
-    let mut ops = Mem::<F, H::Digest>::new();
     let mut grafted = Mem::<F, H::Digest>::new();
-    let mut ops_batch = ops.new_batch();
     let mut grafted_batch = grafted.new_batch();
     for index in 0..leaves {
         let encoded = operation(index).encode();
-        ops_batch = ops_batch.add(&hasher, &encoded);
         grafted_batch = grafted_batch.add(&verifier, &encoded);
     }
-    let ops_batch = ops_batch.merkleize(&ops, &hasher);
     let grafted_batch = grafted_batch.merkleize(&grafted, &verifier);
-    ops.apply_batch(&ops_batch).map_err(|e| e.to_string())?;
     grafted
         .apply_batch(&grafted_batch)
         .map_err(|e| e.to_string())?;
@@ -292,6 +380,15 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::Any(args) => {
+                let output = match (args.tree.family, args.tree.hash) {
+                    (TreeKind::Mmr, Hash::Keccak) => any::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Sha256) => any::<mmr::Family, Sha256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak) => any::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Sha256) => any::<mmb::Family, Sha256>(&args),
+                }?;
+                Ok(output.abi_encode_params())
+            }
             Self::Generate(args) => {
                 let output = match (args.family, args.hash) {
                     (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(&args),
@@ -352,6 +449,154 @@ mod tests {
         let bit = *inactive.loc % 256;
         inactive.chunk[(bit / 8) as usize] &= !(1 << (bit % 8));
         assert!(!inactive.verify::<H, _>(op, &root));
+    }
+
+    fn verify_any_output<F: Family, H: Hasher>(output: &AnyOutput) {
+        let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
+        let proof = Proof::<F, H::Digest> {
+            leaves: Location::new(u64::try_from(output.leaves).unwrap()),
+            inactive_peaks: usize::try_from(output.inactivePeaks).unwrap(),
+            digests: output
+                .digests
+                .iter()
+                .map(|d| digest(d.as_slice()))
+                .collect(),
+        };
+        let location = Location::new(u64::try_from(output.location).unwrap());
+        let op = Operation::<F>::decode(Copying(output.operation.as_ref())).unwrap();
+        let root = digest(output.root.as_slice());
+        let verify = |proof: &Proof<F, H::Digest>, op: &Operation<F>, root: &H::Digest| {
+            qmdb::verify_proof::<H, F, _>(proof, location, core::slice::from_ref(op), root)
+        };
+        assert!(verify(&proof, &op, &root));
+        let mut bad_root = output.root.0;
+        bad_root[0] ^= 1;
+        assert!(!verify(&proof, &op, &digest(&bad_root)));
+        let mut bad_op = op.clone();
+        let Operation::Update(update) = &mut bad_op else {
+            unreachable!()
+        };
+        update.value = FixedBytes::new([0xff; 32]);
+        assert!(!verify(&proof, &bad_op, &root));
+        let mut extra = proof.clone();
+        extra.digests.push(root);
+        assert!(!verify(&extra, &op, &root));
+        if !proof.digests.is_empty() {
+            let mut truncated = proof.clone();
+            truncated.digests.pop();
+            assert!(!verify(&truncated, &op, &root));
+            let mut changed = proof;
+            let mut bytes = changed.digests[0].as_ref().to_vec();
+            bytes[0] ^= 1;
+            changed.digests[0] = digest(&bytes);
+            assert!(!verify(&changed, &op, &root));
+        }
+    }
+
+    #[test]
+    fn any_cli_covers_boundaries_inactive_prefixes_and_history() {
+        for family in ["mmr", "mmb"] {
+            for hash in ["keccak", "sha256"] {
+                for leaves in [1u64, 2, 3, 7, 11, 31, 255, 256, 257, 383, 513, 1793] {
+                    for location in [0, leaves / 2, leaves - 1] {
+                        for floor in [0, location] {
+                            for history in [None, Some("updated"), Some("deleted")] {
+                                if history.is_some() && (leaves < 2 || location != 0) {
+                                    continue;
+                                }
+                                let mut args = vec![
+                                    "fuzz".to_owned(),
+                                    "qmdb".into(),
+                                    "any".into(),
+                                    leaves.to_string(),
+                                    location.to_string(),
+                                    "42".into(),
+                                    "--family".into(),
+                                    family.into(),
+                                    "--hash".into(),
+                                    hash.into(),
+                                    "--inactivity-floor".into(),
+                                    floor.to_string(),
+                                ];
+                                if let Some(history) = history {
+                                    args.extend(["--history".into(), history.into()]);
+                                }
+                                let encoded = Cli::try_parse_from(args)
+                                    .unwrap()
+                                    .command
+                                    .execute()
+                                    .unwrap();
+                                let output =
+                                    <AnyOutput as SolValue>::abi_decode_params_validate(&encoded)
+                                        .unwrap();
+                                assert_eq!(output.leaves, leaves);
+                                assert_eq!(output.location, location);
+                                assert_eq!(output.operation.len(), 97);
+                                assert_eq!(output.operation[0], 0xD2);
+                                match (family, hash) {
+                                    ("mmr", "keccak") => {
+                                        verify_any_output::<mmr::Family, Keccak256>(&output)
+                                    }
+                                    ("mmr", _) => verify_any_output::<mmr::Family, Sha256>(&output),
+                                    (_, "keccak") => {
+                                        verify_any_output::<mmb::Family, Keccak256>(&output)
+                                    }
+                                    _ => verify_any_output::<mmb::Family, Sha256>(&output),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn any_history_contains_later_mutations_of_the_proven_key() {
+        for history in [History::Updated, History::Deleted] {
+            let args = AnyArgs {
+                tree: GenerateArgs {
+                    leaves: 3,
+                    location: 0,
+                    seed: 42,
+                    hash: Hash::Keccak,
+                    family: TreeKind::Mmb,
+                    inactivity_floor: 0,
+                },
+                history: Some(history),
+            };
+            let Operation::Update(first) = any_operation::<mmb::Family>(&args, 0) else {
+                unreachable!()
+            };
+            assert_eq!(first.key, key(0));
+            assert_eq!(first.next_key, key(0));
+            match any_operation::<mmb::Family>(&args, 2) {
+                Operation::Update(last) => {
+                    assert_eq!(last.key, first.key);
+                    assert_eq!(last.next_key, first.next_key);
+                    assert_ne!(last.value, first.value);
+                }
+                Operation::Delete(key) => assert_eq!(key, first.key),
+                _ => unreachable!(),
+            }
+            let before = any::<mmb::Family, Keccak256>(&AnyArgs {
+                tree: GenerateArgs {
+                    leaves: 1,
+                    ..args.tree
+                },
+                history: None,
+            })
+            .unwrap();
+            let output = any::<mmb::Family, Keccak256>(&args).unwrap();
+            assert_eq!(before.operation, output.operation);
+            assert_ne!(before.root, output.root);
+            verify_any_output::<mmb::Family, Keccak256>(&before);
+            assert_eq!(
+                output.operation.as_ref(),
+                any_operation::<mmb::Family>(&args, 0).encode().as_ref()
+            );
+            verify_any_output::<mmb::Family, Keccak256>(&output);
+        }
     }
 
     #[test]

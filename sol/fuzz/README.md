@@ -18,8 +18,9 @@ target/release/commonware-sol-fuzz simplex --help
   to curve points.
 - `merkle`: Generate and check MMR and MMB proofs.
 - `qmdb` generates active operation proofs for current QMDBs. Pass `--family mmr`
-  for MMR proofs or use the default MMB family. The `exclude` subcommand generates
-  ordered exclusion proofs with 32-byte keys and values.
+  for MMR proofs or use the default MMB family. The `any` subcommand generates
+  ordered operation proofs, including overwrite and deletion histories. The `exclude`
+  subcommand generates ordered exclusion proofs with 32-byte keys and values.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.
