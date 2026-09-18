@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
   <title id="title">From Payments to a Certified Settlement</title>
-  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 67-of-100 certificate.</desc>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 34-of-100 certificate.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -73,29 +73,29 @@
     <use href="#validator-row" y="0"/>
     <use href="#validator-row" y="22"/>
     <use href="#validator-row" y="44"/>
-    <use href="#validator-row" y="66"/>
-    <use href="#validator-row" y="88"/>
-    <use href="#validator-row" y="110"/>
   </g>
-  <g transform="translate(535 313)">
+  <g transform="translate(535 247)">
     <use class="signed" href="#validator" x="0"/>
     <use class="signed" href="#validator" x="26"/>
     <use class="signed" href="#validator" x="52"/>
     <use class="signed" href="#validator" x="78"/>
-    <use class="signed" href="#validator" x="104"/>
-    <use class="signed" href="#validator" x="130"/>
-    <use class="signed" href="#validator" x="156"/>
+    <use class="pending" href="#validator" x="104"/>
+    <use class="pending" href="#validator" x="130"/>
+    <use class="pending" href="#validator" x="156"/>
     <use class="pending" href="#validator" x="182"/>
     <use class="pending" href="#validator" x="208"/>
     <use class="pending" href="#validator" x="234"/>
   </g>
-  <g class="pending" transform="translate(535 335)">
+  <g class="pending" transform="translate(535 269)">
     <use href="#validator-row" y="0"/>
     <use href="#validator-row" y="22"/>
     <use href="#validator-row" y="44"/>
+    <use href="#validator-row" y="66"/>
+    <use href="#validator-row" y="88"/>
+    <use href="#validator-row" y="110"/>
   </g>
-  <text class="note center green" x="575" y="431">67 signed</text>
-  <text class="note center" x="725" y="431">33 not included</text>
+  <text class="note center green" x="575" y="431">34 signed</text>
+  <text class="note center" x="725" y="431">66 not included</text>
 
   <path class="wire vote" d="M809 260 H990"/>
   <text class="label center green" x="900" y="239">Certify</text>
@@ -105,7 +105,7 @@
   <text class="heading center green" x="1142" y="211">Certified close</text>
   <circle cx="1046" cy="266" r="20" fill="#087a32"/>
   <path d="M1037 266 L1044 273 L1056 259" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <text class="center green" x="1172" y="277" style="font-size:32px; font-weight:700;">67 / 100</text>
+  <text class="center green" x="1172" y="277" style="font-size:32px; font-weight:700;">34 / 100</text>
   <text class="note center" x="1142" y="316">Same commitment</text>
 
   <path class="leader" d="M403 260 V463" stroke="#2424d4"/>
@@ -192,7 +192,7 @@
   <text class="heading center" x="993" y="743" style="fill:#fff;">32-byte commitment</text>
   <path class="binding" d="M993 766 V797" marker-end="url(#vote-arrow)"/>
   <rect x="724" y="797" width="538" height="61" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
-  <text class="heading center green" x="805" y="835">67 / 100</text>
+  <text class="heading center green" x="805" y="835">34 / 100</text>
   <path d="M886 810 V845" stroke="#c7dfce"/>
   <text class="label green" x="907" y="822">Certificate</text>
   <text class="note" x="907" y="846">Aggregate signature + bitmap</text>

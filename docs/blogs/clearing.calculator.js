@@ -229,7 +229,7 @@ function mount(root) {
   panel.append(controls);
   const sN = slider(controls, 'clearing-calc-n', 'Live accounts', 'Includes accounts with no activity.', 3, Math.log10(MAX_ACCOUNTS), 0.01, 6);
   const sK = slider(controls, 'clearing-calc-k', 'Recipients per account', 'Average over all live accounts.', -3, Math.log10(maxDegree(1e6)), 'any', 0);
-  const sV = slider(controls, 'clearing-calc-v', 'Validators', 'Each receives the same complete update.', Math.log10(4), Math.log10(MAX_VALIDATORS), 'any', 2);
+  const sV = slider(controls, 'clearing-calc-v', 'Validators', 'Each receives the same complete update.', 0, Math.log10(MAX_VALIDATORS), 'any', 2);
 
   const activity = el('div', { class: 'clearing-calculator-activity' });
   const pairs = el('span');
@@ -266,17 +266,11 @@ function mount(root) {
   composition.append(el('div', { class: 'label' }, 'Composition'), breakdown);
   results.append(dealing, composition);
 
-  // Committee sizes snap to n = 3f + 1.
-  const curV = () => {
-    const f = Math.round((Math.pow(10, parseFloat(sV.input.value)) - 1) / 3);
-    return 3 * f + 1;
-  };
-
   function draw() {
     const N = Math.min(MAX_ACCOUNTS, sig3(Math.pow(10, parseFloat(sN.input.value))));
     const kMax = maxDegree(N);
     sK.input.max = Math.log10(kMax);
-    const validators = curV();
+    const validators = Math.round(Math.pow(10, parseFloat(sV.input.value)));
     const sc = scenario(N, Math.pow(10, parseFloat(sK.input.value)));
     const K = sc.E / N;
     sN.out.textContent = count(N);
