@@ -303,13 +303,11 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableAutomaton as _, CertifiableBlock as _, HandoffPolicy,
-        HandoffProposal, HandoffPublication, Reporter as _,
-        marshal::{Update, ancestry, standard::Deferred},
+        Application as _, CertifiableBlock as _, HandoffPolicy, HandoffPublication, Reporter as _,
+        marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
-        types::FixedEpocher,
     };
-    use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
@@ -422,23 +420,10 @@ mod tests {
                 },
             );
             let _guards = marshal.guards;
-            let marshal = marshal.mailbox;
-            let mut deferred = Deferred::new(
-                context.child("prepare"),
-                mailbox,
-                marshal.clone(),
-                FixedEpocher::new(NZU64!(10)),
-            );
-
             let block = TestBlock::new(1, 1);
-            assert!(marshal.verified(block.context().round, block.clone()).await);
-            let response = deferred.propose_handoff(block.context()).await;
             assert_eq!(
-                response.await.unwrap(),
-                HandoffProposal::Proposed {
-                    payload: block.digest(),
-                    publication,
-                }
+                mailbox.handoff_policy(&block.context()),
+                HandoffPolicy::Prepare(publication),
             );
         });
     }
