@@ -56,7 +56,7 @@ impl<B, S> MockVerifyingApp<B, S> {
     }
 
     /// Blocks the first proposal build until cancellation. Returns receivers that
-    /// signal when the build starts and when it is cancelled.
+    /// signal when the build starts and that error when it is cancelled.
     pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
         let (started, started_rx) = oneshot::channel();
         let (dropped, dropped_rx) = oneshot::channel();
@@ -71,28 +71,6 @@ impl<B, S> MockVerifyingApp<B, S> {
 struct ProposalGate {
     started: oneshot::Sender<()>,
     dropped: oneshot::Sender<()>,
-}
-
-/// Signals when dropped unless disarmed first.
-pub(crate) struct DropSignal(Option<oneshot::Sender<()>>);
-
-impl DropSignal {
-    pub(crate) const fn new(sender: Option<oneshot::Sender<()>>) -> Self {
-        Self(sender)
-    }
-
-    /// Disarms the drop signal.
-    pub(crate) fn disarm(&mut self) {
-        self.0.take();
-    }
-}
-
-impl Drop for DropSignal {
-    fn drop(&mut self) {
-        if let Some(dropped) = self.0.take() {
-            dropped.send_lossy(());
-        }
-    }
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -129,7 +107,8 @@ where
             .as_ref()
             .and_then(|gate| gate.lock().take());
         if let Some(gate) = gate {
-            let _drop_signal = DropSignal::new(Some(gate.dropped));
+            // Cancelling this future drops the sender, which errors the receiver.
+            let _dropped = gate.dropped;
             gate.started.send_lossy(());
             std::future::pending::<()>().await;
         }

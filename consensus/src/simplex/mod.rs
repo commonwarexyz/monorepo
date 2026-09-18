@@ -288,16 +288,16 @@
 //!
 //! ### Handoff Metrics
 //!
-//! `handoff_events` counts nonexclusive lifecycle events. `Requested` counts requests to the
-//! automaton, not unique views. `Deferred` counts explicit deferrals, `CandidateReturned` counts
-//! candidates returned by the automaton, and `Held` counts candidates retained for parent
-//! certification. Releasing a held candidate does not count it as returned again. Publication
-//! events count local relay attempts after proposal acceptance, classified by whether the exact
-//! captured parent has certified or finalized at that point. They do not imply network delivery.
+//! `handoff_events` counts lifecycle events. One request can count several events. `Requested`
+//! counts requests to the automaton, not unique views. `Deferred` counts explicit deferrals.
+//! Consensus can still abandon a deferred request later. `CandidateReturned` counts candidates
+//! returned by the automaton, and `Held` counts candidates retained for parent certification.
+//! Releasing a held candidate does not count it as returned again. Publication events count
+//! local relay attempts after proposal acceptance, classified by whether the exact captured
+//! parent has certified or finalized at that point. They do not imply network delivery.
 //!
 //! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
 //! view exit, superseded ancestry, response closure, or ineligibility at recording.
-//! `handoff_events` counts each deferral once. Consensus can still abandon the deferred request later.
 //! Neither family tracks losses across restart or distinguishes newly built candidates from
 //! reused blocks.
 //!
@@ -2005,7 +2005,7 @@ mod tests {
                 let gap = window[1].duration_since(window[0]).unwrap_or_default();
                 assert!(
                     gap < 2 * link_latency,
-                    "expected pipelined boundary view {view} within one link latency of its parent, got {gap:?}"
+                    "expected pipelined boundary view {view} within two link latencies of its parent, got {gap:?}"
                 );
             }
 

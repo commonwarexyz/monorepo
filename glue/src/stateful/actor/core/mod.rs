@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn forwards_handoff_policy_and_reuses_recovered_proposal() {
+    fn mailbox_forwards_handoff_policy() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff-policy", 1);
@@ -401,7 +401,7 @@ mod tests {
             .await;
             let plan = SyncPlan::init(&context, "stateful-handoff-policy-stateful").await;
             let publication = HandoffPublication::AllowBeforeCertification;
-            let (stateful, mailbox) = Stateful::init(
+            let (_stateful, mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
                     application: TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
@@ -423,8 +423,6 @@ mod tests {
             );
             let _guards = marshal.guards;
             let marshal = marshal.mailbox;
-            let actor = stateful.start();
-            let _databases = mailbox.subscribe_databases().await;
             let mut deferred = Deferred::new(
                 context.child("prepare"),
                 mailbox,
@@ -432,8 +430,6 @@ mod tests {
                 FixedEpocher::new(NZU64!(10)),
             );
 
-            // The handoff build must use Marshal's ordinary path to reuse the
-            // recovered candidate.
             let block = TestBlock::new(1, 1);
             assert!(marshal.verified(block.context().round, block.clone()).await);
             let response = deferred.propose_handoff(block.context()).await;
@@ -444,7 +440,6 @@ mod tests {
                     publication,
                 }
             );
-            actor.abort();
         });
     }
 

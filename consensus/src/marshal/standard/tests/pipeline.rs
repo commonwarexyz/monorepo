@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    Viewable,
-    marshal::{ancestry::Ancestry, mocks::verifying::DropSignal},
-};
+use crate::{Viewable, marshal::ancestry::Ancestry};
 use commonware_p2p::Receiver;
 
 /// Which of the two concurrent steps completes first.
@@ -21,7 +18,6 @@ struct PipelineApp {
     build_started: Arc<Mutex<Option<oneshot::Sender<Ctx>>>>,
     build_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     build_completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    build_dropped: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     policies: Arc<AtomicUsize>,
     builds: Arc<AtomicUsize>,
     block: B,
@@ -49,7 +45,6 @@ impl crate::Application<Runtime> for PipelineApp {
             0,
             "the retained handoff must not be replaced by an ordinary build"
         );
-        let mut drop_signal = DropSignal::new(self.build_dropped.lock().take());
         self.build_started
             .lock()
             .take()
@@ -57,7 +52,6 @@ impl crate::Application<Runtime> for PipelineApp {
             .send_lossy(context);
         let release = self.build_release.lock().take().unwrap();
         release.await.unwrap();
-        drop_signal.disarm();
         self.build_completed.lock().take().unwrap().send_lossy(());
         Some(self.block.clone())
     }
@@ -159,7 +153,6 @@ fn retained_pipeline_handoff(first: First) {
         let (build_tx, build_rx) = oneshot::channel();
         let (build_release_tx, build_release_rx) = oneshot::channel();
         let (completed_tx, completed_rx) = oneshot::channel();
-        let (drop_tx, drop_rx) = oneshot::channel();
         let policies = Arc::new(AtomicUsize::new(0));
         let app = PipelineApp {
             verify_started: Arc::new(Mutex::new(Some(verify_tx))),
@@ -167,7 +160,6 @@ fn retained_pipeline_handoff(first: First) {
             build_started: Arc::new(Mutex::new(Some(build_tx))),
             build_release: Arc::new(Mutex::new(Some(build_release_rx))),
             build_completed: Arc::new(Mutex::new(Some(completed_tx))),
-            build_dropped: Arc::new(Mutex::new(Some(drop_tx))),
             policies: policies.clone(),
             builds: Arc::new(AtomicUsize::new(0)),
             block,
@@ -280,10 +272,6 @@ fn retained_pipeline_handoff(first: First) {
             policies.load(Ordering::SeqCst),
             1,
             "one handoff request evaluates the policy once"
-        );
-        assert!(
-            drop_rx.await.is_err(),
-            "build must complete, not be cancelled"
         );
 
         let proposal = loop {

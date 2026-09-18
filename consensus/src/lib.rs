@@ -176,8 +176,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Controls when consensus may publish a prepared handoff proposal.
     ///
-    /// The application chooses this for each handoff. Consensus requires certification or
-    /// finalization of the exact captured parent to satisfy the publication barrier.
+    /// The application chooses this for each handoff.
     #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
     pub enum HandoffPublication {
         /// Wait until the captured parent certifies or finalizes before publication.

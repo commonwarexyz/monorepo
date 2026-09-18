@@ -3250,7 +3250,7 @@ mod tests {
                 let response = gated.propose_handoff(non_boundary_context.clone()).await;
                 started.await.expect("handoff build should start");
                 drop(response);
-                dropped.await.expect("handoff build should be cancelled");
+                assert!(dropped.await.is_err(), "handoff build should be cancelled");
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -3283,9 +3283,9 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let optimistic_rx = wrapper.propose_handoff(reproposal_context.clone()).await;
+                let handoff_rx = wrapper.propose_handoff(reproposal_context.clone()).await;
                 assert_eq!(
-                    optimistic_rx.await.expect("optimistic decision missing"),
+                    handoff_rx.await.expect("handoff decision missing"),
                     HandoffProposal::AwaitCertification,
                     "{kind:?}: application deferral must precede automatic boundary reproposal"
                 );
