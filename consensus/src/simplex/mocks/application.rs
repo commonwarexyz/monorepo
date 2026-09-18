@@ -157,7 +157,7 @@ pub enum Certifier<D: Digest> {
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
-    /// Let a test decide when and how to complete each certification request.
+    /// Lets a test decide when and how to complete each certification request.
     Controlled(CertificationController<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
@@ -212,9 +212,9 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    /// Invoked on every ordinary and handoff proposal request received by the
-    /// application, so tests can count builds per view and detect spurious
-    /// local-leader propose attempts (e.g. after replay).
+    /// Invoked for every ordinary and handoff proposal request. Tests use it to
+    /// count requests per view and detect spurious local-leader requests after
+    /// replay.
     propose_observer: Option<ProposeObserver<H, P>>,
 
     /// Takes ownership of handoff proposal responses when configured.

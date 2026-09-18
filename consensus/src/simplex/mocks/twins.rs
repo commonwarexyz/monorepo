@@ -339,9 +339,9 @@ where
     }
 
     fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {
-        // Scripted `round_leaders` answer `elect` during the attack prefix, so
-        // delegating to the fallback could contradict the script and violate
-        // the `elect_without_certificate == elect` contract.
+        // Scripted `round_leaders` control `elect` during the attack prefix.
+        // Delegating here could contradict the script and violate the
+        // `elect_without_certificate == elect` contract.
         None
     }
 }
