@@ -161,11 +161,16 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         config: CodingConfig,
         strategy: &impl Strategy,
     ) -> (C::Commitment, Vec<C::Shard>) {
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
-
-        C::encode(&config, buf.as_slice(), strategy).expect("must encode block successfully")
+        C::encode_with(
+            &config,
+            inner.encode_size() + config.encode_size(),
+            |out| {
+                inner.write(out);
+                config.write(out);
+            },
+            strategy,
+        )
+        .expect("must encode block successfully")
     }
 
     /// Create a new [`CodedBlock`] from a [`Block`] and a configuration.
@@ -205,7 +210,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Returns a reference to the shards in this coded block.
     ///
-    /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
+    /// If the shards have not yet been generated, they will be created via [`Scheme::encode_with`].
     pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
         self.shards.get_or_init(|| {
             let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
@@ -370,13 +375,18 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         // The context digest is not checkable here because [`Block`] does not
         // expose a context, so callers that need the full commitment to match
         // must compare it after decoding.
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
-        let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
-                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
-            })?;
+        let (commitment, shards) = C::encode_with(
+            &config,
+            inner.encode_size() + config.encode_size(),
+            |out| {
+                inner.write(out);
+                config.write(out);
+            },
+            &Sequential,
+        )
+        .map_err(|_| {
+            commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
+        })?;
         if commitment != expected.root() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
@@ -436,7 +446,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 ///
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission.
-/// Its [`Read`] impl recomputes the coding root with [`Scheme::encode`] unless the
+/// Its [`Read`] impl recomputes the coding root with [`Scheme::encode_with`] unless the
 /// expected commitment is trusted (see [`CodedBlockCfg`]).
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
@@ -686,7 +696,13 @@ mod test {
         };
 
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let (expected_root, expected_shards) =
+            RS::encode(&CONFIG, (block.clone(), CONFIG).encode(), &Sequential).unwrap();
         let coded_block = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        assert_eq!(coded_block.commitment().root(), expected_root);
+        for (actual, expected) in coded_block.shards(&Sequential).iter().zip(&expected_shards) {
+            assert_eq!(actual.encode(), expected.encode());
+        }
 
         let encoded = coded_block.encode();
         let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
@@ -699,6 +715,7 @@ mod test {
         .unwrap();
 
         assert!(coded_block == decoded);
+        assert_eq!(decoded.commitment().root(), expected_root);
     }
 
     #[test]

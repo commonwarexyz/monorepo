@@ -181,6 +181,52 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
+        /// Encode `data_len` bytes supplied by `write`, returning a commitment, shards, and proofs.
+        ///
+        /// The scheme supplies the destination so the caller can serialize directly into it.
+        ///
+        /// The callback receives a writable payload slice and must advance it to empty by
+        /// writing exactly `data_len` bytes. It is called at most once. The result must match
+        /// [`Self::encode`] applied to those bytes with the same configuration and strategy.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the callback leaves bytes unwritten. Writing past the end through
+        /// [`bytes::BufMut`] also panics.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_codec::{EncodeSize, Write};
+        /// use commonware_coding::{Config, ReedSolomon, Scheme};
+        /// use commonware_cryptography::Sha256;
+        /// use commonware_parallel::Sequential;
+        /// use commonware_utils::NZU16;
+        ///
+        /// let config = Config {
+        ///     minimum_shards: NZU16!(2),
+        ///     extra_shards: NZU16!(1),
+        /// };
+        /// let value = 42u64;
+        /// let (commitment, shards) = ReedSolomon::<Sha256>::encode_with(
+        ///     &config,
+        ///     value.encode_size(),
+        ///     |out| value.write(out),
+        ///     &Sequential,
+        /// ).unwrap();
+        /// ```
+        #[allow(clippy::type_complexity)]
+        fn encode_with(
+            config: &Config,
+            data_len: usize,
+            write: impl FnOnce(&mut &mut [u8]),
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+            let mut data = vec![0; data_len];
+            fill_payload(&mut data, write);
+            Self::encode(config, data.as_slice(), strategy)
+        }
+
         /// Check the integrity of a shard, producing a checked shard.
         ///
         /// This takes in an index, to make sure that the shard you're checking
@@ -485,6 +531,12 @@ commonware_macros::stability_scope!(ALPHA {
     /// guarantees that the shard results from a valid encoding of the data, and thus,
     /// if other participants also call check, then the data is guaranteed to be reconstructable.
     pub trait ValidatingScheme {}
+
+    /// Fill a bounded payload through a writable cursor.
+    fn fill_payload(mut out: &mut [u8], write: impl FnOnce(&mut &mut [u8])) {
+        write(&mut out);
+        assert!(out.is_empty(), "writer did not fill payload");
+    }
 });
 
 #[cfg(test)]
@@ -533,8 +585,137 @@ mod test {
     mod scheme {
         use super::*;
         use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
+        use bytes::BufMut as _;
         use commonware_codec::Encode;
-        use commonware_parallel::Sequential;
+        use commonware_parallel::{Rayon, Sequential};
+        use commonware_utils::NZUsize;
+        use std::cell::Cell;
+
+        fn encode_with_matches_encode<S: Scheme>(
+            config: &Config,
+            data: &[u8],
+            strategy: &impl Strategy,
+        ) {
+            let expected = S::encode(config, data, strategy).unwrap();
+            let calls = Cell::new(0);
+            let actual = S::encode_with(
+                config,
+                data.len(),
+                |out| {
+                    calls.set(calls.get() + 1);
+                    assert_eq!(out.len(), data.len());
+                    for chunk in data.chunks(7) {
+                        out.put_slice(chunk);
+                    }
+                },
+                strategy,
+            )
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(actual.1.len(), expected.1.len());
+            for (actual, expected) in actual.1.iter().zip(&expected.1) {
+                assert_eq!(actual.encode(), expected.encode());
+            }
+
+            let checked = actual
+                .1
+                .iter()
+                .enumerate()
+                .rev()
+                .take(usize::from(config.minimum_shards.get()))
+                .map(|(i, shard)| S::check(config, &actual.0, i as u16, shard).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                S::decode(config, &actual.0, checked.iter(), strategy).unwrap(),
+                data,
+            );
+        }
+
+        #[test]
+        fn encode_with_matches_bytes() {
+            for (minimum, extra) in [(1, 1), (2, 1), (4, 7)] {
+                let config = Config {
+                    minimum_shards: NZU16!(minimum),
+                    extra_shards: NZU16!(extra),
+                };
+                for len in [0, 1, 7, 8, 9, 63, 64, 65, 1023] {
+                    let data: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
+                    encode_with_matches_encode::<ReedSolomon<Sha256>>(&config, &data, &Sequential);
+                    encode_with_matches_encode::<PhasedAsScheme<Zoda<Sha256>>>(
+                        &config,
+                        &data,
+                        &Sequential,
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn encode_with_matches_bytes_parallel() {
+            let strategy = Rayon::new(NZUsize!(4)).unwrap();
+            let config = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(3),
+            };
+            let data: Vec<_> = (0..512 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+            encode_with_matches_encode::<ReedSolomon<Sha256>>(&config, &data, &strategy);
+            encode_with_matches_encode::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &strategy);
+        }
+
+        fn encode_with_checks_writer<S: Scheme>() {
+            let config = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(1),
+            };
+            let underwrite = std::panic::catch_unwind(|| {
+                S::encode_with(&config, 2, |out| out.put_u8(1), &Sequential).unwrap();
+            });
+            assert!(underwrite.is_err());
+            let overwrite = std::panic::catch_unwind(|| {
+                S::encode_with(&config, 1, |out| out.put_u16(1), &Sequential).unwrap();
+            });
+            assert!(overwrite.is_err());
+        }
+
+        #[test]
+        fn encode_with_rejects_incorrect_write_length() {
+            encode_with_checks_writer::<ReedSolomon<Sha256>>();
+            encode_with_checks_writer::<PhasedAsScheme<Zoda<Sha256>>>();
+        }
+
+        #[test]
+        fn encode_with_rejects_invalid_layout_before_writing() {
+            let config = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(1),
+            };
+            let result = ReedSolomon::<Sha256>::encode_with(
+                &config,
+                usize::MAX,
+                |_| panic!("invalid length must not invoke the writer"),
+                &Sequential,
+            );
+            assert!(matches!(
+                result,
+                Err(ReedSolomonError::InvalidDataLength(_))
+            ));
+
+            let config = Config {
+                minimum_shards: NZU16!(u16::MAX),
+                extra_shards: NZU16!(1),
+            };
+            let result = ReedSolomon::<Sha256>::encode_with(
+                &config,
+                0,
+                |_| panic!("invalid configuration must not invoke the writer"),
+                &Sequential,
+            );
+            assert!(matches!(
+                result,
+                Err(ReedSolomonError::TooManyTotalShards(_))
+            ));
+        }
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();

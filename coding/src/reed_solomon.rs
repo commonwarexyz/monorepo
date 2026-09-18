@@ -1,4 +1,4 @@
-use crate::{Config, Scheme};
+use crate::{Config, Scheme, fill_payload};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -189,18 +189,27 @@ where
 /// Returns a contiguous buffer of `k` padded shards and the shard length.
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
-    // Compute shard length
-    let data_len = data.remaining();
+fn prepare_data(
+    data_len: usize,
+    k: usize,
+    write: impl FnOnce(&mut &mut [u8]),
+) -> Result<(Vec<u8>, usize), Error> {
+    let length = u32::try_from(data_len).map_err(|_| Error::InvalidDataLength(data_len))?;
+    let payload_end = u32::SIZE
+        .checked_add(data_len)
+        .filter(|&len| len <= isize::MAX as usize)
+        .ok_or(Error::InvalidDataLength(data_len))?;
     let shard_len = canonical_shard_len(data_len, k);
+    let padded_len = k
+        .checked_mul(shard_len)
+        .filter(|&len| len <= isize::MAX as usize)
+        .ok_or(Error::InvalidDataLength(data_len))?;
 
-    // Prepare data
-    let length_bytes = (data_len as u32).to_be_bytes();
-    let mut padded = vec![0u8; k * shard_len];
-    padded[..u32::SIZE].copy_from_slice(&length_bytes);
-    data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
+    let mut padded = vec![0u8; padded_len];
+    padded[..u32::SIZE].copy_from_slice(&length.to_be_bytes());
+    fill_payload(&mut padded[u32::SIZE..payload_end], write);
 
-    (padded, shard_len)
+    Ok((padded, shard_len))
 }
 
 /// Return the canonical shard width for a payload and shard count.
@@ -313,7 +322,25 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
-    data: impl bytes::Buf,
+    mut data: impl bytes::Buf,
+    strategy: &S,
+) -> Result<Encoding<H::Digest>, Error> {
+    encode_with::<H, _>(
+        total,
+        min,
+        data.remaining(),
+        // Preserve specialized bulk copies and avoid polling remaining length per chunk.
+        |out| data.copy_to_slice(std::mem::take(out)),
+        strategy,
+    )
+}
+
+/// Encode a payload written directly into the original shards' backing buffer.
+fn encode_with<H: Hasher, S: Strategy>(
+    total: u16,
+    min: u16,
+    data_len: usize,
+    write: impl FnOnce(&mut &mut [u8]),
     strategy: &S,
 ) -> Result<Encoding<H::Digest>, Error> {
     // Validate parameters
@@ -322,13 +349,8 @@ fn encode<H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
-    let data_len = data.remaining();
-    if data_len > u32::MAX as usize {
-        return Err(Error::InvalidDataLength(data_len));
-    }
-
     // Prepare data as a contiguous buffer of k shards
-    let (padded, shard_len) = prepare_data(data, k);
+    let (padded, shard_len) = prepare_data(data_len, k, write)?;
 
     // Compute recovery shards, striping large shard widths across the strategy
     let manual = strategy.manual();
@@ -1162,6 +1184,21 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         )
     }
 
+    fn encode_with(
+        config: &Config,
+        data_len: usize,
+        write: impl FnOnce(&mut &mut [u8]),
+        strategy: &impl Strategy,
+    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+        encode_with::<H, _>(
+            total_shards(config)?,
+            config.minimum_shards.get(),
+            data_len,
+            write,
+            strategy,
+        )
+    }
+
     fn check(
         config: &Config,
         commitment: &Self::Commitment,
@@ -1216,6 +1253,17 @@ mod tests {
     const FUZZ_MAX_EXTRA_SHARDS: u16 = 8;
     const FUZZ_MAX_DATA_LEN: usize = 256;
     const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
+
+    #[test]
+    fn test_prepare_data_payload_bounds() {
+        let (padded, shard_len) = prepare_data(3, 2, |out| {
+            assert_eq!(out.len(), 3);
+            out.put_slice(&[1, 2, 3]);
+        })
+        .unwrap();
+        assert_eq!(shard_len, 4);
+        assert_eq!(padded, [0, 0, 0, 3, 1, 2, 3, 0]);
+    }
 
     fn checked(
         root: <Sha256 as Hasher>::Digest,
@@ -1914,7 +1962,10 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
+        let (padded, shard_size) = prepare_data(data.len(), min as usize, |out| {
+            out.put_slice(data.as_slice())
+        })
+        .unwrap();
 
         // Re-encode the data
         let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
@@ -1975,7 +2026,8 @@ mod tests {
         let k = min as usize;
         let m = total as usize - k;
 
-        let (mut padded, shard_len) = prepare_data(data.as_slice(), k);
+        let (mut padded, shard_len) =
+            prepare_data(data.len(), k, |out| out.put_slice(data.as_slice())).unwrap();
         let payload_end = u32::SIZE + data.len();
         let total_original_len = k * shard_len;
         assert!(payload_end < total_original_len, "test requires padding");

@@ -6,6 +6,7 @@ use rand::{Rng, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use shard_selection::SELECTIONS;
 
+mod encode_with;
 mod reed_solomon;
 mod shard_selection;
 mod zoda;
@@ -128,4 +129,4 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-criterion_main!(reed_solomon::benches, zoda::benches);
+criterion_main!(reed_solomon::benches, zoda::benches, encode_with::benches);
