@@ -300,22 +300,22 @@ where
         // A queued delivery can outlive its callers. Consume a waiting group only
         // when its subscription is included in the delivery.
         let key = delivery.key;
-        let pending = match self.pending.entry(key) {
+        let entry = match self.pending.entry(key) {
             Entry::Occupied(entry)
                 if delivery
                     .subscribers
                     .iter()
                     .any(|(subscriber, _)| *subscriber == entry.get().subscriber) =>
             {
-                entry.remove()
+                entry
             }
             _ => {
                 self.metrics.deliveries.inc(status::Status::Dropped);
                 return;
             }
         };
-        let _ = self.metrics.pending_requests.try_set(self.pending.len());
 
+        // Keep the waiting group intact until decoding and response shape checks succeed.
         let cfg = (key.max_ops().get() as usize, ());
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)
@@ -328,14 +328,14 @@ where
                 response
             }
             _ => {
-                self.pending.insert(key, pending);
-                let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 self.metrics.deliveries.inc(status::Status::Invalid);
                 feedback_tx.send_lossy(false);
                 return;
             }
         };
 
+        let pending = entry.remove();
+        let _ = self.metrics.pending_requests.try_set(self.pending.len());
         let subscriber = pending.subscriber;
         let mut approvals = Vec::new();
         for subscriber in pending.responses {
@@ -425,7 +425,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256};
     use commonware_macros::select;
     use commonware_p2p::{
-        Manager as _, Provider, TrackedPeers,
+        Provider, TrackedPeers,
         simulated::{Link, Network},
     };
     use commonware_parallel::Sequential;
@@ -442,9 +442,7 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
-        non_empty_vec,
-        ordered::Set,
-        probability,
+        non_empty_vec, probability,
     };
     use futures::FutureExt as _;
     use std::time::Duration;
@@ -482,6 +480,7 @@ mod tests {
         }
     }
 
+    /// Reports peer-block requests so tests can observe resolver rejection handling.
     #[derive(Clone)]
     struct RecordingBlocker(mpsc::UnboundedSender<ed25519::PublicKey>);
 
@@ -555,13 +554,6 @@ mod tests {
         oneshot::channel()
     }
 
-    fn test_pending(subscriber: u64, responses: Vec<TestPending>) -> Pending<TestPending> {
-        Pending {
-            subscriber,
-            responses,
-        }
-    }
-
     fn test_delivery(
         key: Request<mmr::Family>,
         subscriber: u64,
@@ -616,6 +608,7 @@ mod tests {
         Shared::new("test", db)
     }
 
+    /// Create a database with one committed update so responses contain real operations.
     async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
@@ -634,15 +627,23 @@ mod tests {
 
     type LiveMailbox = SyncMailbox<mmr::Family, TestDb>;
 
+    /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair {
+        /// Local data each peer can serve, also available for expected-response checks.
         databases: [Shared<TestDb>; 2],
+        /// Local fetch entry points for each resolver service.
         mailboxes: [LiveMailbox; 2],
+        /// Actor counters used to observe admission and cancellation.
         metrics: [ResolverMetrics; 2],
+        /// Actor handles used to verify that shutdown releases their child tasks.
         handles: Vec<Handle<()>>,
     }
 
+    /// Connect two database-backed actors over reliable deterministic links.
     async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair {
-        let (network, oracle) = Network::new(
+        // Reliable links isolate actor scheduling and database availability from packet loss.
+        let peers = [1, 2].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
+        let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -650,12 +651,12 @@ mod tests {
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },
-        );
+            peers.clone(),
+        )
+        .await;
         network.start();
 
-        let peers = [1, 2].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
-        let mut manager = oracle.manager();
-        manager.track(0, Set::try_from(peers.to_vec()).unwrap());
+        let manager = oracle.manager();
         let link = Link {
             latency: Duration::from_millis(1),
             jitter: Duration::ZERO,
@@ -670,10 +671,13 @@ mod tests {
             .await
             .unwrap();
 
+        // Distinct data identifies which peer supplied each response.
         let databases = [
             init_seeded_db(context.child("database_0"), &format!("{prefix}-0")).await,
             init_seeded_db(context.child("database_1"), &format!("{prefix}-1")).await,
         ];
+
+        // Keep each actor's admission counters and handle alongside its local fetch interface.
         let mut mailboxes = Vec::new();
         let mut metrics = Vec::new();
         let mut handles = Vec::new();
@@ -711,6 +715,7 @@ mod tests {
         }
     }
 
+    /// Wait for actor admission; resolver consumption requires a separate ordering barrier.
     async fn wait_for_fetches(
         context: &deterministic::Context,
         metrics: &ResolverMetrics,
@@ -728,6 +733,7 @@ mod tests {
         }
     }
 
+    /// Wait for the actor to retire a waiting group after its last caller leaves.
     async fn wait_for_cancels(
         context: &deterministic::Context,
         metrics: &ResolverMetrics,
@@ -745,16 +751,20 @@ mod tests {
         }
     }
 
+    /// Stop both actors and verify their previously live task prefix drains completely.
     async fn shutdown_pair(
         context: &deterministic::Context,
         prefix: &str,
         handles: Vec<Handle<()>>,
     ) {
+        // Establish that the selected prefix covers live work before testing its cleanup.
         let actor_prefix = format!("{prefix}_actor");
         assert!(
             count_running_tasks(context, &actor_prefix) > 0,
             "selected actor prefix should be running before abort"
         );
+
+        // Stop both actor trees and wait for their resolver descendants to exit.
         for handle in handles {
             handle.abort();
             let _ = handle.await;
@@ -772,6 +782,7 @@ mod tests {
         assert_eq!(count_running_tasks(context, &actor_prefix), 0);
     }
 
+    /// Obtain the response directly from its database for comparison with the P2P result.
     async fn expected_payload(db: &Shared<TestDb>, request: Request<mmr::Family>) -> Bytes {
         let (response, feedback) = db.serve(request).await.unwrap();
         assert!(feedback.is_none());
@@ -791,6 +802,7 @@ mod tests {
         assert!(!operations.is_empty());
     }
 
+    /// A decodable response for tests that control downstream approval explicitly.
     fn encoded_fetch_payload() -> Bytes {
         Response::<mmr::Family, TestOp, sha256::Digest>::Operations {
             proof: Proof {
@@ -808,6 +820,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
 
+            // An unattached actor must release the peer request without waiting for a database.
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(Location::new(1)), response_tx);
             assert!(response_rx.await.is_err());
@@ -817,11 +830,13 @@ mod tests {
     #[test]
     fn same_request_served_after_attach() {
         deterministic::Runner::default().start(|context| async move {
+            // Attaching a database makes an initially unavailable actor able to serve.
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
             let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
+            // Drive the queued read to completion and check that the peer receives encoded data.
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(size), response_tx);
             actor.serves.next_completed().await;
@@ -836,11 +851,13 @@ mod tests {
     #[test]
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
+            // Attach a usable database so the configured request bound is the only rejection cause.
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let size = db.read().await.bounds().end;
             actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
 
+            // Oversized requests must release their response channel before starting a read.
             let request = Request::Operations {
                 size,
                 start: Location::new(0),
@@ -859,12 +876,18 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // The caller leaves while its delivery is still queued.
             let (subscriber_tx, subscriber_rx) = test_subscriber();
             drop(subscriber_rx);
-            actor
-                .pending
-                .insert(request, test_pending(7, vec![subscriber_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![subscriber_tx],
+                },
+            );
 
+            // With nobody to verify the response, the peer receives no validity judgment.
             let (ack_tx, ack_rx) = oneshot::channel();
             actor.handle_deliver(test_delivery(request, 7), encoded_fetch_payload(), ack_tx);
 
@@ -878,15 +901,22 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // Both callers receive the response, but the second leaves its approval pending.
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request, test_pending(7, vec![sub1_tx, sub2_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![sub1_tx, sub2_tx],
+                },
+            );
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor.handle_deliver(test_delivery(request, 7), encoded_fetch_payload(), ack_tx);
             let (_response, second_feedback) = sub2_rx.await.unwrap();
+
+            // One explicit rejection is decisive even when another caller has not replied.
             futures::join!(
                 async {
                     let _ = actor.tasks.next_completed().await;
@@ -900,6 +930,7 @@ mod tests {
                 }
             );
 
+            // Rejection closes the remaining approval receiver instead of waiting for it.
             assert!(!ack_rx.await.unwrap());
             assert!(!second_feedback.unwrap().send_lossy(true));
         });
@@ -911,14 +942,21 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // Two callers share one delivery and can independently abandon verification.
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request, test_pending(7, vec![sub1_tx, sub2_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![sub1_tx, sub2_tx],
+                },
+            );
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor.handle_deliver(test_delivery(request, 7), encoded_fetch_payload(), ack_tx);
+
+            // A dropped approval is unjudged; the other caller's acceptance still counts.
             futures::join!(
                 async {
                     let _ = actor.tasks.next_completed().await;
@@ -946,14 +984,21 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // Both callers receive data before abandoning their approval channels.
             let (sub1_tx, sub1_rx) = test_subscriber();
             let (sub2_tx, sub2_rx) = test_subscriber();
-            actor
-                .pending
-                .insert(request, test_pending(7, vec![sub1_tx, sub2_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![sub1_tx, sub2_tx],
+                },
+            );
 
             let (ack_tx, ack_rx) = oneshot::channel();
             actor.handle_deliver(test_delivery(request, 7), encoded_fetch_payload(), ack_tx);
+
+            // No caller judges the response, so the resolver must not receive an acceptance.
             futures::join!(
                 async {
                     let _ = actor.tasks.next_completed().await;
@@ -977,6 +1022,7 @@ mod tests {
             let request = test_request_at(Location::new(1));
             assert!(!actor.pending.contains_key(&request));
 
+            // A delivery with no waiting group must not create a validity judgment.
             let (ack_tx, ack_rx) = oneshot::channel();
             actor.handle_deliver(
                 test_delivery(request, 7),
@@ -993,12 +1039,18 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // The caller has left, but its cancellation has not yet retired the subscription.
             let (stale_tx, stale_rx) = test_subscriber();
             drop(stale_rx);
-            actor
-                .pending
-                .insert(request, test_pending(7, vec![stale_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![stale_tx],
+                },
+            );
 
+            // New demand joins that subscription while replacing the closed local response.
             let (fresh_tx, _fresh_rx) = test_subscriber();
             let action = actor.handle_mailbox_message(mailbox::Message::GetOperations {
                 request,
@@ -1016,14 +1068,22 @@ mod tests {
     #[test]
     fn malformed_or_mismatched_delivery_preserves_same_cohort() {
         deterministic::Runner::default().start(|context| async move {
+            // Keep a boundary requester waiting across responses it cannot consume.
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = Request::Boundary {
                 size: Location::new(1),
                 start: Location::new(0),
             };
             let (sub_tx, mut sub_rx) = test_subscriber();
-            actor.pending.insert(request, test_pending(7, vec![sub_tx]));
+            actor.pending.insert(
+                request,
+                Pending {
+                    subscriber: 7,
+                    responses: vec![sub_tx],
+                },
+            );
 
+            // Decode failure and a wrong response variant both reject data without losing demand.
             for payload in [
                 Bytes::from_static(b"malformed-response"),
                 encoded_fetch_payload(),
@@ -1046,6 +1106,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // A cancellation can arrive after delivery has already removed the waiting group.
             let action =
                 actor.handle_mailbox_message(mailbox::Message::CancelOperations { request });
 
@@ -1059,6 +1120,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let request = test_request_at(Location::new(1));
 
+            // Retire one subscription after its only caller leaves.
             let (old_tx, old_rx) = test_subscriber();
             let old_subscriber = test_fetch(
                 actor.handle_mailbox_message(mailbox::Message::GetOperations {
@@ -1074,6 +1136,7 @@ mod tests {
             assert!(matches!(cancel, MailboxAction::Cancel(key, subscriber)
                     if key == request && subscriber == old_subscriber));
 
+            // Reopening the same key creates a distinct group while an older delivery may exist.
             let (fresh_tx, mut fresh_rx) = test_subscriber();
             let fresh_subscriber = test_fetch(
                 actor.handle_mailbox_message(mailbox::Message::GetOperations {
@@ -1085,6 +1148,7 @@ mod tests {
             .subscriber;
             assert_ne!(fresh_subscriber, old_subscriber);
 
+            // The older delivery cannot drain the new group or judge data on its behalf.
             let (stale_ack_tx, stale_ack_rx) = oneshot::channel();
             actor.handle_deliver(
                 test_delivery(request, old_subscriber),
@@ -1097,6 +1161,7 @@ mod tests {
             assert_eq!(pending.responses.len(), 1);
             assert!(fresh_rx.try_recv().is_err());
 
+            // A delivery addressed to the new group still completes and reports its approval.
             let (fresh_ack_tx, fresh_ack_rx) = oneshot::channel();
             actor.handle_deliver(
                 test_delivery(request, fresh_subscriber),
@@ -1113,6 +1178,7 @@ mod tests {
     #[test]
     fn produce_keeps_one_busy_serve_slot() {
         deterministic::Runner::default().start(|context| async move {
+            // Hold database access so the first serve cannot finish and free its slot.
             let db = init_seeded_db(context.child("resolver_db"), "bounded-serve").await;
             let size = db.read().await.bounds().end;
             let actor_db = db.clone();
@@ -1120,6 +1186,7 @@ mod tests {
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(Some(actor_db)));
 
+            // Admit one serve and check that a second request is dropped immediately.
             let (first_tx, mut first_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(size), first_tx);
             assert!(matches!(
@@ -1137,6 +1204,7 @@ mod tests {
             );
             let extra_was_dropped = matches!(extra_rx.now_or_never(), Some(Err(_)));
 
+            // Release the database and actor before reporting the admission-bound assertion.
             slot.put(database);
             drop(actor);
             assert!(
@@ -1149,6 +1217,7 @@ mod tests {
     #[test]
     fn busy_serve_preserves_actor_progress_and_reuses_slot() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Distinct request keys distinguish the active read from a request that must retry.
             const PREFIX: &str = "busy_serve_live";
             let pair_context = context.child(PREFIX);
             let pair = spawn_live_pair(&pair_context, PREFIX).await;
@@ -1159,16 +1228,11 @@ mod tests {
                 start: Location::new(0),
                 max_ops: NZU64!(2),
             };
-            let request_3 = Request::Operations {
-                size,
-                start: Location::new(0),
-                max_ops: NZU64!(3),
-            };
             let expected_1 = expected_payload(&pair.databases[0], request_1).await;
             let expected_2 = expected_payload(&pair.databases[0], request_2).await;
-            let expected_3 = expected_payload(&pair.databases[0], request_3).await;
             let peer_expected = expected_payload(&pair.databases[1], request_1).await;
 
+            // Keep one peer's database unavailable while the other peer requests its data.
             let (slot, database) = pair.databases[0].write().await;
             let blocked_1 = pair.mailboxes[1].serve(request_1);
             futures::pin_mut!(blocked_1);
@@ -1177,6 +1241,7 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
             assert!(blocked_1.as_mut().now_or_never().is_none());
 
+            // A second request reaches the busy peer and must remain eligible for retry.
             let blocked_2 = pair.mailboxes[1].serve(request_2);
             futures::pin_mut!(blocked_2);
             assert!(futures::poll!(blocked_2.as_mut()).is_pending());
@@ -1184,6 +1249,7 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
             assert!(blocked_2.as_mut().now_or_never().is_none());
 
+            // The busy actor must still fetch and validate data from the other peer.
             let (response, feedback) = select! {
                 result = pair.mailboxes[0].serve(request_1) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
@@ -1193,6 +1259,7 @@ mod tests {
             assert_operations_response(&response, request_1, &peer_expected);
             feedback.unwrap().send(true).unwrap();
 
+            // Restoring the database lets the active request and the dropped request finish.
             slot.put(database);
             let (response_1, feedback_1) = select! {
                 result = blocked_1 => result.unwrap(),
@@ -1207,13 +1274,7 @@ mod tests {
             assert_operations_response(&response_2, request_2, &expected_2);
             feedback_2.unwrap().send(true).unwrap();
 
-            let (response_3, feedback_3) = select! {
-                result = pair.mailboxes[1].serve(request_3) => result.unwrap(),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("serve slot was not reusable"),
-            };
-            assert_operations_response(&response_3, request_3, &expected_3);
-            feedback_3.unwrap().send(true).unwrap();
-
+            // Both actor trees must release their work on shutdown.
             shutdown_pair(&context, PREFIX, pair.handles).await;
         });
     }
@@ -1221,6 +1282,7 @@ mod tests {
     #[test]
     fn late_same_key_subscriber_completes_after_approval() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // A distinct key provides an ordering barrier through the same resolver mailbox.
             const PREFIX: &str = "late_subscriber_live";
             let pair_context = context.child(PREFIX);
             let pair = spawn_live_pair(&pair_context, PREFIX).await;
@@ -1234,6 +1296,7 @@ mod tests {
             };
             let barrier_expected = expected_payload(&pair.databases[1], barrier_request).await;
 
+            // Hold the first delivery's verdict while a new waiting group forms for its key.
             let (first, first_feedback) = pair.mailboxes[0].serve(request).await.unwrap();
             assert_operations_response(&first, request, &expected);
 
@@ -1245,6 +1308,7 @@ mod tests {
             futures::pin_mut!(third);
             assert!(futures::poll!(third.as_mut()).is_pending());
 
+            // Barrier completion proves the late fetch reached the resolver before acceptance.
             let (barrier, barrier_feedback) = select! {
                 result = pair.mailboxes[0].serve(barrier_request) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
@@ -1255,6 +1319,7 @@ mod tests {
             barrier_feedback.unwrap().send(true).unwrap();
             first_feedback.unwrap().send(true).unwrap();
 
+            // Both late callers must receive the retained response and can approve it independently.
             let mut late_results = select! {
                 results = futures::future::join(second, third) => Some(results),
                 _ = context.sleep(Duration::from_secs(1)) => None,
@@ -1270,6 +1335,7 @@ mod tests {
                 third_feedback.take().unwrap().send_lossy(true);
             }
 
+            // Check task cleanup even when late delivery times out.
             shutdown_pair(&context, PREFIX, pair.handles).await;
             assert!(
                 matches!(late_results, Some((Ok(_), Ok(_)))),
@@ -1281,6 +1347,7 @@ mod tests {
     #[test]
     fn cancel_late_cohort_preserves_prior_feedback_and_fresh_demand() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Separate barrier keys establish resolver consumption before and after cancellation.
             const PREFIX: &str = "cancel_late_cohort_live";
             let pair_context = context.child(PREFIX);
             let pair = spawn_live_pair(&pair_context, PREFIX).await;
@@ -1301,9 +1368,11 @@ mod tests {
             let post_cancel_expected =
                 expected_payload(&pair.databases[1], post_cancel_barrier).await;
 
+            // Keep the first group's approval open throughout cancellation of a later group.
             let (first, first_feedback) = pair.mailboxes[0].serve(request).await.unwrap();
             assert_operations_response(&first, request, &expected);
 
+            // Admit the late group into the resolver, then drop its last caller.
             {
                 let late = pair.mailboxes[0].serve(request);
                 futures::pin_mut!(late);
@@ -1321,6 +1390,7 @@ mod tests {
             }
             wait_for_cancels(&context, &pair.metrics[0], 1).await;
 
+            // Reopen the key and fence its admission before releasing the original approval.
             let fresh = pair.mailboxes[0].serve(request);
             futures::pin_mut!(fresh);
             assert!(futures::poll!(fresh.as_mut()).is_pending());
@@ -1335,6 +1405,7 @@ mod tests {
             barrier_feedback.unwrap().send(true).unwrap();
             first_feedback.unwrap().send(true).unwrap();
 
+            // Cancelling the intermediate group must preserve cached data for the fresh caller.
             let (fresh, fresh_feedback) = select! {
                 result = fresh => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
@@ -1344,15 +1415,19 @@ mod tests {
             assert_operations_response(&fresh, request, &expected);
             fresh_feedback.unwrap().send(true).unwrap();
 
+            // The cancellation and redelivery paths must leave no actor tasks after shutdown.
             shutdown_pair(&context, PREFIX, pair.handles).await;
         });
     }
 
     #[test]
     fn repeated_rejections_prune_older_cohorts() {
+        // Retention and verdict completion can reach the resolver in either order.
         for retain_before_false in [false, true] {
             deterministic::Runner::timed(Duration::from_secs(10)).start(move |context| async move {
-                let (network, oracle) = Network::new(
+                // Keep the honest source reachable after synthetic rejection so retries stay live.
+                let peers = [11, 12].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
+                let (network, oracle) = Network::new_with_peers(
                     context.child("rejection_network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
@@ -1360,13 +1435,12 @@ mod tests {
                         disconnect_on_block: false,
                         tracked_peer_sets: NZUsize!(1),
                     },
-                );
+                    peers.clone(),
+                )
+                .await;
                 network.start();
 
-                let peers =
-                    [11, 12].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
-                let mut manager = oracle.manager();
-                manager.track(0, Set::try_from(peers.to_vec()).unwrap());
+                let manager = oracle.manager();
                 let link = Link {
                     latency: Duration::from_millis(1),
                     jitter: Duration::ZERO,
@@ -1392,6 +1466,7 @@ mod tests {
                     .await
                     .unwrap();
 
+                // Serve real database responses, with a distinct key available as a mailbox fence.
                 let database =
                     init_seeded_db(context.child("rejection_source_db"), "rejection-source").await;
                 let size = database.read().await.bounds().end;
@@ -1419,6 +1494,7 @@ mod tests {
                     );
                 let source_handle = source.start(source_net);
 
+                // Drive the client actor manually to inspect real resolver subscription snapshots.
                 let (handler_tx, mut handler_rx) = commonware_actor::mailbox::new(
                     context.child("rejection_handler"),
                     NZUsize!(16),
@@ -1444,6 +1520,7 @@ mod tests {
                 let (mut actor, _mailbox) =
                     TestActor::new(context.child("rejection_client"), test_config(None));
 
+                // Leave the first group's approval pending while subsequent demand is admitted.
                 let (first_tx, first_rx) = test_subscriber();
                 let first_fetch = test_fetch(
                     actor.handle_mailbox_message(mailbox::Message::GetOperations {
@@ -1480,7 +1557,9 @@ mod tests {
                 let (_response, first_feedback) = first_rx.await.unwrap();
                 let mut current_feedback = Some(first_feedback.unwrap());
 
+                // A second rejection reveals whether already-spent older identities accumulate.
                 for round in 0..2 {
+                    // The successor must survive cleanup of the group whose verdict is pending.
                     let (successor_tx, successor_rx) = test_subscriber();
                     let successor_fetch = test_fetch(
                         actor.handle_mailbox_message(mailbox::Message::GetOperations {
@@ -1492,12 +1571,11 @@ mod tests {
                     let successor_id = successor_fetch.subscriber;
                     resolver_mailbox.fetch(successor_fetch);
 
+                    // A distinct-key delivery fences retention before the verdict is published.
                     if retain_before_false {
                         resolver_mailbox
                             .retain(move |key, id| key != &request || *id >= current_id);
 
-                        // This distinct fetch shares the resolver mailbox. Its delivery proves
-                        // the preceding retain was consumed before the verdict is published.
                         let (barrier_tx, barrier_rx) = test_subscriber();
                         let barrier_fetch = test_fetch(
                             actor.handle_mailbox_message(mailbox::Message::GetOperations {
@@ -1528,6 +1606,7 @@ mod tests {
                         assert_eq!(actor.tasks.next_completed().await, None);
                     }
 
+                    // Consume the rejection and observe the resolver's resulting block event.
                     current_feedback.take().unwrap().send(false).unwrap();
                     assert_eq!(
                         actor.tasks.next_completed().await,
@@ -1541,11 +1620,13 @@ mod tests {
                     };
                     assert_eq!(blocked_peer, peers[1]);
 
+                    // In this ordering the block event fences verdict consumption before cleanup.
                     if !retain_before_false {
                         resolver_mailbox
                             .retain(move |key, id| key != &request || *id >= current_id);
                     }
 
+                    // Retry carries only the current retry owner and still-live successor demand.
                     let retried = select! {
                         message = handler_rx.recv() => message.unwrap(),
                         _ = context.sleep(Duration::from_secs(1)) => panic!("retry delivery missing"),
@@ -1566,6 +1647,7 @@ mod tests {
                         .collect::<Vec<_>>();
                     assert_eq!(subscribers, vec![current_id, successor_id]);
 
+                    // Let the successor become the next rejecting group to exercise reclamation.
                     if round == 0 {
                         actor.handle_deliver(delivery, value, response);
                         let (_response, feedback) = successor_rx.await.unwrap();
@@ -1574,6 +1656,7 @@ mod tests {
                     }
                 }
 
+                // Stop the independently driven resolver and source actor after both rounds.
                 resolver_handle.abort();
                 let _ = resolver_handle.await;
                 source_handle.abort();
