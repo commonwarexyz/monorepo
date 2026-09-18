@@ -26,6 +26,7 @@ QMDB commands use MMB by default. Pass `--family mmr` for MMR proofs.
 Range and sparse commands accept `--encoding variable` for variable-length values.
 
 - `qmdb current` generates active operation proofs for current QMDBs.
+- `qmdb lifecycle` generates proofs from committed, pruned, and reopened ordered current databases.
 - `qmdb any` generates ordered operation proofs, including overwrite and deletion histories.
 - `qmdb keyless` generates append and commit proofs with fixed or variable encodings.
 - `qmdb unordered` generates fixed or variable operation proofs. Add `--current`

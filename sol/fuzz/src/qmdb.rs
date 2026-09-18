@@ -1,7 +1,7 @@
 //! Materialized MMR and MMB fixtures for any, keyless, immutable, and current QMDB.
 //!
-//! Deterministic operation logs and activity bitmaps exercise the production tree,
-//! codec, and proof APIs without a persistent database lifecycle.
+//! Materialized operation logs and activity bitmaps exercise the production tree,
+//! codec, and proof APIs. Lifecycle fixtures additionally use persistent databases.
 
 use crate::{
     Hash,
@@ -33,6 +33,7 @@ use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 
 mod batch;
 mod exclusion;
+mod lifecycle;
 
 type Uint256 = <sol!(uint256) as SolType>::RustType;
 type Operation<F> = fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>;
@@ -99,6 +100,8 @@ sol! {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Prove operations from a persistent database lifecycle.
+    Lifecycle(lifecycle::LifecycleArgs),
     /// Prove a contiguous range of exact encoded operations.
     Range(batch::RangeArgs),
     /// Prove historical operations at sparse locations.
@@ -818,6 +821,7 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::Lifecycle(args) => args.execute(),
             Self::ExcludeVariable(args) => args.execute(),
             Self::Range(args) => args.execute(),
             Self::Multi(args) => args.execute(),
