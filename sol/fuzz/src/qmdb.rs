@@ -1,4 +1,4 @@
-//! Materialized MMR and MMB fixtures for any, keyless, and current QMDB.
+//! Materialized MMR and MMB fixtures for any, keyless, immutable, and current QMDB.
 //!
 //! Deterministic operation logs and activity bitmaps exercise the production tree,
 //! codec, and proof APIs without a persistent database lifecycle.
@@ -26,7 +26,7 @@ use commonware_storage::{
             ordered::proof::ExclusionProof,
             proof::{OpsRootWitness, operation},
         },
-        keyless,
+        immutable, keyless,
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
@@ -66,6 +66,8 @@ pub(crate) enum Command {
     Unordered(UnorderedArgs),
     /// Prove membership of an encoded keyless append or commit.
     Keyless(KeylessArgs),
+    /// Prove membership of an encoded immutable set or commit.
+    Immutable(ImmutableArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
     Generate(GenerateArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
@@ -149,6 +151,26 @@ pub(crate) struct KeylessArgs {
     encoding: Encoding,
     #[arg(long, value_enum, default_value = "append")]
     operation: KeylessOperation,
+    /// Variable value and metadata length; defaults to a boundary size selected by the seed.
+    #[arg(long)]
+    value_length: Option<u16>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ImmutableOperation {
+    Set,
+    Commit,
+    CommitMetadata,
+}
+
+#[derive(Args)]
+pub(crate) struct ImmutableArgs {
+    #[command(flatten)]
+    tree: GenerateArgs,
+    #[arg(long, value_enum, default_value = "fixed")]
+    encoding: Encoding,
+    #[arg(long, value_enum, default_value = "set")]
+    operation: ImmutableOperation,
     /// Variable value and metadata length; defaults to a boundary size selected by the seed.
     #[arg(long)]
     value_length: Option<u16>,
@@ -318,6 +340,61 @@ fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String
                 usize::from,
             );
             keyless_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                args,
+                index,
+                bytes.into_iter().cycle().take(len).collect(),
+            )
+        }),
+    }
+}
+
+fn immutable_operation<F: Family, V: qmdb::any::value::ValueEncoding>(
+    args: &ImmutableArgs,
+    index: u64,
+    value: V::Value,
+) -> immutable::Operation<F, FixedBytes<32>, V> {
+    use immutable::Operation::{Commit, Set};
+    if index == 0 {
+        return Commit(None, Location::new(0));
+    }
+    if index == args.tree.location {
+        return match args.operation {
+            ImmutableOperation::Set => Set(key(index), value),
+            ImmutableOperation::Commit => Commit(None, Location::new(args.tree.inactivity_floor)),
+            ImmutableOperation::CommitMetadata => {
+                Commit(Some(value), Location::new(args.tree.inactivity_floor))
+            }
+        };
+    }
+    if index == args.tree.leaves - 1 {
+        return Commit(None, Location::new(args.tree.inactivity_floor));
+    }
+    Set(key(index), value)
+}
+
+fn immutable<F: Family, H: Hasher>(args: &ImmutableArgs) -> Result<AnyOutput, String> {
+    validate_tree(&args.tree)?;
+    if args.tree.location == 0 && !matches!(args.operation, ImmutableOperation::Commit) {
+        return Err("location 0 is the bootstrap commit; require --operation commit".into());
+    }
+    if args.value_length.is_some() && matches!(args.encoding, Encoding::Fixed) {
+        return Err("value-length requires --encoding variable".into());
+    }
+    match args.encoding {
+        Encoding::Fixed => plain_proof::<F, H, _>(&args.tree, |index| {
+            immutable_operation::<F, FixedEncoding<FixedBytes<32>>>(
+                args,
+                index,
+                FixedBytes::new(leaf(args.tree.seed, index)),
+            )
+        }),
+        Encoding::Variable => plain_proof::<F, H, _>(&args.tree, |index| {
+            let bytes = leaf(args.tree.seed, index);
+            let len = args.value_length.map_or_else(
+                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
+                usize::from,
+            );
+            immutable_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
                 args,
                 index,
                 bytes.into_iter().cycle().take(len).collect(),
@@ -642,6 +719,15 @@ impl Command {
                     (TreeKind::Mmr, Hash::Sha256) => keyless::<mmr::Family, Sha256>(&args),
                     (TreeKind::Mmb, Hash::Keccak) => keyless::<mmb::Family, Keccak256>(&args),
                     (TreeKind::Mmb, Hash::Sha256) => keyless::<mmb::Family, Sha256>(&args),
+                }?;
+                Ok(output.abi_encode_params())
+            }
+            Self::Immutable(args) => {
+                let output = match (args.tree.family, args.tree.hash) {
+                    (TreeKind::Mmr, Hash::Keccak) => immutable::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Sha256) => immutable::<mmr::Family, Sha256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak) => immutable::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Sha256) => immutable::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
@@ -1047,6 +1133,123 @@ mod tests {
         unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256");
         unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak");
         unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256");
+    }
+
+    #[test]
+    fn immutable_cli_codecs_operations_and_inactive_prefixes() {
+        for family in ["mmr", "mmb"] {
+            for hash in ["keccak", "sha256"] {
+                for encoding in ["fixed", "variable"] {
+                    for operation in ["set", "commit", "commit-metadata"] {
+                        for (leaves, location, floor) in
+                            [(1u64, 0u64, 0u64), (2, 1, 0), (1023, 1022, 512)]
+                        {
+                            if location == 0 && operation != "commit" {
+                                continue;
+                            }
+                            let mut args = vec![
+                                "fuzz".to_string(),
+                                "qmdb".into(),
+                                "immutable".into(),
+                                leaves.to_string(),
+                                location.to_string(),
+                                "71".into(),
+                                "--family".into(),
+                                family.into(),
+                                "--hash".into(),
+                                hash.into(),
+                                "--encoding".into(),
+                                encoding.into(),
+                                "--operation".into(),
+                                operation.into(),
+                                "--inactivity-floor".into(),
+                                floor.to_string(),
+                            ];
+                            if encoding == "variable" {
+                                args.extend(["--value-length".into(), "128".into()]);
+                            }
+                            let bytes = Cli::try_parse_from(args)
+                                .unwrap()
+                                .command
+                                .execute()
+                                .unwrap();
+                            let output =
+                                <AnyOutput as SolValue>::abi_decode_params_validate(&bytes)
+                                    .unwrap();
+                            assert_eq!(output.leaves, leaves);
+                            assert_eq!(output.location, location);
+                            if floor != 0 {
+                                assert_ne!(output.inactivePeaks, 0);
+                            }
+                            let mut expected = vec![u8::from(operation != "set")];
+                            if operation == "set" {
+                                expected.extend_from_slice(key(location).as_ref());
+                            } else {
+                                expected.push(u8::from(operation == "commit-metadata"));
+                            }
+                            if operation != "commit" {
+                                let value = leaf(71, location);
+                                if encoding == "variable" {
+                                    expected.extend_from_slice(&[0x80, 0x01]);
+                                    expected.extend(value.into_iter().cycle().take(128));
+                                } else {
+                                    expected.extend_from_slice(&value);
+                                }
+                            } else if encoding == "fixed" {
+                                expected.extend_from_slice(&[0; 32]);
+                            }
+                            if operation != "set" {
+                                if encoding == "fixed" {
+                                    expected.extend_from_slice(&floor.to_be_bytes());
+                                    expected.extend_from_slice(&[0; 23]);
+                                } else if floor == 512 {
+                                    expected.extend_from_slice(&[0x80, 0x04]);
+                                } else {
+                                    expected.push(0);
+                                }
+                            }
+                            assert_eq!(output.operation.as_ref(), expected.as_slice());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_cli_rejects_invalid_arguments() {
+        for (leaves, location, floor, operation, length) in [
+            (0, 0, 0, "commit", None),
+            (1_000_001, 1, 0, "set", None),
+            (3, 3, 0, "set", None),
+            (3, 1, 2, "set", None),
+            (1, 0, 0, "set", None),
+            (1, 0, 0, "commit-metadata", None),
+            (2, 1, 0, "set", Some("32")),
+        ] {
+            let mut args = vec![
+                "fuzz".to_string(),
+                "qmdb".into(),
+                "immutable".into(),
+                leaves.to_string(),
+                location.to_string(),
+                "71".into(),
+                "--inactivity-floor".into(),
+                floor.to_string(),
+                "--operation".into(),
+                operation.into(),
+            ];
+            if let Some(length) = length {
+                args.extend(["--value-length".into(), length.into()]);
+            }
+            assert!(
+                Cli::try_parse_from(args)
+                    .unwrap()
+                    .command
+                    .execute()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

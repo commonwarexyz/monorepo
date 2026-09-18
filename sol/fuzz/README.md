@@ -24,6 +24,7 @@ target/release/commonware-sol-fuzz simplex --help
   `keyless` subcommand generates append and commit proofs with fixed or variable encodings.
   The `unordered` subcommand generates fixed or variable operation proofs. Add `--current`
   to include activity authentication.
+  The `immutable` subcommand generates set and commit proofs.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.
