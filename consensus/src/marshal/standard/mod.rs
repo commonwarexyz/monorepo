@@ -2298,7 +2298,6 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
-                    handoff_publication: HandoffPublication::AfterCertification,
                 },
             );
             let _engine = engine.start(vote_network, certificate_network, resolver_network);

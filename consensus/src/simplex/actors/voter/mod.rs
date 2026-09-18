@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    CertifiableAutomaton, HandoffPublication, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
     simplex::{Floor, Plan, elector::Elector, types::Activity},
     types::{Epoch, ViewDelta},
 };
@@ -43,7 +43,6 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub skip_budget: u64,
-    pub handoff_publication: HandoffPublication,
     pub view_retention: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -54,7 +53,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        HandoffProposal, Viewable,
+        HandoffProposal, HandoffPublication, Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -228,7 +227,7 @@ mod tests {
         drop_proposals: bool,
         /// Whether the mock application accepts pipelined handoff requests.
         accept_handoffs: bool,
-        application_handoff_publication: HandoffPublication,
+        /// Publication permission the mock application returns with accepted handoffs.
         handoff_publication: HandoffPublication,
         actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
@@ -257,8 +256,7 @@ mod tests {
                 stall_proposals: false,
                 drop_proposals: false,
                 accept_handoffs: false,
-                application_handoff_publication: HandoffPublication::AllowBeforeCertification,
-                handoff_publication: HandoffPublication::AfterCertification,
+                handoff_publication: HandoffPublication::AllowBeforeCertification,
                 actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
@@ -316,7 +314,7 @@ mod tests {
         actor.set_stall_proposals(options.stall_proposals);
         actor.set_drop_proposals(options.drop_proposals);
         actor.set_accept_handoffs(options.accept_handoffs);
-        actor.set_handoff_publication(options.application_handoff_publication);
+        actor.set_handoff_publication(options.handoff_publication);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
@@ -362,7 +360,6 @@ mod tests {
             certification_timeout: options.certification_timeout,
             timeout_retry: options.timeout_retry,
             skip_budget: u64::MAX,
-            handoff_publication: options.handoff_publication,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -713,7 +710,6 @@ mod tests {
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
             skip_budget,
-            handoff_publication: HandoffPublication::AfterCertification,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -1148,7 +1144,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1391,7 +1386,6 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -2077,7 +2071,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2280,7 +2273,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2476,7 +2468,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2571,7 +2562,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2729,7 +2719,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4212,7 +4201,6 @@ mod tests {
     fn pipelined_handoff_retained_response_order(
         certification_first: bool,
         invalidation: Option<HeldInvalidation>,
-        configured_publication: HandoffPublication,
         response_publication: HandoffPublication,
     ) {
         let n = 5;
@@ -4281,8 +4269,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
                     accept_handoffs: true,
-                    application_handoff_publication: response_publication,
-                    handoff_publication: configured_publication,
+                    handoff_publication: response_publication,
                     ..Default::default()
                 },
             )
@@ -4440,17 +4427,6 @@ mod tests {
             false,
             None,
             HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
-        );
-    }
-
-    #[test_traced]
-    fn test_pipelined_handoff_application_holds_before_certification() {
-        pipelined_handoff_retained_response_order(
-            false,
-            None,
-            HandoffPublication::AllowBeforeCertification,
-            HandoffPublication::AfterCertification,
         );
     }
 
@@ -4460,7 +4436,6 @@ mod tests {
             true,
             None,
             HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
         );
     }
 
@@ -4470,7 +4445,6 @@ mod tests {
             false,
             Some(HeldInvalidation::ConflictingParent),
             HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
         );
     }
 
@@ -4480,7 +4454,6 @@ mod tests {
             false,
             Some(HeldInvalidation::Timeout),
             HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
         );
     }
 
@@ -4490,7 +4463,6 @@ mod tests {
             false,
             Some(HeldInvalidation::Restart),
             HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
         );
     }
 
@@ -5471,7 +5443,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -5691,7 +5662,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -5901,7 +5871,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -6066,7 +6035,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -6524,7 +6492,6 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -6806,7 +6773,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6931,7 +6897,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7083,7 +7048,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7244,7 +7208,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7346,7 +7309,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7517,7 +7479,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7630,7 +7591,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7798,7 +7758,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7913,7 +7872,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8081,7 +8039,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8256,7 +8213,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8357,7 +8313,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8534,7 +8489,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8714,7 +8668,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9008,7 +8961,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9981,7 +9933,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10095,7 +10046,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11372,7 +11322,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11653,7 +11602,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11812,7 +11760,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -11930,7 +11877,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -12083,7 +12029,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -12226,7 +12171,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -12366,7 +12310,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 skip_budget: u64::MAX,
-                handoff_publication: HandoffPublication::AfterCertification,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

@@ -49,7 +49,6 @@ mod gui;
 
 use clap::{Arg, Command, value_parser};
 use commonware_consensus::{
-    HandoffPublication,
     simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
@@ -222,7 +221,6 @@ fn main() {
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forward: ForwardPolicy::Disabled,
-            handoff_publication: HandoffPublication::AfterCertification,
             track_historical_votes: false,
         };
         let engine = simplex::Engine::new(context.child("engine"), cfg);

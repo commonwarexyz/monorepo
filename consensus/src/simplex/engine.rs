@@ -77,7 +77,6 @@ impl<
         info!(
             round = %handoff_round,
             elect_without_certificate = elector.elect_without_certificate(handoff_round).is_some(),
-            handoff_publication = ?cfg.handoff_publication,
             "handoff configuration at the epoch's first term start"
         );
 
@@ -119,7 +118,6 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 skip_budget,
-                handoff_publication: cfg.handoff_publication,
                 view_retention: cfg.view_retention,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

@@ -126,6 +126,10 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
+    /// Whether honest applications prepare pipelined handoff candidates.
+    pub accept_handoffs: bool,
+    /// Publication permission honest applications return with prepared candidates.
+    pub handoff_publication: HandoffPublication,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -159,6 +163,12 @@ impl Arbitrary<'_> for FuzzInput {
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
+        let accept_handoffs = u.arbitrary()?;
+        let handoff_publication = if u.arbitrary()? {
+            HandoffPublication::AllowBeforeCertification
+        } else {
+            HandoffPublication::AfterCertification
+        };
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -192,6 +202,8 @@ impl Arbitrary<'_> for FuzzInput {
             term_length,
             optimistic_views,
             heterogeneous_optimism,
+            accept_handoffs,
+            handoff_publication,
             strategy,
         })
     }
@@ -377,6 +389,8 @@ fn spawn_honest_validator<
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     optimistic_views: ViewDelta,
+    accept_handoffs: bool,
+    handoff_publication: HandoffPublication,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -411,7 +425,10 @@ where
         certify_latency: (10.0, 5.0),
         should_certify: application::Certifier::Always,
     };
-    let (actor, application) = application::Application::new(context.child("application"), app_cfg);
+    let (mut actor, application) =
+        application::Application::new(context.child("application"), app_cfg);
+    actor.set_accept_handoffs(accept_handoffs);
+    actor.set_handoff_publication(handoff_publication);
     actor.start();
 
     let blocker = oracle.control(validator.clone());
@@ -440,7 +457,6 @@ where
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forward: ForwardPolicy::Disabled,
-        handoff_publication: HandoffPublication::AfterCertification,
         track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
@@ -485,6 +501,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &participants,
                 input.term_length,
                 validator_optimistic_views(&input, i),
+                input.accept_handoffs,
+                input.handoff_publication,
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -659,8 +677,10 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 certify_latency: (10.0, 5.0),
                 should_certify: application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 application::Application::new(primary_context.child("application"), app_cfg);
+            actor.set_accept_handoffs(input.accept_handoffs);
+            actor.set_handoff_publication(input.handoff_publication);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -689,7 +709,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forward: ForwardPolicy::Disabled,
-                handoff_publication: HandoffPublication::AfterCertification,
                 track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);

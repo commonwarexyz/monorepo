@@ -20,7 +20,7 @@ use crate::dkg::{
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, CertifiableBlock, HandoffPublication, Heightable,
+    Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver, standard::Deferred,
@@ -509,7 +509,6 @@ where
         let simplex = simplex::Engine::new(
             context.child("simplex"),
             simplex::Config {
-                handoff_publication: HandoffPublication::AfterCertification,
                 scheme,
                 elector: RoundRobin::<Sha256>::default(),
                 blocker: self.config.blocker,

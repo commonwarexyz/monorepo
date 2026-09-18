@@ -174,11 +174,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
-    /// Controls when a prepared handoff proposal may be published.
+    /// Controls when consensus may publish a prepared handoff proposal.
     ///
-    /// Early publication requires permission from both the node configuration and the
-    /// application response. Certification means certification of the exact captured parent;
-    /// finalization of that parent also satisfies the publication barrier.
+    /// The application chooses this for each handoff. Certification means certification of
+    /// the exact captured parent; finalization of that parent also satisfies the publication
+    /// barrier.
     #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
     pub enum HandoffPublication {
         /// Wait until the captured parent certifies or finalizes before publication.
@@ -197,7 +197,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         Proposed {
             /// Prepared or reused candidate.
             payload: D,
-            /// Publication permission for this candidate, bounded by node configuration.
+            /// When consensus may publish this candidate.
             publication: HandoffPublication,
         },
         /// Wait until the parent has been certified before requesting a proposal again.
@@ -393,13 +393,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
         /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
         /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before
-        /// requesting that ordinary path again. Consensus controls whether a ready
-        /// candidate may be published before parent certification. Early publication requires
-        /// permission from both the application and the node configuration.
+        /// requesting that ordinary path again. The [`HandoffPublication`] inside
+        /// [`HandoffPolicy::Prepare`] decides whether consensus may publish the candidate
+        /// before the parent certifies.
         ///
         /// The decision applies to this request and cannot be revoked after returning it.
-        /// If early-publication trust is uncertain, prepare with
-        /// [`HandoffPublication::AfterCertification`].
+        /// Publishing early trusts the parent's builder not to equivocate. The context names
+        /// the parent by view and digest; the application identifies its builder from the
+        /// elector's schedule or from a block it has already verified. If that trust is
+        /// uncertain, prepare with [`HandoffPublication::AfterCertification`].
         ///
         /// Make this decision from information already available to the application. If
         /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].

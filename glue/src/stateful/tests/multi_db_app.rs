@@ -17,7 +17,7 @@ use crate::{
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, HandoffPublication, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -717,7 +717,6 @@ impl EngineDefinition for MultiDbEngine {
 
         // Simplex engine
         let simplex_config = simplex::Config {
-            handoff_publication: HandoffPublication::AfterCertification,
             scheme,
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),

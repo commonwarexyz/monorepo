@@ -10,7 +10,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, HandoffPublication, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
         self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
@@ -740,7 +740,6 @@ where
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
-                handoff_publication: HandoffPublication::AfterCertification,
                 scheme: scheme.as_ref().clone(),
                 elector: self.simplex.elector.clone(),
                 blocker: self.oracle.clone(),
