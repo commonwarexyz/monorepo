@@ -92,12 +92,9 @@ behind Multimmit’s marshal." />
 Clabby</a></div>
                         <div class="date">September 13th, 2026</div>
         </div>
-        <p>In a fully replicated blockchain, every replica receives,
-        stores, and processes every block. We’re aiming for several
-        gigabytes of blocks per second, which means every replica’s
-        network, disk, and processing capacity must keep up with that
-        rate. If a replica falls behind or crashes, it has to recover
-        its place and catch up while new blocks keep arriving.</p>
+        <p>Ordering a few GB/s efficiently on a blockchain is hard.
+        Keeping up with incoming blocks leaves little room to catch up
+        after a slowdown or crash.</p>
         <p>We’re building <a href="/blogs/multimmit">Multimmit</a> to
         increase throughput by enabling producers to build and broadcast
         their own chains in parallel. Consensus agrees on references to

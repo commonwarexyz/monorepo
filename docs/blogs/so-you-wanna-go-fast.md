@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/so-you-wanna-go-fast.png"
 katex: false
 ---
 
-In a fully replicated blockchain, every replica receives, stores, and processes every block. We're aiming for several gigabytes of blocks per second, which means every replica's network, disk, and processing capacity must keep up with that rate. If a replica falls behind or crashes, it has to recover its place and catch up while new blocks keep arriving.
+Ordering a few GB/s efficiently on a blockchain is hard. Keeping up with incoming blocks leaves little room to catch up after a slowdown or crash.
 
 We're building [Multimmit](/blogs/multimmit) to increase throughput by enabling producers to build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
 
