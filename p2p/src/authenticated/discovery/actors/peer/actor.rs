@@ -413,7 +413,7 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::{Handshake as _, cups::Sake, utils::Timeout};
+    use commonware_stream::{Handshake as _, cups::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -443,9 +443,9 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<Sake<S>> {
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
         Timeout::new(
-            Sake {
+            StreamHandshake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),

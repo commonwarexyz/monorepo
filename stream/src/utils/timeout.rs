@@ -24,10 +24,10 @@ pub enum TimeoutError<E> {
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{cups::Sake, utils::Timeout};
+/// use commonware_stream::{cups::Handshake, utils::Timeout};
 /// use std::time::Duration;
 ///
-/// let handshake = Timeout::new(Sake::new(PrivateKey::from_seed(0)), Duration::from_secs(5));
+/// let handshake = Timeout::new(Handshake::new(PrivateKey::from_seed(0)), Duration::from_secs(5));
 /// ```
 #[derive(Clone)]
 pub struct Timeout<H> {

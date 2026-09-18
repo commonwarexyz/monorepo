@@ -5,7 +5,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::Handshake;
 #[cfg(test)]
-use commonware_stream::cups::Sake;
+use commonware_stream::cups::Handshake as StreamHandshake;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -245,7 +245,7 @@ where
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<Sake<C>> {
+impl<C: Signer> Config<StreamHandshake<C>> {
     pub fn test(
         signer: C,
         listen: SocketAddr,
@@ -253,7 +253,7 @@ impl<C: Signer> Config<Sake<C>> {
         max_message_size: u32,
     ) -> Self {
         let mut config = Self::local(
-            Sake::new(signer),
+            StreamHandshake::new(signer),
             b"test_namespace",
             listen,
             listen,

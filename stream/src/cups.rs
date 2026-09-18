@@ -7,7 +7,7 @@
 //!
 //! # Handshake
 //!
-//! [Sake] implements [crate::Handshake] using Commonware
+//! [Handshake] implements [crate::Handshake] using Commonware
 //! [SAKE](commonware_cryptography::handshake::sake) (Simple Authenticated Key Exchange) and returns CUPS
 //! [Sender] and [Receiver] halves. SAKE uses a fixed three-message exchange with ephemeral X25519
 //! keys, identity signatures, and BLAKE3 transcript derivation to establish directional ciphers.
@@ -109,7 +109,7 @@ impl From<HandshakeError> for Error {
 ///
 /// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake].
 #[derive(Clone)]
-pub struct Sake<S> {
+pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
@@ -120,7 +120,7 @@ pub struct Sake<S> {
     pub max_handshake_age: Duration,
 }
 
-impl<S> Sake<S> {
+impl<S> Handshake<S> {
     /// Creates a SAKE handshake accepting timestamps up to five seconds ahead or ten seconds old.
     pub const fn new(signer: S) -> Self {
         Self {
@@ -163,7 +163,7 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer> crate::Handshake for Sake<S> {
+impl<S: Signer> crate::Handshake for Handshake<S> {
     const MAX_SIZE: u32 = MAX_SIZE;
 
     type PublicKey = S::PublicKey;
@@ -565,7 +565,7 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = Sake::new(PrivateKey::from_seed(0));
+                    let handshake = Handshake::new(PrivateKey::from_seed(0));
                     let attempt = async {
                         if dialer {
                             handshake
@@ -607,8 +607,8 @@ mod test {
         });
     }
 
-    fn transport_handshake(signer: PrivateKey) -> Sake<PrivateKey> {
-        Sake {
+    fn transport_handshake(signer: PrivateKey) -> Handshake<PrivateKey> {
+        Handshake {
             signer,
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
