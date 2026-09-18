@@ -43,7 +43,17 @@ contract LibQMDBCurrentTest is HashTest {
     }
 
     /// @dev Check caller allocations, dirty scratch, and subsequent allocations on every exit path.
-    function checked(QMDBCase calldata c) external view returns (bool valid) {
+    function checked(QMDBCase calldata c) external view returns (bool) {
+        return _checked(c, false, 0);
+    }
+
+    /// @dev Exercise exclusion with the same caller-memory checks as membership.
+    function checkedExclusion(QMDBCase calldata c, bytes32 key) external view returns (bool) {
+        return _checked(c, true, key);
+    }
+
+    /// @dev Repeated verification preserves inputs and leaves subsequent allocations zeroed.
+    function _checked(QMDBCase calldata c, bool exclusion, bytes32 key) internal view returns (bool valid) {
         bytes memory operation = c.operation;
         bytes memory guard = abi.encode(c);
         bytes32 beforeInputs = keccak256(abi.encode(operation, guard));
@@ -57,9 +67,16 @@ contract LibQMDBCurrentTest is HashTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = _mmb()
-                ? LibQMDBCurrent.verify(c.root, operation, c.proof, _hasher())
-                : LibQMDBCurrent.verifyMMR(c.root, operation, c.proof, _hasher());
+            bool result;
+            if (exclusion) {
+                result = _mmb()
+                    ? LibQMDBCurrent.verifyExclusion(c.root, key, operation, c.proof, _hasher())
+                    : LibQMDBCurrent.verifyExclusionMMR(c.root, key, operation, c.proof, _hasher());
+            } else {
+                result = _mmb()
+                    ? LibQMDBCurrent.verify(c.root, operation, c.proof, _hasher())
+                    : LibQMDBCurrent.verifyMMR(c.root, operation, c.proof, _hasher());
+            }
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)
@@ -235,25 +252,34 @@ contract LibQMDBCurrentTest is HashTest {
 
     /// @dev Every supplied commitment, sibling, and coordinate is authenticated.
     function rejectMutations(QMDBCase memory c) internal view {
-        assertTrue(this.checked(c));
+        rejectMutations(c, false, 0);
+    }
+
+    /// @dev Apply proof mutations to either verifier while keeping the exclusion query fixed.
+    function rejectMutations(QMDBCase memory c, bool exclusion, bytes32 key) internal view {
+        assertTrue(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.root ^= bytes32(uint256(1));
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.root ^= bytes32(uint256(1));
         c.proof.opsRoot ^= bytes32(uint256(1));
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.opsRoot ^= bytes32(uint256(1));
         c.proof.pending ^= bytes32(uint256(1));
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.pending ^= bytes32(uint256(1));
         c.proof.partialDigest ^= bytes32(uint256(1));
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.partialDigest ^= bytes32(uint256(1));
         c.proof.chunk ^= bytes32(uint256(1) << 128);
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.chunk ^= bytes32(uint256(1) << 128);
+        uint256 inactive = c.proof.inactivePeaks;
+        c.proof.inactivePeaks = type(uint256).max;
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
+        c.proof.inactivePeaks = inactive;
         for (uint256 i; i < c.proof.digests.length; ++i) {
             c.proof.digests[i] ^= bytes32(uint256(1));
-            assertFalse(this.checked(c));
+            assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
             c.proof.digests[i] ^= bytes32(uint256(1));
         }
         bytes32[] memory original = c.proof.digests;
@@ -261,35 +287,35 @@ contract LibQMDBCurrentTest is HashTest {
         for (uint256 i; i < original.length; ++i) {
             c.proof.digests[i] = original[i];
         }
-        assertFalse(this.checked(c), "trailing witness accepted");
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c), "trailing witness accepted");
         if (original.length != 0) {
             c.proof.digests = new bytes32[](original.length - 1);
             for (uint256 i; i < c.proof.digests.length; ++i) {
                 c.proof.digests[i] = original[i];
             }
-            assertFalse(this.checked(c), "missing witness accepted");
+            assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c), "missing witness accepted");
         }
         c.proof.digests = original;
         if (c.proof.leaves > 1) {
             uint256 location = c.proof.location;
             c.proof.location = (location + 1) % c.proof.leaves;
-            assertFalse(this.checked(c), "wrong location accepted");
+            assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c), "wrong location accepted");
             c.proof.location = location;
         }
         ++c.proof.leaves;
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         --c.proof.leaves;
         c.proof.location = c.proof.leaves;
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.location = type(uint256).max;
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.location = 0;
         c.proof.leaves = 0;
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.leaves = (uint256(1) << 62) + (_mmb() ? 31 : 1);
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.leaves = type(uint256).max;
-        assertFalse(this.checked(c));
+        assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
     }
 
     /// @dev Exercise absent, pending, partial, and combined witness shapes on rejection paths.
@@ -327,6 +353,130 @@ contract LibQMDBCurrentTest is HashTest {
             QMDBCase memory c = this.build(sizes[i], sizes[i] - 1, hex"010203", true);
             assertTrue(this.checked(c));
             this.rejectOtherFamily(c);
+        }
+    }
+
+    /// @dev Values have a fixed size per database. Their bytes do not affect interval ordering.
+    function test_ExclusionIntervalsAndValueLengths() public view {
+        uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 64, 97, 257];
+        bytes32[7] memory keys = [
+            bytes32(0),
+            bytes32(uint256(9)),
+            bytes32(uint256(10)),
+            bytes32(uint256(15)),
+            bytes32(uint256(20)),
+            bytes32(uint256(21)),
+            bytes32(type(uint256).max)
+        ];
+        for (uint256 i; i < lengths.length; ++i) {
+            bytes memory value = new bytes(lengths[i]);
+            for (uint256 j; j < value.length; ++j) {
+                value[j] = bytes1(uint8(j + 1));
+            }
+            for (uint256 mode; mode < 3; ++mode) {
+                bytes32 left = bytes32(uint256(mode == 1 ? 20 : 10));
+                bytes32 right = bytes32(uint256(mode == 0 ? 20 : 10));
+                QMDBCase memory c = this.build(383, 127, abi.encodePacked(bytes1(0xd2), left, value, right), true);
+                for (uint256 j; j < keys.length; ++j) {
+                    bool expected = mode == 0
+                        ? keys[j] > left && keys[j] < right
+                        : mode == 1 ? keys[j] > left || keys[j] < right : keys[j] != left;
+                    assertEq(this.checkedExclusion(c, keys[j]), expected, "cyclic interval membership");
+                }
+            }
+        }
+    }
+
+    /// @dev Arbitrary keys exercise cyclic ordering against an authenticated update.
+    function testFuzz_ExclusionIntervals(bytes32 left, bytes32 right, bytes32 key, bytes memory value) public view {
+        QMDBCase memory c = this.build(2, 1, abi.encodePacked(bytes1(0xd2), left, value, right), true);
+        bool expected =
+            left < right ? left < key && key < right : left > right ? key > left || key < right : key != left;
+        assertEq(this.checkedExclusion(c, key), expected);
+    }
+
+    /// @dev Empty commits authenticate their own location as the floor, with optional fixed-size metadata.
+    function test_ExclusionEmptyCommit() public view {
+        uint256[6] memory lengths = [uint256(0), 1, 31, 32, 33, 97];
+        for (uint256 i; i < lengths.length; ++i) {
+            bytes memory metadata = new bytes(lengths[i]);
+            for (uint256 j; j < metadata.length; ++j) {
+                metadata[j] = bytes1(uint8(j + 1));
+            }
+            bytes memory operation = abi.encodePacked(hex"d301", metadata, uint64(256), new bytes(55));
+            QMDBCase memory c = this.build(257, 256, operation, true);
+            assertTrue(this.checkedExclusion(c, 0));
+            assertTrue(this.checkedExclusion(c, bytes32(type(uint256).max)));
+            operation = abi.encodePacked(hex"d300", new bytes(lengths[i]), uint64(256), new bytes(55));
+            assertTrue(this.checkedExclusion(this.build(257, 256, operation, true), 0));
+            operation = abi.encodePacked(hex"d301", metadata, uint64(255), new bytes(55));
+            c = this.build(257, 256, operation, true);
+            assertTrue(this.checked(c), "wrong-floor operation membership");
+            assertFalse(this.checkedExclusion(c, 0), "wrong floor");
+        }
+        bytes memory absent = abi.encodePacked(hex"d300", uint64(0), new bytes(55));
+        assertTrue(this.checkedExclusion(this.build(1, 0, absent, true), bytes32(uint256(7))));
+        absent = abi.encodePacked(hex"d300", uint64(382), new bytes(55));
+        assertTrue(this.checkedExclusion(this.build(383, 382, absent, true), 0));
+        absent = abi.encodePacked(hex"d300", uint64(381), new bytes(55));
+        assertFalse(this.checkedExclusion(this.build(383, 382, absent, true), 0));
+    }
+
+    /// @dev Malformed operation bytes remain invalid even when the active proof authenticates them.
+    function test_ExclusionMalformedOperations() public view {
+        assertFalse(this.checkedExclusion(this.build(1, 0, "", true), 0));
+        for (uint256 length = 1; length < 65; ++length) {
+            bytes memory operation = new bytes(length);
+            operation[0] = 0xd2;
+            assertFalse(this.checkedExclusion(this.build(1, 0, operation, true), bytes32(uint256(1))));
+            operation[0] = 0xd3;
+            assertFalse(this.checkedExclusion(this.build(1, 0, operation, true), bytes32(uint256(1))));
+        }
+        bytes memory commit = abi.encodePacked(hex"d300", uint64(0), new bytes(55));
+        for (uint256 tag; tag < 256; ++tag) {
+            if (tag == 0xd2 || tag == 0xd3) continue;
+            commit[0] = bytes1(uint8(tag));
+            assertFalse(this.checkedExclusion(this.build(1, 0, commit, true), bytes32(uint256(1))));
+        }
+        commit[0] = 0xd3;
+        for (uint256 flag = 2; flag < 256; ++flag) {
+            commit[1] = bytes1(uint8(flag));
+            assertFalse(this.checkedExclusion(this.build(1, 0, commit, true), 0));
+        }
+        commit[1] = 0;
+        for (uint256 i = 10; i < commit.length; ++i) {
+            commit[i] = 0x01;
+            assertFalse(this.checkedExclusion(this.build(1, 0, commit, true), 0), "nonzero commit padding");
+            commit[i] = 0;
+        }
+        commit = abi.encodePacked(hex"d300", new bytes(33), uint64(0), new bytes(55));
+        for (uint256 i = 2; i < 35; ++i) {
+            commit[i] = 0x01;
+            assertFalse(this.checkedExclusion(this.build(1, 0, commit, true), 0), "nonzero absent metadata");
+            commit[i] = 0;
+        }
+        commit = abi.encodePacked(hex"d301", bytes32(uint256(42)), uint64(0), new bytes(55));
+        commit[commit.length - 1] = 0x01;
+        assertFalse(this.checkedExclusion(this.build(1, 0, commit, true), 0), "metadata commit padding");
+    }
+
+    /// @dev Interval and empty witnesses share the complete active-operation authentication contract.
+    function test_ExclusionProofAuthentication() public view {
+        uint256[7] memory sizes = [uint256(1), 256, 257, 383, 512, 513, 639];
+        bytes memory update = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 location = sizes[i] - 1;
+            for (uint256 mode; mode < 2; ++mode) {
+                bytes memory operation =
+                    mode == 0 ? update : abi.encodePacked(hex"d300", uint64(location), new bytes(55));
+                QMDBCase memory c = this.build(sizes[i], location, operation, true);
+                rejectMutations(c, true, bytes32(uint256(15)));
+                c = this.build(sizes[i], location, operation, false);
+                assertFalse(this.checkedExclusion(c, bytes32(uint256(15))), "inactive exclusion operation");
+                c = this.build(sizes[i], location, operation, true);
+                c.operation[c.operation.length / 2] ^= 0x01;
+                assertFalse(this.checkedExclusion(c, bytes32(uint256(15))), "operation tampering");
+            }
         }
     }
 
@@ -397,6 +547,80 @@ contract LibQMDBCurrentTest is HashTest {
             c = generate(n, n - 1, floors[i]);
             c.proof.inactivePeaks = 0;
             assertFalse(this.checked(c));
+        }
+    }
+
+    /// @dev Decode an exclusion fixture and the Rust verifier's verdict for the queried key.
+    function generateExclusion(uint256 leaves, uint256 location, bytes32 key, string memory mode, bool metadata)
+        internal
+        returns (QMDBCase memory c, bool expected)
+    {
+        string[] memory args = new string[](metadata ? 12 : 11);
+        args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
+        args[1] = "qmdb";
+        args[2] = "exclude";
+        args[3] = vm.toString(leaves);
+        args[4] = vm.toString(location);
+        args[5] = "71";
+        args[6] = vm.toString(key);
+        args[7] = "--family";
+        args[8] = _mmb() ? "mmb" : "mmr";
+        args[9] = "--mode";
+        args[10] = mode;
+        if (metadata) args[11] = "--metadata";
+        (
+            c.root,
+            c.proof.leaves,
+            c.proof.location,
+            c.proof.inactivePeaks,
+            c.proof.chunk,
+            c.proof.opsRoot,
+            c.proof.pending,
+            c.proof.partialDigest,
+            c.proof.digests,
+            c.operation,
+            expected
+        ) =
+            abi.decode(
+                _ffi(args),
+                (bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
+            );
+        assertEq(c.proof.leaves, leaves);
+        assertEq(c.proof.location, location);
+    }
+
+    /// @dev The oracle's verdict comes from Rust ExclusionProof::verify on the same query and root.
+    function test_DifferentialExclusion() public {
+        uint256[8] memory sizes = [uint256(1), 255, 256, 257, 383, 512, 639, 1023];
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 n = sizes[i];
+            uint256[2] memory locations = [uint256(0), n - 1];
+            for (uint256 j; j < locations.length; ++j) {
+                uint256 location = locations[j];
+                bytes32 left = bytes32(2 * (location + 1));
+                bytes32 right = bytes32(2 * ((location + 1) % n + 1));
+                bytes32[4] memory queries = [bytes32(uint256(left) + 1), left, right, bytes32(0)];
+                for (uint256 k; k < queries.length; ++k) {
+                    (QMDBCase memory c, bool expected) = generateExclusion(n, location, queries[k], "interval", false);
+                    bool member = n == 1
+                        ? queries[k] != left
+                        : location == n - 1
+                            ? queries[k] > left || queries[k] < right
+                            : queries[k] > left && queries[k] < right;
+                    assertEq(expected, member, "oracle interval fixture");
+                    assertEq(this.checkedExclusion(c, queries[k]), expected, "Rust interval disagreement");
+                }
+            }
+            bytes32 present = bytes32(2 * n);
+            for (uint256 j; j < 2; ++j) {
+                bytes32 query = j == 0 ? present : bytes32(0);
+                (QMDBCase memory c, bool expected) = generateExclusion(n, n - 1, query, "single", false);
+                assertEq(expected, j != 0, "oracle single fixture");
+                assertEq(this.checkedExclusion(c, query), expected, "Rust single disagreement");
+                (c, expected) = generateExclusion(n, n - 1, query, "empty", j != 0);
+                assertTrue(expected, "oracle empty fixture");
+                assertTrue(this.checkedExclusion(c, query), "Rust empty disagreement");
+            }
         }
     }
 

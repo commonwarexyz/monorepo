@@ -4,7 +4,7 @@ pragma solidity ^0.8.15;
 import { Common } from "../merkle/Common.sol";
 import { LibMerkle } from "../merkle/LibMerkle.sol";
 
-/// @notice Verify an active operation in a current QMDB with 32-byte bitmap chunks.
+/// @notice Verify active operations and key exclusion in a current QMDB with 32-byte bitmap chunks.
 /// @dev Uses QMDB's backward peak fold and big-endian position and count encodings.
 /// The caller supplies an authenticated root and a trusted hash target.
 /// Hash targets receive raw bytes and must return exactly 32 bytes.
@@ -49,6 +49,72 @@ library LibQMDBCurrent {
         returns (bool)
     {
         return _verify(root, operation, proof, false, hasher);
+    }
+
+    /// @notice Verify key exclusion against a trusted ordered current MMB root.
+    /// @dev The database must use 32-byte keys and fixed value encoding. For value size `V`,
+    /// operations have `65 + V` bytes. Updates encode tag, key, value, then next key.
+    /// Commits encode tag, metadata flag, `V` metadata bytes, big-endian `uint64` floor,
+    /// then 55 zero bytes. The authenticated database's schema determines `V`.
+    /// @param root Authenticated root of a database with this fixed ordered schema.
+    /// @param key Key whose absence is being proven.
+    /// @param operation Exact encoded adjacent-key update or empty-database commit.
+    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
+    /// @return True when the active operation proves that `key` is absent under `root`.
+    function verifyExclusion(bytes32 root, bytes32 key, bytes memory operation, Proof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, true, hasher);
+    }
+
+    /// @notice Verify key exclusion against a trusted ordered current MMR root.
+    /// @dev Requires the same fixed ordered database schema as `verifyExclusion`.
+    /// @param root Authenticated root of a database with 32-byte keys and fixed value encoding.
+    /// @param key Key whose absence is being proven.
+    /// @param operation Exact encoded adjacent-key update or empty-database commit.
+    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
+    /// @return True when the active operation proves that `key` is absent under `root`.
+    function verifyExclusionMMR(bytes32 root, bytes32 key, bytes memory operation, Proof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, false, hasher);
+    }
+
+    /// @dev An active update excludes the open cyclic interval between its keys, including
+    /// every other key when both endpoints match. An empty database's commit floor is its location.
+    function _excludes(bytes32 key, bytes memory operation, uint256 location) private pure returns (bool) {
+        uint256 length = operation.length;
+        if (length < 65) return false;
+        if (operation[0] == 0xd2) {
+            bytes32 start;
+            bytes32 end;
+            assembly ("memory-safe") {
+                start := mload(add(operation, 33))
+                end := mload(add(operation, length))
+            }
+            return start < end ? key > start && key < end : key > start || key < end;
+        }
+        if (operation[0] != 0xd3 || uint8(operation[1]) > 1) return false;
+        uint256 floor;
+        uint256 padding;
+        assembly ("memory-safe") {
+            let data := add(operation, 32)
+            floor := shr(192, mload(add(data, sub(length, 63))))
+            padding := or(mload(add(data, sub(length, 55))), mload(add(data, sub(length, 32))))
+        }
+        if (floor != location || padding != 0) return false;
+        if (operation[1] == 0) {
+            for (uint256 i = 2; i < length - 63; ++i) {
+                if (operation[i] != 0) return false;
+            }
+        }
+        return true;
     }
 
     /// @dev The tree family determines the leaf bound, physical positions, and graftable chunks.

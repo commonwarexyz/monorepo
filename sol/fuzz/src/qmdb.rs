@@ -11,14 +11,15 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::{SolType, SolValue};
 use clap::{Args, Subcommand};
 use commonware_codec::Encode;
-use commonware_cryptography::{Hasher, Keccak256, Sha256};
+use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
     merkle::{Family, Graftable, Location, mem::Mem, mmb, mmr},
     qmdb::{
         self,
-        any::ordered::fixed,
+        any::{ordered::fixed, value::FixedEncoding},
         current::{
             grafting,
+            ordered::proof::ExclusionProof,
             proof::{OpsRootWitness, operation},
         },
     },
@@ -47,6 +48,8 @@ sol! {
 pub(crate) enum Command {
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
     Generate(GenerateArgs),
+    /// Prove exclusion using a cyclic key interval or an empty database commit.
+    Exclude(ExcludeArgs),
 }
 
 #[derive(Args)]
@@ -63,12 +66,31 @@ pub(crate) struct GenerateArgs {
     inactivity_floor: u64,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ExclusionMode {
+    Interval,
+    Single,
+    Empty,
+}
+
+#[derive(Args)]
+pub(crate) struct ExcludeArgs {
+    #[command(flatten)]
+    tree: GenerateArgs,
+    keyhex: String,
+    #[arg(long, value_enum, default_value = "interval")]
+    mode: ExclusionMode,
+    #[arg(long)]
+    metadata: bool,
+}
+
+fn key(index: u64) -> FixedBytes<32> {
+    let mut bytes = [0; 32];
+    bytes[24..].copy_from_slice(&index.to_be_bytes());
+    FixedBytes::new(bytes)
+}
+
 fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
-    let key = |index: u64| {
-        let mut bytes = [0; 32];
-        bytes[24..].copy_from_slice(&index.to_be_bytes());
-        FixedBytes::new(bytes)
-    };
     Operation::Update(fixed::Update {
         key: key(index),
         value: FixedBytes::new(leaf(seed, index)),
@@ -76,11 +98,20 @@ fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
     })
 }
 
-fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOutput, String> {
+struct Materialized<F: Graftable, D: Digest> {
+    output: OperationOutput,
+    proof: operation::Proof<F, D, [u8; 32]>,
+    root: D,
+}
+
+fn materialize<F: Graftable, H: Hasher>(
+    args: &GenerateArgs,
+    operation: impl Fn(u64) -> Operation<F>,
+    active: impl Fn(u64) -> bool,
+) -> Result<Materialized<F, H::Digest>, String> {
     let GenerateArgs {
         leaves,
         location,
-        seed,
         inactivity_floor,
         ..
     } = *args;
@@ -91,7 +122,7 @@ fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOut
     }
     let mut status = Prunable::<32>::new();
     for index in 0..leaves {
-        status.push(index >= inactivity_floor);
+        status.push(active(index));
     }
     let chunks: Vec<_> = (0..leaves.div_ceil(256))
         .map(|index| status.get_chunk(index as usize).as_slice())
@@ -104,7 +135,7 @@ fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOut
     let mut ops_batch = ops.new_batch();
     let mut grafted_batch = grafted.new_batch();
     for index in 0..leaves {
-        let encoded = operation::<F>(seed, index, leaves).encode();
+        let encoded = operation(index).encode();
         ops_batch = ops_batch.add(&hasher, &encoded);
         grafted_batch = grafted_batch.add(&verifier, &encoded);
     }
@@ -146,12 +177,12 @@ fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOut
         partial_chunk: partial,
     }
     .root::<H>(&ops_root);
-    let op = operation::<F>(seed, location, leaves);
+    let op = operation(location);
     if !proof.verify::<H, _>(op.clone(), &root) {
         return Err("Commonware rejected proof against the materialized canonical root".into());
     }
     let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
-    Ok(OperationOutput {
+    let output = OperationOutput {
         root: bytes32(root).into(),
         leaves: Uint256::from(leaves),
         location: Uint256::from(location),
@@ -169,19 +200,114 @@ fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOut
             .map(|d| bytes32(*d).into())
             .collect(),
         operation: op.encode().to_vec().into(),
+    };
+    Ok(Materialized {
+        output,
+        proof,
+        root,
     })
+}
+
+fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOutput, String> {
+    materialize::<F, H>(
+        args,
+        |index| operation::<F>(args.seed, index, args.leaves),
+        |index| index >= args.inactivity_floor,
+    )
+    .map(|fixture| fixture.output)
+}
+
+fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, String> {
+    let query = const_hex::decode(args.keyhex.strip_prefix("0x").unwrap_or(&args.keyhex))
+        .map_err(|e| e.to_string())?;
+    let query = FixedBytes::<32>::new(query.try_into().map_err(|_| "key must be 32 bytes")?);
+    if args.tree.inactivity_floor != 0 {
+        return Err("exclude derives its inactivity floor from the mode".into());
+    }
+    if args.metadata && !matches!(args.mode, ExclusionMode::Empty) {
+        return Err("metadata requires empty mode".into());
+    }
+    if matches!(args.mode, ExclusionMode::Empty | ExclusionMode::Single)
+        && args.tree.leaves.checked_sub(1) != Some(args.tree.location)
+    {
+        return Err("empty and single modes require location = leaves - 1".into());
+    }
+    let tree = GenerateArgs {
+        inactivity_floor: match args.mode {
+            ExclusionMode::Interval => 0,
+            _ => args.tree.location,
+        },
+        ..args.tree
+    };
+    let op = |index| match args.mode {
+        ExclusionMode::Empty => Operation::<F>::CommitFloor(
+            args.metadata
+                .then(|| FixedBytes::new(leaf(tree.seed, index))),
+            Location::new(index),
+        ),
+        ExclusionMode::Interval | ExclusionMode::Single => Operation::Update(fixed::Update {
+            key: key(2
+                * (match args.mode {
+                    ExclusionMode::Single => tree.location,
+                    _ => index,
+                } + 1)),
+            value: FixedBytes::new(leaf(tree.seed, index)),
+            next_key: key(2
+                * (match args.mode {
+                    ExclusionMode::Single => tree.location,
+                    _ => (index + 1) % tree.leaves,
+                } + 1)),
+        }),
+    };
+    let Materialized {
+        output,
+        proof,
+        root,
+    } = materialize::<F, H>(&tree, op, |index| {
+        matches!(args.mode, ExclusionMode::Interval) || index == tree.location
+    })?;
+    let exclusion: ExclusionProof<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>, H::Digest, _> =
+        match op(tree.location) {
+            Operation::Update(update) => ExclusionProof::KeyValue(proof, update),
+            Operation::CommitFloor(metadata, _) => ExclusionProof::Commit(proof, metadata),
+            _ => unreachable!(),
+        };
+    let expected = exclusion.verify::<H>(&query, &root);
+    Ok((
+        output.root,
+        output.leaves,
+        output.location,
+        output.inactivePeaks,
+        output.chunk,
+        output.opsRoot,
+        output.pending,
+        output.partial,
+        output.digests,
+        output.operation,
+        expected,
+    )
+        .abi_encode_params())
 }
 
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
-        let Self::Generate(args) = self;
-        let output = match (args.family, args.hash) {
-            (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(&args),
-            (TreeKind::Mmr, Hash::Sha256) => generate::<mmr::Family, Sha256>(&args),
-            (TreeKind::Mmb, Hash::Keccak) => generate::<mmb::Family, Keccak256>(&args),
-            (TreeKind::Mmb, Hash::Sha256) => generate::<mmb::Family, Sha256>(&args),
-        }?;
-        Ok(output.abi_encode_params())
+        match self {
+            Self::Generate(args) => {
+                let output = match (args.family, args.hash) {
+                    (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Sha256) => generate::<mmr::Family, Sha256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak) => generate::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Sha256) => generate::<mmb::Family, Sha256>(&args),
+                }?;
+                Ok(output.abi_encode_params())
+            }
+            Self::Exclude(args) => match (args.tree.family, args.tree.hash) {
+                (TreeKind::Mmr, Hash::Keccak) => exclude::<mmr::Family, Keccak256>(&args),
+                (TreeKind::Mmr, Hash::Sha256) => exclude::<mmr::Family, Sha256>(&args),
+                (TreeKind::Mmb, Hash::Keccak) => exclude::<mmb::Family, Keccak256>(&args),
+                (TreeKind::Mmb, Hash::Sha256) => exclude::<mmb::Family, Sha256>(&args),
+            },
+        }
     }
 }
 
@@ -292,6 +418,73 @@ mod tests {
                                     assert_eq!(output.inactivePeaks, 1);
                                 } else if leaves == 1793 && floor == 1792 {
                                     assert_eq!(output.inactivePeaks, 3);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exclusion_matches_cyclic_intervals_and_empty_commits() {
+        type ExclusionOutput = <sol!((bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
+        for family in ["mmr", "mmb"] {
+            for hash in ["keccak", "sha256"] {
+                for leaves in [1u64, 256, 257, 383, 513] {
+                    for location in [0, leaves - 1] {
+                        for mode in ["interval", "single", "empty"] {
+                            for metadata in [false, true] {
+                                if metadata && mode != "empty" {
+                                    continue;
+                                }
+                                let start = 2 * (location + 1);
+                                let end = 2 * ((location + 1) % leaves + 1);
+                                for query in [0, start - 1, start, start + 1, end, u64::MAX] {
+                                    let queryhex = const_hex::encode(key(query));
+                                    let mut arguments = vec![
+                                        "fuzz".to_owned(),
+                                        "qmdb".into(),
+                                        "exclude".into(),
+                                        leaves.to_string(),
+                                        location.to_string(),
+                                        "42".into(),
+                                        queryhex,
+                                        "--family".into(),
+                                        family.into(),
+                                        "--hash".into(),
+                                        hash.into(),
+                                        "--mode".into(),
+                                        mode.into(),
+                                    ];
+                                    if metadata {
+                                        arguments.push("--metadata".into());
+                                    }
+                                    let result =
+                                        Cli::try_parse_from(arguments).unwrap().command.execute();
+                                    if mode != "interval" && location != leaves - 1 {
+                                        assert!(result.is_err());
+                                        continue;
+                                    }
+                                    let encoded = result.unwrap();
+                                    let output =
+                                        ExclusionOutput::abi_decode_params_validate(&encoded)
+                                            .unwrap();
+                                    let expected = match mode {
+                                        "empty" => true,
+                                        "single" => query != start,
+                                        _ if start == end => query != start,
+                                        _ if start < end => query > start && query < end,
+                                        _ => query > start || query < end,
+                                    };
+                                    assert_eq!(
+                                        output.10, expected,
+                                        "{family} {hash} {leaves} {location} {mode} {metadata} {query}"
+                                    );
+                                    assert_eq!(output.1, leaves);
+                                    assert_eq!(output.2, location);
+                                    assert_eq!(output.9.len(), 97);
                                 }
                             }
                         }
