@@ -20,7 +20,7 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::{Handshake, cups::Config as StreamConfig};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::{sync::Arc, time::Duration};

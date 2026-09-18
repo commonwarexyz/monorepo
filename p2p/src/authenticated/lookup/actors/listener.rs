@@ -12,7 +12,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::{Handshake, cups::Config as StreamConfig};
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;

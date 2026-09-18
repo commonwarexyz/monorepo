@@ -1,8 +1,5 @@
 //! Exchange messages over arbitrary transport.
 //!
-//! [cups] provides Commonware CUPS records established with the SAKE handshake ([cups::Handshake]).
-//! [Handshake], [Sender], and [Receiver] define the generic connection and message interfaces.
-//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
@@ -17,8 +14,6 @@ commonware_macros::stability_scope!(BETA {
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
-    mod config;
-    pub use config::Config;
     pub mod cups;
     pub mod utils;
 
@@ -159,7 +154,10 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::utils::{Timeout, TimeoutError};
+        use crate::{
+            cups::Config,
+            utils::{Timeout, TimeoutError},
+        };
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};

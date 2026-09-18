@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, Handshake, utils::Timeout};
+use commonware_stream::{Handshake, cups::Config as StreamConfig, utils::Timeout};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use std::sync::Arc;

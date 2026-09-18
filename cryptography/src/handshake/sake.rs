@@ -1,7 +1,6 @@
-//! Commonware SAKE (Simple Authenticated Key Exchange).
+//! Simple Authenticated Key Exchange (SAKE).
 //!
-//! This is a Commonware construction, unrelated to [EAP-SAKE] or the [symmetric-key SAKE]
-//! protocol.
+//! This construction is unrelated to [EAP-SAKE] or the [symmetric-key SAKE] protocol.
 //!
 //! # Construction
 //!
@@ -67,7 +66,7 @@ const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
-// V0 is safe because the application namespace is summarized as a single packet before the
+// V0 is safe because the application namespace is summarized as a single packet before
 // SAKE commits a fixed sequence of canonical encodings at fixed positions.
 const TRANSCRIPT_VERSION: Version = Version::V0;
 
