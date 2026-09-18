@@ -402,11 +402,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
         let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
-        self.set_leader_once(view, leader);
+        self.create_round(view).set_leader(leader);
     }
 
-    /// Records `leader` for `view` if unset. This makes election, inheritance,
-    /// and early handoff updates idempotent.
+    /// Records `leader` for `view` if unset. This makes inheritance and early
+    /// handoff updates idempotent.
     fn set_leader_once(&mut self, view: View, leader: Participant) {
         if self.leader_is_set(view) {
             return;
