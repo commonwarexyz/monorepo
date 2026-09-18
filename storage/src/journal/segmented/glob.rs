@@ -326,6 +326,51 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((offset, entry_size))
     }
 
+    /// Append multiple independently framed values with one buffered-writer operation.
+    async fn append_many<'a>(
+        &mut self,
+        section: u64,
+        values: impl ExactSizeIterator<Item = &'a V>,
+    ) -> Result<Vec<(u64, u32)>, Error>
+    where
+        V: 'a,
+    {
+        if values.len() == 0 {
+            return Err(Error::EmptyAppend);
+        }
+
+        let mut encoded = Vec::new();
+        let mut locations = Vec::with_capacity(values.len());
+        for value in values {
+            let start = encoded.len();
+            if let Some(level) = self.compression {
+                frame::compress_into(level, &value.encode(), &mut encoded)?;
+            } else {
+                value.write(&mut encoded);
+            }
+            let checksum = Crc32::checksum(&encoded[start..]);
+            encoded.put_u32(checksum);
+            let size = u32::try_from(encoded.len() - start).map_err(|_| Error::ValueTooLarge)?;
+            let start = u64::try_from(start).map_err(|_| Error::OffsetOverflow)?;
+            locations.push((start, size));
+        }
+
+        let writer = self.manager.get_or_create(section).await?;
+        let offset = writer.size();
+        let encoded_len = u64::try_from(encoded.len()).map_err(|_| Error::OffsetOverflow)?;
+        let _end = offset
+            .checked_add(encoded_len)
+            .ok_or(Error::OffsetOverflow)?;
+        for (relative, _) in &mut locations {
+            *relative = offset.checked_add(*relative).ok_or(Error::OffsetOverflow)?;
+        }
+        writer
+            .write_at(offset, encoded)
+            .await
+            .map_err(Error::Runtime)?;
+        Ok(locations)
+    }
+
     /// See [Glob::get].
     async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         let writer = self
@@ -481,6 +526,19 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     pub async fn append(mut self, section: u64, value: &V) -> Result<(Self, u64, u32), Error> {
         let (offset, size) = self.0.append(section, value).await?;
         Ok((self, offset, size))
+    }
+
+    /// Append multiple values to one section with one buffered-writer operation.
+    pub(super) async fn append_many<'a>(
+        mut self,
+        section: u64,
+        values: impl ExactSizeIterator<Item = &'a V>,
+    ) -> Result<(Self, Vec<(u64, u32)>), Error>
+    where
+        V: 'a,
+    {
+        let locations = self.0.append_many(section, values).await?;
+        Ok((self, locations))
     }
 
     /// Read value at offset with known size (from index entry).
@@ -757,6 +815,108 @@ mod tests {
             codec_config: (),
             write_buffer: NZUsize!(1024),
         }
+    }
+
+    #[test_traced]
+    fn test_append_many_frames_and_writes_once() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, recordings) =
+                    commonware_runtime::mocks::RecordingContext::new(context);
+                let cfg = Config {
+                    compression,
+                    write_buffer: NZUsize!(8),
+                    ..test_cfg()
+                };
+                let values = [[1u8; 64], [2; 64], [3; 64]];
+                let glob = Glob::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                recordings.clear();
+                let (glob, locations) = glob
+                    .append_many(7, values.iter())
+                    .await
+                    .expect("batch append failed");
+                assert_eq!(recordings.snapshot().writes.len(), 1);
+                assert_eq!(locations.len(), values.len());
+                for pair in locations.windows(2) {
+                    assert_eq!(pair[0].0 + u64::from(pair[0].1), pair[1].0);
+                }
+                for (value, &(offset, size)) in values.iter().zip(&locations) {
+                    assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
+                }
+
+                recordings.clear();
+                let mut glob = glob;
+                let mut single_locations = Vec::new();
+                for value in &values {
+                    let (offset, size);
+                    (glob, offset, size) = glob.append(8, value).await.unwrap();
+                    single_locations.push((offset, size));
+                }
+                assert_eq!(
+                    recordings.snapshot().writes.len(),
+                    values.len(),
+                    "large single appends should require one physical write each"
+                );
+
+                let glob = glob.sync_all().await.unwrap();
+                let total_size = locations
+                    .last()
+                    .map(|(offset, size)| *offset + u64::from(*size))
+                    .unwrap();
+                assert_eq!(
+                    single_locations
+                        .last()
+                        .map(|(offset, size)| *offset + u64::from(*size)),
+                    Some(total_size)
+                );
+                {
+                    // The glob holds each section's only open, so compare the flushed bytes
+                    // through its writers' blobs.
+                    let batch = glob.0.manager.get(7).unwrap().unwrap();
+                    let single = glob.0.manager.get(8).unwrap().unwrap();
+                    assert_eq!((batch.size(), single.size()), (total_size, total_size));
+                    let len = usize::try_from(total_size).unwrap();
+                    let batch_bytes = batch
+                        .blob()
+                        .read_at(0, len, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    let single_bytes = single
+                        .blob()
+                        .read_at(0, len, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    assert_eq!(batch_bytes.as_ref(), single_bytes.as_ref());
+                }
+
+                let (glob, removed) = glob.remove_section(8).await.unwrap();
+                assert!(removed);
+                drop(glob.sync(7).await.unwrap());
+
+                let glob = Glob::<_, [u8; 64]>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                for (value, &(offset, size)) in values.iter().zip(&locations) {
+                    assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
+                }
+                glob.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_append_many_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            assert!(matches!(
+                glob.append_many(0, std::iter::empty()).await,
+                Err(Error::EmptyAppend)
+            ));
+        });
     }
 
     #[test_traced]
