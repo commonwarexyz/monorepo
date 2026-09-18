@@ -1216,6 +1216,29 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok(self)
     }
 
+    /// Make all accepted entries durable, persist their tracked recovery markers, and close.
+    pub async fn close(self) -> Result<(), Error> {
+        let mut journal = self.sync_all().await?;
+        let Some(mut tracking) = journal.tracking.take() else {
+            return Ok(());
+        };
+
+        if let Some(marker) = tracking.marker_sync_pending.take() {
+            marker
+                .await
+                .map_err(|err| Error::Metadata(crate::metadata::Error::Runtime(err)))?;
+        }
+
+        let mut dirty = false;
+        for section in journal.index.sections() {
+            dirty |= tracking.stage_marker(section, journal.index.section_len(section)?);
+        }
+        if dirty {
+            tracking.metadata.sync().await?;
+        }
+        Ok(())
+    }
+
     /// Prune both journals. Returns true if any sections were pruned.
     ///
     /// Prunes index first, then glob. This order ensures crash safety:
@@ -1432,17 +1455,25 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, BufferPooler, Clock as _, Runner, Storage as _, Supervisor as _,
-        WriteOptions,
+        Blob as _, BufMut, BufferPooler, Clock as _, ReadOptions, Runner, Spawner as _,
+        Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
-        deterministic,
+        deterministic::{self, FaultConfig, PartialWriteMode, WriteConfig},
         mocks::{
             DeferredSync, DelayedSyncContext, PendingSyncs, SyncFaultContext, WriteFaultContext,
-            WriteFaults, drive_pending_syncs, next_pending_sync,
+            WriteFaults, drive_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize, probability};
-    use std::{future::Future, time::Duration};
+    use commonware_utils::{NZU16, NZUsize, Probability, probability};
+    use rstest::rstest;
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     impl<E: crate::Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -1941,6 +1972,332 @@ mod tests {
                 .await
                 .unwrap();
         });
+    }
+
+    async fn init_tracked<E: Context>(
+        context: &E,
+        cfg: Config<()>,
+        metadata_partition: &str,
+    ) -> Oversized<E, TestEntry, TestValue> {
+        let mut replay = Oversized::init_with_metadata(
+            context.child("oversized"),
+            cfg,
+            metadata_partition.into(),
+            ReadOptions::default(),
+        )
+        .await
+        .expect("failed to initialize tracked journal");
+        while let Some(entry) = replay.next().await {
+            entry.expect("tracked replay failed");
+        }
+        replay
+            .finish_tracked()
+            .await
+            .expect("failed to finish tracked replay")
+    }
+
+    #[test_traced]
+    fn test_close_reuses_completed_data_sync_and_waits_for_marker() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg(&delayed);
+            let metadata_partition = "close-metadata";
+            let mut journal = init_tracked(&delayed, cfg.clone(), metadata_partition).await;
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+
+            let starts = pending.starts();
+            journal = journal.sync_all().await.expect("failed to sync data");
+            assert_eq!(pending.starts() - starts, 2);
+
+            pending.arm();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let task = context.child("close").spawn(|_| async move {
+                let result = journal.close().await;
+                completed_clone.store(1, Ordering::Relaxed);
+                result
+            });
+            while pending.calls() == 0 && completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+
+            assert_eq!(
+                pending.calls(),
+                1,
+                "close must reuse the completed data cut and sync only its marker"
+            );
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "close must wait for marker durability"
+            );
+            release_pending_syncs(&pending);
+            task.await
+                .expect("close task failed")
+                .expect("close failed");
+
+            let reopen = context.child("reopen");
+            let journal = init_tracked(&reopen, cfg, metadata_partition).await;
+            assert_eq!(
+                journal.size(1).expect("missing section"),
+                TestEntry::SIZE as u64
+            );
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_close_surfaces_pending_marker_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let metadata_partition = "close-error-metadata";
+            let seed = context.child("seed");
+            let mut journal = init_tracked(&seed, cfg.clone(), metadata_partition).await;
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+            journal = journal.sync_all().await.expect("failed to sync data");
+            drop(journal);
+
+            let faulty = SyncFaultContext {
+                inner: context.child("faulty"),
+                fail_partition: metadata_partition.into(),
+            };
+            let journal = init_tracked(&faulty, cfg, metadata_partition).await;
+            assert!(matches!(journal.close().await, Err(Error::Metadata(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_close_marker_skips_value_revalidation() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let metadata_partition = "close-skip-metadata";
+            let seed = context.child("seed");
+            let mut journal = init_tracked(&seed, cfg.clone(), metadata_partition).await;
+            let (first_offset, first_size, second_offset, second_size);
+            (journal, _, first_offset, first_size) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append first entry");
+            (journal, _, second_offset, second_size) = journal
+                .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .expect("failed to append second entry");
+            journal.close().await.expect("failed to close");
+
+            let (values, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open values");
+            let byte = values
+                .read_at(first_offset, 1, ReadOptions::default())
+                .await
+                .expect("failed to read value")
+                .coalesce();
+            values
+                .write_at(
+                    first_offset,
+                    vec![byte.as_ref()[0] ^ 0xFF],
+                    WriteOptions::SYNC,
+                )
+                .await
+                .expect("failed to corrupt value");
+            drop(values);
+
+            let reopen = context.child("reopen");
+            let journal = init_tracked(&reopen, cfg, metadata_partition).await;
+            assert!(
+                journal
+                    .get_value(1, first_offset, first_size)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                journal
+                    .get_value(1, second_offset, second_size)
+                    .await
+                    .expect("failed to read covered value"),
+                [2; 16]
+            );
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_close_marker_rejects_lost_durable_value_without_repair() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let metadata_partition = "close-corrupt-metadata";
+            let seed = context.child("seed");
+            let mut journal = init_tracked(&seed, cfg.clone(), metadata_partition).await;
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+            journal.close().await.expect("failed to close");
+
+            let (index, index_size) = context
+                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open index");
+            drop(index);
+            let (values, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open values");
+            values.resize(0).await.expect("failed to truncate values");
+            values.sync().await.expect("failed to sync truncation");
+            drop(values);
+
+            for child in ["first", "second"] {
+                let child = context.child(child);
+                let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    child,
+                    cfg.clone(),
+                    metadata_partition.into(),
+                    ReadOptions::default(),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+
+                let (_, retained) = context
+                    .open(&cfg.index_partition, &1u64.to_be_bytes())
+                    .await
+                    .expect("failed to reopen index");
+                assert_eq!(retained, index_size, "failed open must not trim the index");
+            }
+        });
+    }
+
+    async fn assert_close_prefixes(
+        journal: &Oversized<deterministic::Context, TestEntry, TestValue>,
+        minimum: u64,
+        maximum: u64,
+    ) -> [u64; 2] {
+        let mut counts = [0; 2];
+        for section in [1, 2] {
+            let count = journal.size(section).unwrap() / TestEntry::SIZE as u64;
+            assert!((minimum..=maximum).contains(&count));
+            for position in 0..count {
+                let entry = journal.get(section, position).await.unwrap();
+                assert_eq!(entry.id, position + 1);
+                let value = journal
+                    .get_value(section, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap();
+                assert_eq!(value, [entry.id as u8; 16]);
+            }
+            counts[section as usize - 1] = count;
+        }
+        counts
+    }
+
+    #[rstest]
+    #[case::data_sync(false)]
+    #[case::marker_sync(true)]
+    fn test_close_recovers_from_interrupted_sync(
+        #[case] data_durable: bool,
+        #[values(PartialWriteMode::Prefix, PartialWriteMode::Subset)] mode: PartialWriteMode,
+        #[values(probability!(0.0), probability!(0.5), probability!(1.0))] retention: Probability,
+        #[values(1, 2)] generations: u64,
+    ) {
+        for seed in 0..4 {
+            let runner = deterministic::Runner::new(
+                deterministic::Config::default()
+                    .with_seed(seed)
+                    .with_timeout(Some(Duration::from_secs(10))),
+            );
+            let (_, checkpoint) = runner.start_and_recover(|context| async move {
+                let pending = PendingSyncs::default();
+                pending.unblock();
+                let delayed = DelayedSyncContext {
+                    inner: context.child("delayed"),
+                    pending: pending.clone(),
+                };
+                let cfg = test_cfg(&context);
+                // The next record rewrites the partial index page holding the durable prefix.
+                assert!(
+                    (generations + 1) * TestEntry::SIZE as u64
+                        <= u64::from(cfg.index_page_cache.page_size().get())
+                );
+                let mut journal = init_tracked(&delayed, cfg, "close-crash-metadata").await;
+                // Keep Metadata open across publications so close exercises both full
+                // rewrites and stable-key delta updates of its alternate copy.
+                for generation in 1..=generations {
+                    for section in [1, 2] {
+                        (journal, _, _, _) = journal
+                            .append(
+                                section,
+                                TestEntry::new(generation, 0, 0),
+                                &[generation as u8; 16],
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    journal = journal.sync_all().await.unwrap();
+                    journal = journal
+                        .sync_tracked(&BTreeSet::new(), &BTreeSet::new())
+                        .await
+                        .unwrap();
+                    if let Some(marker) = &journal.tracking.as_ref().unwrap().marker_sync_pending {
+                        marker.clone().await.unwrap();
+                    }
+                }
+                *context.storage_fault_config().write() =
+                    FaultConfig::default().write(WriteConfig {
+                        failure_rate: probability!(0.0),
+                        retention_rate: retention,
+                        mode,
+                    });
+                for section in [1, 2] {
+                    let id = generations + 1;
+                    (journal, _, _, _) = journal
+                        .append(section, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                        .await
+                        .unwrap();
+                }
+                if data_durable {
+                    journal = journal.sync_all().await.unwrap();
+                }
+                pending.arm();
+                let _task = context.child("close").spawn(|_| journal.close());
+                // Leave one sync blocked: either one of four data blobs or the marker copy.
+                let syncs = if data_durable { 1 } else { 4 };
+                while pending.calls() < syncs {
+                    commonware_runtime::reschedule().await;
+                }
+            });
+
+            let minimum = generations + u64::from(data_durable);
+            let maximum = generations + 1;
+            let (counts, checkpoint) =
+                deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                    *context.storage_fault_config().write() = FaultConfig::default();
+                    let cfg = test_cfg(&context);
+                    let journal = init_tracked(&context, cfg, "close-crash-metadata").await;
+                    assert_close_prefixes(&journal, minimum, maximum).await
+                });
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let cfg = test_cfg(&context);
+                let journal = init_tracked(&context, cfg, "close-crash-metadata").await;
+                assert_eq!(
+                    assert_close_prefixes(&journal, minimum, maximum).await,
+                    counts
+                );
+                journal.close().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]
