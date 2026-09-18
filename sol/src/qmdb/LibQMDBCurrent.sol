@@ -49,6 +49,16 @@ library LibQMDBCurrent {
         bytes32 partialDigest;
     }
 
+    /// @dev Field byte sizes with `VARIABLE_SIZE` selecting length-prefixed byte vectors.
+    /// Lengths use Commonware's canonical unsigned 32-bit varint. Keys use raw byte lexicographic ordering.
+    struct ExclusionEncoding {
+        uint256 keySize;
+        uint256 valueSize;
+    }
+
+    /// @dev Select a length-prefixed byte vector in `ExclusionEncoding`.
+    uint256 internal constant VARIABLE_SIZE = type(uint256).max;
+
     /// @notice Verify operation bytes and activity status for a Current MMB range.
     /// @dev Inactive operations are valid and every touched activity chunk is authenticated.
     function verifyRange(
@@ -102,7 +112,7 @@ library LibQMDBCurrent {
     /// @notice Verify an encoded operation and its active bit against a trusted current MMB root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param proof Single-operation membership proof with an activity chunk.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation reconstructs `root` and consumes every digest.
@@ -117,7 +127,7 @@ library LibQMDBCurrent {
     /// @notice Verify an encoded operation and its active bit against a trusted current MMR root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param proof Single-operation membership proof with an activity chunk.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation reconstructs `root` and consumes every digest.
@@ -137,7 +147,7 @@ library LibQMDBCurrent {
     /// @param root Authenticated root of a database with this fixed ordered schema.
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param proof Single-operation membership proof with an activity chunk.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -157,7 +167,7 @@ library LibQMDBCurrent {
     /// @param root Authenticated root of a database with 32-byte keys and fixed value encoding.
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param proof Single-operation membership proof with an activity chunk.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -170,6 +180,53 @@ library LibQMDBCurrent {
         address hasher
     ) internal view returns (bool) {
         return _excludes(key, operation, proof.location) && _verify(root, operation, proof, false, chunkBytes, hasher);
+    }
+
+    /// @notice Verify ordered key exclusion under a current MMB root with variable operation encoding.
+    /// @dev Keys use raw byte lexicographic ordering. Fields use fixed-width bytes or
+    /// Commonware length-prefixed byte vectors as specified by the trusted database schema.
+    /// @param root Authenticated root of an ordered current QMDB using variable operation encoding.
+    /// @param key Raw key whose absence is being proven.
+    /// @param operation Exact encoded adjacent-key update or empty-database commit.
+    /// @param proof Active operation membership proof.
+    /// @param encoding Trusted key and value encoding configuration bound to `root`.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
+    /// @return True when the active operation proves that `key` is absent under `root`.
+    function verifyExclusionVariable(
+        bytes32 root,
+        bytes memory key,
+        bytes memory operation,
+        Proof calldata proof,
+        ExclusionEncoding memory encoding,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _excludesVariable(key, operation, proof.location, encoding)
+            && _verify(root, operation, proof, true, chunkBytes, hasher);
+    }
+
+    /// @notice Verify ordered key exclusion under a current MMR root with variable operation encoding.
+    /// @dev Uses the raw byte ordering and trusted field encodings of `verifyExclusionVariable`.
+    /// @param root Authenticated root of an ordered current QMDB using variable operation encoding.
+    /// @param key Raw key whose absence is being proven.
+    /// @param operation Exact encoded adjacent-key update or empty-database commit.
+    /// @param proof Active operation membership proof.
+    /// @param encoding Trusted key and value encoding configuration bound to `root`.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
+    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
+    /// @return True when the active operation proves that `key` is absent under `root`.
+    function verifyExclusionVariableMMR(
+        bytes32 root,
+        bytes memory key,
+        bytes memory operation,
+        Proof calldata proof,
+        ExclusionEncoding memory encoding,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _excludesVariable(key, operation, proof.location, encoding)
+            && _verify(root, operation, proof, false, chunkBytes, hasher);
     }
 
     /// @dev An active update excludes the open cyclic interval between its keys, including
@@ -376,5 +433,106 @@ library LibQMDBCurrent {
             }
         }
         return Common.hash(input, hasher);
+    }
+
+    /// @dev Parse variable operation framing before interpreting an authenticated cyclic key interval.
+    function _excludesVariable(
+        bytes memory key,
+        bytes memory operation,
+        uint256 location,
+        ExclusionEncoding memory encoding
+    ) private pure returns (bool) {
+        if (operation.length == 0) return false;
+        if (encoding.keySize == VARIABLE_SIZE) {
+            if (key.length > type(uint32).max) return false;
+        } else if (key.length != encoding.keySize) {
+            return false;
+        }
+        if (operation[0] == 0xd2) {
+            (uint256 left, uint256 leftEnd, bool valid) = _field(operation, 1, encoding.keySize);
+            if (!valid) return false;
+            (, uint256 valueEnd, bool valueValid) = _field(operation, leftEnd, encoding.valueSize);
+            if (!valueValid) return false;
+            (uint256 right, uint256 rightEnd, bool rightValid) = _field(operation, valueEnd, encoding.keySize);
+            if (!rightValid || rightEnd != operation.length) return false;
+            int256 afterLeft = _compare(key, 0, key.length, operation, left, leftEnd);
+            int256 beforeRight = _compare(key, 0, key.length, operation, right, rightEnd);
+            return _compare(operation, left, leftEnd, operation, right, rightEnd) < 0
+                ? afterLeft > 0 && beforeRight < 0
+                : afterLeft > 0 || beforeRight < 0;
+        }
+        if (operation[0] != 0xd3 || operation.length < 2 || uint8(operation[1]) > 1) return false;
+        uint256 cursor = 2;
+        if (operation[1] == 0x01) {
+            bool valid;
+            (, cursor, valid) = _field(operation, cursor, encoding.valueSize);
+            if (!valid) return false;
+        }
+        (uint256 floor, uint256 end, bool validFloor) = _varint(operation, cursor, 64);
+        return validFloor && end == operation.length && floor == location;
+    }
+
+    /// @dev Return a bounded raw field slice, consuming its length prefix when present.
+    function _field(bytes memory input, uint256 cursor, uint256 size)
+        private
+        pure
+        returns (uint256 start, uint256 end, bool valid)
+    {
+        if (size == VARIABLE_SIZE) {
+            (size, cursor, valid) = _varint(input, cursor, 32);
+            // forge-lint: disable-next-line(boolean-cst)
+            if (!valid) return (0, 0, false);
+        }
+        // forge-lint: disable-next-line(boolean-cst)
+        if (cursor > input.length || size > input.length - cursor) return (0, 0, false);
+        // forge-lint: disable-next-line(boolean-cst)
+        return (cursor, cursor + size, true);
+    }
+
+    /// @dev Decode a minimal unsigned varint with a bounded width and no truncation.
+    function _varint(bytes memory input, uint256 cursor, uint256 bits)
+        private
+        pure
+        returns (uint256 value, uint256 end, bool valid)
+    {
+        for (uint256 shift = 0; shift < bits; shift += 7) {
+            // forge-lint: disable-next-line(boolean-cst)
+            if (cursor >= input.length) return (0, 0, false);
+            uint256 octet = uint8(input[cursor++]);
+            value |= (octet & 127) << shift;
+            if (octet < 128) {
+                // forge-lint: disable-next-line(boolean-cst)
+                if ((shift != 0 && octet == 0) || value >> bits != 0) return (0, 0, false);
+                // forge-lint: disable-next-line(boolean-cst)
+                return (value, cursor, true);
+            }
+        }
+        // forge-lint: disable-next-line(boolean-cst)
+        return (0, 0, false);
+    }
+
+    /// @dev Compare bounded raw byte slices lexicographically, ordering a proper prefix first.
+    /// End-aligned words keep short reads within the byte array allocation.
+    function _compare(bytes memory a, uint256 aStart, uint256 aEnd, bytes memory b, uint256 bStart, uint256 bEnd)
+        private
+        pure
+        returns (int256)
+    {
+        uint256 aLength = aEnd - aStart;
+        uint256 bLength = bEnd - bStart;
+        uint256 length = aLength < bLength ? aLength : bLength;
+        for (uint256 i = 0; i < length; i += 32) {
+            uint256 remaining = length - i;
+            uint256 width = remaining < 32 ? remaining : 32;
+            uint256 left;
+            uint256 right;
+            assembly ("memory-safe") {
+                let mask := shr(shl(3, sub(32, width)), not(0))
+                left := and(mask, mload(add(add(add(a, aStart), i), width)))
+                right := and(mask, mload(add(add(add(b, bStart), i), width)))
+            }
+            if (left != right) return left < right ? int256(-1) : int256(1);
+        }
+        return aLength == bLength ? int256(0) : aLength < bLength ? int256(-1) : int256(1);
     }
 }

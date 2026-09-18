@@ -52,19 +52,24 @@ contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Check caller allocations, dirty scratch, and subsequent allocations on every exit path.
     function checked(QMDBCase calldata c) external view returns (bool) {
-        return _checked(c, false, 0);
+        return _checked(c, 0, hex"", LibQMDBCurrent.ExclusionEncoding(0, 0));
     }
 
     /// @dev Exercise exclusion with the same caller-memory checks as membership.
     function checkedExclusion(QMDBCase calldata c, bytes32 key) external view returns (bool) {
-        return _checked(c, true, key);
+        return _checked(c, 1, abi.encodePacked(key), LibQMDBCurrent.ExclusionEncoding(0, 0));
     }
 
     /// @dev Repeated verification preserves inputs and leaves subsequent allocations zeroed.
-    function _checked(QMDBCase calldata c, bool exclusion, bytes32 key) internal view returns (bool valid) {
+    function _checked(
+        QMDBCase calldata c,
+        uint256 mode,
+        bytes memory key,
+        LibQMDBCurrent.ExclusionEncoding memory encoding
+    ) internal view returns (bool valid) {
         bytes memory operation = c.operation;
         bytes memory guard = abi.encode(c);
-        bytes32 beforeInputs = keccak256(abi.encode(operation, guard));
+        bytes32 beforeInputs = keccak256(abi.encode(operation, guard, key, encoding));
         for (uint256 repeat; repeat < 2; ++repeat) {
             uint256 beforePointer;
             uint256 afterPointer;
@@ -76,10 +81,20 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                 }
             }
             bool result;
-            if (exclusion) {
+            if (mode == 2) {
                 result = _mmb()
-                    ? LibQMDBCurrent.verifyExclusion(c.root, key, operation, c.proof, c.chunkBytes, _hasher())
-                    : LibQMDBCurrent.verifyExclusionMMR(c.root, key, operation, c.proof, c.chunkBytes, _hasher());
+                    ? LibQMDBCurrent.verifyExclusionVariable(
+                        c.root, key, operation, c.proof, encoding, c.chunkBytes, _hasher()
+                    )
+                    : LibQMDBCurrent.verifyExclusionVariableMMR(
+                        c.root, key, operation, c.proof, encoding, c.chunkBytes, _hasher()
+                    );
+            } else if (mode == 1) {
+                result = _mmb()
+                    ? LibQMDBCurrent.verifyExclusion(c.root, bytes32(key), operation, c.proof, c.chunkBytes, _hasher())
+                    : LibQMDBCurrent.verifyExclusionMMR(
+                        c.root, bytes32(key), operation, c.proof, c.chunkBytes, _hasher()
+                    );
             } else {
                 result = _mmb()
                     ? LibQMDBCurrent.verify(c.root, operation, c.proof, c.chunkBytes, _hasher())
@@ -99,7 +114,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                 assertEq(uint8(fresh[i]), 0, "new allocation is dirty");
                 fresh[i] = bytes1(uint8(i));
             }
-            assertEq(keccak256(abi.encode(operation, guard)), beforeInputs, "caller memory changed");
+            assertEq(keccak256(abi.encode(operation, guard, key, encoding)), beforeInputs, "caller memory changed");
         }
     }
 
@@ -833,6 +848,320 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                 string.concat(_group(_mmb() ? "QMDB" : "QMDBMMR"), "/", names[i]), vm.lastFrameGas().gasTotalUsed
             );
         }
+    }
+
+    /// @dev Exercise variable exclusion with the membership verifier's memory checks.
+    function checkedVariableExclusion(
+        QMDBCase calldata c,
+        bytes calldata key,
+        LibQMDBCurrent.ExclusionEncoding calldata encoding
+    ) external view returns (bool) {
+        return _checked(c, 2, key, encoding);
+    }
+
+    /// @dev Encode a canonical unsigned varint independently of the verifier's decoder.
+    function _unsigned(uint256 value) internal pure returns (bytes memory encoded) {
+        do {
+            uint8 octet = uint8(value & 127);
+            value >>= 7;
+            encoded = bytes.concat(encoded, bytes1(octet | (value == 0 ? 0 : 128)));
+        } while (value != 0);
+    }
+
+    /// @dev Frame a byte vector with Commonware's unsigned length prefix.
+    function _vector(bytes memory value) internal pure returns (bytes memory) {
+        return bytes.concat(_unsigned(value.length), value);
+    }
+
+    /// @dev Compare raw keys one byte at a time as an independent ordering oracle.
+    function _keyOrder(bytes memory a, bytes memory b) internal pure returns (int256) {
+        for (uint256 i; i < a.length && i < b.length; ++i) {
+            if (a[i] != b[i]) return a[i] < b[i] ? int256(-1) : int256(1);
+        }
+        return a.length == b.length ? int256(0) : a.length < b.length ? int256(-1) : int256(1);
+    }
+
+    /// @dev Authenticate arbitrary operation bytes before testing their exclusion interpretation.
+    function _variableCase(bytes memory operation, bytes memory key, bool expected) internal view {
+        QMDBCase memory c = this.build(1, 0, operation, true);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        assertEq(this.checkedVariableExclusion(c, key, encoding), expected);
+    }
+
+    /// @dev Prefix keys, empty keys, and full-word boundaries retain Rust's raw byte ordering.
+    function testFuzz_VariableExclusionOrdering(bytes memory left, bytes memory right, bytes memory query) public view {
+        if (left.length > 160 || right.length > 160 || query.length > 160) return;
+        bytes memory operation = bytes.concat(hex"d2", _vector(left), hex"00", _vector(right));
+        int256 afterLeft = _keyOrder(query, left);
+        int256 beforeRight = _keyOrder(query, right);
+        bool expected = _keyOrder(left, right) < 0 ? afterLeft > 0 && beforeRight < 0 : afterLeft > 0 || beforeRight < 0;
+        _variableCase(operation, query, expected);
+    }
+
+    /// @dev Explicit prefixes and zero suffixes exercise comparisons that padded words cannot distinguish.
+    function test_VariableExclusionPrefixes() public view {
+        _variableCase(hex"d201000003000001", hex"0000", true);
+        _variableCase(hex"d201000003000001", hex"00", false);
+        _variableCase(hex"d201000003000001", hex"000001", false);
+        _variableCase(hex"d2010100020001", hex"", true);
+        _variableCase(hex"d2010100020001", hex"0002", false);
+        _variableCase(hex"d20101000101", hex"0100", true);
+        _variableCase(hex"d20101000101", hex"01", false);
+        _variableCase(hex"d200000100", hex"", false);
+        _variableCase(hex"d2000000", hex"00", true);
+        uint256[8] memory lengths = [uint256(1), 31, 32, 33, 63, 64, 65, 128];
+        for (uint256 i; i < lengths.length; ++i) {
+            bytes memory left = new bytes(lengths[i]);
+            bytes memory right = bytes.concat(left, hex"0001");
+            bytes memory operation = bytes.concat(hex"d2", _vector(left), hex"00", _vector(right));
+            _variableCase(operation, bytes.concat(left, hex"00"), true);
+            _variableCase(operation, left, false);
+            _variableCase(operation, right, false);
+        }
+    }
+
+    /// @dev Fixed fields and byte vectors compose independently within variable operation encoding.
+    function test_VariableExclusionMixedFields() public view {
+        uint256 variableSize = type(uint256).max;
+        for (uint256 keySize; keySize < 2; ++keySize) {
+            for (uint256 valueSize; valueSize < 2; ++valueSize) {
+                LibQMDBCurrent.ExclusionEncoding memory encoding = LibQMDBCurrent.ExclusionEncoding(
+                    keySize == 0 ? variableSize : 1, valueSize == 0 ? variableSize : 1
+                );
+                bytes memory left = keySize == 0 ? bytes(hex"0101") : bytes(hex"01");
+                bytes memory right = keySize == 0 ? bytes(hex"0103") : bytes(hex"03");
+                bytes memory value = valueSize == 0 ? bytes(hex"01ff") : bytes(hex"ff");
+                QMDBCase memory c = this.build(1, 0, bytes.concat(hex"d2", left, value, right), true);
+                assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
+                assertFalse(this.checkedVariableExclusion(c, hex"01", encoding));
+                assertFalse(this.checkedVariableExclusion(c, hex"03", encoding));
+                if (keySize != 0) assertFalse(this.checkedVariableExclusion(c, hex"0002", encoding));
+                c = this.build(1, 0, bytes.concat(hex"d301", value, hex"00"), true);
+                assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
+                c = this.build(1, 0, hex"d30000", true);
+                assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
+            }
+        }
+        LibQMDBCurrent.ExclusionEncoding memory emptyValue = LibQMDBCurrent.ExclusionEncoding(variableSize, 0);
+        QMDBCase memory zero = this.build(1, 0, hex"d201010103", true);
+        assertTrue(this.checkedVariableExclusion(zero, hex"02", emptyValue));
+        zero = this.build(1, 0, hex"d30100", true);
+        assertTrue(this.checkedVariableExclusion(zero, hex"", emptyValue));
+        emptyValue.keySize = variableSize - 1;
+        assertFalse(this.checkedVariableExclusion(zero, hex"", emptyValue));
+        emptyValue.keySize = variableSize;
+        emptyValue.valueSize = variableSize - 1;
+        assertFalse(this.checkedVariableExclusion(zero, hex"", emptyValue));
+    }
+
+    /// @dev Length-prefix transitions and optional empty metadata preserve exact operation framing.
+    function test_VariableExclusionLengthsAndCommits() public view {
+        uint256[7] memory sizes = [uint256(0), 1, 32, 127, 128, 16383, 16384];
+        for (uint256 i; i < sizes.length; ++i) {
+            bytes memory value = new bytes(sizes[i]);
+            _variableCase(bytes.concat(hex"d20101", _vector(value), hex"0103"), hex"02", true);
+            _variableCase(bytes.concat(hex"d301", _vector(value), hex"00"), hex"02", true);
+        }
+        _variableCase(hex"d30000", hex"", true);
+        _variableCase(hex"d3010000", hex"", true);
+        _variableCase(hex"d30001", hex"", false);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        for (uint256 location = 127; location <= 128; ++location) {
+            QMDBCase memory c = this.build(location + 1, location, bytes.concat(hex"d300", _unsigned(location)), true);
+            assertTrue(this.checkedVariableExclusion(c, hex"", encoding));
+            c = this.build(location + 1, location, bytes.concat(hex"d300", _unsigned(location - 1)), true);
+            assertFalse(this.checkedVariableExclusion(c, hex"", encoding));
+        }
+    }
+
+    /// @dev Authenticated malformed operations cannot shift key boundaries or alias commit floors.
+    function test_VariableExclusionMalformed() public view {
+        bytes[19] memory invalid = [
+            bytes(hex""),
+            hex"d1",
+            hex"d2",
+            hex"d3",
+            hex"d30200",
+            hex"d300",
+            hex"d3008000",
+            hex"d30080808080808080808002",
+            hex"d3008080808080808080808000",
+            hex"d3000000",
+            hex"d301800000",
+            hex"d301020000",
+            hex"d2810001000103",
+            hex"d2808080801001000103",
+            hex"d2010180000103",
+            hex"d2010100810003",
+            hex"d2010100010300",
+            hex"d20101000203",
+            hex"d201010001"
+        ];
+        for (uint256 i; i < invalid.length; ++i) {
+            _variableCase(invalid[i], hex"02", false);
+        }
+        bytes memory valid = hex"d20101000103";
+        for (uint256 length; length < valid.length; ++length) {
+            bytes memory truncated = new bytes(length);
+            for (uint256 i; i < length; ++i) {
+                truncated[i] = valid[i];
+            }
+            _variableCase(truncated, hex"02", false);
+        }
+    }
+
+    /// @dev Exclusion remains bound to activity, operation bytes, witnesses, and the trusted root.
+    function test_VariableExclusionProofBinding() public view {
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        bytes memory operation = hex"d20101000103";
+        QMDBCase memory c = this.build(638, 17, operation, true);
+        assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
+        c.root ^= bytes32(uint256(1));
+        assertFalse(this.checkedVariableExclusion(c, hex"02", encoding));
+        c.root ^= bytes32(uint256(1));
+        c.operation[2] = 0x00;
+        assertFalse(this.checkedVariableExclusion(c, hex"02", encoding));
+        c.operation[2] = 0x01;
+        c.proof.digests[0] ^= bytes32(uint256(1));
+        assertFalse(this.checkedVariableExclusion(c, hex"02", encoding));
+        c = this.build(638, 17, operation, false);
+        assertFalse(this.checkedVariableExclusion(c, hex"02", encoding));
+    }
+
+    /// @dev Rust serializes the operation and evaluates exclusion under the same trusted field schema.
+    function checkVariableExclusion(
+        uint256 leaves,
+        uint256 location,
+        bytes memory key,
+        LibQMDBCurrent.ExclusionEncoding memory encoding,
+        uint256 chunkBytes,
+        string[] memory options
+    ) internal returns (bool expected) {
+        QMDBCase memory c;
+        uint256 variableSize = type(uint256).max;
+        string[] memory args = new string[](
+            11 + (encoding.keySize != variableSize ? 2 : 0) + (encoding.valueSize != variableSize ? 2 : 0)
+                + options.length
+        );
+        args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
+        args[1] = "qmdb";
+        args[2] = "exclude-variable";
+        args[3] = vm.toString(leaves);
+        args[4] = vm.toString(location);
+        args[5] = "71";
+        args[6] = vm.toString(key);
+        args[7] = "--family";
+        args[8] = _mmb() ? "mmb" : "mmr";
+        args[9] = "--chunk-bytes";
+        args[10] = vm.toString(chunkBytes);
+        uint256 cursor = 11;
+        if (encoding.keySize != variableSize) {
+            args[cursor++] = "--key-size";
+            args[cursor++] = vm.toString(encoding.keySize);
+        }
+        if (encoding.valueSize != variableSize) {
+            args[cursor++] = "--value-size";
+            args[cursor++] = vm.toString(encoding.valueSize);
+        }
+        for (uint256 i; i < options.length; ++i) {
+            args[cursor++] = options[i];
+        }
+        (
+            c.root,
+            c.proof.leaves,
+            c.proof.location,
+            c.proof.inactivePeaks,
+            c.proof.chunk,
+            c.proof.opsRoot,
+            c.proof.pending,
+            c.proof.partialDigest,
+            c.proof.digests,
+            c.operation,
+            expected
+        ) =
+            abi.decode(
+                _ffi(args),
+                (bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
+            );
+        c.chunkBytes = chunkBytes;
+        assertEq(c.proof.leaves, leaves);
+        assertEq(c.proof.location, location);
+        assertTrue(this.checked(c), "Rust exclusion operation is not active");
+        assertEq(this.checkedVariableExclusion(c, key, encoding), expected, "Rust variable exclusion disagreement");
+    }
+
+    /// @dev Rust's raw-byte ordering covers prefix intervals, wraparound, mixed codecs, and empty commits.
+    function test_DifferentialVariableExclusion() public {
+        uint256 variableSize = type(uint256).max;
+        LibQMDBCurrent.ExclusionEncoding memory encoding = LibQMDBCurrent.ExclusionEncoding(variableSize, variableSize);
+        string[] memory options = new string[](2);
+        options[0] = "--keys";
+        options[1] = "00,01,010000";
+        bytes[5] memory queries = [bytes(hex"0000"), hex"00", hex"01", hex"0100", hex""];
+        uint256[5] memory locations = [uint256(0), 0, 0, 1, 2];
+        bool[5] memory expected = [true, false, false, true, true];
+        for (uint256 i; i < queries.length; ++i) {
+            bool actual = checkVariableExclusion(3, locations[i], queries[i], encoding, 1, options);
+            assertEq(actual, expected[i], "Rust prefix fixture");
+        }
+        options[1] = "00,02,04";
+        encoding.keySize = 1;
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 64, options));
+        encoding.valueSize = 4;
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 16, options));
+        encoding.keySize = variableSize;
+        encoding.valueSize = 0;
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 2, options));
+
+        encoding.valueSize = variableSize;
+        options = new string[](5);
+        options[0] = "--mode";
+        options[1] = "empty";
+        options[2] = "--metadata";
+        options[3] = "--value-length";
+        options[4] = "0";
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 16, options));
+        options[4] = "128";
+        assertTrue(checkVariableExclusion(129, 128, hex"00", encoding, 1, options));
+
+        options = new string[](2);
+        options[0] = "--mode";
+        options[1] = "empty";
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 128, options));
+        options[1] = "single";
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 2, options));
+
+        options = new string[](4);
+        options[0] = "--mode";
+        options[1] = "single";
+        options[2] = "--keys";
+        options[3] = "0x";
+        encoding.keySize = 0;
+        encoding.valueSize = 0;
+        bool absent = checkVariableExclusion(1, 0, hex"", encoding, 32, options);
+        assertFalse(absent, "zero-width singleton key exists");
+    }
+
+    /// @dev Random locations compare endpoint and proper-prefix queries against Rust across chunk sizes.
+    function testFuzz_DifferentialVariableExclusion(
+        uint16 leavesSeed,
+        uint16 locationSeed,
+        uint8 querySeed,
+        uint8 chunkSeed
+    ) public {
+        uint256 leaves = uint256(leavesSeed) % 128 + 1;
+        uint256 location = uint256(locationSeed) % leaves;
+        uint256 index = querySeed % 4 == 1 ? (location + 1) % leaves : location;
+        bytes memory query = abi.encodePacked(uint64(index), new bytes(index % 3));
+        if (querySeed % 4 == 2) query = bytes.concat(query, hex"00");
+        if (querySeed % 4 == 3) query = hex"";
+        uint256[6] memory chunks = [uint256(1), 2, 16, 32, 64, 128];
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        checkVariableExclusion(leaves, location, query, encoding, chunks[chunkSeed % chunks.length], new string[](0));
     }
 }
 

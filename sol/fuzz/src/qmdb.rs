@@ -32,6 +32,7 @@ use commonware_storage::{
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 
 mod batch;
+mod exclusion;
 
 type Uint256 = <sol!(uint256) as SolType>::RustType;
 type Operation<F> = fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>;
@@ -114,6 +115,8 @@ pub(crate) enum Command {
     Generate(GenerateArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
     Exclude(ExcludeArgs),
+    /// Prove exclusion with independently fixed or vector byte fields.
+    ExcludeVariable(exclusion::ExcludeVariableArgs),
 }
 
 #[derive(Args)]
@@ -760,6 +763,7 @@ fn exclude<F: Graftable, H: Hasher, const N: usize>(args: &ExcludeArgs) -> Resul
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::ExcludeVariable(args) => args.execute(),
             Self::Range(args) => args.execute(),
             Self::Multi(args) => args.execute(),
             Self::Unordered(args) => match (args.tree.family, args.tree.hash) {
