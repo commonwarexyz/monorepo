@@ -245,8 +245,9 @@
 //!
 //! ### Pipelined Handoff
 //!
-//! Handoff preparation supports both publication after parent certification and pipelined
-//! publication before certification.
+//! A pipelined handoff lets the incoming leader prepare its term-start proposal before the
+//! parent certifies. Application policy controls preparation; node configuration controls
+//! whether publication may also occur before certification.
 //!
 //! A **handoff request** asks the incoming leader for a term-start candidate before its parent
 //! certifies. **Preparation** builds or reuses a candidate in response to that request.
