@@ -20,12 +20,7 @@ struct AnyNode {
     uint256 right;
 }
 
-contract LibQMDBAnyTest is UnorderedOracle {
-    /// @dev Select the delayed-merge MMB family.
-    function _mmb() internal pure virtual override returns (bool) {
-        return true;
-    }
-
+abstract contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev Expose the selected family through a calldata proof entrypoint.
     function verify(AnyCase calldata c) external view returns (bool) {
         return _mmb()
@@ -310,7 +305,8 @@ contract LibQMDBAnyTest is UnorderedOracle {
                                 operations[i],
                                 "",
                                 false,
-                                lengths[j]
+                                lengths[j],
+                                32
                             ),
                             (bytes32, uint256, uint256, uint256, bytes32[], bytes)
                         );
@@ -337,7 +333,8 @@ contract LibQMDBAnyTest is UnorderedOracle {
                             "update",
                             history == 0 ? "updated" : "deleted",
                             false,
-                            128
+                            128,
+                            32
                         ),
                         (bytes32, uint256, uint256, uint256, bytes32[], bytes)
                     );
@@ -395,7 +392,14 @@ contract LibQMDBAnyTest is UnorderedOracle {
     }
 }
 
-contract LibQMDBAnySha256Test is LibQMDBAnyTest {
+contract LibQMDBAnyMMBTest is LibQMDBAnyTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBAnyMMBSha256Test is LibQMDBAnyMMBTest {
     /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);

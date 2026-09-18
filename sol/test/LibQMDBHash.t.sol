@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { RawSha256Hasher } from "./Common.t.sol";
-import { LibMerkleCommon } from "../src/merkle/LibMerkleCommon.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBBatchTest, BatchCase } from "./LibQMDBBatch.t.sol";
 import { LibQMDBCurrentTest, QMDBCase } from "./LibQMDBCurrent.t.sol";
@@ -39,7 +39,7 @@ contract QMDBLengthFaultHasher {
 }
 
 /// @dev Reuse append-history builders and batch caller-memory checks with a raw contract target.
-contract LibQMDBHashTest is LibQMDBBatchTest {
+abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     LibQMDBBatchTest internal precompile;
     LibQMDBCurrentTest internal currentBuilder;
 
@@ -53,13 +53,13 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         precompile = LibQMDBBatchTest(
             deployCode(
-                _mmb() ? "LibQMDBBatch.t.sol:LibQMDBBatchSha256Test" : "LibQMDBBatch.t.sol:LibQMDBBatchMMRSha256Test"
+                _mmb() ? "LibQMDBBatch.t.sol:LibQMDBBatchMMBSha256Test" : "LibQMDBBatch.t.sol:LibQMDBBatchMMRSha256Test"
             )
         );
         currentBuilder = LibQMDBCurrentTest(
             deployCode(
                 _mmb()
-                    ? "LibQMDBCurrent.t.sol:LibQMDBCurrentSha256Test"
+                    ? "LibQMDBCurrent.t.sol:LibQMDBCurrentMMBSha256Test"
                     : "LibQMDBCurrent.t.sol:LibQMDBCurrentMMRSha256Test"
             )
         );
@@ -184,7 +184,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
             vm.etch(_hasher(), address(new QMDBLengthFaultHasher(length, lengths[mode], mode == 0)).code);
             (bool success, bytes memory output) = address(this).staticcall(input);
             assertFalse(success, "hash failure did not revert");
-            assertEq(output, abi.encodeWithSelector(LibMerkleCommon.HashFailed.selector), "wrong hash failure");
+            assertEq(output, abi.encodeWithSelector(LibMerkle.HashFailed.selector), "wrong hash failure");
         }
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         accepted(input);
@@ -234,14 +234,21 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
         BatchCase memory plain = build(13, sequence(0, 2), false);
         QMDBCase memory current = currentBuilder.buildChunk(33, 0, hex"010203", true, 2);
         vm.etch(_hasher(), hex"");
-        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
+        vm.expectRevert(LibMerkle.HashFailed.selector);
         this.checked(plain);
-        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
+        vm.expectRevert(LibMerkle.HashFailed.selector);
         this.singleCurrent(current, _hasher(), false);
     }
 }
 
 /// @dev Run the same raw-target contracts against eager MMR append geometry.
+contract LibQMDBHashMMBTest is LibQMDBHashTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
 contract LibQMDBHashMMRTest is LibQMDBHashTest {
     /// @dev Select the eagerly merged append family for builders and verification.
     function _mmb() internal pure override returns (bool) {

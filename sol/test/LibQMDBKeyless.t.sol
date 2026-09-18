@@ -12,11 +12,8 @@ struct KeylessCase {
     LibQMDBCommon.Proof proof;
 }
 
-contract LibQMDBKeylessTest is HashTest {
-    /// @dev Select the delayed-merge MMB family.
-    function _mmb() internal pure virtual returns (bool) {
-        return true;
-    }
+abstract contract LibQMDBKeylessTest is HashTest {
+    function _mmb() internal pure virtual returns (bool);
 
     /// @dev Caller allocations and reusable scratch survive successful and rejected proofs.
     function checked(KeylessCase calldata c) external view returns (bool valid) {
@@ -218,7 +215,7 @@ contract LibQMDBKeylessTest is HashTest {
         bool variableEncoding,
         uint256 operation
     ) internal returns (KeylessCase memory c) {
-        string[] memory args = new string[](19);
+        string[] memory args = new string[](variableEncoding ? 21 : 19);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "keyless";
@@ -238,6 +235,11 @@ contract LibQMDBKeylessTest is HashTest {
         args[16] = location == 0 || operation == 1 ? "commit" : operation == 0 ? "append" : "commit-metadata";
         args[17] = "--chunk-bytes";
         args[18] = "32";
+        if (variableEncoding) {
+            uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 127, 128, 129];
+            args[19] = "--value-length";
+            args[20] = vm.toString(lengths[seed % lengths.length]);
+        }
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));
         assertEq(c.proof.leaves, leaves);
@@ -338,7 +340,14 @@ contract LibQMDBKeylessTest is HashTest {
     }
 }
 
-contract LibQMDBKeylessSha256Test is LibQMDBKeylessTest {
+contract LibQMDBKeylessMMBTest is LibQMDBKeylessTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBKeylessMMBSha256Test is LibQMDBKeylessMMBTest {
     /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);

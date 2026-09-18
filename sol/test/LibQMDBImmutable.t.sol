@@ -12,11 +12,8 @@ struct ImmutableCase {
     LibQMDBCommon.Proof proof;
 }
 
-contract LibQMDBImmutableTest is HashTest {
-    /// @dev Select the delayed-merge MMB family.
-    function _mmb() internal pure virtual returns (bool) {
-        return true;
-    }
+abstract contract LibQMDBImmutableTest is HashTest {
+    function _mmb() internal pure virtual returns (bool);
 
     /// @dev Repeated verification preserves caller bytes, allocation alignment, and the zero slot.
     function checked(ImmutableCase calldata c) external view returns (bool valid) {
@@ -220,7 +217,14 @@ contract LibQMDBImmutableTest is HashTest {
     }
 }
 
-contract LibQMDBImmutableSha256Test is LibQMDBImmutableTest {
+contract LibQMDBImmutableMMBTest is LibQMDBImmutableTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBImmutableMMBSha256Test is LibQMDBImmutableMMBTest {
     /// @dev Run inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);

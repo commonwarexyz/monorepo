@@ -183,8 +183,8 @@ pub(crate) struct UnorderedArgs {
     /// Repeat one key before a final overwrite or delete.
     #[arg(long, value_enum)]
     history: Option<History>,
-    /// Variable value and metadata length; otherwise selected by the seed.
-    #[arg(long)]
+    /// Variable value and metadata length, required for variable encoding.
+    #[arg(long, required_if_eq("encoding", "variable"))]
     value_length: Option<u16>,
 }
 
@@ -203,8 +203,8 @@ pub(crate) struct KeylessArgs {
     encoding: Encoding,
     #[arg(long, value_enum)]
     operation: KeylessOperation,
-    /// Variable value and metadata length; defaults to a boundary size selected by the seed.
-    #[arg(long)]
+    /// Variable value and metadata length, required for variable encoding.
+    #[arg(long, required_if_eq("encoding", "variable"))]
     value_length: Option<u16>,
 }
 
@@ -223,8 +223,8 @@ pub(crate) struct ImmutableArgs {
     encoding: Encoding,
     #[arg(long, value_enum)]
     operation: ImmutableOperation,
-    /// Variable value and metadata length; defaults to a boundary size selected by the seed.
-    #[arg(long)]
+    /// Variable value and metadata length, required for variable encoding.
+    #[arg(long, required_if_eq("encoding", "variable"))]
     value_length: Option<u16>,
 }
 
@@ -347,7 +347,7 @@ fn plain_proof<F: Family, H: Hasher, O: Encode>(
     })
 }
 
-// The seed selects sizes around word and varint boundaries for both values and metadata.
+// Fixture matrices cover word and varint boundaries for values and metadata.
 const VARIABLE_LENGTHS: [usize; 8] = [0, 1, 31, 32, 33, 127, 128, 129];
 
 fn keyless_operation<F: Family, V: qmdb::any::value::ValueEncoding>(
@@ -389,18 +389,20 @@ fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String
                 FixedBytes::new(leaf(args.tree.seed, index)),
             )
         }),
-        Encoding::Variable => plain_proof::<F, H, _>(&args.tree, |index| {
-            let bytes = leaf(args.tree.seed, index);
-            let len = args.value_length.map_or_else(
-                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
-                usize::from,
+        Encoding::Variable => {
+            let len = usize::from(
+                args.value_length
+                    .ok_or("variable encoding requires --value-length")?,
             );
-            keyless_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
-                args,
-                index,
-                bytes.into_iter().cycle().take(len).collect(),
-            )
-        }),
+            plain_proof::<F, H, _>(&args.tree, |index| {
+                let bytes = leaf(args.tree.seed, index);
+                keyless_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                    args,
+                    index,
+                    bytes.into_iter().cycle().take(len).collect(),
+                )
+            })
+        }
     }
 }
 
@@ -444,18 +446,20 @@ fn immutable<F: Family, H: Hasher>(args: &ImmutableArgs) -> Result<AnyOutput, St
                 FixedBytes::new(leaf(args.tree.seed, index)),
             )
         }),
-        Encoding::Variable => plain_proof::<F, H, _>(&args.tree, |index| {
-            let bytes = leaf(args.tree.seed, index);
-            let len = args.value_length.map_or_else(
-                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
-                usize::from,
+        Encoding::Variable => {
+            let len = usize::from(
+                args.value_length
+                    .ok_or("variable encoding requires --value-length")?,
             );
-            immutable_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
-                args,
-                index,
-                bytes.into_iter().cycle().take(len).collect(),
-            )
-        }),
+            plain_proof::<F, H, _>(&args.tree, |index| {
+                let bytes = leaf(args.tree.seed, index);
+                immutable_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                    args,
+                    index,
+                    bytes.into_iter().cycle().take(len).collect(),
+                )
+            })
+        }
     }
 }
 
@@ -476,17 +480,19 @@ fn unordered<F: Graftable, H: Hasher>(args: &UnorderedArgs) -> Result<Vec<u8>, S
                 FixedBytes::new(leaf(args.tree.seed, index))
             })
         }
-        Encoding::Variable => unordered_encoded::<F, H, VariableEncoding<Vec<u8>>>(args, |index| {
-            let len = args.value_length.map_or_else(
-                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
-                usize::from,
+        Encoding::Variable => {
+            let len = usize::from(
+                args.value_length
+                    .ok_or("variable encoding requires --value-length")?,
             );
-            leaf(args.tree.seed, index)
-                .into_iter()
-                .cycle()
-                .take(len)
-                .collect()
-        }),
+            unordered_encoded::<F, H, VariableEncoding<Vec<u8>>>(args, |index| {
+                leaf(args.tree.seed, index)
+                    .into_iter()
+                    .cycle()
+                    .take(len)
+                    .collect()
+            })
+        }
     }
 }
 
@@ -888,6 +894,59 @@ mod tests {
     use commonware_storage::{merkle::Proof, qmdb::current::proof::RangeProof};
 
     #[test]
+    fn cli_requires_variable_value_length() {
+        use clap::error::ErrorKind;
+
+        for (command, operation) in [
+            ("unordered", "update"),
+            ("keyless", "append"),
+            ("immutable", "set"),
+        ] {
+            let mut args = vec![
+                "fuzz",
+                "qmdb",
+                "--hash",
+                "keccak",
+                command,
+                "--leaves",
+                "3",
+                "--location",
+                "1",
+                "--seed",
+                "42",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--operation",
+                operation,
+                "--encoding",
+                "variable",
+            ];
+            let error = Cli::try_parse_from(&args).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+            assert!(error.to_string().contains("--value-length"), "{error}");
+            args.extend(["--value-length", "0"]);
+            assert!(Cli::try_parse_from(&args).is_ok());
+            let encoding = args.iter().position(|arg| *arg == "--encoding").unwrap() + 1;
+            args[encoding] = "fixed";
+            let error = Cli::try_parse_from(&args)
+                .unwrap()
+                .command
+                .execute()
+                .unwrap_err();
+            assert!(
+                error.contains("value-length requires --encoding variable"),
+                "{error}"
+            );
+            args.truncate(args.len() - 2);
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+    }
+
+    #[test]
     fn cli_requires_explicit_named_inputs() {
         use clap::error::ErrorKind;
 
@@ -958,6 +1017,14 @@ mod tests {
                     "00",
                     "--mode",
                     "interval",
+                    "--key-size",
+                    "variable",
+                    "--value-size",
+                    "variable",
+                    "--value-length",
+                    "31",
+                    "--keys",
+                    "00,01,02",
                 ],
             ),
             (
@@ -1699,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn keyless_cli_variable_length_overrides_seed() {
+    fn keyless_cli_variable_lengths() {
         use commonware_codec::Decode;
         for length in [0u16, 31, 32, 33, 127, 128, 65535] {
             for operation in ["append", "commit-metadata"] {
@@ -1835,29 +1902,39 @@ mod tests {
                                 continue;
                             }
                             for seed in 0..8u64 {
-                                let encoded = Cli::try_parse_from([
-                                    "fuzz",
-                                    "qmdb",
-                                    "--hash",
-                                    hash,
-                                    "keyless",
-                                    "--leaves",
-                                    &leaves.to_string(),
-                                    "--location",
-                                    &location.to_string(),
-                                    "--seed",
-                                    &seed.to_string(),
-                                    "--family",
-                                    family,
-                                    "--inactivity-floor",
-                                    &floor.to_string(),
-                                    "--encoding",
-                                    encoding,
-                                    "--operation",
-                                    operation,
-                                    "--chunk-bytes",
-                                    "32",
-                                ])
+                                let length = VARIABLE_LENGTHS[seed as usize].to_string();
+                                let length_args = if encoding == "variable" {
+                                    vec!["--value-length", length.as_str()]
+                                } else {
+                                    vec![]
+                                };
+                                let encoded = Cli::try_parse_from(
+                                    [
+                                        "fuzz",
+                                        "qmdb",
+                                        "--hash",
+                                        hash,
+                                        "keyless",
+                                        "--leaves",
+                                        &leaves.to_string(),
+                                        "--location",
+                                        &location.to_string(),
+                                        "--seed",
+                                        &seed.to_string(),
+                                        "--family",
+                                        family,
+                                        "--inactivity-floor",
+                                        &floor.to_string(),
+                                        "--encoding",
+                                        encoding,
+                                        "--operation",
+                                        operation,
+                                        "--chunk-bytes",
+                                        "32",
+                                    ]
+                                    .into_iter()
+                                    .chain(length_args),
+                                )
                                 .unwrap()
                                 .command
                                 .execute()

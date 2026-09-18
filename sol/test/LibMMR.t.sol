@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibMMR } from "../src/merkle/LibMMR.sol";
 import { MerkleTestCommon, CompatibilityHarness, IMerkleGasHarness, HashSelection } from "./Common.t.sol";
 
@@ -10,7 +11,7 @@ contract MMRHarness is HashSelection {
         view
         returns (bool)
     {
-        return LibMMR.verify(root, leaves, index, element, proof, _hasher());
+        return LibMMR.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
@@ -18,7 +19,7 @@ contract MMRHarness is HashSelection {
         view
         returns (bool)
     {
-        return LibMMR.verifyRange(root, leaves, start, elements, proof, _hasher());
+        return LibMMR.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
@@ -26,7 +27,7 @@ contract MMRHarness is HashSelection {
         view
         returns (bool)
     {
-        return LibMMR.verifyCalldata(root, leaves, index, element, proof, _hasher());
+        return LibMMR.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyRangeCalldata(
@@ -36,7 +37,9 @@ contract MMRHarness is HashSelection {
         bytes32[] calldata elements,
         bytes32[] calldata proof
     ) external view returns (bool) {
-        return LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
+        return LibMMR.verifyRangeCalldata(
+            root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+        );
     }
 }
 

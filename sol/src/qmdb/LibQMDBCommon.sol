@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { LibMerkleCommon } from "../merkle/LibMerkleCommon.sol";
 import { LibMerkle } from "../merkle/LibMerkle.sol";
-import { LibMerkleSparse } from "../merkle/LibMerkleSparse.sol";
 
 /// @dev Shared QMDB operation proof reconstruction.
 library LibQMDBCommon {
@@ -68,16 +66,16 @@ library LibQMDBCommon {
         // forge-lint: disable-next-line(boolean-cst)
         if (start > leaves || operations.length > leaves - start) return (0, false);
         bytes32[] memory elements = new bytes32[](operations.length);
-        uint256 position = LibMerkleCommon.position(LibMerkleCommon.peak(start, 1, mmb), 1, mmb);
+        uint256 position = LibMerkle.position(LibMerkle.peak(start, 1, mmb), 1, mmb);
         for (uint256 i = 0; i < operations.length;) {
             // forge-lint: disable-next-line(unsafe-typecast)
-            elements[i] = LibMerkleCommon.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
+            elements[i] = LibMerkle.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
             unchecked {
                 if (++i == operations.length) break;
                 uint256 next = start + i;
                 // MMR leaf positions advance by one plus the trailing zeros in `next`.
                 // MMB advances by two, or one when `next + 1` is a power of two.
-                position += mmb ? (((next + 1) & next) == 0 ? 1 : 2) : 1 + LibMerkleCommon.log2(next & (~next + 1));
+                position += mmb ? (((next + 1) & next) == 0 ? 1 : 2) : 1 + LibMerkle.log2(next & (~next + 1));
             }
         }
         return LibMerkle.reconstructPrehashed(leaves, start, elements, digests, inactivePeaks, graft, mmb, hasher);
@@ -100,11 +98,11 @@ library LibQMDBCommon {
         }
         bytes32[] memory elements = new bytes32[](operations.length);
         for (uint256 i; i < operations.length; ++i) {
-            uint256 position = LibMerkleCommon.position(LibMerkleCommon.peak(proof.locations[i], 1, mmb), 1, mmb);
+            uint256 position = LibMerkle.position(LibMerkle.peak(proof.locations[i], 1, mmb), 1, mmb);
             // forge-lint: disable-next-line(unsafe-typecast)
-            elements[i] = LibMerkleCommon.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
+            elements[i] = LibMerkle.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
         }
-        return LibMerkleSparse.verifyPrehashed(
+        return LibMerkle.verifyMultiPrehashed(
             root, leaves, proof.locations, elements, proof.positions, proof.digests, proof.inactivePeaks, mmb, hasher
         );
     }
@@ -142,10 +140,10 @@ library LibQMDBCommon {
         bool mmb,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
-        uint256 position = LibMerkleCommon.position(LibMerkleCommon.peak(location, 1, mmb), 1, mmb);
+        uint256 position = LibMerkle.position(LibMerkle.peak(location, 1, mmb), 1, mmb);
         // The leaf bound keeps every physical position below `2^64`.
         // forge-lint: disable-next-line(unsafe-typecast)
-        bytes32 leaf = LibMerkleCommon.hash(abi.encodePacked(uint64(position), operation), hasher);
+        bytes32 leaf = LibMerkle.hash(abi.encodePacked(uint64(position), operation), hasher);
         return LibMerkle.reconstructGrafted(leaves, location, leaf, digests, inactivePeaks, graft, mmb, hasher);
     }
 }

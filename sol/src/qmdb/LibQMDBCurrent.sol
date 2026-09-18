@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { LibMerkleCommon } from "../merkle/LibMerkleCommon.sol";
 import { LibMerkle } from "../merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "./LibQMDBCommon.sol";
 
@@ -10,7 +9,7 @@ import { LibQMDBCommon } from "./LibQMDBCommon.sol";
 /// The caller supplies an authenticated root and a trusted hash target and chunk byte size.
 /// Chunk bytes must be a nonzero power of two below `2^60`, matching the authenticated database.
 /// Nonzero hash targets receive raw bytes via `STATICCALL` and must return exactly 32 bytes.
-/// A failed call or any other return length reverts with `LibMerkleCommon.HashFailed()`.
+/// A failed call or any other return length reverts with `LibMerkle.HashFailed()`.
 library LibQMDBCurrent {
     /// @dev Absent pending and partial digests are zero. Their presence follows from
     /// `leaves` and the tree family. MMR proofs never have a pending digest.
@@ -153,7 +152,7 @@ library LibQMDBCurrent {
         address hasher
     ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
-        uint256 height = LibMerkleCommon.log2(chunkBytes) + 3;
+        uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         uint256 start = proof.start;
         uint256 count = operations.length;
@@ -165,20 +164,20 @@ library LibQMDBCurrent {
         bytes calldata chunks = proof.chunks;
         if (chunks.length != (lastChunk - firstChunk + 1) * chunkBytes) return false;
         uint256 complete = n >> height;
-        uint256 graftable = mmb ? LibMerkleCommon.graftableMMBChunks(n, height) : complete;
+        uint256 graftable = mmb ? LibMerkle.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
         uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && proof.pending != 0) || (nextBit == 0 && proof.partialDigest != 0)) return false;
         if (pending && firstChunk <= graftable && graftable <= lastChunk) {
             if (
-                LibMerkleCommon.hash(
+                LibMerkle.hash(
                         chunks[(graftable - firstChunk) * chunkBytes:(graftable - firstChunk + 1) * chunkBytes], hasher
                     ) != proof.pending
             ) return false;
         }
         if (nextBit != 0 && lastChunk == complete) {
             if (
-                LibMerkleCommon.hash(
+                LibMerkle.hash(
                         chunks[(lastChunk - firstChunk) * chunkBytes:(lastChunk - firstChunk + 1) * chunkBytes], hasher
                     ) != proof.partialDigest
             ) {
@@ -215,11 +214,11 @@ library LibQMDBCurrent {
         address hasher
     ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
-        uint256 height = LibMerkleCommon.log2(chunkBytes) + 3;
+        uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         if (n > (uint256(1) << 62) + (mmb ? 30 : 0)) return false;
         uint256 complete = n >> height;
-        uint256 graftable = mmb ? LibMerkleCommon.graftableMMBChunks(n, height) : complete;
+        uint256 graftable = mmb ? LibMerkle.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
         uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && witness.pending != 0) || (nextBit == 0 && witness.partialDigest != 0)) return false;
@@ -248,7 +247,7 @@ library LibQMDBCurrent {
         address hasher
     ) internal view returns (bool) {
         if (!_validChunkBytes(chunkBytes)) return false;
-        uint256 height = LibMerkleCommon.log2(chunkBytes) + 3;
+        uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         uint256 loc = proof.location;
         if (n > (uint256(1) << 62) + (mmb ? 30 : 0) || loc >= n) return false;
@@ -257,13 +256,13 @@ library LibQMDBCurrent {
         if (uint8(chunk[(loc & ((chunkBytes << 3) - 1)) >> 3]) & (uint256(1) << (loc & 7)) == 0) return false;
 
         uint256 complete = n >> height;
-        uint256 graftable = mmb ? LibMerkleCommon.graftableMMBChunks(n, height) : complete;
+        uint256 graftable = mmb ? LibMerkle.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
         uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && proof.pending != 0) || (nextBit == 0 && proof.partialDigest != 0)) return false;
         uint256 chunkIndex = loc >> height;
         if (chunkIndex >= graftable) {
-            bytes32 digest = LibMerkleCommon.hash(chunk, hasher);
+            bytes32 digest = LibMerkle.hash(chunk, hasher);
             if (chunkIndex == complete) {
                 if (digest != proof.partialDigest) return false;
             } else if (digest != proof.pending) {
@@ -317,7 +316,7 @@ library LibQMDBCurrent {
                 mstore(add(p, 8), partialDigest)
             }
         }
-        return LibMerkleCommon.hash(input, hasher);
+        return LibMerkle.hash(input, hasher);
     }
 
     /// @dev Parse variable operation framing before interpreting an authenticated cyclic key interval.

@@ -91,9 +91,9 @@ pub(crate) enum Command {
         #[command(flatten)]
         policy: Policy,
     },
-    /// Shorthand for `generate mmr`.
+    /// Shorthand for `generate --kind mmr`.
     Mmr(RangeArgs),
-    /// Shorthand for `generate mmb`.
+    /// Shorthand for `generate --kind mmb`.
     Mmb(RangeArgs),
 }
 
@@ -103,18 +103,17 @@ pub(crate) enum TreeKind {
     Mmb,
 }
 
-#[derive(Clone, Copy, Default, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum Fold {
-    #[default]
     Forward,
     Backward,
 }
 
-#[derive(Args, Clone, Copy, Default)]
+#[derive(Args, Clone, Copy)]
 pub(crate) struct Policy {
-    #[arg(long, value_enum, default_value = "forward")]
+    #[arg(long, value_enum)]
     bagging: Fold,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long)]
     inactive_peaks: usize,
 }
 
@@ -468,6 +467,11 @@ mod tests {
     use crate::Cli;
     use clap::Parser;
 
+    const FORWARD_ACTIVE: Policy = Policy {
+        bagging: Fold::Forward,
+        inactive_peaks: 0,
+    };
+
     #[test]
     fn cli_preserves_generation_forms_and_check_encoding() {
         use clap::CommandFactory;
@@ -491,6 +495,10 @@ mod tests {
                     "6",
                     "--seed",
                     "42",
+                    "--bagging",
+                    "forward",
+                    "--inactive-peaks",
+                    "0",
                     "--check-mutated",
                 ])
                 .unwrap()
@@ -499,17 +507,13 @@ mod tests {
                 .unwrap();
                 let expected = match (kind, mode) {
                     ("mmr", "generate") => {
-                        generate::<mmr::Family, Keccak256>(11, 2, 6, 42, true, Policy::default())
+                        generate::<mmr::Family, Keccak256>(11, 2, 6, 42, true, FORWARD_ACTIVE)
                     }
                     ("mmb", "generate") => {
-                        generate::<mmb::Family, Keccak256>(11, 2, 6, 42, true, Policy::default())
+                        generate::<mmb::Family, Keccak256>(11, 2, 6, 42, true, FORWARD_ACTIVE)
                     }
-                    ("mmr", _) => {
-                        synthetic::<mmr::Family, Keccak256>(11, 2, 6, 42, Policy::default())
-                    }
-                    ("mmb", _) => {
-                        synthetic::<mmb::Family, Keccak256>(11, 2, 6, 42, Policy::default())
-                    }
+                    ("mmr", _) => synthetic::<mmr::Family, Keccak256>(11, 2, 6, 42, FORWARD_ACTIVE),
+                    ("mmb", _) => synthetic::<mmb::Family, Keccak256>(11, 2, 6, 42, FORWARD_ACTIVE),
                     _ => unreachable!(),
                 }
                 .unwrap();
@@ -529,6 +533,10 @@ mod tests {
                         "6",
                         "--seed",
                         "42",
+                        "--bagging",
+                        "forward",
+                        "--inactive-peaks",
+                        "0",
                         "--check-mutated",
                     ])
                     .unwrap()
@@ -549,6 +557,10 @@ mod tests {
                         kind,
                         "--abi-hex",
                         &hex,
+                        "--bagging",
+                        "forward",
+                        "--inactive-peaks",
+                        "0",
                     ])
                     .unwrap()
                     .command
@@ -575,6 +587,10 @@ mod tests {
                 "6",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
             vec![
                 "synthetic",
@@ -588,8 +604,22 @@ mod tests {
                 "6",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
-            vec!["check", "--kind", "mmr", "--abi-hex", "00"],
+            vec![
+                "check",
+                "--kind",
+                "mmr",
+                "--abi-hex",
+                "00",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
+            ],
             vec![
                 "generate-multi",
                 "--kind",
@@ -600,6 +630,10 @@ mod tests {
                 "2",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
             vec![
                 "synthetic-multi",
@@ -611,8 +645,22 @@ mod tests {
                 "2",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
-            vec!["check-multi", "--kind", "mmb", "--abi-hex", "00"],
+            vec![
+                "check-multi",
+                "--kind",
+                "mmb",
+                "--abi-hex",
+                "00",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
+            ],
             vec![
                 "mmr",
                 "--leaf-count",
@@ -623,6 +671,10 @@ mod tests {
                 "6",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
             vec![
                 "mmb",
@@ -634,6 +686,10 @@ mod tests {
                 "6",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ],
         ] {
             assert!(Cli::try_parse_from(["fuzz", "merkle"].into_iter().chain(args)).is_err());
@@ -655,6 +711,10 @@ mod tests {
                 "6",
                 "--seed",
                 "42",
+                "--bagging",
+                "forward",
+                "--inactive-peaks",
+                "0",
             ])
             .is_err()
         );
@@ -669,13 +729,13 @@ mod tests {
     fn generates_and_checks_all_modes_with<H: Hasher>() {
         for check_mutated in [false, true] {
             let mmr_single =
-                generate::<mmr::Family, H>(11, 8, 1, 7, check_mutated, Policy::default()).unwrap();
+                generate::<mmr::Family, H>(11, 8, 1, 7, check_mutated, FORWARD_ACTIVE).unwrap();
             let mmr_range =
-                generate::<mmr::Family, H>(11, 2, 6, 7, check_mutated, Policy::default()).unwrap();
+                generate::<mmr::Family, H>(11, 2, 6, 7, check_mutated, FORWARD_ACTIVE).unwrap();
             let mmb_single =
-                generate::<mmb::Family, H>(11, 8, 1, 7, check_mutated, Policy::default()).unwrap();
+                generate::<mmb::Family, H>(11, 8, 1, 7, check_mutated, FORWARD_ACTIVE).unwrap();
             let mmb_range =
-                generate::<mmb::Family, H>(11, 2, 6, 7, check_mutated, Policy::default()).unwrap();
+                generate::<mmb::Family, H>(11, 2, 6, 7, check_mutated, FORWARD_ACTIVE).unwrap();
             assert_eq!(mmr_single.leaves, 11);
             assert_eq!(mmr_range.leaves, 11);
             assert_eq!(mmb_single.leaves, 11);
@@ -695,30 +755,30 @@ mod tests {
     }
 
     fn submitted_mutations<F: Family, H: Hasher>() {
-        let output = generate::<F, H>(11, 2, 6, 42, true, Policy::default()).unwrap();
+        let output = generate::<F, H>(11, 2, 6, 42, true, FORWARD_ACTIVE).unwrap();
         let encoded = check_input(&output, 2);
-        assert!(check::<F, H>(&encoded, Policy::default()));
+        assert!(check::<F, H>(&encoded, FORWARD_ACTIVE));
         let proof_offset = abi_u64(&encoded, 128).unwrap() as usize;
         for index in [0, 63, 95, 192, proof_offset + 32] {
             let mut changed = encoded.clone();
             changed[index] ^= 1;
             assert!(
-                !check::<F, H>(&changed, Policy::default()),
+                !check::<F, H>(&changed, FORWARD_ACTIVE),
                 "accepted mutation at byte {index}"
             );
         }
         let mut excessive_leaves = encoded.clone();
         excessive_leaves[32] = 1;
-        assert!(!check::<F, H>(&excessive_leaves, Policy::default()));
+        assert!(!check::<F, H>(&excessive_leaves, FORWARD_ACTIVE));
         assert!(!check::<F, H>(
             &encoded[..encoded.len() - 32],
-            Policy::default()
+            FORWARD_ACTIVE
         ));
         let mut extra_digest = encoded;
         extra_digest[proof_offset..proof_offset + 32]
             .copy_from_slice(&(output.proof.len() as u64 + 1).abi_encode());
         extra_digest.extend_from_slice(&[0; 32]);
-        assert!(!check::<F, H>(&extra_digest, Policy::default()));
+        assert!(!check::<F, H>(&extra_digest, FORWARD_ACTIVE));
     }
 
     #[test]
@@ -740,23 +800,23 @@ mod tests {
             leaves: 0,
         };
         let encoded = check_input(&output, 0);
-        assert!(check::<F, H>(&encoded, Policy::default()));
+        assert!(check::<F, H>(&encoded, FORWARD_ACTIVE));
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded;
         overlapping.copy_within(96..128, 128);
         for malformed in [trailing, overlapping] {
-            assert!(!check::<F, H>(&malformed, Policy::default()));
+            assert!(!check::<F, H>(&malformed, FORWARD_ACTIVE));
         }
-        assert!(!check::<F, H>(&check_input(&output, 1), Policy::default()));
+        assert!(!check::<F, H>(&check_input(&output, 1), FORWARD_ACTIVE));
         output.leaves = 1;
-        assert!(!check::<F, H>(&check_input(&output, 0), Policy::default()));
+        assert!(!check::<F, H>(&check_input(&output, 0), FORWARD_ACTIVE));
         output.leaves = 0;
         output.root[0] ^= 1;
-        assert!(!check::<F, H>(&check_input(&output, 0), Policy::default()));
+        assert!(!check::<F, H>(&check_input(&output, 0), FORWARD_ACTIVE));
         output.root[0] ^= 1;
         output.proof.push([0; 32]);
-        assert!(!check::<F, H>(&check_input(&output, 0), Policy::default()));
+        assert!(!check::<F, H>(&check_input(&output, 0), FORWARD_ACTIVE));
     }
 
     #[test]
@@ -773,12 +833,8 @@ mod tests {
     fn high_sizes<F: Family, H: Hasher>() {
         for leaves in [1 << 62, *F::MAX_LEAVES - 1, *F::MAX_LEAVES] {
             for (start, length) in [(0, 1), (leaves / 2 - 1, 3), (leaves - 1, 1)] {
-                let output =
-                    synthetic::<F, H>(leaves, start, length, 42, Policy::default()).unwrap();
-                assert!(check::<F, H>(
-                    &check_input(&output, start),
-                    Policy::default()
-                ));
+                let output = synthetic::<F, H>(leaves, start, length, 42, FORWARD_ACTIVE).unwrap();
+                assert!(check::<F, H>(&check_input(&output, start), FORWARD_ACTIVE));
             }
         }
     }
@@ -852,7 +908,7 @@ mod tests {
     }
 
     fn abi_tuple_offsets_are_canonical_with<H: Hasher>() {
-        let output = generate::<mmr::Family, H>(3, 1, 1, 99, false, Policy::default()).unwrap();
+        let output = generate::<mmr::Family, H>(3, 1, 1, 99, false, FORWARD_ACTIVE).unwrap();
         let encoded = abi_encode(&output);
         assert_eq!(&encoded[32..64], &128u64.abi_encode());
         assert_eq!(&encoded[128..160], &1u64.abi_encode());
@@ -879,6 +935,10 @@ mod tests {
                         "6",
                         "--seed",
                         "42",
+                        "--bagging",
+                        "forward",
+                        "--inactive-peaks",
+                        "0",
                     ]);
                     let encoded = Cli::try_parse_from(args)
                         .unwrap()
@@ -907,6 +967,10 @@ mod tests {
                             kind,
                             "--abi-hex",
                             &hex,
+                            "--bagging",
+                            "forward",
+                            "--inactive-peaks",
+                            "0",
                         ])
                         .unwrap()
                         .command
@@ -917,6 +981,103 @@ mod tests {
                     outputs.push(encoded);
                 }
                 assert_ne!(outputs[0], outputs[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn cli_requires_explicit_policy() {
+        use clap::error::ErrorKind;
+
+        for command in [
+            vec![
+                "generate",
+                "--kind",
+                "mmr",
+                "--leaf-count",
+                "3",
+                "--start",
+                "1",
+                "--length",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "synthetic",
+                "--kind",
+                "mmb",
+                "--leaf-count",
+                "3",
+                "--start",
+                "1",
+                "--length",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "mmr",
+                "--leaf-count",
+                "3",
+                "--start",
+                "1",
+                "--length",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "mmb",
+                "--leaf-count",
+                "3",
+                "--start",
+                "1",
+                "--length",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "generate-multi",
+                "--kind",
+                "mmr",
+                "--leaf-count",
+                "3",
+                "--locations",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "synthetic-multi",
+                "--kind",
+                "mmb",
+                "--leaf-count",
+                "3",
+                "--locations",
+                "1",
+                "--seed",
+                "42",
+            ],
+            vec!["check", "--kind", "mmr", "--abi-hex", "00"],
+            vec!["check-multi", "--kind", "mmb", "--abi-hex", "00"],
+        ] {
+            for bagging in ["forward", "backward"] {
+                for inactive in ["0", "1"] {
+                    let mut args = vec!["fuzz", "merkle", "--hash", "keccak"];
+                    args.extend_from_slice(&command);
+                    args.extend(["--bagging", bagging, "--inactive-peaks", inactive]);
+                    assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+                    for field in ["--bagging", "--inactive-peaks"] {
+                        let mut missing = args.clone();
+                        let index = missing.iter().position(|arg| *arg == field).unwrap();
+                        missing.drain(index..index + 2);
+                        let error = Cli::try_parse_from(missing).err().unwrap();
+                        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+                        assert!(error.to_string().contains(field), "{error}");
+                    }
+                }
             }
         }
     }

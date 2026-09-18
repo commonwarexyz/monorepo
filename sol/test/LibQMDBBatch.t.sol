@@ -35,11 +35,8 @@ struct BatchNode {
     uint256 selected;
 }
 
-contract LibQMDBBatchTest is HashTest {
-    /// @dev Select the delayed append family.
-    function _mmb() internal pure virtual returns (bool) {
-        return true;
-    }
+abstract contract LibQMDBBatchTest is HashTest {
+    function _mmb() internal pure virtual returns (bool);
 
     /// @dev Exercise every plain facade against the same operation bytes and proof.
     function callPlain(BatchCase calldata c, bytes[] memory operations, uint256 facade) internal view returns (bool) {
@@ -561,19 +558,6 @@ contract LibQMDBBatchTest is HashTest {
         }
     }
 
-    /// @dev Decode batches checked by Rust's production range or sparse verifier.
-    function generate(
-        uint256 n,
-        uint256[] memory selected,
-        uint256 floor,
-        bool sparse,
-        bool current,
-        string memory variant,
-        string memory activity
-    ) internal returns (BatchCase memory c) {
-        return generate(n, selected, floor, sparse, current, variant, activity, 32, "fixed");
-    }
-
     /// @dev Decode a Rust batch fixture with a caller-selected Current chunk size.
     function generate(
         uint256 n,
@@ -694,7 +678,8 @@ contract LibQMDBBatchTest is HashTest {
         string[4] memory variants = [string("ordered"), "unordered", "keyless", "immutable"];
         for (uint256 i; i < variants.length; ++i) {
             for (uint256 mode; mode < 2; ++mode) {
-                BatchCase memory c = generate(1023, sequence(768, 3), 768, mode != 0, false, variants[i], "all");
+                BatchCase memory c =
+                    generate(1023, sequence(768, 3), 768, mode != 0, false, variants[i], "all", 32, "fixed");
                 assertGt(mode == 0 ? c.range.inactivePeaks : c.multi.inactivePeaks, 0, "inactive fixture");
                 rejectMutations(c);
             }
@@ -738,7 +723,15 @@ contract LibQMDBBatchTest is HashTest {
             uint256 count = n - start > 3 ? 3 : n - start;
             for (uint256 mode; mode < 4; ++mode) {
                 BatchCase memory c = generate(
-                    n, sequence(start, count), 0, mode % 2 != 0, true, "unordered", mode < 2 ? "zero" : "mixed"
+                    n,
+                    sequence(start, count),
+                    0,
+                    mode % 2 != 0,
+                    true,
+                    "unordered",
+                    mode < 2 ? "zero" : "mixed",
+                    32,
+                    "fixed"
                 );
                 assertTrue(this.checked(c), "Rust Current disagreement");
                 rejectCurrentMutations(c);
@@ -784,8 +777,8 @@ contract LibQMDBBatchTest is HashTest {
     /// @dev Operation and grafted trees authenticate their own inactive peak boundaries.
     function test_DifferentialSeparateInactiveCounts() public {
         uint256[] memory selected = sequence(896, 1);
-        BatchCase memory range = generate(1023, selected, 896, false, true, "unordered", "all");
-        BatchCase memory multi = generate(1023, selected, 896, true, true, "unordered", "all");
+        BatchCase memory range = generate(1023, selected, 896, false, true, "unordered", "all", 32, "fixed");
+        BatchCase memory multi = generate(1023, selected, 896, true, true, "unordered", "all", 32, "fixed");
         assertEq(range.root, multi.root);
         assertTrue(range.currentRange.inactivePeaks != multi.multi.inactivePeaks);
         assertTrue(this.checked(range));
@@ -811,7 +804,8 @@ contract LibQMDBBatchTest is HashTest {
                 selected[i] = floor + uint256(keccak256(abi.encode(querySeed, i))) % (n - floor);
             }
         }
-        BatchCase memory c = generate(n, selected, floor, sparse, current, "ordered", mode % 8 < 4 ? "mixed" : "zero");
+        BatchCase memory c =
+            generate(n, selected, floor, sparse, current, "ordered", mode % 8 < 4 ? "mixed" : "zero", 32, "fixed");
         assertTrue(this.checked(c), "Rust batch disagreement");
         c.operations[0] = abi.encodePacked(c.operations[0], bytes1(0));
         assertFalse(this.checked(c), "modified Rust operation");
@@ -835,7 +829,14 @@ contract LibQMDBBatchTest is HashTest {
     }
 }
 
-contract LibQMDBBatchSha256Test is LibQMDBBatchTest {
+contract LibQMDBBatchMMBTest is LibQMDBBatchTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBBatchMMBSha256Test is LibQMDBBatchMMBTest {
     /// @dev Select the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);

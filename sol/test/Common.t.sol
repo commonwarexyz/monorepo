@@ -2,11 +2,10 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
-import { LibMerkleCommon } from "../src/merkle/LibMerkleCommon.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibBMT } from "../src/merkle/LibBMT.sol";
 import { LibMMR } from "../src/merkle/LibMMR.sol";
 import { LibMMB } from "../src/merkle/LibMMB.sol";
-import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 
 /// @dev Virtual constants specialize verifier callers without a runtime hasher parameter.
 abstract contract HashSelection {
@@ -43,20 +42,6 @@ abstract contract HashTest is Test, HashSelection {
 abstract contract UnorderedOracle is HashTest {
     /// @dev The inherited suites specialize both append families.
     function _mmb() internal pure virtual returns (bool);
-
-    /// @dev Return an Any tuple, or a Current tuple followed by the Rust activity verdict.
-    function unorderedFixture(
-        uint256 leaves,
-        uint256 location,
-        uint256 floor,
-        string memory encoding,
-        string memory operation,
-        string memory history,
-        bool current,
-        uint256 valueLength
-    ) internal returns (bytes memory) {
-        return unorderedFixture(leaves, location, floor, encoding, operation, history, current, valueLength, 32);
-    }
 
     /// @dev Return an Any tuple, or a Current tuple for the selected activity chunk size.
     function unorderedFixture(
@@ -406,8 +391,8 @@ abstract contract VerifierHarness is HashTest {
         bytes32[] memory proof
     ) public view returns (bool valid) {
         valid = belt
-            ? LibMMB.verifyRange(root, leaves, start, elements, proof, _hasher())
-            : LibMMR.verifyRange(root, leaves, start, elements, proof, _hasher());
+            ? LibMMB.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
+            : LibMMR.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
         assertEq(valid, this.calldataRange(belt, root, leaves, start, elements, proof), "range calldata disagreement");
     }
 
@@ -420,8 +405,8 @@ abstract contract VerifierHarness is HashTest {
         bytes32[] memory proof
     ) public view returns (bool valid) {
         valid = belt
-            ? LibMMB.verify(root, leaves, index, element, proof, _hasher())
-            : LibMMR.verify(root, leaves, index, element, proof, _hasher());
+            ? LibMMB.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
+            : LibMMR.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
         assertEq(valid, this.calldataSingle(belt, root, leaves, index, element, proof), "single calldata disagreement");
     }
 
@@ -434,8 +419,12 @@ abstract contract VerifierHarness is HashTest {
         bytes32[] calldata proof
     ) external view returns (bool) {
         return belt
-            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
-            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
+            ? LibMMB.verifyRangeCalldata(
+                root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+            )
+            : LibMMR.verifyRangeCalldata(
+                root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+            );
     }
 
     function calldataSingle(
@@ -447,8 +436,8 @@ abstract contract VerifierHarness is HashTest {
         bytes32[] calldata proof
     ) external view returns (bool) {
         return belt
-            ? LibMMB.verifyCalldata(root, leaves, index, element, proof, _hasher())
-            : LibMMR.verifyCalldata(root, leaves, index, element, proof, _hasher());
+            ? LibMMB.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
+            : LibMMR.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function slicedCalldata(
@@ -464,12 +453,20 @@ abstract contract VerifierHarness is HashTest {
         proof = proof[1:proof.length - 1];
         if (single) {
             return belt
-                ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof, _hasher())
-                : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof, _hasher());
+                ? LibMMB.verifyCalldata(
+                    root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                )
+                : LibMMR.verifyCalldata(
+                    root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                );
         }
         return belt
-            ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
-            : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
+            ? LibMMB.verifyRangeCalldata(
+                root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+            )
+            : LibMMR.verifyRangeCalldata(
+                root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+            );
     }
 
     function checkedVerification(
@@ -518,21 +515,37 @@ abstract contract VerifierHarness is HashTest {
         if (calldataMode) {
             if (single) {
                 valid = belt
-                    ? LibMMB.verifyCalldata(root, leaves, start, elements[0], proof, _hasher())
-                    : LibMMR.verifyCalldata(root, leaves, start, elements[0], proof, _hasher());
+                    ? LibMMB.verifyCalldata(
+                        root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                    )
+                    : LibMMR.verifyCalldata(
+                        root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                    );
             } else {
                 valid = belt
-                    ? LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher())
-                    : LibMMR.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
+                    ? LibMMB.verifyRangeCalldata(
+                        root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                    )
+                    : LibMMR.verifyRangeCalldata(
+                        root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                    );
             }
         } else if (single) {
             valid = belt
-                ? LibMMB.verify(root, leaves, start, memoryElements[0], memoryProof, _hasher())
-                : LibMMR.verify(root, leaves, start, memoryElements[0], memoryProof, _hasher());
+                ? LibMMB.verify(
+                    root, leaves, start, memoryElements[0], memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                )
+                : LibMMR.verify(
+                    root, leaves, start, memoryElements[0], memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                );
         } else {
             valid = belt
-                ? LibMMB.verifyRange(root, leaves, start, memoryElements, memoryProof, _hasher())
-                : LibMMR.verifyRange(root, leaves, start, memoryElements, memoryProof, _hasher());
+                ? LibMMB.verifyRange(
+                    root, leaves, start, memoryElements, memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                )
+                : LibMMR.verifyRange(
+                    root, leaves, start, memoryElements, memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+                );
         }
         uint256 afterPointer;
         uint256 zero;
@@ -710,7 +723,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](13);
+        string[] memory args = new string[](17);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = synthetic ? "synthetic" : "generate";
@@ -724,12 +737,16 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[10] = vm.toString(length);
         args[11] = "--seed";
         args[12] = vm.toString(uint256(seed));
+        args[13] = "--bagging";
+        args[14] = "forward";
+        args[15] = "--inactive-peaks";
+        args[16] = "0";
         (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         assertEq(c.leaves, leaves);
     }
 
     function rustCheck(bool belt, Case memory c, uint256 start) internal returns (bool) {
-        string[] memory args = new string[](7);
+        string[] memory args = new string[](11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = "check";
@@ -737,6 +754,10 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[4] = belt ? "mmb" : "mmr";
         args[5] = "--abi-hex";
         args[6] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
+        args[7] = "--bagging";
+        args[8] = "forward";
+        args[9] = "--inactive-peaks";
+        args[10] = "0";
         return abi.decode(_ffi(args), (bool));
     }
 
@@ -891,7 +912,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertTrue(valid);
     }
 
-    function generate(CompatibilityCase memory c, uint256 length, uint64 seed, bool synthetic)
+    function generateCompatibility(CompatibilityCase memory c, uint256 length, uint64 seed, bool synthetic)
         internal
         returns (CompatibilityCase memory)
     {
@@ -947,7 +968,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         return c;
     }
 
-    function rustCheck(CompatibilityCase memory c) internal returns (bool) {
+    function rustCheckCompatibility(CompatibilityCase memory c) internal returns (bool) {
         string[] memory args = new string[](11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
@@ -965,8 +986,8 @@ abstract contract MerkleTestCommon is VerifierHarness {
         return abi.decode(_ffi(args), (bool));
     }
 
-    function compare(CompatibilityCase memory c, bool expected) internal {
-        assertEq(rustCheck(c), expected, "Commonware expected result");
+    function compareCompatibility(CompatibilityCase memory c, bool expected) internal {
+        assertEq(rustCheckCompatibility(c), expected, "Commonware expected result");
         assertEq(harness.checked(c, false), expected, "memory disagreement");
         assertEq(harness.checked(c, true), expected, "calldata disagreement");
     }
@@ -1003,29 +1024,29 @@ abstract contract MerkleTestCommon is VerifierHarness {
         c.proof = proof;
     }
 
-    function exercise(CompatibilityCase memory c) internal {
-        compare(c, true);
+    function exerciseCompatibility(CompatibilityCase memory c) internal {
+        compareCompatibility(c, true);
         slices(c, true);
         c.root ^= bytes32(uint256(1));
-        compare(c, false);
+        compareCompatibility(c, false);
         slices(c, false);
         c.root ^= bytes32(uint256(1));
         c.inactive += 1;
-        compare(c, false);
+        compareCompatibility(c, false);
         c.inactive -= 1;
         c.leaves += 1;
-        compare(c, false);
+        compareCompatibility(c, false);
         c.leaves -= 1;
         if (c.elements.length != 0) {
             c.elements[0] ^= bytes32(uint256(1));
-            compare(c, false);
+            compareCompatibility(c, false);
             c.elements[0] ^= bytes32(uint256(1));
         }
         bytes32[] memory proof = c.proof;
         uint256[] memory positions = c.positions;
         if (proof.length != 0) {
             proof[proof.length - 1] ^= bytes32(uint256(1));
-            compare(c, false);
+            compareCompatibility(c, false);
             proof[proof.length - 1] ^= bytes32(uint256(1));
             c.proof = new bytes32[](proof.length - 1);
             for (uint256 i; i < c.proof.length; ++i) {
@@ -1037,7 +1058,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
                     c.positions[i] = positions[i];
                 }
             }
-            compare(c, false);
+            compareCompatibility(c, false);
         }
         c.proof = new bytes32[](proof.length + 1);
         for (uint256 i; i < proof.length; ++i) {
@@ -1050,7 +1071,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
             }
             c.positions[positions.length] = positions.length == 0 ? 0 : positions[positions.length - 1] + 1;
         }
-        compare(c, false);
+        compareCompatibility(c, false);
         c.proof = proof;
         c.positions = positions;
     }
@@ -1086,16 +1107,16 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 uint256 boundary;
                 for (uint256 peak; peak < widths.length; ++peak) {
                     c.start = boundary;
-                    c = generate(c, 1, 11, false);
+                    c = generateCompatibility(c, 1, 11, false);
                     c.mode = 1;
-                    compare(c, true);
+                    compareCompatibility(c, true);
                     c.mode = 0;
-                    compare(c, true);
+                    compareCompatibility(c, true);
                     boundary += widths[peak];
                     if (boundary < c.leaves) {
                         c.start = boundary - 1;
-                        c = generate(c, 2, 11, false);
-                        compare(c, true);
+                        c = generateCompatibility(c, 2, 11, false);
+                        compareCompatibility(c, true);
                         slices(c, true);
                     }
                 }
@@ -1111,10 +1132,10 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.leaves = 31;
             c.inactive = 2;
             c.start = 15;
-            exercise(generate(c, 12, 7, false));
+            exerciseCompatibility(generateCompatibility(c, 12, 7, false));
             c.start = 30;
             c.mode = 1;
-            exercise(generate(c, 1, 7, false));
+            exerciseCompatibility(generateCompatibility(c, 1, 7, false));
         }
     }
 
@@ -1128,7 +1149,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         c.start = uint256(s) % c.leaves;
         c.inactive = uint256(inactive) % (peakWidths(belt, c.leaves).length + 1);
         uint256 length = uint256(len) % (c.leaves - c.start) + 1;
-        exercise(generate(c, length, seed, false));
+        exerciseCompatibility(generateCompatibility(c, length, seed, false));
     }
 
     function checkCompatibilityMaximumSize(bool belt) internal {
@@ -1139,10 +1160,10 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.leaves = c.belt ? 0x400000000000001e : 0x4000000000000000;
             c.inactive = 1;
             c.start = c.leaves / 2 - 1;
-            exercise(generate(c, 4, 23, true));
+            exerciseCompatibility(generateCompatibility(c, 4, 23, true));
             c.start = c.leaves - 1;
             c.mode = 1;
-            exercise(generate(c, 1, 29, true));
+            exerciseCompatibility(generateCompatibility(c, 1, 29, true));
         }
     }
 
@@ -1153,7 +1174,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         c.leaves = (uint256(1) << (uint256(exponent) % 61 + 2)) - 1;
         c.start = uint256(offset) % c.leaves;
         c.inactive = seed % 2;
-        exercise(generate(c, c.leaves - c.start < 3 ? c.leaves - c.start : 3, seed, true));
+        exerciseCompatibility(generateCompatibility(c, c.leaves - c.start < 3 ? c.leaves - c.start : 3, seed, true));
     }
 
     function checkCompatibilityEmpty(bool belt) internal {
@@ -1164,13 +1185,13 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.backward = bagging != 0;
                 c.mode = mode;
                 c.root = _hash(abi.encodePacked(uint64(0)));
-                compare(c, true);
+                compareCompatibility(c, true);
                 slices(c, true);
                 c.inactive = 1;
-                compare(c, false);
+                compareCompatibility(c, false);
                 c.inactive = 0;
                 c.leaves = 1;
-                compare(c, false);
+                compareCompatibility(c, false);
             }
         }
     }
@@ -1190,7 +1211,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.indices[2] = 16;
                 c.indices[3] = 15;
                 c.indices[4] = 16;
-                exercise(generateMulti(c, 17, false));
+                exerciseCompatibility(generateMulti(c, 17, false));
             }
         }
     }
@@ -1207,36 +1228,36 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.indices[1] = 3;
             c.indices[2] = 3;
             c = generateMulti(c, 9, false);
-            compare(c, true);
+            compareCompatibility(c, true);
             c.elements[2] ^= bytes32(uint256(1));
-            compare(c, false);
+            compareCompatibility(c, false);
             c.elements[2] ^= bytes32(uint256(1));
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
-            compare(c, false);
+            compareCompatibility(c, false);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
-            compare(c, false);
+            compareCompatibility(c, false);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
-            compare(c, false);
+            compareCompatibility(c, false);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
             uint256 position = c.positions[1];
             c.positions[1] = c.positions[0];
-            compare(c, false);
+            compareCompatibility(c, false);
             c.positions[1] = position;
             c.positions[c.positions.length - 1] = type(uint256).max;
-            compare(c, false);
+            compareCompatibility(c, false);
             c = generateMulti(c, 9, false);
             uint256[] memory indices = c.indices;
             c.indices = new uint256[](2);
             c.indices[0] = indices[0];
             c.indices[1] = indices[1];
-            compare(c, false);
+            compareCompatibility(c, false);
             c.indices = indices;
             c.positions = new uint256[](0);
-            compare(c, false);
+            compareCompatibility(c, false);
         }
     }
 
@@ -1250,7 +1271,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         for (uint256 i; i < c.indices.length; ++i) {
             c.indices[i] = uint256(keccak256(abi.encode(seed, i))) % c.leaves;
         }
-        exercise(generateMulti(c, seed, false));
+        exerciseCompatibility(generateMulti(c, seed, false));
     }
 
     function checkCompatibilitySparseMaximumSize(bool belt) internal {
@@ -1265,7 +1286,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.indices[1] = 0;
             c.indices[2] = c.leaves / 2 - 1;
             c.indices[3] = c.leaves / 2;
-            exercise(generateMulti(c, 31, true));
+            exerciseCompatibility(generateMulti(c, 31, true));
         }
     }
 
@@ -1277,7 +1298,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.leaves = 1023;
             c.start = 480;
             c.inactive = 2;
-            c = generate(c, 64, 7, false);
+            c = generateCompatibility(c, 64, 7, false);
             string memory group = string.concat(c.belt ? "MMB" : "MMR", "RootPolicy");
             string memory fold = c.backward ? "backward" : "forward";
             assertTrue(harness.verify(c, false, false));
@@ -1318,13 +1339,13 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 if (shape == 0) {
                     for (uint256 witness; witness < c.proof.length; ++witness) {
                         c.proof[witness] ^= bytes32(uint256(1));
-                        compare(c, false);
+                        compareCompatibility(c, false);
                         c.proof[witness] ^= bytes32(uint256(1));
                     }
                 }
-                exercise(c);
+                exerciseCompatibility(c);
                 c.inactive = 0;
-                compare(c, false);
+                compareCompatibility(c, false);
             }
         }
     }
@@ -1339,13 +1360,13 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.leaves = 1;
                 c.elements = new bytes32[](1);
                 c.indices = new uint256[](1);
-                c = mode == 2 ? generateMulti(c, 19, false) : generate(c, 1, 19, false);
+                c = mode == 2 ? generateMulti(c, 19, false) : generateCompatibility(c, 1, 19, false);
                 c.leaves = (c.belt ? 0x400000000000001e : 0x4000000000000000) + 1;
-                compare(c, false);
+                compareCompatibility(c, false);
                 c.leaves = 1;
                 c.start = type(uint256).max;
                 c.indices[0] = type(uint256).max;
-                compare(c, false);
+                compareCompatibility(c, false);
             }
         }
     }
@@ -1357,17 +1378,17 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.backward = bagging != 0;
             c.leaves = 31;
             c.start = 3;
-            c = generate(c, 2, 41, false);
+            c = generateCompatibility(c, 2, 41, false);
             bytes32 zeroBoundaryRoot = c.root;
             c.inactive = 1;
-            c = generate(c, 2, 41, false);
+            c = generateCompatibility(c, 2, 41, false);
             assertNotEq(c.root, zeroBoundaryRoot, "inactive boundary is root bound");
-            compare(c, true);
+            compareCompatibility(c, true);
             c.inactive = 0;
-            compare(c, false);
+            compareCompatibility(c, false);
             c.inactive = 1;
             c.backward = !c.backward;
-            compare(c, false);
+            compareCompatibility(c, false);
         }
     }
 }
@@ -1492,8 +1513,12 @@ contract HashAddressTest is MerkleTestCommon {
                 family == 2
                     ? LibBMT.verify(c.root, 1, 0, c.elements[0], empty, address(0))
                     : family == 1
-                        ? LibMMB.verify(c.root, 1, 0, c.elements[0], empty, address(0))
-                        : LibMMR.verify(c.root, 1, 0, c.elements[0], empty, address(0))
+                        ? LibMMB.verify(
+                            c.root, 1, 0, c.elements[0], empty, LibMerkle.Bagging.ForwardFold, 0, address(0)
+                        )
+                        : LibMMR.verify(
+                                c.root, 1, 0, c.elements[0], empty, LibMerkle.Bagging.ForwardFold, 0, address(0)
+                            )
             );
             c.root = family == 2
                 ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
@@ -1554,7 +1579,7 @@ contract HashAddressTest is MerkleTestCommon {
         for (uint256 algorithm; algorithm < 3; ++algorithm) {
             address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
             bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
-            assertEq(LibMerkleCommon.hash(a, b, offset, length, target), expected);
+            assertEq(LibMerkle.hashSlice(a, b, offset, length, target), expected);
         }
     }
 
@@ -1565,7 +1590,7 @@ contract HashAddressTest is MerkleTestCommon {
             assembly ("memory-safe") { target := or(target, shl(160, not(0))) }
             bytes memory input = hex"00112233445566778899";
             bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
-            assertEq(LibMerkleCommon.hash(hex"00112233445566778899", 0, 0, input.length, target), expected);
+            assertEq(LibMerkle.hashSlice(hex"00112233445566778899", 0, 0, input.length, target), expected);
             for (uint256 family; family < 3; ++family) {
                 CompatibilityCase memory c = singleCase(family == 1, family == 2);
                 if (algorithm == 0) {
@@ -1578,8 +1603,12 @@ contract HashAddressTest is MerkleTestCommon {
                     assertTrue(LibBMT.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
                     assertTrue(LibBMT.verifyMulti(c.root, 1, c.indices, c.elements, c.proof, target));
                 } else if (family == 1) {
-                    assertTrue(LibMMB.verify(c.root, 1, 0, c.elements[0], c.proof, target));
-                    assertTrue(LibMMB.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
+                    assertTrue(
+                        LibMMB.verify(c.root, 1, 0, c.elements[0], c.proof, LibMerkle.Bagging.ForwardFold, 0, target)
+                    );
+                    assertTrue(
+                        LibMMB.verifyRange(c.root, 1, 0, c.elements, c.proof, LibMerkle.Bagging.ForwardFold, 0, target)
+                    );
                     assertTrue(
                         LibMMB.verifyMulti(
                             c.root,
@@ -1594,8 +1623,12 @@ contract HashAddressTest is MerkleTestCommon {
                         )
                     );
                 } else {
-                    assertTrue(LibMMR.verify(c.root, 1, 0, c.elements[0], c.proof, target));
-                    assertTrue(LibMMR.verifyRange(c.root, 1, 0, c.elements, c.proof, target));
+                    assertTrue(
+                        LibMMR.verify(c.root, 1, 0, c.elements[0], c.proof, LibMerkle.Bagging.ForwardFold, 0, target)
+                    );
+                    assertTrue(
+                        LibMMR.verifyRange(c.root, 1, 0, c.elements, c.proof, LibMerkle.Bagging.ForwardFold, 0, target)
+                    );
                     assertTrue(
                         LibMMR.verifyMulti(
                             c.root,
@@ -1628,7 +1661,7 @@ contract HashAddressTest is MerkleTestCommon {
                 for (uint8 mode; mode < 3; ++mode) {
                     c.mode = mode;
                     for (uint256 location; location < 2; ++location) {
-                        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
+                        vm.expectRevert(LibMerkle.HashFailed.selector);
                         if (family == 2) this.bmtVerify(c, location != 0);
                         else harness.verify(c, location != 0, false);
                     }
@@ -1651,7 +1684,7 @@ contract HashAddressTest is MerkleTestCommon {
                     (bool success, bytes memory result) =
                         (family == 2 ? address(this) : address(harness)).staticcall{ gas: 200000 }(input);
                     assertFalse(success);
-                    assertEq(result, abi.encodeWithSelector(LibMerkleCommon.HashFailed.selector));
+                    assertEq(result, abi.encodeWithSelector(LibMerkle.HashFailed.selector));
                 }
             }
         }

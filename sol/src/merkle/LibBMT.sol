@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { LibMerkleCommon } from "./LibMerkleCommon.sol";
+import { LibMerkle } from "./LibMerkle.sol";
 
 /// @title Commonware Binary Merkle Tree inclusion verification
 /// @notice Verify inclusion proofs for raw 32-byte elements in trees of at most `2^32 - 1` leaves.
@@ -11,7 +11,7 @@ import { LibMerkleCommon } from "./LibMerkleCommon.sol";
 /// Every verifier requires exact proof consumption and leaves its input arrays unchanged.
 /// Address `0` selects native Keccak256. Other hashers receive raw bytes through `STATICCALL`
 /// and must return exactly `32` bytes, matching the SHA256 precompile at address `2`.
-/// Failed calls and invalid return lengths revert with `LibMerkleCommon.HashFailed()`.
+/// Failed calls and invalid return lengths revert with `LibMerkle.HashFailed()`.
 library LibBMT {
     /// @notice Verify one raw element.
     /// @dev Invalid bounds, malformed proofs and root mismatches return `false`.
@@ -192,7 +192,7 @@ library LibBMT {
             function externalHash(pointer, length, targetHasher) -> digest {
                 let success := staticcall(gas(), targetHasher, pointer, length, 0, 0x20)
                 if iszero(and(success, eq(returndatasize(), 0x20))) {
-                    mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
+                    mstore(0, 0x832d9905) // `LibMerkle.HashFailed()`.
                     // Each external hash result must be checked before traversal continues.
                     // forge-lint: disable-next-line(require-revert-in-loop)
                     revert(0x1c, 4)
@@ -268,7 +268,7 @@ library LibBMT {
             function externalHash(pointer, length, targetHasher) -> digest {
                 let success := staticcall(gas(), targetHasher, pointer, length, 0, 0x20)
                 if iszero(and(success, eq(returndatasize(), 0x20))) {
-                    mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
+                    mstore(0, 0x832d9905) // `LibMerkle.HashFailed()`.
                     // Each external hash result must be checked before traversal continues.
                     // forge-lint: disable-next-line(require-revert-in-loop)
                     revert(0x1c, 4)
@@ -387,7 +387,7 @@ library LibBMT {
             function externalHash(pointer, length, targetHasher) -> digest {
                 let success := staticcall(gas(), targetHasher, pointer, length, 0, 0x20)
                 if iszero(and(success, eq(returndatasize(), 0x20))) {
-                    mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
+                    mstore(0, 0x832d9905) // `LibMerkle.HashFailed()`.
                     // Each external hash result must be checked before traversal continues.
                     // forge-lint: disable-next-line(require-revert-in-loop)
                     revert(0x1c, 4)
@@ -422,14 +422,14 @@ library LibBMT {
                 }
             }
         }
-        if (valid && !sorted) LibMerkleCommon.sortPairs(base, count);
+        if (valid && !sorted) LibMerkle.sortPairs(base, count);
         assembly ("memory-safe") {
             hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
             /// @dev Hash raw bytes through an external target and require exactly one digest.
             function externalHash(pointer, length, targetHasher) -> digest {
                 let success := staticcall(gas(), targetHasher, pointer, length, 0, 0x20)
                 if iszero(and(success, eq(returndatasize(), 0x20))) {
-                    mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
+                    mstore(0, 0x832d9905) // `LibMerkle.HashFailed()`.
                     // Each external hash result must be checked before traversal continues.
                     // forge-lint: disable-next-line(require-revert-in-loop)
                     revert(0x1c, 4)
@@ -517,8 +517,8 @@ library LibBMT {
 
     /// @dev Authenticate the unique finalized empty tree without allocating memory.
     function _empty(bytes32 root, uint256 leaves, uint256 proofLength, address hasher) private view returns (bool) {
-        bytes32 digest = LibMerkleCommon.hash(0, 0, 0, 0, hasher);
-        digest = LibMerkleCommon.hash(0, digest, 0x1c, 0x24, hasher);
+        bytes32 digest = LibMerkle.hashSlice(0, 0, 0, 0, hasher);
+        digest = LibMerkle.hashSlice(0, digest, 0x1c, 0x24, hasher);
         return leaves == 0 && proofLength == 0 && root == digest;
     }
 }

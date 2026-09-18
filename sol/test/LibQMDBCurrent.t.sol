@@ -24,12 +24,7 @@ struct QMDBNode {
     uint256 right;
 }
 
-contract LibQMDBCurrentTest is UnorderedOracle {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure virtual override returns (bool) {
-        return true;
-    }
-
+abstract contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Expose the calldata proof entrypoint for tests and gas measurements.
     function verify(QMDBCase calldata c) external view returns (bool) {
         return _mmb()
@@ -357,11 +352,6 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         }
     }
 
-    /// @dev Every supplied commitment, sibling, and coordinate is authenticated.
-    function rejectMutations(QMDBCase memory c) internal view {
-        rejectMutations(c, false, 0);
-    }
-
     /// @dev Apply proof mutations to either verifier while keeping the exclusion query fixed.
     function rejectMutations(QMDBCase memory c, bool exclusion, bytes32 key) internal view {
         assertTrue(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
@@ -429,7 +419,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     function test_TamperedProofsAndBounds() public view {
         uint256[7] memory sizes = [uint256(1), 256, 257, 383, 512, 513, 639];
         for (uint256 i; i < sizes.length; ++i) {
-            rejectMutations(this.build(sizes[i], sizes[i] - 1, hex"010203", true));
+            rejectMutations(this.build(sizes[i], sizes[i] - 1, hex"010203", true), false, bytes32(0));
             QMDBCase memory c = this.build(sizes[i], 0, hex"010203", true);
             c.proof.inactivePeaks = type(uint256).max;
             assertFalse(this.checked(c));
@@ -587,11 +577,6 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         }
     }
 
-    /// @dev Decode the Rust oracle's flat ABI tuple without imposing an operation type.
-    function generate(uint256 leaves, uint256 location, uint256 floor) internal returns (QMDBCase memory c) {
-        return generate(leaves, location, floor, 32);
-    }
-
     /// @dev Decode a Rust proof generated with a caller-selected chunk size.
     function generate(uint256 leaves, uint256 location, uint256 floor, uint256 chunkBytes)
         internal
@@ -682,7 +667,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                     if (i == 0) assertGt(c.proof.inactivePeaks, 0, "unordered inactive prefix missing");
                     assertEq(expected, i != 1, "delete activity");
                     assertEq(this.checked(c), expected, "Rust unordered activity disagreement");
-                    if (expected) rejectMutations(c);
+                    if (expected) rejectMutations(c, false, bytes32(0));
                 }
             }
         }
@@ -722,9 +707,9 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     function test_DifferentialBoundaryTrees() public {
         uint256[15] memory sizes = [uint256(1), 2, 255, 256, 257, 382, 383, 511, 512, 513, 638, 639, 767, 1023, 2047];
         for (uint256 i; i < sizes.length; ++i) {
-            assertTrue(this.checked(generate(sizes[i], 0, 0)));
-            assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0)));
-            if (sizes[i] > 256) assertTrue(this.checked(generate(sizes[i], 256, 0)));
+            assertTrue(this.checked(generate(sizes[i], 0, 0, 32)));
+            assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0, 32)));
+            if (sizes[i] > 256) assertTrue(this.checked(generate(sizes[i], 256, 0, 32)));
         }
     }
 
@@ -746,7 +731,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256 n = uint256(leavesSeed) % 1536 + 1;
         uint256 floor = uint256(floorSeed) % n;
         uint256 location = floor + uint256(locationSeed) % (n - floor);
-        QMDBCase memory c = generate(n, location, floor);
+        QMDBCase memory c = generate(n, location, floor, 32);
         assertTrue(this.checked(c));
         c.operation = abi.encodePacked(c.operation, bytes1(0));
         assertFalse(this.checked(c), "modified oracle operation accepted");
@@ -757,13 +742,13 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256[4] memory floors = [uint256(512), 768, 1024, 1280];
         for (uint256 i; i < floors.length; ++i) {
             uint256 n = i < 2 ? 1023 : 1535;
-            QMDBCase memory c = generate(n, floors[i], floors[i]);
+            QMDBCase memory c = generate(n, floors[i], floors[i], 32);
             assertTrue(this.checked(c));
-            c = generate(n, n - 1, floors[i]);
+            c = generate(n, n - 1, floors[i], 32);
             uint256 inactive = c.proof.inactivePeaks;
             assertGt(inactive, 0, "fixture has no inactive peaks");
-            rejectMutations(c);
-            c = generate(n, n - 1, floors[i]);
+            rejectMutations(c, false, bytes32(0));
+            c = generate(n, n - 1, floors[i], 32);
             c.proof.inactivePeaks = 0;
             assertFalse(this.checked(c));
         }
@@ -1053,14 +1038,12 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         bytes memory key,
         LibQMDBCurrent.ExclusionEncoding memory encoding,
         uint256 chunkBytes,
+        uint256 valueLength,
         string[] memory options
     ) internal returns (bool expected) {
         QMDBCase memory c;
         uint256 variableSize = type(uint256).max;
-        string[] memory args = new string[](
-            17 + (encoding.keySize != variableSize ? 2 : 0) + (encoding.valueSize != variableSize ? 2 : 0)
-                + options.length
-        );
+        string[] memory args = new string[](21 + (encoding.valueSize == variableSize ? 2 : 0) + options.length);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "exclude-variable";
@@ -1078,14 +1061,14 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         args[14] = vm.toString(chunkBytes);
         args[15] = "--inactivity-floor";
         args[16] = "0";
-        uint256 cursor = 17;
-        if (encoding.keySize != variableSize) {
-            args[cursor++] = "--key-size";
-            args[cursor++] = vm.toString(encoding.keySize);
-        }
-        if (encoding.valueSize != variableSize) {
-            args[cursor++] = "--value-size";
-            args[cursor++] = vm.toString(encoding.valueSize);
+        args[17] = "--key-size";
+        args[18] = encoding.keySize == variableSize ? "variable" : vm.toString(encoding.keySize);
+        args[19] = "--value-size";
+        args[20] = encoding.valueSize == variableSize ? "variable" : vm.toString(encoding.valueSize);
+        uint256 cursor = 21;
+        if (encoding.valueSize == variableSize) {
+            args[cursor++] = "--value-length";
+            args[cursor++] = vm.toString(valueLength);
         }
         for (uint256 i; i < options.length; ++i) {
             args[cursor++] = options[i];
@@ -1127,35 +1110,34 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256[5] memory locations = [uint256(0), 0, 0, 1, 2];
         bool[5] memory expected = [true, false, false, true, true];
         for (uint256 i; i < queries.length; ++i) {
-            bool actual = checkVariableExclusion(3, locations[i], queries[i], encoding, 1, options);
+            bool actual = checkVariableExclusion(3, locations[i], queries[i], encoding, 1, 129, options);
             assertEq(actual, expected[i], "Rust prefix fixture");
         }
         options[1] = "00,02,04";
         encoding.keySize = 1;
-        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 64, options));
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 64, 129, options));
         encoding.valueSize = 4;
-        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 16, options));
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 16, 129, options));
         encoding.keySize = variableSize;
         encoding.valueSize = 0;
-        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 2, options));
+        assertTrue(checkVariableExclusion(3, 0, hex"01", encoding, 2, 129, options));
 
         encoding.valueSize = variableSize;
-        options = new string[](5);
+        options = new string[](4);
         options[0] = "--mode";
         options[1] = "empty";
         options[2] = "--metadata";
-        options[3] = "--value-length";
-        options[4] = "0";
-        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 16, options));
-        options[4] = "128";
-        assertTrue(checkVariableExclusion(129, 128, hex"00", encoding, 1, options));
+        options[3] = "--derive-keys";
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 16, 0, options));
+        assertTrue(checkVariableExclusion(129, 128, hex"00", encoding, 1, 128, options));
 
-        options = new string[](2);
+        options = new string[](3);
         options[0] = "--mode";
         options[1] = "empty";
-        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 128, options));
+        options[2] = "--derive-keys";
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 128, 129, options));
         options[1] = "single";
-        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 2, options));
+        assertTrue(checkVariableExclusion(129, 128, hex"", encoding, 2, 129, options));
 
         options = new string[](4);
         options[0] = "--mode";
@@ -1164,7 +1146,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         options[3] = "0x";
         encoding.keySize = 0;
         encoding.valueSize = 0;
-        bool absent = checkVariableExclusion(1, 0, hex"", encoding, 32, options);
+        bool absent = checkVariableExclusion(1, 0, hex"", encoding, 32, 129, options);
         assertFalse(absent, "zero-width singleton key exists");
     }
 
@@ -1184,14 +1166,22 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256[6] memory chunks = [uint256(1), 2, 16, 32, 64, 128];
         LibQMDBCurrent.ExclusionEncoding memory encoding =
             LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
-        string[] memory options = new string[](2);
+        string[] memory options = new string[](3);
         options[0] = "--mode";
         options[1] = "interval";
-        checkVariableExclusion(leaves, location, query, encoding, chunks[chunkSeed % chunks.length], options);
+        options[2] = "--derive-keys";
+        checkVariableExclusion(leaves, location, query, encoding, chunks[chunkSeed % chunks.length], 129, options);
     }
 }
 
-contract LibQMDBCurrentSha256Test is LibQMDBCurrentTest {
+contract LibQMDBCurrentMMBTest is LibQMDBCurrentTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBCurrentMMBSha256Test is LibQMDBCurrentMMBTest {
     /// @dev Run the same compatibility and rejection cases through the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);

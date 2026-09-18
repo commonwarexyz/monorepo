@@ -6,7 +6,7 @@ import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
-contract LibQMDBLifecycleTest is HashTest {
+abstract contract LibQMDBLifecycleTest is HashTest {
     struct Operation {
         bytes32 root;
         uint256 leaves;
@@ -31,9 +31,7 @@ contract LibQMDBLifecycleTest is HashTest {
     }
 
     /// @dev Select the append family used by the database and verifier.
-    function _mmb() internal pure virtual returns (bool) {
-        return true;
-    }
+    function _mmb() internal pure virtual returns (bool);
 
     /// @dev Expose the calldata proof entrypoints with the fixture's 32-byte bitmap chunks.
     function verify(
@@ -107,7 +105,14 @@ contract LibQMDBLifecycleTest is HashTest {
     }
 }
 
-contract LibQMDBLifecycleSha256Test is LibQMDBLifecycleTest {
+contract LibQMDBLifecycleMMBTest is LibQMDBLifecycleTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure override returns (bool) {
+        return true;
+    }
+}
+
+contract LibQMDBLifecycleMMBSha256Test is LibQMDBLifecycleMMBTest {
     /// @dev Select the SHA-256 precompile and matching Rust database hasher.
     function _hasher() internal pure override returns (address) {
         return address(2);
