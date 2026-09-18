@@ -4,7 +4,7 @@
 //! inputs for grafting geometry; their status does not claim a database lifecycle.
 
 use super::{
-    GenerateArgs, Uint256, key, materialize, materialize_ops, operation, with_chunk_bytes,
+    GenerateArgs, Uint256, key, materialize_current, materialize_ops, operation, with_chunk_bytes,
 };
 use crate::{
     Hash,
@@ -238,16 +238,20 @@ fn prove<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
 ) -> Result<Vec<u8>, String> {
     if options.current {
         let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
-        let current = materialize::<F, H, _, N>(tree, &operation, &|index: u64| {
-            index >= tree.inactivity_floor
-                && match options.activity {
-                    Activity::All => true,
-                    Activity::Mixed => {
-                        !(index / chunk_bits).is_multiple_of(3) && !index.is_multiple_of(3)
+        let current = materialize_current::<F, H, N>(
+            tree,
+            &|index, bytes| operation(index).write(bytes),
+            &|index: u64| {
+                index >= tree.inactivity_floor
+                    && match options.activity {
+                        Activity::All => true,
+                        Activity::Mixed => {
+                            !(index / chunk_bits).is_multiple_of(3) && !index.is_multiple_of(3)
+                        }
+                        Activity::Zero => false,
                     }
-                    Activity::Zero => false,
-                }
-        })?;
+            },
+        )?;
         let pending = current
             .witness
             .pending_chunk_digest
@@ -329,7 +333,7 @@ fn prove<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
             }
         }
     } else {
-        let ops = materialize_ops::<F, H, _>(tree, &operation)?;
+        let ops = materialize_ops::<F, H>(tree, &|index, bytes| operation(index).write(bytes))?;
         let inactive = F::inactive_peaks(
             Location::new(tree.leaves),
             Location::new(tree.inactivity_floor),

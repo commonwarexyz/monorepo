@@ -2,7 +2,7 @@
 
 use super::{
     ExclusionMode, GenerateArgs, Materialized, VARIABLE_LENGTHS, current_output, materialize,
-    validate_tree, with_chunk_bytes,
+    validate_tree,
 };
 use crate::{
     Hash,
@@ -109,9 +109,7 @@ impl ExcludeVariableArgs {
 
     fn dispatch<F: Graftable, H: Hasher>(&self) -> Result<Vec<u8>, String> {
         with_field_type!(self.key_size, |K| {
-            with_field_type!(self.value_size, |V| {
-                with_chunk_bytes!(self.tree.chunk_bytes, |N| generate::<F, H, K, V, N>(self))
-            })
+            with_field_type!(self.value_size, |V| generate::<F, H, K, V>(self))
         })
     }
 }
@@ -169,7 +167,7 @@ fn keys<K: FixtureBytes>(args: &ExcludeVariableArgs) -> Result<Vec<K>, String> {
     Ok(keys)
 }
 
-fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes, const N: usize>(
+fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes>(
     args: &ExcludeVariableArgs,
 ) -> Result<Vec<u8>, String> {
     validate_tree(&args.tree)?;
@@ -231,7 +229,7 @@ fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes, const N: 
         proof,
         root,
         ..
-    } = materialize::<F, H, _, N>(&tree, op, |index| {
+    } = materialize::<F, H, _>(&tree, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
     let exclusion: ExclusionProof<F, K, VariableEncoding<V>, H::Digest, _> = match op(tree.location)

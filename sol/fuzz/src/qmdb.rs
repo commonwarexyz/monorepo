@@ -13,7 +13,7 @@ use clap::{Args, Subcommand};
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
-    merkle::{Family, Graftable, Location, mem::Mem, mmb, mmr},
+    merkle::{Family, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr},
     qmdb::{
         self,
         any::{
@@ -256,16 +256,19 @@ fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
     })
 }
 
-fn materialize_ops<F: Family, H: Hasher, O: Encode>(
+fn materialize_ops<F: Family, H: Hasher>(
     args: &GenerateArgs,
-    operation: &impl Fn(u64) -> O,
+    encode: &dyn Fn(u64, &mut Vec<u8>),
 ) -> Result<Mem<F, H::Digest>, String> {
     validate_tree(args)?;
     let hasher = qmdb::hasher::<H>();
     let mut ops = Mem::<F, H::Digest>::new();
     let mut batch = ops.new_batch();
+    let mut encoded = Vec::new();
     for index in 0..args.leaves {
-        batch = batch.add(&hasher, &operation(index).encode());
+        encoded.clear();
+        encode(index, &mut encoded);
+        batch = batch.add(&hasher, &encoded);
     }
     let batch = batch.merkleize(&ops, &hasher);
     ops.apply_batch(&batch).map_err(|e| e.to_string())?;
@@ -309,7 +312,7 @@ fn plain_proof<F: Family, H: Hasher, O: Encode>(
     tree: &GenerateArgs,
     operation: impl Fn(u64) -> O,
 ) -> Result<AnyOutput, String> {
-    let ops = materialize_ops::<F, H, _>(tree, &operation)?;
+    let ops = materialize_ops::<F, H>(tree, &|index, bytes| operation(index).write(bytes))?;
     let hasher = qmdb::hasher::<H>();
     let inactive = F::inactive_peaks(
         Location::new(tree.leaves),
@@ -453,6 +456,7 @@ fn immutable<F: Family, H: Hasher>(args: &ImmutableArgs) -> Result<AnyOutput, St
 
 fn unordered<F: Graftable, H: Hasher>(args: &UnorderedArgs) -> Result<Vec<u8>, String> {
     validate_tree(&args.tree)?;
+    with_chunk_bytes!(args.tree.chunk_bytes, |N| Ok::<_, String>(N))?;
     if args.value_length.is_some() && matches!(args.encoding, Encoding::Fixed) {
         return Err("value-length requires --encoding variable".into());
     }
@@ -461,29 +465,27 @@ fn unordered<F: Graftable, H: Hasher>(args: &UnorderedArgs) -> Result<Vec<u8>, S
     {
         return Err("history requires leaves >= 2 and --operation update".into());
     }
-    with_chunk_bytes!(args.tree.chunk_bytes, |N| match args.encoding {
+    match args.encoding {
         Encoding::Fixed => {
-            unordered_encoded::<F, H, FixedEncoding<FixedBytes<32>>, N>(args, |index| {
+            unordered_encoded::<F, H, FixedEncoding<FixedBytes<32>>>(args, |index| {
                 FixedBytes::new(leaf(args.tree.seed, index))
             })
         }
-        Encoding::Variable => {
-            unordered_encoded::<F, H, VariableEncoding<Vec<u8>>, N>(args, |index| {
-                let len = args.value_length.map_or_else(
-                    || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
-                    usize::from,
-                );
-                leaf(args.tree.seed, index)
-                    .into_iter()
-                    .cycle()
-                    .take(len)
-                    .collect()
-            })
-        }
-    })
+        Encoding::Variable => unordered_encoded::<F, H, VariableEncoding<Vec<u8>>>(args, |index| {
+            let len = args.value_length.map_or_else(
+                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
+                usize::from,
+            );
+            leaf(args.tree.seed, index)
+                .into_iter()
+                .cycle()
+                .take(len)
+                .collect()
+        }),
+    }
 }
 
-fn unordered_encoded<F: Graftable, H: Hasher, V: ValueEncoding, const N: usize>(
+fn unordered_encoded<F: Graftable, H: Hasher, V: ValueEncoding>(
     args: &UnorderedArgs,
     value: impl Fn(u64) -> V::Value,
 ) -> Result<Vec<u8>, String>
@@ -546,7 +548,7 @@ where
         }
         active[index as usize] = true;
     }
-    let fixture = materialize::<F, H, _, N>(tree, op, |index| active[index as usize])?;
+    let fixture = materialize::<F, H, _>(tree, op, |index| active[index as usize])?;
     let expected = fixture
         .proof
         .verify::<H, _>(op(tree.location), &fixture.root);
@@ -570,9 +572,13 @@ fn current_output(output: OperationOutput, expected: bool) -> Vec<u8> {
         .abi_encode_params()
 }
 
-struct Materialized<F: Graftable, D: Digest, const N: usize> {
+struct Materialized<F: Graftable, D: Digest> {
     output: OperationOutput,
-    proof: operation::Proof<F, D, [u8; N]>,
+    proof: operation::Proof<F, D, Vec<u8>>,
+    root: D,
+}
+
+struct CurrentTree<F: Graftable, D: Digest, const N: usize> {
     root: D,
     ops_root: D,
     ops: Mem<F, D>,
@@ -581,18 +587,17 @@ struct Materialized<F: Graftable, D: Digest, const N: usize> {
     witness: OpsRootWitness<F, D>,
 }
 
-fn materialize<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
+fn materialize_current<F: Graftable, H: Hasher, const N: usize>(
     args: &GenerateArgs,
-    operation: impl Fn(u64) -> O,
-    active: impl Fn(u64) -> bool,
-) -> Result<Materialized<F, H::Digest, N>, String> {
+    encode: &dyn Fn(u64, &mut Vec<u8>),
+    active: &dyn Fn(u64) -> bool,
+) -> Result<CurrentTree<F, H::Digest, N>, String> {
+    validate_tree(args)?;
     let GenerateArgs {
         leaves,
-        location,
         inactivity_floor,
         ..
     } = *args;
-    let ops = materialize_ops::<F, H, _>(args, &operation)?;
     let mut status = Prunable::<N>::new();
     for index in 0..leaves {
         status.push(active(index));
@@ -605,33 +610,33 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
     let graftable = grafting::graftable_chunks::<F>(leaves, height);
     let hasher = qmdb::hasher::<H>();
     let verifier = grafting::Verifier::<F, H>::new(height, 0, chunks, graftable);
+    let mut ops = Mem::<F, H::Digest>::new();
+    let mut ops_batch = ops.new_batch();
     let mut grafted = Mem::<F, H::Digest>::new();
     let mut grafted_batch = grafted.new_batch();
+    let mut encoded = Vec::new();
     for index in 0..leaves {
-        let encoded = operation(index).encode();
+        encoded.clear();
+        encode(index, &mut encoded);
+        ops_batch = ops_batch.add(&hasher, &encoded);
         grafted_batch = grafted_batch.add(&verifier, &encoded);
     }
+    let ops_batch = ops_batch.merkleize(&ops, &hasher);
+    ops.apply_batch(&ops_batch).map_err(|e| e.to_string())?;
     let grafted_batch = grafted_batch.merkleize(&grafted, &verifier);
     grafted
         .apply_batch(&grafted_batch)
         .map_err(|e| e.to_string())?;
 
-    // Any roots fold all peaks wholly below the floor. Current roots additionally
-    // require a chunk-aligned boundary, which OperationProof::new derives itself.
     let inactive_ops = F::inactive_peaks(Location::new(leaves), Location::new(inactivity_floor));
     let ops_root = ops.root(&hasher, inactive_ops).map_err(|e| e.to_string())?;
-    let proof =
-        futures::executor::block_on(operation::Proof::<F, H::Digest, [u8; N]>::new::<H, _>(
-            &status,
-            &grafted,
-            Location::new(inactivity_floor),
-            Location::new(location),
-            ops_root,
-        ))
-        .map_err(|e| e.to_string())?;
-    let range = &proof.range_proof;
+    // The maximal whole-peak prefix below a chunk-aligned floor is chunk-aligned.
+    let inactive_current = F::inactive_peaks(
+        Location::new(leaves),
+        Location::new(inactivity_floor & !(chunk_bits - 1)),
+    );
     let grafted_root = grafted
-        .root(&hasher, range.proof.inactive_peaks)
+        .root(&hasher, inactive_current)
         .map_err(|e| e.to_string())?;
     let pending =
         (leaves / chunk_bits > graftable).then(|| H::hash(&[status.get_chunk(graftable as usize)]));
@@ -647,39 +652,7 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
         partial_chunk: partial,
     };
     let root = witness.root::<H>(&ops_root);
-    let op = operation(location);
-    if !range.verify::<H, _, N>(
-        Location::new(location),
-        core::slice::from_ref(&op),
-        &[proof.chunk],
-        &root,
-    ) || proof.verify::<H, _>(op.clone(), &root) != active(location)
-    {
-        return Err("Commonware rejected proof against the materialized canonical root".into());
-    }
-    let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
-    let output = OperationOutput {
-        root: bytes32(root).into(),
-        leaves: Uint256::from(leaves),
-        location: Uint256::from(location),
-        inactivePeaks: Uint256::from(range.proof.inactive_peaks),
-        chunk: proof.chunk.to_vec().into(),
-        opsRoot: bytes32(ops_root).into(),
-        pending: pending.map_or([0; 32], bytes32).into(),
-        partial: partial
-            .map_or([0; 32], |(_, digest)| bytes32(digest))
-            .into(),
-        digests: range
-            .proof
-            .digests
-            .iter()
-            .map(|d| bytes32(*d).into())
-            .collect(),
-        operation: op.encode().to_vec().into(),
-    };
-    Ok(Materialized {
-        output,
-        proof,
+    Ok(CurrentTree {
         root,
         ops_root,
         ops,
@@ -689,10 +662,92 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
     })
 }
 
-fn current<F: Graftable, H: Hasher, const N: usize>(
+fn materialize_singleton<F: Graftable, H: Hasher, const N: usize>(
     args: &GenerateArgs,
-) -> Result<OperationOutput, String> {
-    materialize::<F, H, _, N>(
+    encode: &dyn Fn(u64, &mut Vec<u8>),
+    active: &dyn Fn(u64) -> bool,
+) -> Result<Materialized<F, H::Digest>, String> {
+    let current = materialize_current::<F, H, N>(args, encode, active)?;
+    let proof =
+        futures::executor::block_on(operation::Proof::<F, H::Digest, [u8; N]>::new::<H, _>(
+            &current.status,
+            &current.grafted,
+            Location::new(args.inactivity_floor),
+            Location::new(args.location),
+            current.ops_root,
+        ))
+        .map_err(|e| e.to_string())?;
+    let proof = operation::Proof {
+        loc: proof.loc,
+        chunk: proof.chunk.to_vec(),
+        range_proof: proof.range_proof,
+    };
+    let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
+    let mut encoded = Vec::new();
+    encode(args.location, &mut encoded);
+    let output = OperationOutput {
+        root: bytes32(current.root).into(),
+        leaves: Uint256::from(args.leaves),
+        location: Uint256::from(args.location),
+        inactivePeaks: Uint256::from(proof.range_proof.proof.inactive_peaks),
+        chunk: proof.chunk.clone().into(),
+        opsRoot: bytes32(current.ops_root).into(),
+        pending: current
+            .witness
+            .pending_chunk_digest
+            .as_ref()
+            .copied()
+            .map_or([0; 32], bytes32)
+            .into(),
+        partial: current
+            .witness
+            .partial_chunk
+            .map_or([0; 32], |(_, digest)| bytes32(digest))
+            .into(),
+        digests: proof
+            .range_proof
+            .proof
+            .digests
+            .iter()
+            .map(|d| bytes32(*d).into())
+            .collect(),
+        operation: encoded.into(),
+    };
+    Ok(Materialized {
+        output,
+        proof,
+        root: current.root,
+    })
+}
+
+fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
+    args: &GenerateArgs,
+    operation: impl Fn(u64) -> O,
+    active: impl Fn(u64) -> bool,
+) -> Result<Materialized<F, H::Digest>, String> {
+    let fixture = with_chunk_bytes!(args.chunk_bytes, |N| {
+        materialize_singleton::<F, H, N>(
+            args,
+            &|index, bytes| operation(index).write(bytes),
+            &active,
+        )
+    })?;
+    let op = operation(args.location);
+    if !fixture.proof.range_proof.verify_with_chunk_size::<H, _>(
+        Location::new(args.location),
+        core::slice::from_ref(&op),
+        core::slice::from_ref(&fixture.proof.chunk),
+        args.chunk_bytes,
+        &fixture.root,
+    ) || fixture.proof.verify::<H, _>(op, &fixture.root) != active(args.location)
+    {
+        return Err("Commonware rejected proof against the materialized canonical root".into());
+    }
+    Ok(fixture)
+}
+
+fn current<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOutput, String> {
+    materialize::<F, H, _>(
         args,
         |index| operation::<F>(args.seed, index, args.leaves),
         |index| index >= args.inactivity_floor,
@@ -700,7 +755,7 @@ fn current<F: Graftable, H: Hasher, const N: usize>(
     .map(|fixture| fixture.output)
 }
 
-fn exclude<F: Graftable, H: Hasher, const N: usize>(args: &ExcludeArgs) -> Result<Vec<u8>, String> {
+fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, String> {
     let query = const_hex::decode(args.keyhex.strip_prefix("0x").unwrap_or(&args.keyhex))
         .map_err(|e| e.to_string())?;
     let query = FixedBytes::<32>::new(query.try_into().map_err(|_| "key must be 32 bytes")?);
@@ -747,7 +802,7 @@ fn exclude<F: Graftable, H: Hasher, const N: usize>(args: &ExcludeArgs) -> Resul
         proof,
         root,
         ..
-    } = materialize::<F, H, _, N>(&tree, op, |index| {
+    } = materialize::<F, H, _>(&tree, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
     let exclusion: ExclusionProof<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>, H::Digest, _> =
@@ -801,58 +856,18 @@ impl Command {
             }
             Self::Current(args) => {
                 let output = match (args.family, args.hash) {
-                    (TreeKind::Mmr, Hash::Keccak) => {
-                        with_chunk_bytes!(
-                            args.chunk_bytes,
-                            |N| current::<mmr::Family, Keccak256, N>(&args)
-                        )
-                    }
-                    (TreeKind::Mmr, Hash::Sha256) => {
-                        with_chunk_bytes!(args.chunk_bytes, |N| current::<mmr::Family, Sha256, N>(
-                            &args
-                        ))
-                    }
-                    (TreeKind::Mmb, Hash::Keccak) => {
-                        with_chunk_bytes!(
-                            args.chunk_bytes,
-                            |N| current::<mmb::Family, Keccak256, N>(&args)
-                        )
-                    }
-                    (TreeKind::Mmb, Hash::Sha256) => {
-                        with_chunk_bytes!(args.chunk_bytes, |N| current::<mmb::Family, Sha256, N>(
-                            &args
-                        ))
-                    }
+                    (TreeKind::Mmr, Hash::Keccak) => current::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Sha256) => current::<mmr::Family, Sha256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak) => current::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Sha256) => current::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
             Self::Exclude(args) => match (args.tree.family, args.tree.hash) {
-                (TreeKind::Mmr, Hash::Keccak) => {
-                    with_chunk_bytes!(args.tree.chunk_bytes, |N| exclude::<
-                        mmr::Family,
-                        Keccak256,
-                        N,
-                    >(&args))
-                }
-                (TreeKind::Mmr, Hash::Sha256) => {
-                    with_chunk_bytes!(
-                        args.tree.chunk_bytes,
-                        |N| exclude::<mmr::Family, Sha256, N>(&args)
-                    )
-                }
-                (TreeKind::Mmb, Hash::Keccak) => {
-                    with_chunk_bytes!(args.tree.chunk_bytes, |N| exclude::<
-                        mmb::Family,
-                        Keccak256,
-                        N,
-                    >(&args))
-                }
-                (TreeKind::Mmb, Hash::Sha256) => {
-                    with_chunk_bytes!(
-                        args.tree.chunk_bytes,
-                        |N| exclude::<mmb::Family, Sha256, N>(&args)
-                    )
-                }
+                (TreeKind::Mmr, Hash::Keccak) => exclude::<mmr::Family, Keccak256>(&args),
+                (TreeKind::Mmr, Hash::Sha256) => exclude::<mmr::Family, Sha256>(&args),
+                (TreeKind::Mmb, Hash::Keccak) => exclude::<mmb::Family, Keccak256>(&args),
+                (TreeKind::Mmb, Hash::Sha256) => exclude::<mmb::Family, Sha256>(&args),
             },
         }
     }
