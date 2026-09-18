@@ -212,9 +212,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Generate a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// Marshal applications choose whether to prepare through [`Application::handoff_policy`];
-        /// construction remains asynchronous.
-        ///
         /// [`HandoffProposal::Proposed`] carries the same verification and certification
         /// commitments as a payload from [`Automaton::propose`].
         /// [`HandoffProposal::AwaitCertification`] declines this request; consensus issues
@@ -398,10 +395,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// before the parent certifies.
         ///
         /// The decision applies to this request and cannot be revoked after returning it.
-        /// Publishing early trusts the parent's builder not to equivocate. The context names
-        /// the parent by view and digest; the application identifies its builder from the
-        /// elector's schedule or from a block it has already verified. If that trust is
-        /// uncertain, prepare with [`HandoffPublication::AfterCertification`].
+        /// Publishing early trusts the outgoing consensus leader, the proposer of the parent,
+        /// not to equivocate. The context names the parent by view and digest. Its leader
+        /// field is the incoming leader making this request, not the outgoing one. The
+        /// application identifies the outgoing leader from the elector's schedule or from a
+        /// parent block it has already verified. If that identity or trust is uncertain,
+        /// prepare with [`HandoffPublication::AfterCertification`].
         ///
         /// Make this decision from information already available to the application. If
         /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
