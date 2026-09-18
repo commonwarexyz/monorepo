@@ -18,6 +18,8 @@ fn bench_decode(c: &mut Criterion) {
         (1 << 20, 20, 4, Interleaved),
         (1 << 23, 20, 1, Interleaved),
         (1 << 23, 20, 4, Interleaved),
+        (1 << 20, 50, 2, Interleaved),
+        (1 << 23, 50, 2, Interleaved),
         (1 << 20, 100, 4, Interleaved),
         (1 << 20, 250, 4, Interleaved),
         (1 << 20, 500, 4, Interleaved),

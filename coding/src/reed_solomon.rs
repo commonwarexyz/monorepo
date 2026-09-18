@@ -21,6 +21,35 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 // Keep each stripe large enough to amortize extra encoder/decoder setup.
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
+/// Hash independent shard pairs within each worker, preserving shard order.
+fn hash_shards<H: Hasher, S: Strategy>(
+    shards: &[impl AsRef<[u8]> + Sync],
+    shard_len: usize,
+    strategy: &S,
+) -> impl Iterator<Item = H::Digest> {
+    // Keep enough independent jobs to occupy all workers.
+    let chunk_len = if shards.len() / 2 >= strategy.manual().parallelism() {
+        2
+    } else {
+        1
+    };
+    strategy
+        .map_collect_vec_with_multiplier(
+            shards.chunks(chunk_len),
+            shard_len.saturating_mul(chunk_len),
+            |pair| match pair {
+                [left, right] => {
+                    let (left, right) = H::hash_pair(&[left.as_ref()], &[right.as_ref()]);
+                    (left, Some(right))
+                }
+                [last] => (H::hash(&[last.as_ref()]), None),
+                _ => unreachable!("chunks contain one or two shards"),
+            },
+        )
+        .into_iter()
+        .flat_map(|(first, second)| [Some(first), second].into_iter().flatten())
+}
+
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -376,11 +405,8 @@ fn encode<H: Hasher, S: Strategy>(
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
         .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
         .collect();
-    let shard_hashes =
-        strategy
-            .map_collect_vec_with_multiplier(&shard_slices, shard_len, |shard| H::hash(&[shard]));
-    for hash in &shard_hashes {
-        builder.add(hash);
+    for hash in hash_shards::<H, _>(&shard_slices, shard_len, strategy) {
+        builder.add(&hash);
     }
     let tree = builder.build();
     let root = tree.root();
@@ -743,23 +769,20 @@ fn verify_root<H: Hasher, S: Strategy>(
         .enumerate()
         .filter(|(_, digest)| digest.is_none())
         .map(|(i, _)| {
-            (
-                i,
-                if i < k {
-                    originals[i]
-                } else {
-                    recoveries[i - k]
-                },
-            )
+            if i < k {
+                originals[i]
+            } else {
+                recoveries[i - k]
+            }
         })
         .collect::<Vec<_>>();
 
-    for (i, digest) in
-        strategy.map_collect_vec_with_multiplier(missing_shards, shard_len, |(i, shard)| {
-            (i, H::hash(&[shard]))
-        })
+    for (slot, digest) in shard_digests
+        .iter_mut()
+        .filter(|digest| digest.is_none())
+        .zip(hash_shards::<H, _>(&missing_shards, shard_len, strategy))
     {
-        shard_digests[i] = Some(digest);
+        *slot = Some(digest);
     }
 
     let mut builder = Builder::<H>::new(n);
@@ -1216,6 +1239,25 @@ mod tests {
     const FUZZ_MAX_EXTRA_SHARDS: u16 = 8;
     const FUZZ_MAX_DATA_LEN: usize = 256;
     const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
+
+    #[test]
+    fn test_hash_shards_preserves_order() {
+        fn check(strategy: &impl Strategy) {
+            for count in [0, 1, 2, 3, 15, 16, 17, 33, 50] {
+                for len in [0, 127, 128, 129, 65536] {
+                    let shards: Vec<_> = (0..count).map(|i| vec![i as u8; len]).collect();
+                    let expected: Vec<_> = shards.iter().map(|s| Sha256::hash(&[s])).collect();
+                    assert_eq!(
+                        hash_shards::<Sha256, _>(&shards, len, strategy).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            }
+        }
+        check(&Sequential);
+        check(&Rayon::new(NZUsize!(2)).unwrap());
+        check(&Rayon::new(NZUsize!(8)).unwrap());
+    }
 
     fn checked(
         root: <Sha256 as Hasher>::Digest,

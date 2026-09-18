@@ -1,4 +1,4 @@
-//! Pair-hashing SHA-256 kernels for merkle node messages.
+//! Pair-hashing SHA-256 kernels for Merkle nodes and contiguous messages.
 //!
 //! Modern SHA extensions (aarch64 SHA2, x86_64 SHA-NI) execute several
 //! rounds per instruction but with multi-cycle latency, so a single message
@@ -12,9 +12,9 @@
 //! the BMT). Both need one full block plus a fixed-layout padding block
 //! each. Callers passing one of these shapes as its exact constituent
 //! parts (a position and two digests, or two digests) load directly from
-//! those parts into vector registers, with no intermediate buffer. Any other
-//! shape, or the same shape split into a different part decomposition, falls
-//! back to serial hashing.
+//! those parts into vector registers, with no intermediate buffer. On aarch64,
+//! equal-length contiguous messages of at least 128 bytes also share an
+//! interleaved compression loop. Other input shapes fall back to serial hashing.
 
 use super::{DIGEST_LENGTH, Digest};
 
@@ -45,19 +45,21 @@ const _: () = assert!(MMR_NODE_LEN == 72);
 const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
 const _: () = assert!(BMT_NODE_LEN == 64);
 
-/// Hash two node-length messages, each given as parts, with the pair-hashing
-/// kernel for the current CPU.
+/// Hash two messages with the pair-hashing kernel for the current CPU.
 ///
 /// Returns `None` when the kernel cannot be used: the required CPU features
-/// are unavailable, or the messages don't match one of the known node shapes
-/// (a position and two digests, or two digests) as their exact constituent
-/// parts.
+/// are unavailable, or the messages match neither a supported Merkle node
+/// shape nor the equal-length contiguous shape supported on aarch64.
 ///
 /// Inlined aggressively so the shape matching constant-folds at call sites
 /// with fixed-shape inputs (e.g. merkle nodes).
 #[inline(always)]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
     match (left, right) {
+        #[cfg(target_arch = "aarch64")]
+        ([left], [right]) if left.len() == right.len() && left.len() >= 128 => {
+            dispatch_bytes(left, right)
+        }
         ([left_pos, left_left, left_right], [right_pos, right_left, right_right]) => dispatch_mmr(
             (*left_pos).try_into().ok()?,
             (*left_left).try_into().ok()?,
@@ -76,8 +78,7 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
     }
 }
 
-/// Dispatch two node-length messages, given as their constituent parts, to
-/// the available kernel.
+/// Dispatch two messages to the available kernel.
 ///
 /// `aarch64_kernel`/`x86_64_kernel` name the arch-specific kernel functions
 /// to invoke once the required CPU features are confirmed. `args` lists the
@@ -147,4 +148,12 @@ define_dispatch!(
         right_a: &[u8; DIGEST_LENGTH],
         right_b: &[u8; DIGEST_LENGTH],
     )
+);
+
+#[cfg(target_arch = "aarch64")]
+define_dispatch!(
+    dispatch_bytes,
+    hash_pair_bytes,
+    hash_pair_bytes,
+    (left: &[u8], right: &[u8])
 );

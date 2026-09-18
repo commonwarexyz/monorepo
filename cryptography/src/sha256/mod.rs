@@ -291,6 +291,8 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_utils::test_rng;
+    use rand::Rng as _;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -395,6 +397,44 @@ mod tests {
             vec![vec![fill; 32], vec![fill + 1; 32]]
         }
         crate::fuzz::Plan::<Sha256>::new(node(0x11), node(0x33)).run();
+    }
+
+    #[test]
+    fn test_hash_pair_bytes_matches_streaming() {
+        let mut rng = test_rng();
+        let mut left = vec![0u8; 65536 + 64];
+        let mut right = vec![0u8; left.len()];
+        rng.fill_bytes(&mut left);
+        rng.fill_bytes(&mut right);
+        for len in (0..=320).chain([511, 512, 513, 4095, 4096, 4097, 65535, 65536]) {
+            for offset in [0, 1, 15, 63] {
+                let a = &left[offset..offset + len];
+                let b = &right[offset..offset + len];
+                let (actual_a, actual_b) = Sha256::hash_pair(&[a], &[b]);
+                assert_eq!(actual_a.0.as_slice(), ISha256::digest(a).as_slice());
+                assert_eq!(actual_b.0.as_slice(), ISha256::digest(b).as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn test_hash_pair_bytes_fallback() {
+        let left = [0x12; 513];
+        let right = [0x34; 513];
+        for (a, b) in [
+            (vec![&left[..512]], vec![&right[..513]]),
+            (vec![&left[..127], &left[127..]], vec![&right[..]]),
+        ] {
+            let (actual_a, actual_b) = Sha256::hash_pair(&a, &b);
+            assert_eq!(
+                actual_a.0.as_slice(),
+                ISha256::digest(a.concat()).as_slice()
+            );
+            assert_eq!(
+                actual_b.0.as_slice(),
+                ISha256::digest(b.concat()).as_slice()
+            );
+        }
     }
 
     #[test]
