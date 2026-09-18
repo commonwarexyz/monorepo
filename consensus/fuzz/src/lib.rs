@@ -743,6 +743,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 participants.as_ref(),
                 input.term_length,
                 validator_optimistic_views(&input, idx),
+                input.accept_handoffs,
+                input.handoff_publication,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
