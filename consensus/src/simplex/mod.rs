@@ -1798,13 +1798,6 @@ mod tests {
 
     /// Starts a fully linked five-validator ed25519 round-robin cluster.
     /// Returns each validator's reporter, the view-1 leader's index, and the network oracle.
-    ///
-    /// The 1.5s leader and 3.5s certification timeouts are tuned to the
-    /// callers' link latencies: with latency near or above
-    /// half the leader timeout, a view that waits for its parent's
-    /// certification (two or more network trips) times out, so runs stay
-    /// nullification-free only when views pipeline (optimistic validation
-    /// within terms, pipelined handoffs across them).
     async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],

@@ -1378,13 +1378,6 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // Released held results carry `None` to avoid counting the candidate twice.
-                if matches!(request, ProposalRequest::Handoff(_))
-                    && matches!(&proposed, Ok(ProposalResponse::Proposed { publication: Some(_), .. }))
-                {
-                    self.record_handoff_event(HandoffEventKind::CandidateReturned);
-                }
-
                 // Retain a declined handoff or held build outside the round proposal
                 // slot until the parent certifies. The captured request and build latch
                 // remain active until promotion.
@@ -1395,12 +1388,16 @@ impl<
                         continue;
                     }
                     Ok(ProposalResponse::Proposed { payload, publication }) => {
-                        if publication == Some(HandoffPublication::AfterCertification)
-                            && !self.state.proposal_parent_certified(request.context())
-                        {
-                            self.record_handoff_event(HandoffEventKind::Held);
-                            pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
-                            continue;
+                        // Released held results carry `None`, so each candidate counts once.
+                        if let Some(publication) = publication {
+                            self.record_handoff_event(HandoffEventKind::CandidateReturned);
+                            if publication == HandoffPublication::AfterCertification
+                                && !self.state.proposal_parent_certified(request.context())
+                            {
+                                self.record_handoff_event(HandoffEventKind::Held);
+                                pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
+                                continue;
+                            }
                         }
                         Ok(payload)
                     }
