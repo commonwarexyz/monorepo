@@ -92,7 +92,7 @@ impl<V: Viewable, F> Viewable for Request<V, F> {
     }
 }
 
-/// Adapter that polls an [Option<Request<V, R>>] in place.
+/// Adapter that polls an [Option<Request<V, F>>] in place.
 struct Waiter<'a, V: Viewable, F>(&'a mut Option<Request<V, F>>);
 
 impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {

@@ -1475,8 +1475,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns whether `parent` can support a pipelined handoff. `parent` must
-    /// end a term, the incoming leader must be the local signer, and no
-    /// nullification may have abandoned the term.
+    /// end a term, the incoming leader must be the local signer, and the
+    /// outgoing term must have no nullification.
     fn handoff_parent(&self, parent: View) -> bool {
         self.handoff_leader(parent.next())
             .is_some_and(|leader| self.is_me(leader))
@@ -1739,8 +1739,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return Ok(());
         };
 
-        // Intra-term views share the structural rules (the nullification check
-        // is trivially satisfied once contiguity holds).
+        // Gated proposals share the structural rules of verification.
         self.validate_parent_span(view, parent)?;
 
         if self.explicit_ancestry_payload(required).is_some() {
