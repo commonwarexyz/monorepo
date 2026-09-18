@@ -92,12 +92,14 @@ behind Multimmit’s marshal." />
 Clabby</a></div>
                         <div class="date">September 13th, 2026</div>
         </div>
-        <p>A blockchain that produces several gigabytes of blocks per
-        second asks every replica to receive, store, and process that
-        data. If a replica falls behind or crashes, it has to recover
+        <p>In a fully replicated blockchain, every replica receives,
+        stores, and processes every block. We’re aiming for several
+        gigabytes of blocks per second, which means every replica’s
+        network, disk, and processing capacity must keep up with that
+        rate. If a replica falls behind or crashes, it has to recover
         its place and catch up while new blocks keep arriving.</p>
         <p>We’re building <a href="/blogs/multimmit">Multimmit</a> to
-        reach that scale by enabling producers to build and broadcast
+        increase throughput by enabling producers to build and broadcast
         their own chains in parallel. Consensus agrees on references to
         those chains, leaving each replica to assemble their blocks into
         the same ordered stream for the application. We’ll call that

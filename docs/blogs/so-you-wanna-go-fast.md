@@ -11,9 +11,9 @@ image: "https://commonware.xyz/imgs/so-you-wanna-go-fast.png"
 katex: false
 ---
 
-A blockchain that produces several gigabytes of blocks per second asks every replica to receive, store, and process that data. If a replica falls behind or crashes, it has to recover its place and catch up while new blocks keep arriving.
+In a fully replicated blockchain, every replica receives, stores, and processes every block. We're aiming for several gigabytes of blocks per second, which means every replica's network, disk, and processing capacity must keep up with that rate. If a replica falls behind or crashes, it has to recover its place and catch up while new blocks keep arriving.
 
-We're building [Multimmit](/blogs/multimmit) to reach that scale by enabling producers to build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
+We're building [Multimmit](/blogs/multimmit) to increase throughput by enabling producers to build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
 
 Multimmit sustains one million 512-byte transactions per second across 50 validators. Median submission-to-finality latency is 400 ms globally and 63 ms in North America. The [results below](#how-fast-does-it-go) show the comparisons and fault scenarios. Getting there takes more than a fast consensus protocol.
 
