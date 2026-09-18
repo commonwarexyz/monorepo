@@ -398,6 +398,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Sets the leader for the given view if it is not already set.
     fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
+        if self.leader_is_set(view) {
+            return;
+        }
         let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
         self.set_leader_once(view, leader);
     }
