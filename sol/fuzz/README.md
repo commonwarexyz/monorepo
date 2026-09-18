@@ -25,5 +25,4 @@ simplex generate <scheme> <variant> <kind> <namespace_hex> <epoch> <view> <paren
 - `certificate`: Generate and check BLS12-381 certificates, or hash namespaced messages
   to curve points.
 - `merkle`: Generate and check MMR and MMB proofs.
-- `simplex`: Generate Simplex signatures. `--participants` and `--signers-hex` apply
-  to `multisig` and default to `4` and `0x07`.
+- `simplex`: Generate Simplex signatures.

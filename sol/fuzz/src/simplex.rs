@@ -32,8 +32,10 @@ enum Kind {
 
 #[derive(Args, Default)]
 struct MultisigOptions {
+    /// Committee size, required for multisig.
     #[arg(long)]
     participants: Option<u32>,
+    /// Signer bitmap, required for multisig.
     #[arg(long)]
     signers_hex: Option<String>,
 }
@@ -94,11 +96,14 @@ impl GenerateArgs {
                 )?))
             }
             Scheme::Multisig => {
+                let (Some(participants), Some(signers)) = (
+                    self.multisig.participants,
+                    self.multisig.signers_hex.as_deref(),
+                ) else {
+                    return Err("--participants and --signers-hex are required for multisig".into());
+                };
                 let (namespace, message) = self.subject()?;
-                let participants = self.multisig.participants.unwrap_or(4);
-                let signers = certificate::decode_hex(
-                    self.multisig.signers_hex.as_deref().unwrap_or("0x07"),
-                )?;
+                let signers = certificate::decode_hex(signers)?;
                 Ok(multisig::encode_output(multisig::generate_variant(
                     self.variant,
                     &namespace,
@@ -267,29 +272,50 @@ mod tests {
     }
 
     #[test]
-    fn multisig_defaults_to_three_of_four() {
-        let encoded = Cli::try_parse_from([
-            "commonware-sol-fuzz",
-            "simplex",
-            "generate",
-            "multisig",
-            "minpk",
-            "nullify",
-            "0x74657374",
-            "1",
-            "2",
-            "3",
-            &const_hex::encode([0; 32]),
-            "7",
-        ])
-        .unwrap()
-        .command
-        .execute()
-        .unwrap();
-        let (_, public_keys, signers, _) =
-            <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
-        assert_eq!(public_keys.len(), 4 * 128);
-        assert_eq!(signers.as_ref(), &[0x07]);
+    fn multisig_requires_explicit_participants_and_signers() {
+        for (variant, public_size) in [("minsig", 256), ("minpk", 128)] {
+            let base = [
+                "commonware-sol-fuzz",
+                "simplex",
+                "generate",
+                "multisig",
+                variant,
+                "nullify",
+                "0x74657374",
+                "1",
+                "2",
+                "3",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "7",
+            ];
+            for options in [
+                &[][..],
+                &["--participants", "4"][..],
+                &["--signers-hex", "0x01"][..],
+            ] {
+                let parsed =
+                    Cli::try_parse_from(base.into_iter().chain(options.iter().copied())).unwrap();
+                assert_eq!(
+                    parsed.command.execute().unwrap_err(),
+                    "--participants and --signers-hex are required for multisig"
+                );
+            }
+
+            let encoded = Cli::try_parse_from(base.into_iter().chain([
+                "--participants",
+                "4",
+                "--signers-hex",
+                "0x01",
+            ]))
+            .unwrap()
+            .command
+            .execute()
+            .unwrap();
+            let (_, public_keys, signers, _) =
+                <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
+            assert_eq!(public_keys.len(), 4 * public_size);
+            assert_eq!(signers.as_ref(), &[0x01]);
+        }
     }
 
     #[test]
