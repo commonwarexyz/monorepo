@@ -24,7 +24,7 @@ pub struct MockVerifyingApp<B, S> {
     /// The result returned by `verify`.
     pub verify_result: bool,
     /// Policy returned for handoff proposal builds.
-    pub handoff_policy: HandoffPolicy,
+    handoff_policy: HandoffPolicy,
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
     _phantom: PhantomData<S>,
 }
@@ -32,23 +32,14 @@ pub struct MockVerifyingApp<B, S> {
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
     pub fn new() -> Self {
-        Self {
-            propose_result: None,
-            verify_result: true,
-            handoff_policy: HandoffPolicy::AwaitCertification,
-            proposal_gate: None,
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Create a new mock verifying application with a fixed verify result.
     pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
-            propose_result: None,
             verify_result,
-            handoff_policy: HandoffPolicy::AwaitCertification,
-            proposal_gate: None,
-            _phantom: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -64,34 +55,37 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Block proposal construction until released and report if it is cancelled.
-    pub fn with_proposal_gate(
-        mut self,
-    ) -> (
-        Self,
-        oneshot::Receiver<()>,
-        oneshot::Sender<()>,
-        oneshot::Receiver<()>,
-    ) {
+    /// Block the first proposal construction forever. Returns receivers that
+    /// fire when the build starts and when it is cancelled.
+    pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
         let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
         let (dropped, dropped_rx) = oneshot::channel();
         self.proposal_gate = Some(Arc::new(Mutex::new(Some(ProposalGate {
             started,
-            release: release_rx,
             dropped,
         }))));
-        (self, started_rx, release, dropped_rx)
+        (self, started_rx, dropped_rx)
     }
 }
 
 struct ProposalGate {
     started: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
     dropped: oneshot::Sender<()>,
 }
 
-struct DropSignal(Option<oneshot::Sender<()>>);
+/// Fires its sender when dropped unless disarmed first.
+pub(crate) struct DropSignal(Option<oneshot::Sender<()>>);
+
+impl DropSignal {
+    pub(crate) const fn new(sender: Option<oneshot::Sender<()>>) -> Self {
+        Self(sender)
+    }
+
+    /// Prevents the signal from firing on drop.
+    pub(crate) fn disarm(&mut self) {
+        self.0.take();
+    }
+}
 
 impl Drop for DropSignal {
     fn drop(&mut self) {
@@ -134,10 +128,10 @@ where
             .proposal_gate
             .as_ref()
             .and_then(|gate| gate.lock().take());
-        if let Some(mut gate) = gate {
-            let _drop_signal = DropSignal(Some(gate.dropped));
+        if let Some(gate) = gate {
+            let _drop_signal = DropSignal::new(Some(gate.dropped));
             gate.started.send_lossy(());
-            let _ = (&mut gate.release).await;
+            std::future::pending::<()>().await;
         }
         self.propose_result.clone()
     }

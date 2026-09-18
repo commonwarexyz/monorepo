@@ -2109,8 +2109,8 @@ mod tests {
         )
     }
 
-    /// Like [setup_state_from_config], but fixes `view_retention` at 10 for
-    /// pipelined-handoff tests.
+    /// Like [setup_state_from_config], but fixes `view_retention` at 10 and
+    /// `skip_budget` at 4 for pipelined-handoff tests.
     fn setup_state_with_handoff(
         context: &mut deterministic::Context,
         validators: usize,
@@ -7028,14 +7028,8 @@ mod tests {
         verifier: &ed25519::Scheme,
         schemes: &[ed25519::Scheme],
     ) -> (Proposal<Sha256Digest>, Proposal<Sha256Digest>) {
-        let certified = fetch_proposal(4, 3, 64);
-        let notarization = build_notarization(verifier, schemes, &certified);
-        assert!(state.add_notarization(notarization).0);
-        assert!(state.certified(View::new(4), true).is_some());
+        let certified = certify_view_4(state, verifier, schemes);
         assert_eq!(state.current_view(), View::new(5));
-        // Drain the view-4 candidate: views 1-3 are untracked, so processing
-        // it later requests a parent fetch.
-        let _ = state.certify_candidates();
 
         let tip = fetch_proposal(5, 4, 65);
         assert!(state.set_proposal(View::new(5), tip.clone()));
@@ -7046,9 +7040,12 @@ mod tests {
         (certified, tip)
     }
 
-    /// Leaves a single-participant state at a pipelined term boundary with a
-    /// local notarize vote for the uncertified outgoing tip.
-    fn prepare_single_participant_term_boundary(
+    /// Certifies view 4, the anchor before the outgoing term's final view, and
+    /// returns its proposal.
+    ///
+    /// Drains the view-4 candidate: views 1-3 are untracked, so processing it
+    /// later would request a parent fetch.
+    fn certify_view_4(
         state: &mut TestState,
         verifier: &ed25519::Scheme,
         schemes: &[ed25519::Scheme],
@@ -7058,6 +7055,17 @@ mod tests {
         assert!(state.add_notarization(notarization).0);
         assert!(state.certified(View::new(4), true).is_some());
         let _ = state.certify_candidates();
+        certified
+    }
+
+    /// Leaves a single-participant state at a pipelined term boundary with a
+    /// local notarize vote for the uncertified outgoing tip.
+    fn prepare_single_participant_term_boundary(
+        state: &mut TestState,
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+    ) -> Proposal<Sha256Digest> {
+        certify_view_4(state, verifier, schemes);
 
         let context = state
             .try_propose()
@@ -7174,12 +7182,7 @@ mod tests {
                 },
                 mut state,
             ) = setup_state_from_config(&mut context, 1, 0, 9, 10, handoff_terms(), 0);
-
-            let certified = fetch_proposal(4, 3, 64);
-            let notarization = build_notarization(&verifier, &schemes, &certified);
-            assert!(state.add_notarization(notarization).0);
-            assert!(state.certified(View::new(4), true).is_some());
-            let _ = state.certify_candidates();
+            certify_view_4(&mut state, &verifier, &schemes);
 
             let tip = fetch_proposal(5, 4, 65);
             let tip_vote = Notarize::sign(&schemes[0], tip.clone()).expect("tip vote");
@@ -7232,8 +7235,8 @@ mod tests {
             let child_notarization = build_notarization(&verifier, &schemes, &child);
             assert!(state.add_notarization(child_notarization).0);
 
-            // Model a recovered child certification to keep the finalization
-            // gate defensive even if certification ordering regresses.
+            // A finalize vote requires the certified parent even when the
+            // child is already certified.
             assert!(state.certified(View::new(6), true).is_some());
             assert!(state.construct_finalize(View::new(6)).is_none());
 
@@ -7255,10 +7258,7 @@ mod tests {
 
             // Restore the certified anchor that precedes the outgoing vote in
             // the journal.
-            let certified = fetch_proposal(4, 3, 64);
-            let notarization = build_notarization(&verifier, &schemes, &certified);
-            assert!(state.add_notarization(notarization).0);
-            assert!(state.certified(View::new(4), true).is_some());
+            certify_view_4(&mut state, &verifier, &schemes);
             assert_eq!(state.current_view(), View::new(5));
 
             // The outgoing vote is durable, but its derived incoming leader is
@@ -7397,33 +7397,6 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_withholds_notarize_after_nullification() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
-                },
-                mut state,
-            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
-            prepare_term_boundary(&mut state, &verifier, &schemes);
-
-            let ctx = state
-                .try_propose()
-                .expect("handoff proposal should use the outgoing tip")
-                .into_context();
-            let ours = fetch_proposal(6, 5, 66);
-
-            // The tip's term is abandoned while the application is building.
-            let nullification =
-                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
-            assert!(state.add_nullification(nullification));
-            assert!(!state.proposed(&ctx, ours.payload));
-            assert!(state.construct_notarize(View::new(6)).is_none());
-        });
-    }
-
-    #[test]
     fn pipelined_handoff_retries_after_parent_invalidation() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -7450,6 +7423,7 @@ mod tests {
                 build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(5)));
             assert!(state.add_nullification(nullification));
             assert!(!state.proposed(&initial, fetch_proposal(6, 5, 66).payload));
+            assert!(state.construct_notarize(View::new(6)).is_none());
 
             // Re-resolving ancestry for the same incoming view selects the
             // certified fallback and still permits only one pending build.

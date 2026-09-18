@@ -1,5 +1,15 @@
 use super::*;
-use crate::marshal::ancestry::Ancestry;
+use crate::marshal::{ancestry::Ancestry, mocks::verifying::DropSignal};
+use commonware_p2p::Receiver;
+
+/// Which of the two concurrent steps completes first.
+#[derive(Clone, Copy, Debug)]
+enum First {
+    /// The parent certifies while the handoff build is still running.
+    Certification,
+    /// The handoff build completes while the parent is still uncertified.
+    Build,
+}
 
 #[derive(Clone)]
 struct PipelineApp {
@@ -13,16 +23,6 @@ struct PipelineApp {
     builds: Arc<AtomicUsize>,
     block: B,
     publication: HandoffPublication,
-}
-
-struct DropSignal(Option<oneshot::Sender<()>>);
-
-impl Drop for DropSignal {
-    fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            tx.send_lossy(());
-        }
-    }
 }
 
 impl crate::Application<Runtime> for PipelineApp {
@@ -47,7 +47,7 @@ impl crate::Application<Runtime> for PipelineApp {
             0,
             "the retained handoff must not be replaced by an ordinary build"
         );
-        let mut drop_signal = DropSignal(self.build_dropped.lock().take());
+        let mut drop_signal = DropSignal::new(self.build_dropped.lock().take());
         self.build_started
             .lock()
             .take()
@@ -55,7 +55,7 @@ impl crate::Application<Runtime> for PipelineApp {
             .send_lossy(context);
         let release = self.build_release.lock().take().unwrap();
         release.await.unwrap();
-        drop_signal.0.take();
+        drop_signal.disarm();
         self.build_completed.lock().take().unwrap().send_lossy(());
         Some(self.block.clone())
     }
@@ -71,7 +71,19 @@ impl crate::Application<Runtime> for PipelineApp {
     }
 }
 
-fn retained_pipeline_handoff(certification_first: bool) {
+/// Receives the next vote from `victim`.
+async fn next_vote(
+    receiver: &mut impl Receiver<PublicKey = PublicKey>,
+    victim: &PublicKey,
+) -> Vote<S, D> {
+    let (sender, message) = receiver.recv().await.unwrap();
+    assert_eq!(&sender, victim);
+    Vote::decode(message).unwrap()
+}
+
+/// A handoff build that outlives or precedes its parent's certification is
+/// published once, after that certification, and never rebuilt.
+fn retained_pipeline_handoff(first: First) {
     deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
         let Fixture {
             participants,
@@ -147,7 +159,6 @@ fn retained_pipeline_handoff(certification_first: bool) {
         let (completed_tx, completed_rx) = oneshot::channel();
         let (drop_tx, mut drop_rx) = oneshot::channel();
         let policies = Arc::new(AtomicUsize::new(0));
-        let builds = Arc::new(AtomicUsize::new(0));
         let app = PipelineApp {
             verify_started: Arc::new(Mutex::new(Some(verify_tx))),
             verify_release: Arc::new(Mutex::new(Some(verify_release_rx))),
@@ -156,7 +167,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
             build_completed: Arc::new(Mutex::new(Some(completed_tx))),
             build_dropped: Arc::new(Mutex::new(Some(drop_tx))),
             policies: policies.clone(),
-            builds: builds.clone(),
+            builds: Arc::new(AtomicUsize::new(0)),
             block,
             publication: HandoffPublication::AfterCertification,
         };
@@ -186,7 +197,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
                 relay: wrapper,
                 reporter: marshal.clone(),
                 strategy: Sequential,
-                partition: format!("retained-pipeline-{certification_first}"),
+                partition: format!("retained-pipeline-{first:?}"),
                 mailbox_size: NZUsize!(128),
                 epoch: Epoch::zero(),
                 floor: simplex::config::Floor::Finalized(floor_finalization),
@@ -216,81 +227,77 @@ fn retained_pipeline_handoff(certification_first: bool) {
             true,
         );
         verify_rx.await.unwrap();
-        let votes: Vec<_> = [0usize, 1, 2]
-            .into_iter()
-            .map(|i| Notarize::sign(&schemes[i], parent.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap();
+        let notarization = StandardHarness::make_notarization(parent.clone(), &schemes, QUORUM);
         certificate_sender.send(
             Recipients::One(victim.clone()),
             Certificate::<S, D>::Notarization(notarization).encode(),
             true,
         );
-        let built_context = select! {
-            result = build_rx => result.expect("handoff build should start"),
-            _ = context.sleep(Duration::from_secs(5)) => panic!("handoff build did not start"),
-        };
+        let built_context = build_rx.await.expect("handoff build should start");
         assert_eq!(built_context, expected_context);
-        assert_eq!(policies.load(Ordering::SeqCst), 1);
-        assert_eq!(builds.load(Ordering::SeqCst), 1);
 
-        if certification_first {
-            verify_release_tx.send_lossy(());
-            loop {
-                let (sender, message) = vote_receiver.recv().await.unwrap();
-                assert_eq!(sender, victim);
-                if let Vote::<S, D>::Finalize(vote) = Vote::decode(message).unwrap()
-                    && vote.proposal == parent
-                {
-                    break;
+        match first {
+            First::Certification => {
+                verify_release_tx.send_lossy(());
+                loop {
+                    if let Vote::Finalize(vote) = next_vote(&mut vote_receiver, &victim).await
+                        && vote.proposal == parent
+                    {
+                        break;
+                    }
                 }
+                assert!(
+                    matches!(drop_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "parent certification must not cancel the running build"
+                );
+                build_release_tx.send_lossy(());
+                completed_rx.await.unwrap();
             }
-            assert!(matches!(drop_rx.try_recv(), Err(TryRecvError::Empty)));
-            assert_eq!(builds.load(Ordering::SeqCst), 1);
-            build_release_tx.send_lossy(());
-            completed_rx.await.unwrap();
-        } else {
-            build_release_tx.send_lossy(());
-            completed_rx.await.unwrap();
-            context.sleep(Duration::from_millis(10)).await;
-            assert!(
-                marshal.get_verified(round).await.is_none(),
-                "the completed candidate must remain staged until its parent certifies"
-            );
-            // Keep certification blocked well past link delivery, so an early
-            // vote sent at build completion would reach the observer.
-            let quiet_until = context.current() + 3 * LINK.latency;
-            loop {
-                select! {
-                    result = vote_receiver.recv() => {
-                        let (sender, message) = result.unwrap();
-                        assert_eq!(sender, victim);
-                        let proposal = match Vote::<S, D>::decode(message).unwrap() {
-                            Vote::Notarize(vote) => Some(vote.proposal),
-                            Vote::Finalize(vote) => Some(vote.proposal),
-                            Vote::Nullify(_) => None,
-                        };
-                        assert_ne!(
-                            proposal.map(|proposal| proposal.round),
-                            Some(round),
-                            "default handoff mode must not vote before parent certification"
-                        );
-                    },
-                    _ = context.sleep_until(quiet_until) => break,
+            First::Build => {
+                build_release_tx.send_lossy(());
+                completed_rx.await.unwrap();
+                // Keep certification blocked well past link delivery, so an early
+                // vote sent at build completion would reach the observer.
+                let quiet_until = context.current() + 3 * LINK.latency;
+                loop {
+                    select! {
+                        result = vote_receiver.recv() => {
+                            let (sender, message) = result.unwrap();
+                            assert_eq!(sender, victim);
+                            let proposal = match Vote::<S, D>::decode(message).unwrap() {
+                                Vote::Notarize(vote) => Some(vote.proposal),
+                                Vote::Finalize(vote) => Some(vote.proposal),
+                                Vote::Nullify(_) => None,
+                            };
+                            assert_ne!(
+                                proposal.map(|proposal| proposal.round),
+                                Some(round),
+                                "default handoff mode must not vote before parent certification"
+                            );
+                        },
+                        _ = context.sleep_until(quiet_until) => break,
+                    }
                 }
+                assert!(
+                    marshal.get_verified(round).await.is_none(),
+                    "the completed candidate must remain staged until its parent certifies"
+                );
+                verify_release_tx.send_lossy(());
             }
-            verify_release_tx.send_lossy(());
         }
 
-        assert_eq!(policies.load(Ordering::SeqCst), 1);
-        assert_eq!(builds.load(Ordering::SeqCst), 1);
-        assert!(drop_rx.await.is_err());
+        assert_eq!(
+            policies.load(Ordering::SeqCst),
+            1,
+            "one handoff request evaluates the policy once"
+        );
+        assert!(
+            drop_rx.await.is_err(),
+            "build must complete, not be cancelled"
+        );
 
         let proposal = loop {
-            let (sender, message) = vote_receiver.recv().await.unwrap();
-            assert_eq!(sender, victim);
-            if let Vote::<S, D>::Notarize(vote) = Vote::decode(message).unwrap()
+            if let Vote::Notarize(vote) = next_vote(&mut vote_receiver, &victim).await
                 && vote.proposal.round == round
             {
                 break vote.proposal;
@@ -298,20 +305,14 @@ fn retained_pipeline_handoff(certification_first: bool) {
         };
         assert_eq!(proposal, Proposal::new(round, View::new(2), digest));
         assert!(marshal.get_verified(round).await.is_some());
-        let votes: Vec<_> = [0usize, 1, 2]
-            .into_iter()
-            .map(|i| Notarize::sign(&schemes[i], proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap();
+        let notarization = StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
         certificate_sender.send(
-            Recipients::One(victim),
+            Recipients::One(victim.clone()),
             Certificate::<S, D>::Notarization(notarization).encode(),
             true,
         );
         loop {
-            let (_, message) = vote_receiver.recv().await.unwrap();
-            if let Vote::<S, D>::Finalize(vote) = Vote::decode(message).unwrap()
+            if let Vote::Finalize(vote) = next_vote(&mut vote_receiver, &victim).await
                 && vote.proposal.round == round
             {
                 assert_eq!(vote.proposal, proposal);
@@ -323,10 +324,10 @@ fn retained_pipeline_handoff(certification_first: bool) {
 
 #[test_traced("WARN")]
 fn test_pipeline_handoff_retains_completed_build_until_parent_certification() {
-    retained_pipeline_handoff(false);
+    retained_pipeline_handoff(First::Build);
 }
 
 #[test_traced("WARN")]
 fn test_pipeline_handoff_retains_build_across_parent_certification() {
-    retained_pipeline_handoff(true);
+    retained_pipeline_handoff(First::Certification);
 }

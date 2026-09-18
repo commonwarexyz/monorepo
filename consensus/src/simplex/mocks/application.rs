@@ -137,10 +137,6 @@ type Latency = (f64, f64);
 /// detect spurious propose calls.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
-/// Handler that takes ownership of a proposal response so tests can decide
-/// when it completes.
-type ProposeController<D> = Box<dyn Fn(D, oneshot::Sender<D>) + Send + 'static>;
-
 /// Handler that takes ownership of a handoff proposal response so tests can
 /// decide when it completes.
 type HandoffProposeController<D> =
@@ -216,15 +212,10 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
 
     verified: HashSet<H::Digest>,
 
-    /// Invoked on every `Message::Propose` request received by the application.
-    /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
+    /// Invoked on every ordinary and handoff proposal request received by the
+    /// application, so tests can count builds per view and detect spurious
+    /// local-leader propose attempts (e.g. after replay).
     propose_observer: Option<ProposeObserver<H, P>>,
-
-    /// Invoked on every handoff proposal request received by the application.
-    handoff_propose_observer: Option<ProposeObserver<H, P>>,
-
-    /// Takes ownership of regular proposal responses when configured.
-    propose_controller: Option<ProposeController<H::Digest>>,
 
     /// Takes ownership of handoff proposal responses when configured.
     handoff_propose_controller: Option<HandoffProposeController<H::Digest>>,
@@ -274,6 +265,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 drop_proposals: false,
                 stall_proposals: false,
                 accept_handoffs: false,
+                // Tests exercise early publication by default; production
+                // applications default to `AfterCertification`.
                 handoff_publication: HandoffPublication::AllowBeforeCertification,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
@@ -282,8 +275,6 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 seen: HashMap::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
-                handoff_propose_observer: None,
-                propose_controller: None,
                 handoff_propose_controller: None,
                 verify_observer: None,
                 pending_proposes: Vec::new(),
@@ -326,14 +317,6 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
         self.propose_observer = Some(observer);
-    }
-
-    pub fn set_handoff_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
-        self.handoff_propose_observer = Some(observer);
-    }
-
-    pub fn set_propose_controller(&mut self, controller: ProposeController<H::Digest>) {
-        self.propose_controller = Some(controller);
     }
 
     pub fn set_handoff_propose_controller(
@@ -516,20 +499,13 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             continue;
                         }
                         let digest = self.propose(context).await;
-                        if let Some(controller) = &self.propose_controller {
-                            controller(digest, response);
-                        } else {
-                            response.send_lossy(digest);
-                        }
+                        response.send_lossy(digest);
                     }
                     Message::ProposeHandoff {
                         context,
                         response,
                     } => {
                         if let Some(observer) = &self.propose_observer {
-                            observer(context.clone());
-                        }
-                        if let Some(observer) = &self.handoff_propose_observer {
                             observer(context.clone());
                         }
                         if !self.accept_handoffs {
