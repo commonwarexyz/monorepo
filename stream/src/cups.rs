@@ -8,7 +8,7 @@
 //! # Handshake
 //!
 //! [Sake] implements [crate::Handshake] using Commonware
-//! [SAKE](commonware_cryptography::sake) (Simple Authenticated Key Exchange) and returns CUPS
+//! [SAKE](commonware_cryptography::handshake::sake) (Simple Authenticated Key Exchange) and returns CUPS
 //! [Sender] and [Receiver] halves. SAKE uses a fixed three-message exchange with ephemeral X25519
 //! keys, identity signatures, and BLAKE3 transcript derivation to establish directional ciphers.
 //!
@@ -45,7 +45,7 @@ use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
-    sake::{
+    handshake::sake::{
         self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
         dial_start, listen_end, listen_start,
     },
@@ -107,7 +107,7 @@ impl From<HandshakeError> for Error {
 
 /// Establishes CUPS streams with Commonware SAKE (Simple Authenticated Key Exchange).
 ///
-/// Implements [crate::Handshake] using [commonware_cryptography::sake].
+/// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake].
 #[derive(Clone)]
 pub struct Sake<S> {
     /// Signer used to authenticate the local peer.
