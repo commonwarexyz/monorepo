@@ -1,9 +1,9 @@
 ---
 title: "So you wanna go fast?"
-description: "Performance work at Commonware, through the storage, concurrency, and crash guarantees behind Multimmit's marshal."
-date: "September 13th, 2026"
-published-time: "2026-09-13T00:00:00Z"
-modified-time: "2026-09-13T00:00:00Z"
+description: "Ordering a few GB/s efficiently on a blockchain is hard. How do we keep up with incoming blocks while leaving room to recover from slowdowns and crashes?"
+date: "September 19th, 2026"
+published-time: "2026-09-19T00:00:00Z"
+modified-time: "2026-09-19T00:00:00Z"
 author: "Ben Clabby"
 author_twitter: "https://x.com/vex_0x"
 url: "https://commonware.xyz/blogs/so-you-wanna-go-fast"
