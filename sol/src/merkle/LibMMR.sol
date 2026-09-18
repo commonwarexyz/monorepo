@@ -9,7 +9,7 @@ import { LibMerkleSparse } from "./LibMerkleSparse.sol";
 /// @dev Supports at most `2^62` leaves.
 /// `H` is native Keccak256 for `address(0)`. Other addresses receive raw hash input via
 /// `STATICCALL` and must return exactly 32 bytes. The caller must trust the selected hasher.
-/// A failed call or any other return length reverts with `Common.HashFailed()`.
+/// A failed call or any other return length reverts with `LibMerkleCommon.HashFailed()`.
 /// Entry points without policy arguments use `ForwardFold` and zero inactive peaks.
 /// Policy overloads select the fold direction and the inactive prefix committed by the root.
 /// `LibMerkle` documents shared hashing and the policy-dependent range proof layout.

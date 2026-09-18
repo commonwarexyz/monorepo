@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { UnorderedOracle } from "./Common.t.sol";
-import { Current } from "../src/qmdb/Current.sol";
+import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
@@ -11,7 +11,7 @@ struct QMDBCase {
     bytes32 root;
     bytes operation;
     uint256 chunkBytes;
-    Current.Proof proof;
+    LibQMDBCurrent.Proof proof;
 }
 
 /// @dev Append history supplies positions and ancestry independently of verifier geometry.
@@ -54,20 +54,21 @@ contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Check caller allocations, dirty scratch, and subsequent allocations on every exit path.
     function checked(QMDBCase calldata c) external view returns (bool) {
-        return _checked(c, 0, hex"", Current.ExclusionEncoding(0, 0));
+        return _checked(c, 0, hex"", LibQMDBCurrent.ExclusionEncoding(0, 0));
     }
 
     /// @dev Exercise exclusion with the same caller-memory checks as membership.
     function checkedExclusion(QMDBCase calldata c, bytes32 key) external view returns (bool) {
-        return _checked(c, 1, abi.encodePacked(key), Current.ExclusionEncoding(0, 0));
+        return _checked(c, 1, abi.encodePacked(key), LibQMDBCurrent.ExclusionEncoding(0, 0));
     }
 
     /// @dev Repeated verification preserves inputs and leaves subsequent allocations zeroed.
-    function _checked(QMDBCase calldata c, uint256 mode, bytes memory key, Current.ExclusionEncoding memory encoding)
-        internal
-        view
-        returns (bool valid)
-    {
+    function _checked(
+        QMDBCase calldata c,
+        uint256 mode,
+        bytes memory key,
+        LibQMDBCurrent.ExclusionEncoding memory encoding
+    ) internal view returns (bool valid) {
         bytes memory operation = c.operation;
         bytes memory guard = abi.encode(c);
         bytes32 beforeInputs = keccak256(abi.encode(operation, guard, key, encoding));
@@ -868,7 +869,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     function checkedVariableExclusion(
         QMDBCase calldata c,
         bytes calldata key,
-        Current.ExclusionEncoding calldata encoding
+        LibQMDBCurrent.ExclusionEncoding calldata encoding
     ) external view returns (bool) {
         return _checked(c, 2, key, encoding);
     }
@@ -898,7 +899,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Authenticate arbitrary operation bytes before testing their exclusion interpretation.
     function _variableCase(bytes memory operation, bytes memory key, bool expected) internal view {
         QMDBCase memory c = this.build(1, 0, operation, true);
-        Current.ExclusionEncoding memory encoding = Current.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
         assertEq(this.checkedVariableExclusion(c, key, encoding), expected);
     }
 
@@ -939,8 +941,9 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256 variableSize = type(uint256).max;
         for (uint256 keySize; keySize < 2; ++keySize) {
             for (uint256 valueSize; valueSize < 2; ++valueSize) {
-                Current.ExclusionEncoding memory encoding =
-                    Current.ExclusionEncoding(keySize == 0 ? variableSize : 1, valueSize == 0 ? variableSize : 1);
+                LibQMDBCurrent.ExclusionEncoding memory encoding = LibQMDBCurrent.ExclusionEncoding(
+                    keySize == 0 ? variableSize : 1, valueSize == 0 ? variableSize : 1
+                );
                 bytes memory left = keySize == 0 ? bytes(hex"0101") : bytes(hex"01");
                 bytes memory right = keySize == 0 ? bytes(hex"0103") : bytes(hex"03");
                 bytes memory value = valueSize == 0 ? bytes(hex"01ff") : bytes(hex"ff");
@@ -955,7 +958,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                 assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
             }
         }
-        Current.ExclusionEncoding memory emptyValue = Current.ExclusionEncoding(variableSize, 0);
+        LibQMDBCurrent.ExclusionEncoding memory emptyValue = LibQMDBCurrent.ExclusionEncoding(variableSize, 0);
         QMDBCase memory zero = this.build(1, 0, hex"d201010103", true);
         assertTrue(this.checkedVariableExclusion(zero, hex"02", emptyValue));
         zero = this.build(1, 0, hex"d30100", true);
@@ -978,7 +981,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         _variableCase(hex"d30000", hex"", true);
         _variableCase(hex"d3010000", hex"", true);
         _variableCase(hex"d30001", hex"", false);
-        Current.ExclusionEncoding memory encoding = Current.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
         for (uint256 location = 127; location <= 128; ++location) {
             QMDBCase memory c = this.build(location + 1, location, bytes.concat(hex"d300", _unsigned(location)), true);
             assertTrue(this.checkedVariableExclusion(c, hex"", encoding));
@@ -1025,7 +1029,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Exclusion remains bound to activity, operation bytes, witnesses, and the trusted root.
     function test_VariableExclusionProofBinding() public view {
-        Current.ExclusionEncoding memory encoding = Current.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
         bytes memory operation = hex"d20101000103";
         QMDBCase memory c = this.build(638, 17, operation, true);
         assertTrue(this.checkedVariableExclusion(c, hex"02", encoding));
@@ -1046,7 +1051,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256 leaves,
         uint256 location,
         bytes memory key,
-        Current.ExclusionEncoding memory encoding,
+        LibQMDBCurrent.ExclusionEncoding memory encoding,
         uint256 chunkBytes,
         string[] memory options
     ) internal returns (bool expected) {
@@ -1112,7 +1117,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Rust's raw-byte ordering covers prefix intervals, wraparound, mixed codecs, and empty commits.
     function test_DifferentialVariableExclusion() public {
         uint256 variableSize = type(uint256).max;
-        Current.ExclusionEncoding memory encoding = Current.ExclusionEncoding(variableSize, variableSize);
+        LibQMDBCurrent.ExclusionEncoding memory encoding = LibQMDBCurrent.ExclusionEncoding(variableSize, variableSize);
         string[] memory options = new string[](4);
         options[0] = "--keys";
         options[1] = "00,01,010000";
@@ -1177,7 +1182,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         if (querySeed % 4 == 2) query = bytes.concat(query, hex"00");
         if (querySeed % 4 == 3) query = hex"";
         uint256[6] memory chunks = [uint256(1), 2, 16, 32, 64, 128];
-        Current.ExclusionEncoding memory encoding = Current.ExclusionEncoding(type(uint256).max, type(uint256).max);
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
         string[] memory options = new string[](2);
         options[0] = "--mode";
         options[1] = "interval";

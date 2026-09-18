@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
-import { Common } from "../src/merkle/Common.sol";
+import { LibMerkleCommon } from "../src/merkle/LibMerkleCommon.sol";
 import { LibBMT } from "../src/merkle/LibBMT.sol";
 import { LibMMR } from "../src/merkle/LibMMR.sol";
 import { LibMMB } from "../src/merkle/LibMMB.sol";
@@ -1554,7 +1554,7 @@ contract HashAddressTest is MerkleTestCommon {
         for (uint256 algorithm; algorithm < 3; ++algorithm) {
             address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
             bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
-            assertEq(Common.hash(a, b, offset, length, target), expected);
+            assertEq(LibMerkleCommon.hash(a, b, offset, length, target), expected);
         }
     }
 
@@ -1565,7 +1565,7 @@ contract HashAddressTest is MerkleTestCommon {
             assembly ("memory-safe") { target := or(target, shl(160, not(0))) }
             bytes memory input = hex"00112233445566778899";
             bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
-            assertEq(Common.hash(hex"00112233445566778899", 0, 0, input.length, target), expected);
+            assertEq(LibMerkleCommon.hash(hex"00112233445566778899", 0, 0, input.length, target), expected);
             for (uint256 family; family < 3; ++family) {
                 CompatibilityCase memory c = singleCase(family == 1, family == 2);
                 if (algorithm == 0) {
@@ -1628,7 +1628,7 @@ contract HashAddressTest is MerkleTestCommon {
                 for (uint8 mode; mode < 3; ++mode) {
                     c.mode = mode;
                     for (uint256 location; location < 2; ++location) {
-                        vm.expectRevert(Common.HashFailed.selector);
+                        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
                         if (family == 2) this.bmtVerify(c, location != 0);
                         else harness.verify(c, location != 0, false);
                     }
@@ -1651,7 +1651,7 @@ contract HashAddressTest is MerkleTestCommon {
                     (bool success, bytes memory result) =
                         (family == 2 ? address(this) : address(harness)).staticcall{ gas: 200000 }(input);
                     assertFalse(success);
-                    assertEq(result, abi.encodeWithSelector(Common.HashFailed.selector));
+                    assertEq(result, abi.encodeWithSelector(LibMerkleCommon.HashFailed.selector));
                 }
             }
         }

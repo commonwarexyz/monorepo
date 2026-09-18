@@ -2,8 +2,8 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { Common } from "../src/qmdb/Common.sol";
-import { Current } from "../src/qmdb/Current.sol";
+import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
+import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
 import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
 import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
@@ -16,13 +16,13 @@ import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 struct BatchCase {
     bytes32 root;
     bytes[] operations;
-    Common.RangeProof range;
-    Common.MultiProof multi;
+    LibQMDBCommon.RangeProof range;
+    LibQMDBCommon.MultiProof multi;
     bool sparse;
     bool current;
     uint256 chunkBytes;
-    Current.RangeProof currentRange;
-    Current.OpsRootWitness witness;
+    LibQMDBCurrent.RangeProof currentRange;
+    LibQMDBCurrent.OpsRootWitness witness;
 }
 
 struct BatchNode {

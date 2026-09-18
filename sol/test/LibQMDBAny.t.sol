@@ -2,14 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { UnorderedOracle } from "./Common.t.sol";
-import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
 import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
 
 struct AnyCase {
     bytes32 root;
     bytes operation;
-    Common.Proof proof;
+    LibQMDBCommon.Proof proof;
 }
 
 struct AnyNode {

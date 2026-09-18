@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 /// @dev Shared Commonware peak geometry and root hashing.
-library Common {
+library LibMerkleCommon {
     /// @dev The selected hash target failed or returned a value other than 32 bytes.
     error HashFailed();
 
@@ -148,7 +148,7 @@ library Common {
                 default {
                     let success := staticcall(gas(), target, 0, 0x40, 0, 0x20)
                     if iszero(and(success, eq(returndatasize(), 0x20))) {
-                        mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                        mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
                         // Each external hash result must be checked before traversal continues.
                         // forge-lint: disable-next-line(require-revert-in-loop)
                         revert(0x1c, 4)

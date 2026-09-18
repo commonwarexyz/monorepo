@@ -2,8 +2,8 @@
 pragma solidity ^0.8.15;
 
 import { RawSha256Hasher } from "./Common.t.sol";
-import { Common as MerkleCommon } from "../src/merkle/Common.sol";
-import { Common } from "../src/qmdb/Common.sol";
+import { LibMerkleCommon } from "../src/merkle/LibMerkleCommon.sol";
+import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBBatchTest, BatchCase } from "./LibQMDBBatch.t.sol";
 import { LibQMDBCurrentTest, QMDBCase } from "./LibQMDBCurrent.t.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
@@ -66,7 +66,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
     }
 
     /// @dev Expose the Any singleton facade with an explicit raw hash target.
-    function singleAny(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
+    function singleAny(bytes32 root, bytes memory operation, LibQMDBCommon.Proof calldata proof, address hasher)
         external
         view
         returns (bool)
@@ -77,7 +77,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
     }
 
     /// @dev Expose the Keyless singleton facade with the same wire-shaped proof fields.
-    function singleKeyless(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
+    function singleKeyless(bytes32 root, bytes memory operation, LibQMDBCommon.Proof calldata proof, address hasher)
         external
         view
         returns (bool)
@@ -88,7 +88,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
     }
 
     /// @dev Expose the Immutable singleton facade with the same wire-shaped proof fields.
-    function singleImmutable(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
+    function singleImmutable(bytes32 root, bytes memory operation, LibQMDBCommon.Proof calldata proof, address hasher)
         external
         view
         returns (bool)
@@ -118,7 +118,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
     function singletonCall(BatchCase memory c, uint256 facade, address hasher) internal pure returns (bytes memory) {
         bytes4[3] memory selectors =
             [this.singleAny.selector, this.singleKeyless.selector, this.singleImmutable.selector];
-        Common.Proof memory proof = Common.Proof(c.range.leaves, c.range.start, 0, c.range.digests);
+        LibQMDBCommon.Proof memory proof = LibQMDBCommon.Proof(c.range.leaves, c.range.start, 0, c.range.digests);
         return abi.encodeWithSelector(selectors[facade], c.root, c.operations[0], proof, hasher);
     }
 
@@ -184,7 +184,7 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
             vm.etch(_hasher(), address(new QMDBLengthFaultHasher(length, lengths[mode], mode == 0)).code);
             (bool success, bytes memory output) = address(this).staticcall(input);
             assertFalse(success, "hash failure did not revert");
-            assertEq(output, abi.encodeWithSelector(MerkleCommon.HashFailed.selector), "wrong hash failure");
+            assertEq(output, abi.encodeWithSelector(LibMerkleCommon.HashFailed.selector), "wrong hash failure");
         }
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         accepted(input);
@@ -234,9 +234,9 @@ contract LibQMDBHashTest is LibQMDBBatchTest {
         BatchCase memory plain = build(13, sequence(0, 2), false);
         QMDBCase memory current = currentBuilder.buildChunk(33, 0, hex"010203", true, 2);
         vm.etch(_hasher(), hex"");
-        vm.expectRevert(MerkleCommon.HashFailed.selector);
+        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
         this.checked(plain);
-        vm.expectRevert(MerkleCommon.HashFailed.selector);
+        vm.expectRevert(LibMerkleCommon.HashFailed.selector);
         this.singleCurrent(current, _hasher(), false);
     }
 }

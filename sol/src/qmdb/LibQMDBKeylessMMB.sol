@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { Common } from "./Common.sol";
+import { LibQMDBCommon } from "./LibQMDBCommon.sol";
 
 /// @notice Verify inclusion of encoded operations in a keyless QMDB.
 /// @dev Operations include their append or commit tag and the database's fixed or variable encoding.
@@ -17,12 +17,12 @@ library LibQMDBKeylessMMB {
     /// @param proof Single-operation proof with its location and inactive peak boundary.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the operation reconstructs `root` and consumes every digest.
-    function verify(bytes32 root, bytes memory operation, Common.Proof calldata proof, address hasher)
+    function verify(bytes32 root, bytes memory operation, LibQMDBCommon.Proof calldata proof, address hasher)
         internal
         view
         returns (bool)
     {
-        return Common.verify(
+        return LibQMDBCommon.verify(
             root, operation, proof.leaves, proof.location, proof.digests, proof.inactivePeaks, true, hasher
         );
     }
@@ -33,12 +33,13 @@ library LibQMDBKeylessMMB {
     /// @param proof Range proof with its start location and backward-folded witnesses.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the range reconstructs `root` and consumes every digest.
-    function verifyRange(bytes32 root, bytes[] memory operations, Common.RangeProof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return Common.verifyRange(root, operations, proof, true, hasher);
+    function verifyRange(
+        bytes32 root,
+        bytes[] memory operations,
+        LibQMDBCommon.RangeProof calldata proof,
+        address hasher
+    ) internal view returns (bool) {
+        return LibQMDBCommon.verifyRange(root, operations, proof, true, hasher);
     }
 
     /// @notice Verify a sparse selection of encoded operations against a trusted keyless MMB root.
@@ -47,11 +48,12 @@ library LibQMDBKeylessMMB {
     /// @param proof Sparse proof with witnesses in increasing physical position order.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the selected operations reconstruct `root` and consume every witness.
-    function verifyMulti(bytes32 root, bytes[] memory operations, Common.MultiProof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return Common.verifyMulti(root, operations, proof, true, hasher);
+    function verifyMulti(
+        bytes32 root,
+        bytes[] memory operations,
+        LibQMDBCommon.MultiProof calldata proof,
+        address hasher
+    ) internal view returns (bool) {
+        return LibQMDBCommon.verifyMulti(root, operations, proof, true, hasher);
     }
 }

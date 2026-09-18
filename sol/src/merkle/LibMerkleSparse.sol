@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { Common as Merkle } from "./Common.sol";
+import { LibMerkleCommon } from "./LibMerkleCommon.sol";
 
 /// @dev Reconstructs each shared ancestor once and authenticates Commonware's exact witness union.
 library LibMerkleSparse {
@@ -117,7 +117,7 @@ library LibMerkleSparse {
     ) private view returns (bool valid) {
         if (leaves > (uint256(1) << 62) + (belt ? 30 : 0)) return false;
         if (count == 0) {
-            return leaves == 0 && inactive == 0 && proofCount == 0 && root == Merkle.emptyRoot(hasher);
+            return leaves == 0 && inactive == 0 && proofCount == 0 && root == LibMerkleCommon.emptyRoot(hasher);
         }
         if (leaves == 0) return false;
         uint256 free;
@@ -126,7 +126,7 @@ library LibMerkleSparse {
         uint256 pairs;
         assembly ("memory-safe") { pairs := mload(0x40) }
         uint256 peaks = pairs + count * 64;
-        uint256 end = peaks + Merkle.levels(leaves, belt) * 32;
+        uint256 end = peaks + LibMerkleCommon.levels(leaves, belt) * 32;
         assembly ("memory-safe") { mstore(0x40, end) }
         (uint256 unique, bool ok) = _elements(p, leaves, indices, elements, count, pairs, prehashed);
         if (ok) {
@@ -173,7 +173,7 @@ library LibMerkleSparse {
                     mstore(add(slot, 0x20), element)
                 }
             }
-            if (!sorted) Merkle.sortPairs(pairs, count);
+            if (!sorted) LibMerkleCommon.sortPairs(pairs, count);
             bytes32 previousElement = bytes32(0);
             for (uint256 i; i < count; ++i) {
                 uint256 index;
@@ -189,12 +189,13 @@ library LibMerkleSparse {
                     continue;
                 }
                 uint256 position = 0;
-                if (!prehashed) position = Merkle.position(Merkle.peak(index, 1, p.belt), 1, p.belt);
+                if (!prehashed) position = LibMerkleCommon.position(LibMerkleCommon.peak(index, 1, p.belt), 1, p.belt);
                 assembly ("memory-safe") {
                     let slot := add(pairs, shl(6, unique))
                     mstore(slot, index)
                 }
-                bytes32 digest = prehashed ? element : Merkle.hash(bytes32(position), element, 0x18, 0x28, p.hasher);
+                bytes32 digest =
+                    prehashed ? element : LibMerkleCommon.hash(bytes32(position), element, 0x18, 0x28, p.hasher);
                 assembly ("memory-safe") {
                     mstore(add(add(pairs, shl(6, unique)), 0x20), digest)
                 }
@@ -220,16 +221,16 @@ library LibMerkleSparse {
         unchecked {
             uint256 cursor = 0;
             uint256 peakCount = 0;
-            for (uint256 level = Merkle.levels(n, p.belt); level != 0;) {
-                uint256 w = Merkle.width(n, --level, p.belt);
+            for (uint256 level = LibMerkleCommon.levels(n, p.belt); level != 0;) {
+                uint256 w = LibMerkleCommon.width(n, --level, p.belt);
                 if (w == 0) continue;
                 uint256 from = p.cursor;
-                uint256 pos = Merkle.peak(cursor, w, p.belt);
+                uint256 pos = LibMerkleCommon.peak(cursor, w, p.belt);
                 (bytes32 digest, bool ok) = _subtree(p, pos, w, cursor);
                 if (!ok) return false;
                 uint256 selected = p.cursor - from;
                 if (selected != 0 && selected != count * 64) {
-                    (bytes32 witness, bool found) = _witness(p, Merkle.position(pos, w, p.belt));
+                    (bytes32 witness, bool found) = _witness(p, LibMerkleCommon.position(pos, w, p.belt));
                     if (!found || witness != digest) return false;
                 }
                 assembly ("memory-safe") { mstore(add(peaks, shl(5, peakCount)), digest) }
@@ -237,8 +238,8 @@ library LibMerkleSparse {
                 cursor += w;
             }
             if (inactive > peakCount || p.used != p.length) return false;
-            bytes32 acc = Merkle.bag(peaks, peakCount, inactive, backward, p.hasher);
-            return Merkle.root(n, inactive, acc, p.hasher) == root;
+            bytes32 acc = LibMerkleCommon.bag(peaks, peakCount, inactive, backward, p.hasher);
+            return LibMerkleCommon.root(n, inactive, acc, p.hasher) == root;
         }
     }
 
@@ -253,10 +254,10 @@ library LibMerkleSparse {
     {
         unchecked {
             uint256 from = p.cursor;
-            if (from == p.end) return _witness(p, Merkle.position(pos, w, p.belt));
+            if (from == p.end) return _witness(p, LibMerkleCommon.position(pos, w, p.belt));
             uint256 index;
             assembly ("memory-safe") { index := mload(from) }
-            if (index >= cursor + w) return _witness(p, Merkle.position(pos, w, p.belt));
+            if (index >= cursor + w) return _witness(p, LibMerkleCommon.position(pos, w, p.belt));
             if (w == 1) {
                 assembly ("memory-safe") { digest := mload(add(from, 0x20)) }
                 p.cursor = from + 64;
@@ -276,7 +277,7 @@ library LibMerkleSparse {
                 both = index < cursor + w;
             }
             if (both) {
-                (bytes32 expected, bool found) = _witness(p, Merkle.position(left, half, p.belt));
+                (bytes32 expected, bool found) = _witness(p, LibMerkleCommon.position(left, half, p.belt));
                 // forge-lint: disable-next-line(boolean-cst)
                 if (!found || expected != a) return (0, false);
             }
@@ -284,11 +285,11 @@ library LibMerkleSparse {
             // forge-lint: disable-next-line(boolean-cst)
             if (!validRight) return (0, false);
             if (both) {
-                (bytes32 expected, bool found) = _witness(p, Merkle.position(right, half, p.belt));
+                (bytes32 expected, bool found) = _witness(p, LibMerkleCommon.position(right, half, p.belt));
                 // forge-lint: disable-next-line(boolean-cst)
                 if (!found || expected != b) return (0, false);
             }
-            uint256 position = Merkle.position(pos, w, p.belt);
+            uint256 position = LibMerkleCommon.position(pos, w, p.belt);
             address hasher = p.hasher;
             assembly ("memory-safe") {
                 hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
@@ -301,7 +302,7 @@ library LibMerkleSparse {
                 default {
                     let success := staticcall(gas(), hasher, 0x18, 0x48, 0, 0x20)
                     if iszero(and(success, eq(returndatasize(), 0x20))) {
-                        mstore(0, 0x832d9905) // `Common.HashFailed()`.
+                        mstore(0, 0x832d9905) // `LibMerkleCommon.HashFailed()`.
                         // Each external hash result must be checked before traversal continues.
                         // forge-lint: disable-next-line(require-revert-in-loop)
                         revert(0x1c, 4)

@@ -2,14 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
 import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
 
 struct ImmutableCase {
     bytes32 root;
     bytes operation;
-    Common.Proof proof;
+    LibQMDBCommon.Proof proof;
 }
 
 contract LibQMDBImmutableTest is HashTest {

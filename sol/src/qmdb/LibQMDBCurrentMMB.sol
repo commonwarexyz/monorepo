@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { Common } from "./Common.sol";
-import { Current } from "./Current.sol";
+import { LibQMDBCommon } from "./LibQMDBCommon.sol";
+import { LibQMDBCurrent } from "./LibQMDBCurrent.sol";
 
 /// @notice Verify active operations, historical operation inclusion and key exclusion in a current MMB QMDB.
 /// @dev The caller authenticates the root, schema, bitmap chunk byte size and hash target.
@@ -21,11 +21,11 @@ library LibQMDBCurrentMMB {
     function verify(
         bytes32 root,
         bytes memory operation,
-        Current.Proof calldata proof,
+        LibQMDBCurrent.Proof calldata proof,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return Current.verify(root, operation, proof, true, chunkBytes, hasher);
+        return LibQMDBCurrent.verify(root, operation, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify operation bytes and activity status for a current MMB range.
@@ -40,11 +40,11 @@ library LibQMDBCurrentMMB {
     function verifyRange(
         bytes32 root,
         bytes[] memory operations,
-        Current.RangeProof calldata proof,
+        LibQMDBCurrent.RangeProof calldata proof,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return Current.verifyRange(root, operations, proof, true, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyRange(root, operations, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify historical operation inclusion under a canonical current MMB root.
@@ -60,12 +60,12 @@ library LibQMDBCurrentMMB {
     function verifyOpsMulti(
         bytes32 root,
         bytes[] memory operations,
-        Common.MultiProof calldata proof,
-        Current.OpsRootWitness calldata witness,
+        LibQMDBCommon.MultiProof calldata proof,
+        LibQMDBCurrent.OpsRootWitness calldata witness,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return Current.verifyOpsMulti(root, operations, proof, witness, true, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyOpsMulti(root, operations, proof, witness, true, chunkBytes, hasher);
     }
 
     /// @notice Verify key exclusion against a trusted ordered current MMB root.
@@ -83,16 +83,16 @@ library LibQMDBCurrentMMB {
         bytes32 root,
         bytes32 key,
         bytes memory operation,
-        Current.Proof calldata proof,
+        LibQMDBCurrent.Proof calldata proof,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return Current.verifyExclusion(root, key, operation, proof, true, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyExclusion(root, key, operation, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify ordered key exclusion under a current MMB root with variable operation encoding.
     /// @dev Keys use raw byte lexicographic ordering. The trusted schema selects fixed-width fields
-    /// or byte vectors with canonical unsigned 32-bit varint lengths using `Current.VARIABLE_SIZE`.
+    /// or byte vectors with canonical unsigned 32-bit varint lengths using `LibQMDBCurrent.VARIABLE_SIZE`.
     /// @param root Authenticated current QMDB MMB root with the specified schema and chunk size.
     /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
@@ -105,11 +105,11 @@ library LibQMDBCurrentMMB {
         bytes32 root,
         bytes memory key,
         bytes memory operation,
-        Current.Proof calldata proof,
-        Current.ExclusionEncoding memory encoding,
+        LibQMDBCurrent.Proof calldata proof,
+        LibQMDBCurrent.ExclusionEncoding memory encoding,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return Current.verifyExclusionVariable(root, key, operation, proof, encoding, true, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyExclusionVariable(root, key, operation, proof, encoding, true, chunkBytes, hasher);
     }
 }

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { Current } from "../src/qmdb/Current.sol";
+import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
@@ -36,11 +36,13 @@ contract LibQMDBLifecycleTest is HashTest {
     }
 
     /// @dev Expose the calldata proof entrypoints with the fixture's 32-byte bitmap chunks.
-    function verify(bytes32 root, bytes memory operation, Current.Proof calldata proof, bool exclusion, bytes32 key)
-        external
-        view
-        returns (bool)
-    {
+    function verify(
+        bytes32 root,
+        bytes memory operation,
+        LibQMDBCurrent.Proof calldata proof,
+        bool exclusion,
+        bytes32 key
+    ) external view returns (bool) {
         if (exclusion) {
             return _mmb()
                 ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, 32, _hasher())
@@ -56,7 +58,7 @@ contract LibQMDBLifecycleTest is HashTest {
         return this.verify(
             operation.root,
             operation.operation,
-            Current.Proof(
+            LibQMDBCurrent.Proof(
                 operation.leaves,
                 operation.location,
                 operation.inactivePeaks,

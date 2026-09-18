@@ -2,14 +2,14 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { Common } from "../src/qmdb/Common.sol";
+import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
 import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
 
 struct KeylessCase {
     bytes32 root;
     bytes operation;
-    Common.Proof proof;
+    LibQMDBCommon.Proof proof;
 }
 
 contract LibQMDBKeylessTest is HashTest {
