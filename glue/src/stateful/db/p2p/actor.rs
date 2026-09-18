@@ -264,6 +264,8 @@ where
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
             }
             mailbox::Message::CancelOperations { request } => {
+                // A cancellation notice may arrive after new callers have joined.
+                // Keep the request while any caller still awaits a response.
                 let Some(pending) = self.pending.get_mut(&request) else {
                     return;
                 };
@@ -272,6 +274,8 @@ where
                     return;
                 }
 
+                // Remove only this group's ID: an earlier group may still be
+                // validating a response for the same key.
                 let subscriber = pending.subscriber;
                 self.pending.remove(&request);
                 resolver.retain(move |key, id| key != &request || *id != subscriber);
