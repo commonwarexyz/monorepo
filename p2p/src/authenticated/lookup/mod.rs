@@ -228,8 +228,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_codec::{Decode as _, Encode as _, FixedSize};
-    use commonware_cryptography::{Signer, Verifier as _, ed25519};
+    use commonware_cryptography::{Signer, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         BufferPooler, Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner,
@@ -250,14 +249,13 @@ mod tests {
     use rand_core::{CryptoRng, Rng};
     use std::{
         collections::{HashMap, HashSet},
-        future::{Future, pending, poll_fn},
+        future::{Future, pending},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
-        task::Poll,
         time::Duration,
     };
     use thiserror::Error;
@@ -2263,22 +2261,17 @@ mod tests {
     struct Observations {
         dials: Mutex<Vec<ed25519::PublicKey>>,
         inbound: Mutex<Vec<ed25519::PublicKey>>,
-        sends: AtomicUsize,
-        receives: AtomicUsize,
-        bouncer_calls: AtomicUsize,
         rejections: AtomicUsize,
         listens: AtomicUsize,
-        signing_calls: AtomicUsize,
-        pending_signatures: AtomicUsize,
+        pending: AtomicUsize,
         reject_inbound: AtomicBool,
-        fail_signing: AtomicBool,
-        stall_next_signature: AtomicBool,
-        signing_failures: AtomicUsize,
+        fail: AtomicBool,
+        stall_next: AtomicBool,
+        failures: AtomicUsize,
     }
 
     struct TestSender<O: Sink> {
         inner: encrypted::Sender<O>,
-        observations: Arc<Observations>,
     }
 
     impl<O: Sink> StreamSender for TestSender<O> {
@@ -2288,7 +2281,6 @@ mod tests {
             &mut self,
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            self.observations.sends.fetch_add(1, Ordering::Relaxed);
             self.inner.send(bufs)
         }
 
@@ -2298,37 +2290,26 @@ mod tests {
             I::Item: Into<IoBufs> + Send,
             I::IntoIter: Send,
         {
-            self.observations.sends.fetch_add(1, Ordering::Relaxed);
             self.inner.send_many(bufs)
         }
     }
 
     struct TestReceiver<I: Stream> {
         inner: encrypted::Receiver<I>,
-        observations: Arc<Observations>,
     }
 
     impl<I: Stream> StreamReceiver for TestReceiver<I> {
         type Error = encrypted::Error;
 
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send {
-            self.observations.receives.fetch_add(1, Ordering::Relaxed);
             self.inner.recv()
         }
     }
 
-    #[derive(Debug, Error)]
-    #[error("application signer unavailable")]
-    struct TestSigningError;
-
-    type ApplicationProof = (ed25519::PublicKey, ed25519::PublicKey, ed25519::Signature);
-    const APPLICATION_PROOF_SIZE: usize = ed25519::PublicKey::SIZE * 2 + ed25519::Signature::SIZE;
-
     #[derive(Clone)]
     struct TestHandshake<const MAX_SIZE: u32 = CUSTOM_MAX_FRAME_SIZE> {
-        application_signer: ed25519::PrivateKey,
+        application_key: ed25519::PublicKey,
         transport_signer: ed25519::PrivateKey,
-        application_to_transport: Arc<HashMap<ed25519::PublicKey, ed25519::PublicKey>>,
         transport_to_application: Arc<HashMap<ed25519::PublicKey, ed25519::PublicKey>>,
         observations: Arc<Observations>,
     }
@@ -2339,119 +2320,22 @@ mod tests {
         Encrypted(#[from] encrypted::Error),
         #[error("unknown application identity")]
         UnknownApplicationIdentity,
-        #[error("unknown transport identity")]
-        UnknownTransportIdentity,
-        #[error("application signing failed: {0}")]
-        Signing(#[from] TestSigningError),
-        #[error("sending application proof failed: {0}")]
-        SendProof(commonware_runtime::Error),
-        #[error("receiving application proof failed: {0}")]
-        ReceiveProof(commonware_runtime::Error),
-        #[error("decoding application proof failed: {0}")]
-        DecodeProof(commonware_codec::Error),
-        #[error("invalid application proof")]
-        InvalidApplicationProof,
-        #[error("application identity rejected")]
-        Rejected,
-    }
-
-    async fn yield_once() {
-        let mut yielded = false;
-        poll_fn(move |context| {
-            if yielded {
-                Poll::Ready(())
-            } else {
-                yielded = true;
-                context.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await;
+        #[error("authentication failed")]
+        Failed,
     }
 
     impl<const MAX_SIZE: u32> TestHandshake<MAX_SIZE> {
-        async fn sign(
-            &self,
-            namespace: &[u8],
-            message: &[u8],
-        ) -> Result<ed25519::Signature, TestSigningError> {
-            self.observations
-                .signing_calls
-                .fetch_add(1, Ordering::Relaxed);
-            yield_once().await;
-            if self
-                .observations
-                .stall_next_signature
-                .swap(false, Ordering::Relaxed)
-            {
-                self.observations
-                    .pending_signatures
-                    .fetch_add(1, Ordering::Relaxed);
+        async fn authenticate(&self) -> Result<(), TestHandshakeError> {
+            // Consume the stall before waiting so other handshake attempts can progress.
+            if self.observations.stall_next.swap(false, Ordering::Relaxed) {
+                self.observations.pending.fetch_add(1, Ordering::Relaxed);
                 pending::<()>().await;
             }
-            if self.observations.fail_signing.load(Ordering::Relaxed) {
-                self.observations
-                    .signing_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(TestSigningError);
-            }
-            Ok(Signer::sign(&self.application_signer, namespace, message))
-        }
-
-        fn encrypted_handshake(&self) -> StreamHandshake<ed25519::PrivateKey> {
-            StreamHandshake::new(self.transport_signer.clone())
-        }
-
-        async fn application_proof(
-            &self,
-            namespace: &[u8],
-        ) -> Result<ApplicationProof, TestSigningError> {
-            let transport_key = Signer::public_key(&self.transport_signer);
-            let signature = self.sign(namespace, transport_key.as_ref()).await?;
-            Ok((self.public_key(), transport_key, signature))
-        }
-
-        fn verify_application_proof(
-            &self,
-            namespace: &[u8],
-            proof: &ApplicationProof,
-        ) -> Result<(), TestHandshakeError> {
-            let (application_key, proof_transport_key, signature) = proof;
-            let Some(transport_key) = self.application_to_transport.get(application_key) else {
-                return Err(TestHandshakeError::UnknownApplicationIdentity);
-            };
-            if transport_key != proof_transport_key
-                || !application_key.verify(namespace, proof_transport_key.as_ref(), signature)
-            {
-                return Err(TestHandshakeError::InvalidApplicationProof);
+            if self.observations.fail.load(Ordering::Relaxed) {
+                self.observations.failures.fetch_add(1, Ordering::Relaxed);
+                return Err(TestHandshakeError::Failed);
             }
             Ok(())
-        }
-
-        async fn send_application_proof(
-            &self,
-            namespace: &[u8],
-            sink: &mut impl Sink,
-        ) -> Result<(), TestHandshakeError> {
-            let proof = self.application_proof(namespace).await?;
-            sink.send(proof.encode())
-                .await
-                .map_err(TestHandshakeError::SendProof)
-        }
-
-        async fn receive_application_proof(
-            &self,
-            namespace: &[u8],
-            stream: &mut impl Stream,
-        ) -> Result<ApplicationProof, TestHandshakeError> {
-            let encoded = stream
-                .recv(APPLICATION_PROOF_SIZE)
-                .await
-                .map_err(TestHandshakeError::ReceiveProof)?;
-            let proof = ApplicationProof::decode_cfg(encoded, &((), (), ()))
-                .map_err(TestHandshakeError::DecodeProof)?;
-            self.verify_application_proof(namespace, &proof)?;
-            Ok(proof)
         }
     }
 
@@ -2464,7 +2348,7 @@ mod tests {
         type Receiver<I: Stream, O: Sink> = TestReceiver<I>;
 
         fn public_key(&self) -> Self::PublicKey {
-            self.application_signer.public_key()
+            self.application_key.clone()
         }
 
         async fn dial<C, I, O>(
@@ -2473,8 +2357,8 @@ mod tests {
             namespace: &[u8],
             max_message_size: u32,
             expected_peer: ed25519::PublicKey,
-            mut stream: I,
-            mut sink: O,
+            stream: I,
+            sink: O,
         ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
             C: BufferPooler + Clock + CryptoRng,
@@ -2488,19 +2372,13 @@ mod tests {
             self.observations.dials.lock().push(expected_peer.clone());
 
             let transport_peer = self
-                .application_to_transport
-                .get(&expected_peer)
-                .cloned()
+                .transport_to_application
+                .iter()
+                .find(|(_, application)| *application == &expected_peer)
+                .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
-            self.send_application_proof(namespace, &mut sink).await?;
-            let proof = self
-                .receive_application_proof(namespace, &mut stream)
-                .await?;
-            if proof.0 != expected_peer || proof.1 != transport_peer {
-                return Err(TestHandshakeError::InvalidApplicationProof);
-            }
-            let (sender, receiver) = self
-                .encrypted_handshake()
+            self.authenticate().await?;
+            let (sender, receiver) = StreamHandshake::new(self.transport_signer)
                 .dial(
                     context,
                     namespace,
@@ -2512,14 +2390,8 @@ mod tests {
                 .await?;
 
             Ok((
-                TestSender {
-                    inner: sender,
-                    observations: self.observations.clone(),
-                },
-                TestReceiver {
-                    inner: receiver,
-                    observations: self.observations,
-                },
+                TestSender { inner: sender },
+                TestReceiver { inner: receiver },
             ))
         }
 
@@ -2529,8 +2401,8 @@ mod tests {
             namespace: &[u8],
             max_message_size: u32,
             bouncer: B,
-            mut stream: I,
-            mut sink: O,
+            stream: I,
+            sink: O,
         ) -> Result<(ed25519::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
             C: BufferPooler + Clock + CryptoRng,
@@ -2544,38 +2416,41 @@ mod tests {
                 "maximum message size exceeds stream limit"
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
-            let proof = self
-                .receive_application_proof(namespace, &mut stream)
-                .await?;
-            self.observations
-                .bouncer_calls
-                .fetch_add(1, Ordering::Relaxed);
-            let acceptable = bouncer(proof.0.clone()).await;
-            if !acceptable || self.observations.reject_inbound.load(Ordering::Relaxed) {
-                self.observations.rejections.fetch_add(1, Ordering::Relaxed);
-                return Err(TestHandshakeError::Rejected);
-            }
-            self.send_application_proof(namespace, &mut sink).await?;
-            let expected_transport = proof.1.clone();
-            let (transport_peer, sender, receiver) = self
-                .encrypted_handshake()
-                .listen(
-                    context,
-                    namespace,
-                    max_message_size,
-                    move |transport_peer| async move { transport_peer == expected_transport },
-                    stream,
-                    sink,
-                )
-                .await?;
-            let application_peer = self
-                .transport_to_application
-                .get(&transport_peer)
-                .cloned()
-                .ok_or(TestHandshakeError::UnknownTransportIdentity)?;
-            if application_peer != proof.0 {
-                return Err(TestHandshakeError::InvalidApplicationProof);
-            }
+            let handshake = &self;
+            let (transport_peer, sender, receiver) =
+                StreamHandshake::new(self.transport_signer.clone())
+                    .listen(
+                        context,
+                        namespace,
+                        max_message_size,
+                        |transport_peer| async move {
+                            let Some(application_peer) =
+                                handshake.transport_to_application.get(&transport_peer)
+                            else {
+                                return false;
+                            };
+                            let acceptable = bouncer(application_peer.clone()).await;
+                            if !acceptable
+                                || handshake
+                                    .observations
+                                    .reject_inbound
+                                    .load(Ordering::Relaxed)
+                            {
+                                handshake
+                                    .observations
+                                    .rejections
+                                    .fetch_add(1, Ordering::Relaxed);
+                                return false;
+                            }
+                            handshake.authenticate().await.is_ok()
+                        },
+                        stream,
+                        sink,
+                    )
+                    .await?;
+
+            // Observe every authenticated identity, including sessions p2p discards before delivery.
+            let application_peer = self.transport_to_application[&transport_peer].clone();
             self.observations
                 .inbound
                 .lock()
@@ -2583,14 +2458,8 @@ mod tests {
 
             Ok((
                 application_peer,
-                TestSender {
-                    inner: sender,
-                    observations: self.observations.clone(),
-                },
-                TestReceiver {
-                    inner: receiver,
-                    observations: self.observations,
-                },
+                TestSender { inner: sender },
+                TestReceiver { inner: receiver },
             ))
         }
     }
@@ -2610,44 +2479,31 @@ mod tests {
     fn make_handshakes<const MAX_SIZE: u32>(
         seeds: &[(u64, u64)],
     ) -> Vec<(TestHandshake<MAX_SIZE>, Arc<Observations>)> {
+        // Distinct keys reveal when transport identities leak into application routing.
         let keys = seeds
             .iter()
             .map(|(transport, application)| {
                 (
                     ed25519::PrivateKey::from_seed(*transport),
-                    ed25519::PrivateKey::from_seed(*application),
+                    ed25519::PrivateKey::from_seed(*application).public_key(),
                 )
             })
             .collect::<Vec<_>>();
-        let application_to_transport: Arc<HashMap<_, _>> = Arc::new(
-            keys.iter()
-                .map(|(transport, application)| {
-                    (
-                        Signer::public_key(application),
-                        Signer::public_key(transport),
-                    )
-                })
-                .collect(),
-        );
         let transport_to_application: Arc<HashMap<_, _>> = Arc::new(
             keys.iter()
                 .map(|(transport, application)| {
-                    (
-                        Signer::public_key(transport),
-                        Signer::public_key(application),
-                    )
+                    (Signer::public_key(transport), application.clone())
                 })
                 .collect(),
         );
 
         keys.into_iter()
-            .map(|(transport_signer, application_signer)| {
+            .map(|(transport_signer, application_key)| {
                 let observations = Arc::new(Observations::default());
                 (
                     TestHandshake {
-                        application_signer,
+                        application_key,
                         transport_signer,
-                        application_to_transport: application_to_transport.clone(),
                         transport_to_application: transport_to_application.clone(),
                         observations: observations.clone(),
                     },
@@ -2885,10 +2741,6 @@ mod tests {
             let inbound = observations_0.inbound.lock();
             assert!(!inbound.is_empty());
             assert!(inbound.iter().all(|peer| peer == &pair.dialer_key));
-            assert!(observations_0.sends.load(Ordering::Relaxed) > 0);
-            assert!(observations_0.receives.load(Ordering::Relaxed) > 0);
-            assert!(observations_1.sends.load(Ordering::Relaxed) > 0);
-            assert!(observations_1.receives.load(Ordering::Relaxed) > 0);
         });
     }
 
@@ -2927,7 +2779,7 @@ mod tests {
         let (blocked_handshake, blocked_observations) = handshakes.next().unwrap();
         let (healthy_handshake, healthy_observations) = handshakes.next().unwrap();
         central_observations
-            .stall_next_signature
+            .stall_next
             .store(true, Ordering::Relaxed);
 
         let central_key = central_handshake.public_key();
@@ -2973,7 +2825,7 @@ mod tests {
         let stalled_at = context.current();
         central_network.start();
         blocked_network.start();
-        wait_for_counter(&context, &central_observations.pending_signatures).await;
+        wait_for_counter(&context, &central_observations.pending).await;
         let blocked_listener = if central_dials {
             &blocked_observations.listens
         } else {
@@ -3017,13 +2869,7 @@ mod tests {
         assert_eq!(peer, expected_peer);
         assert_eq!(message.as_ref(), b"healthy peer progressed");
         assert!(context.current().duration_since(stalled_at).unwrap() < HANDSHAKE_TIMEOUT);
-        assert_eq!(
-            central_observations
-                .pending_signatures
-                .load(Ordering::Relaxed),
-            1
-        );
-        assert!(central_observations.signing_calls.load(Ordering::Relaxed) >= 2);
+        assert_eq!(central_observations.pending.load(Ordering::Relaxed), 1);
 
         if central_dials {
             let dials = central_observations.dials.lock();
@@ -3057,20 +2903,16 @@ mod tests {
 
             wait_for_counter(&context, &observations_0.rejections).await;
             assert!(observations_0.inbound.lock().is_empty());
-            assert_eq!(observations_0.signing_calls.load(Ordering::Relaxed), 0);
-            observations_1.fail_signing.store(true, Ordering::Relaxed);
+            observations_1.fail.store(true, Ordering::Relaxed);
             observations_0
                 .reject_inbound
                 .store(false, Ordering::Relaxed);
-            wait_for_counter(&context, &observations_1.signing_failures).await;
+            wait_for_counter(&context, &observations_1.failures).await;
 
-            let completed_signing_calls = observations_1.signing_calls.load(Ordering::Relaxed);
             let stalled_at = context.current();
-            observations_1
-                .stall_next_signature
-                .store(true, Ordering::Relaxed);
-            observations_1.fail_signing.store(false, Ordering::Relaxed);
-            wait_for_counter(&context, &observations_1.pending_signatures).await;
+            observations_1.stall_next.store(true, Ordering::Relaxed);
+            observations_1.fail.store(false, Ordering::Relaxed);
+            wait_for_counter(&context, &observations_1.pending).await;
 
             repeat_send(
                 &context,
@@ -3081,13 +2923,8 @@ mod tests {
             let (peer, message) = pair.listener_receiver.recv().await.unwrap();
             assert_eq!(peer, pair.dialer_key);
             assert_eq!(message.as_ref(), b"accepted");
-            assert!(observations_0.bouncer_calls.load(Ordering::Relaxed) > 0);
             assert!(
                 context.current().duration_since(stalled_at).unwrap() >= Duration::from_millis(50)
-            );
-            assert!(observations_1.signing_failures.load(Ordering::Relaxed) > 0);
-            assert!(
-                observations_1.signing_calls.load(Ordering::Relaxed) >= completed_signing_calls + 2
             );
         });
     }

@@ -202,16 +202,19 @@ where
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
+        // Inbound and outbound connections share the same handshake policy.
+        let stream_cfg = StreamConfig {
+            handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
+            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
+            max_message_size: self.max_frame_size,
+        };
+
         // Start listener
         let listener = listener::Actor::new(
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                stream_cfg: StreamConfig {
-                    handshake: Timeout::new(self.cfg.handshake.clone(), self.cfg.handshake_timeout),
-                    namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-                    max_message_size: self.max_frame_size,
-                },
+                stream_cfg: stream_cfg.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
                 bypass_ip_check: self.cfg.bypass_ip_check,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
@@ -227,11 +230,7 @@ where
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                stream_cfg: StreamConfig {
-                    handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
-                    namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-                    max_message_size: self.max_frame_size,
-                },
+                stream_cfg,
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,

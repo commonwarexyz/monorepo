@@ -239,17 +239,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
+        // Inbound and outbound connections share the same handshake policy.
+        let stream_cfg = StreamConfig {
+            handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
+            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
+            max_message_size: self.max_frame_size,
+        };
+
         // Start listener
-        let stream_namespace = union(&self.cfg.namespace, STREAM_SUFFIX);
         let listener = listener::Actor::new(
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                stream_cfg: StreamConfig {
-                    handshake: Timeout::new(self.cfg.handshake.clone(), self.cfg.handshake_timeout),
-                    namespace: stream_namespace.clone(),
-                    max_message_size: self.max_frame_size,
-                },
+                stream_cfg: stream_cfg.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
@@ -263,11 +265,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                stream_cfg: StreamConfig {
-                    handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
-                    namespace: stream_namespace,
-                    max_message_size: self.max_frame_size,
-                },
+                stream_cfg,
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,

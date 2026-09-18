@@ -89,8 +89,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
-    /// already ready (via `try_recv`), so this reduces runtime write calls
-    /// without introducing a per-connection timer or extra buffering latency.
+    /// already ready, so batching adds no buffering latency.
     #[allow(clippy::too_many_arguments)]
     fn extend_send_many<V, S, R>(
         peer: &C,
@@ -184,7 +183,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer, batching
-                        // any already-queued messages into the same write.
+                        // any already-queued messages into the same batch.
                         Self::push_batched(
                             &self.sent_messages,
                             &mut batch,
@@ -208,7 +207,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         deadline = context.current() + self.ping_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
-                    // drain already-queued messages into a single runtime write.
+                    // drain already-queued messages into one `send_many` call.
                     // Priority order: control > high > low.
                     msg = Self::recv_prioritized(control, high, low) => {
                         match msg {

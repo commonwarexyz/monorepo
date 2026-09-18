@@ -71,7 +71,8 @@ pub struct Config<H: Handshake> {
     /// rate limits and [`Config::max_peers_per_set`].
     pub mailbox_size: NonZeroUsize,
 
-    /// Maximum number of already-queued outbound messages to combine into one connection write.
+    /// Maximum number of already-queued outbound messages passed to one
+    /// [`commonware_stream::Sender::send_many`] call.
     ///
     /// Set this to `1` to disable batching.
     pub send_batch_size: NonZeroUsize,

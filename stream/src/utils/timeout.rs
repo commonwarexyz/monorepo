@@ -68,6 +68,7 @@ impl<H: Handshake> Handshake for Timeout<H> {
         I: Stream,
         O: Sink,
     {
+        // Construct the handshake future before wrapping it so it can consume a non-Send peer.
         let timeout = context.sleep(self.timeout);
         let attempt = self
             .handshake
