@@ -229,7 +229,7 @@ The operator can then verify the certificate and check that the proposal hash ma
 Figure 4: Every signer derives the same three QMDB roots before signing one close commitment. For 100 validators with at most 33 faulty members, 34 signatures suffice.
 :::
 
-Deployments can choose their certificate scheme. With BLS12-381 multisignatures (MinSig), the certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes.
+Deployments can choose their certificate scheme. With [BLS12-381 multisignatures (MinSig)](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/certificate/multisig/index.html), the certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes.
 
 The validator-derived root bundle is 184 bytes. With the eight-byte withdrawal total, it forms a 192-byte close descriptor. Sending that descriptor with the commitment and certificate takes 293 bytes before chain transaction framing. The operator's dealing is separate.
 

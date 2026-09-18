@@ -442,13 +442,14 @@ O’Grady</a></div>
         before signing one close commitment. For 100 validators with at
         most 33 faulty members, 34 signatures suffice.</p>
         </div>
-        <p>Deployments can choose their certificate scheme. With
-        BLS12-381 multisignatures (MinSig), the certificate is one
-        48-byte aggregate signature plus a <span
-        class="math inline">\lceil n/8\rceil</span>-byte signer bitmap,
-        with proofs of possession checked at committee registration.
-        Including the 32-byte commitment and an eight-byte bitmap-length
-        prefix, the total for 100 validators is 101 bytes.</p>
+        <p>Deployments can choose their certificate scheme. With <a
+        href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/certificate/multisig/index.html">BLS12-381
+        multisignatures (MinSig)</a>, the certificate is one 48-byte
+        aggregate signature plus a <span class="math inline">\lceil
+        n/8\rceil</span>-byte signer bitmap, with proofs of possession
+        checked at committee registration. Including the 32-byte
+        commitment and an eight-byte bitmap-length prefix, the total for
+        100 validators is 101 bytes.</p>
         <p>The validator-derived root bundle is 184 bytes. With the
         eight-byte withdrawal total, it forms a 192-byte close
         descriptor. Sending that descriptor with the commitment and
