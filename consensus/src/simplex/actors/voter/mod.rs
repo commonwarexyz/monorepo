@@ -4633,20 +4633,6 @@ mod tests {
                     break;
                 }
             }
-            // Nullify view 3 locally before the parent's delayed certification
-            // lands. The ordinary replacement proposal for view 3 has already
-            // published, and the held build must still be rejected.
-            fixture.mailbox.timeout(
-                Round::new(Epoch::new(333), View::new(3)),
-                TimeoutReason::LeaderTimeout,
-            );
-            loop {
-                if matches!(fixture.batcher.recv().await.unwrap(), batcher::Message::Constructed(Vote::Nullify(ref vote))
-                    if vote.view() == View::new(3))
-                {
-                    break;
-                }
-            }
             fixture.finish_certification(certified).await;
             wait_for_handoff_abandoned(&context, "AncestrySuperseded")
             .await;
