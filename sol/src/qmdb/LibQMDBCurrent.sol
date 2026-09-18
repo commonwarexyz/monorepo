@@ -3,6 +3,7 @@ pragma solidity ^0.8.15;
 
 import { Common } from "../merkle/Common.sol";
 import { LibMerkle } from "../merkle/LibMerkle.sol";
+import { Common as QMDBCommon } from "./Common.sol";
 
 /// @notice Verify active operations and key exclusion in a current QMDB with 32-byte bitmap chunks.
 /// @dev Uses QMDB's backward peak fold and big-endian position and count encodings.
@@ -143,12 +144,8 @@ library LibQMDBCurrent {
             }
         }
 
-        uint256 position = Common.position(Common.peak(loc, 1, mmb), 1, mmb);
-        // The leaf bound keeps every physical position below `2^64`.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        bytes32 leaf = Common.hash(abi.encodePacked(uint64(position), operation), hasher);
-        (bytes32 merkleRoot, bool valid) = LibMerkle.reconstructGrafted(
-            n, loc, leaf, proof.digests, proof.inactivePeaks, LibMerkle.Graft(proof.chunk, 256), mmb, hasher
+        (bytes32 merkleRoot, bool valid) = QMDBCommon.reconstruct(
+            n, loc, operation, proof.digests, proof.inactivePeaks, LibMerkle.Graft(proof.chunk, 256), mmb, hasher
         );
         if (!valid) return false;
         return _root(proof, merkleRoot, pending, nextBit, hasher) == root;

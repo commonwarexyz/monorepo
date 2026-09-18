@@ -46,7 +46,8 @@ library LibMerkle {
 
     /// @dev Reconstruct a backward-folded root from a positioned leaf digest in the selected tree family.
     /// `graft.prefix` is hashed before the ancestor digest at `graft.width` leaves.
-    /// Width is zero to disable grafting or a power of two of at least two.
+    /// Width is zero to disable ancestor grafting or a power of two of at least two.
+    /// The leaf is already positioned and hashed even when the width is zero.
     /// Callers authenticate the returned root.
     function reconstructGrafted(
         uint256 leaves,
