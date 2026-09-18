@@ -959,6 +959,44 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok((self, position, offset, size))
     }
 
+    /// Append multiple entry/value pairs to one section.
+    ///
+    /// Values are written before their located index entries. Returns the last index position and
+    /// each value's `(offset, size)` in input order. Batches larger than one hold all encoded value
+    /// frames in one temporary buffer, so callers should bound the total encoded input size.
+    /// Returns [Error::EmptyAppend] for no entries.
+    pub async fn append_many(
+        mut self,
+        section: u64,
+        entries: &[(I, V)],
+    ) -> Result<(Self, u64, Vec<(u64, u32)>), Error> {
+        if entries.is_empty() {
+            return Err(Error::EmptyAppend);
+        }
+        if let [(entry, value)] = entries {
+            let (journal, position, offset, size) =
+                self.append(section, entry.clone(), value).await?;
+            return Ok((journal, position, vec![(offset, size)]));
+        }
+
+        let locations;
+        (self.values, locations) = self
+            .values
+            .append_many(section, entries.iter().map(|(_, value)| value))
+            .await?;
+        let mut position = 0;
+        for ((entry, _), &(offset, size)) in entries.iter().zip(&locations) {
+            let located = entry.clone().with_location(offset, size);
+            (self.index, position) = self.index.append(section, &located).await?;
+        }
+
+        if let Some(tracking) = &mut self.tracking {
+            tracking.barrier(section);
+        }
+
+        Ok((self, position, locations))
+    }
+
     /// Get entry at position (index entry only, not value).
     pub async fn get(&self, section: u64, position: u64) -> Result<I, Error> {
         self.index.get(section, position).await
@@ -2038,6 +2076,106 @@ mod tests {
             assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_recovery() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let mut cfg = test_cfg(&context);
+                cfg.compression = compression;
+                let entries = vec![
+                    (TestEntry::new(1, 0, 0), [1; 16]),
+                    (TestEntry::new(2, 0, 0), [2; 16]),
+                    (TestEntry::new(3, 0, 0), [3; 16]),
+                ];
+                let oversized = Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                let singleton = [(TestEntry::new(0, 0, 0), [0; 16])];
+                let (oversized, first, first_location) =
+                    oversized.append_many(5, &singleton).await.unwrap();
+                assert_eq!(first, 0);
+                assert_eq!(first_location.len(), 1);
+                assert_eq!(
+                    oversized
+                        .get_value(5, first_location[0].0, first_location[0].1)
+                        .await
+                        .unwrap(),
+                    [0; 16]
+                );
+                let (oversized, last, locations) =
+                    oversized.append_many(5, &entries).await.unwrap();
+                assert_eq!(last, 3);
+                assert_eq!(locations.len(), entries.len());
+                for pair in locations.windows(2) {
+                    assert_eq!(pair[0].0 + u64::from(pair[0].1), pair[1].0);
+                }
+                for (position, ((expected, value), &(offset, size))) in
+                    entries.iter().zip(&locations).enumerate()
+                {
+                    let actual = oversized.get(5, position as u64 + 1).await.unwrap();
+                    assert_eq!(actual.id, expected.id);
+                    assert_eq!(actual.value_location(), (offset, size));
+                    assert_eq!(oversized.get_value(5, offset, size).await.unwrap(), *value);
+                }
+                drop(oversized.sync(5).await.unwrap());
+
+                let oversized =
+                    Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
+                        .await
+                        .unwrap();
+                for (position, ((expected, value), &(offset, size))) in
+                    entries.iter().zip(&locations).enumerate()
+                {
+                    let actual = oversized.get(5, position as u64 + 1).await.unwrap();
+                    assert_eq!(actual.id, expected.id);
+                    assert_eq!(actual.value_location(), (offset, size));
+                    assert_eq!(oversized.get_value(5, offset, size).await.unwrap(), *value);
+                }
+                oversized.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_rejects_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            let oversized = Oversized::<_, TestEntry, TestValue>::init(
+                context.child("empty"),
+                test_cfg(&context),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                oversized.append_many(0, &[]).await,
+                Err(Error::EmptyAppend)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_index_failure_is_fatal() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = WriteFaults::default();
+            let faulty = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let mut cfg = test_cfg(&faulty);
+            cfg.index_write_buffer = NZUsize!(1);
+            cfg.value_write_buffer = NZUsize!(4096);
+            let oversized = Oversized::init(faulty, cfg).await.unwrap();
+            let entries = (0..10)
+                .map(|id| (TestEntry::new(id, 0, 0), [id as u8; 16]))
+                .collect::<Vec<_>>();
+
+            faults.arm();
+            assert!(matches!(
+                oversized.append_many(0, &entries).await,
+                Err(Error::Runtime(_))
+            ));
         });
     }
 
