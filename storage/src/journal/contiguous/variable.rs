@@ -3468,10 +3468,13 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Churn the 4-page pool with section-1 frames (five data pages) so every
-            // section-0 page is evicted, then warm the offsets page shared by positions
-            // 0..64 without touching position 0's frame page (302-byte frames put frame 0
-            // in page 0 and frame 4 in page 2).
+            // Position 0's frame page already left the 4-page pool during the writes: its
+            // single Small slot evicts each flushed page when the next one arrives. Churn the
+            // pool with section-1 frames (five data pages), then warm the offsets page shared
+            // by positions 0..64 without touching position 0's frame page (302-byte frames put
+            // frame 0 in page 0 and frame 4 in page 2).
+            let (items, _) = reader.probe_parts(&[0]);
+            assert!(items[0].is_none());
             reader
                 .read_many(&(128..136).collect::<Vec<u64>>())
                 .await

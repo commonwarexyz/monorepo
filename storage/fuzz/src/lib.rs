@@ -1,5 +1,5 @@
-//! Shared input generators, crash-recovery flows, and raw-image oracles for storage fuzz
-//! targets.
+//! Shared input generators, model checks, crash-recovery flows, and raw-image oracles for
+//! storage fuzz targets.
 
 use arbitrary::Unstructured;
 use commonware_runtime::{
@@ -9,7 +9,27 @@ use commonware_runtime::{
 use commonware_utils::{Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
-use std::future::Future;
+use std::{fmt::Debug, future::Future};
+
+/// Check strict, non-wrapping neighbors against the model's live keys.
+pub fn assert_ordered_neighbors<K: Ord + Debug>(
+    keys: impl IntoIterator<Item = K>,
+    query: &K,
+    prev: Option<K>,
+    next: Option<K>,
+) {
+    let mut expected_prev = None;
+    let mut expected_next = None;
+    for key in keys {
+        if key < *query && expected_prev.as_ref().is_none_or(|prev| key > *prev) {
+            expected_prev = Some(key);
+        } else if key > *query && expected_next.as_ref().is_none_or(|next| key < *next) {
+            expected_next = Some(key);
+        }
+    }
+    assert_eq!(prev, expected_prev, "incorrect predecessor for {query:?}");
+    assert_eq!(next, expected_next, "incorrect successor for {query:?}");
+}
 
 /// Complete the oldest parked durability completion, if any.
 ///
