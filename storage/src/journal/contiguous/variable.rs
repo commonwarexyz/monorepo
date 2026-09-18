@@ -2351,7 +2351,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
+    /// or lose its failure. A failed data flush or sync fails the next append that reaches
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
+    /// changes the journal. A failed offsets or recovery-watermark sync is not observed by
+    /// commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2870,8 +2874,8 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
-    /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
+    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
+    /// slot. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
     fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
@@ -3464,10 +3468,13 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Churn the 4-page pool with section-1 frames (five data pages) so every
-            // section-0 page is evicted, then warm the offsets page shared by positions
-            // 0..64 without touching position 0's frame page (302-byte frames put frame 0
-            // in page 0 and frame 4 in page 2).
+            // Position 0's frame page already left the 4-page pool during the writes: its
+            // single Small slot evicts each flushed page when the next one arrives. Churn the
+            // pool with section-1 frames (five data pages), then warm the offsets page shared
+            // by positions 0..64 without touching position 0's frame page (302-byte frames put
+            // frame 0 in page 0 and frame 4 in page 2).
+            let (items, _) = reader.probe_parts(&[0]);
+            assert!(items[0].is_none());
             reader
                 .read_many(&(128..136).collect::<Vec<u64>>())
                 .await

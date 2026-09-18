@@ -936,8 +936,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn append(&mut self, item: &A) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
-        self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
-            .await
+        let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
+        if self.blobs.tail_writer().try_append_value(item).is_none() {
+            return self
+                .append_many_inner(Many::Flat(std::slice::from_ref(item)))
+                .await;
+        }
+        self.advance_tail(new_size).await?;
+        Ok(self.finish_append())
     }
 
     /// See [Journal::append_many].
@@ -1020,21 +1026,30 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 .tail_writer()
                 .append_owned(items_buf.slice(start..end))
                 .await?;
-            self.bounds.end = new_size;
+            self.advance_tail(new_size).await?;
             written += batch_count;
-
-            // Seal the just-filled tail, start syncing it, and open the next blob as the new tail.
-            if new_size.is_multiple_of(self.items_per_blob.get()) {
-                self.blobs.seal_tail().await?;
-            }
         }
 
+        Ok(self.finish_append())
+    }
+
+    // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
+    async fn advance_tail(&mut self, new_size: u64) -> Result<(), Error> {
+        self.bounds.end = new_size;
+        if new_size.is_multiple_of(self.items_per_blob.get()) {
+            self.blobs.seal_tail().await?;
+        }
+        Ok(())
+    }
+
+    // Record state metrics once after a successful append, including multi-blob batches.
+    fn finish_append(&self) -> u64 {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
             self.items_per_blob.get(),
         );
-        Ok(self.bounds.end - 1)
+        self.bounds.end - 1
     }
 
     /// See [Journal::rewind].
@@ -1264,7 +1279,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
+    /// or lose its failure. A failed data flush or sync fails the next append that reaches
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
+    /// changes the journal. A failed recovery-watermark sync is not observed by commit and
+    /// resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -1766,6 +1785,53 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_append_buffer_fallback_rotation_and_snapshot() {
+        for write_buffer in [NZUsize!(44), NZUsize!(2048)] {
+            deterministic::Runner::default().start(|context| async move {
+                let mut cfg = test_cfg(&context, NZU64!(7));
+                cfg.write_buffer = write_buffer;
+                let mut journal = Journal::<_, Digest>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..3 {
+                    let position;
+                    (journal, position) = journal.append(&test_digest(i)).await.unwrap();
+                    assert_eq!(position, i);
+                }
+                let snapshot;
+                (journal, snapshot) = journal.snapshot().await.unwrap();
+
+                // Mix direct and prepared appends across buffer and blob boundaries.
+                for i in 3..20 {
+                    let position;
+                    if i % 3 == 0 {
+                        let item = test_digest(i);
+                        let prepared = journal.prepare_append(Many::Flat(&[item]));
+                        (journal, position) = journal.append_prepared(prepared).await.unwrap();
+                    } else {
+                        (journal, position) = journal.append(&test_digest(i)).await.unwrap();
+                    }
+                    assert_eq!(position, i);
+                    assert_eq!(journal.size(), i + 1);
+                }
+                for i in 0..3 {
+                    assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+                }
+                journal = journal.sync().await.unwrap();
+                drop(snapshot);
+                drop(journal);
+
+                let journal = Journal::<_, Digest>::init(context, cfg).await.unwrap();
+                assert_eq!(journal.size(), 20);
+                for i in 0..20 {
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
     fn test_fixed_cached_read_preserves_owned_byte_fields() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
@@ -2109,8 +2175,8 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
-    /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
+    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
+    /// slot. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
     fn test_fixed_dropped_failed_start_sync_surfaces_after_rollover() {
@@ -2141,6 +2207,47 @@ mod tests {
             // Appending through the blob boundary must surface the retained failure.
             assert!(matches!(
                 journal.append_many(Many::Flat(&[1, 2, 3])).await,
+                Err(Error::Runtime(_))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_dropped_failed_start_sync_surfaces_before_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(1000));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap(),
+            );
+
+            // Prove one item durable, then buffer more so the next start_sync rewrites the
+            // tail page. Fail that flush and drop the returned handle unobserved. The failed
+            // completion leaves the barrier unchanged, so no watermark write is attempted.
+            journal.append(&0).await.unwrap();
+            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(1.0),
+                    retention_rate: probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                ..Default::default()
+            };
+            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+
+            // An in-blob flush never consults the tail sync slot, so the tail writer alone must
+            // surface the retained failure: the append fails instead of treating the failed
+            // flush's checksum as durable and overwriting the slot that still is.
+            let overflow = vec![0u64; 300];
+            assert!(matches!(
+                journal.append_many(Many::Flat(&overflow[..])).await,
                 Err(Error::Runtime(_))
             ));
         });
@@ -6167,6 +6274,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
+            let page_cache = cfg.page_cache.clone();
             let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
@@ -6189,9 +6297,21 @@ mod tests {
                 }
             }
 
-            // The last blob (positions 16..20) spans at most the cache capacity, so after
-            // warming exactly those positions they are all served synchronously.
-            let tail: Vec<u64> = (16..20).collect();
+            // Consume tail-page history, then fill the cache with unrelated single-page reads.
+            // The synchronous-hit checks must hold without favorable prior admission state.
+            page_cache.clear();
+            reader
+                .read_many(&(16..20).collect::<Vec<_>>())
+                .await
+                .unwrap();
+            page_cache.clear();
+            for pos in [0, 4, 8] {
+                reader.read(pos).await.unwrap();
+            }
+
+            // Positions 18 and 19 span one cached page and the in-memory tail, so warming them
+            // makes both available synchronously.
+            let tail: Vec<u64> = (18..20).collect();
             reader.read_many(&tail).await.unwrap();
             let served = reader.try_read_many_sync(&tail);
             for (item, pos) in served.iter().zip(&tail) {
@@ -6226,12 +6346,12 @@ mod tests {
             drop(reader);
 
             // A pruned position is trimmed from the prefix rather than reaching offset
-            // derivation, and the valid remainder is still served.
+            // derivation, and the valid single-page remainder is still served.
             (journal, _) = journal.prune(8).await.unwrap();
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
-            reader.read_many(&[9]).await.unwrap();
-            let served = reader.try_read_many_sync(&[3, 9]);
+            reader.read_many(&[8]).await.unwrap();
+            let served = reader.try_read_many_sync(&[3, 8]);
             assert!(served[0].is_none());
             assert!(served[1].is_some());
             drop(served);

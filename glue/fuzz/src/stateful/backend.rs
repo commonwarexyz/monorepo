@@ -380,7 +380,7 @@ mod any_backend {
                 merkle_config: merkle_config(prefix, page_cache.clone()),
                 journal_config: log_config(prefix, page_cache),
                 translator: TwoCap,
-                init_cache_size: Some(QMDB_INIT_CACHE),
+                init_cache: Some(QMDB_INIT_CACHE),
                 init_buffer: QMDB_INIT_BUFFER,
                 init_concurrency: (),
             }
@@ -476,7 +476,7 @@ mod current_backend {
                 journal_config: log_config(prefix, page_cache),
                 grafted_metadata_partition: format!("{prefix}-qmdb-grafted-metadata"),
                 translator: TwoCap,
-                init_cache_size: Some(QMDB_INIT_CACHE),
+                init_cache: Some(QMDB_INIT_CACHE),
                 init_buffer: QMDB_INIT_BUFFER,
                 init_concurrency: (),
             }

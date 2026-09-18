@@ -13,7 +13,7 @@ use commonware_storage::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
-            ordered::{Operation, Update, span_contains},
+            ordered::{Operation, Update},
             value::FixedEncoding,
         },
         create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
@@ -21,7 +21,10 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::assert_ordered_neighbors;
+use commonware_utils::{
+    FuzzRng, NZU16, NZU64, NZUsize, range::contains_cyclic, sequence::FixedBytes,
+};
 use futures::StreamExt as _;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -85,6 +88,9 @@ enum QmdbOperation {
     StreamRange {
         start: RawKey,
     },
+    GetNeighbors {
+        key: RawKey,
+    },
 }
 
 #[derive(Debug)]
@@ -114,7 +120,7 @@ const PAGE_CACHE_SIZE: usize = 100;
 async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut BTreeMap<RawKey, RawValue>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
     expected_op_count: &mut Location<F>,
@@ -141,6 +147,29 @@ async fn commit_pending<F: MerkleFamily>(
     }
     committed_state.extend(pending_inserts.drain());
     db
+}
+
+/// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
+async fn assert_neighbors<F: MerkleFamily>(
+    db: &GenericDb<F>,
+    committed_state: &HashMap<RawKey, RawValue>,
+    key: RawKey,
+) {
+    let query = Key::new(key);
+    let prev = db
+        .get_prev_key(&query)
+        .await
+        .expect("get_prev_key should not fail");
+    let next = db
+        .get_next_key(&query)
+        .await
+        .expect("get_next_key should not fail");
+    assert_ordered_neighbors(
+        committed_state.keys().copied().map(Key::new),
+        &query,
+        prev,
+        next,
+    );
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
@@ -173,7 +202,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache_size: Some(NZUsize!(3)),
+                init_cache: Some(NZUsize!(3)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
@@ -185,7 +214,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
             // committed_state tracks state after apply_batch. pending_expected tracks
             // uncommitted mutations that haven't been applied yet.
-            let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+            let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
             let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
             let mut pending_deletes: HashSet<RawKey> = HashSet::new();
             let mut all_keys: HashSet<RawKey> = HashSet::new();
@@ -210,6 +239,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         pending_writes.push((k, None));
                         pending_inserts.remove(key);
                         pending_deletes.insert(*key);
+                        all_keys.insert(*key);
                         db
                     }
 
@@ -413,15 +443,17 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::GetAll { key } => {
+                        let ordered: BTreeMap<_, _> =
+                            committed_state.iter().map(|(k, v)| (*k, *v)).collect();
                         let actual = db
                             .get_all(&Key::new(*key))
                             .await
                             .expect("get all should not fail");
-                        let expected = committed_state.get(key).map(|value| {
-                            let next = committed_state
+                        let expected = ordered.get(key).map(|value| {
+                            let next = ordered
                                 .range((std::ops::Bound::Excluded(*key), std::ops::Bound::Unbounded))
                                 .next()
-                                .or_else(|| committed_state.first_key_value())
+                                .or_else(|| ordered.first_key_value())
                                 .expect("active key implies non-empty state")
                                 .0;
                             (Value::new(*value), Key::new(*next))
@@ -431,33 +463,35 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::GetSpan { key } => {
+                        let ordered: BTreeMap<_, _> =
+                            committed_state.iter().map(|(k, v)| (*k, *v)).collect();
                         let k = Key::new(*key);
                         let result = db.get_span(&k).await.expect("get should not fail");
                         assert_eq!(
                             result.is_some(),
-                            !committed_state.is_empty(),
+                            !ordered.is_empty(),
                             "span should be empty only if the model is empty",
                         );
                         if let Some((_, update)) = result {
-                            let (expected_key, expected_value) = committed_state
+                            let (expected_key, expected_value) = ordered
                                 .range(..=*key)
                                 .next_back()
-                                .or_else(|| committed_state.last_key_value())
+                                .or_else(|| ordered.last_key_value())
                                 .expect("a returned span requires a non-empty model");
-                            let expected_next = committed_state
+                            let expected_next = ordered
                                 .range((
                                     std::ops::Bound::Excluded(*expected_key),
                                     std::ops::Bound::Unbounded,
                                 ))
                                 .next()
-                                .or_else(|| committed_state.first_key_value())
+                                .or_else(|| ordered.first_key_value())
                                 .expect("a returned span requires a non-empty model")
                                 .0;
                             assert_eq!(update.key, Key::new(*expected_key));
                             assert_eq!(update.value, Value::new(*expected_value));
                             assert_eq!(update.next_key, Key::new(*expected_next));
                             assert!(
-                                span_contains(&update.key, &update.next_key, &k),
+                                contains_cyclic(&update.key..&update.next_key, &k),
                                 "returned span does not contain the requested key",
                             );
                         }
@@ -465,6 +499,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::StreamRange { start } => {
+                        let ordered: BTreeMap<_, _> =
+                            committed_state.iter().map(|(k, v)| (*k, *v)).collect();
                         let actual = {
                             let stream = db
                                 .stream_range(Key::new(*start))
@@ -477,11 +513,17 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             }
                             actual
                         };
-                        let expected = committed_state
+                        let expected = ordered
                             .range(*start..)
                             .map(|(key, value)| (Key::new(*key), Value::new(*value)))
                             .collect::<Vec<_>>();
                         assert_eq!(actual, expected, "stream range disagreed with ordered model");
+                        db
+                    }
+
+                    QmdbOperation::GetNeighbors { key } => {
+                        assert_neighbors(&db, &committed_state, *key).await;
+                        all_keys.insert(*key);
                         db
                     }
                 };
@@ -516,6 +558,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         );
                     },
                 }
+            }
+
+            for key in all_keys
+                .iter()
+                .copied()
+                .chain([[0u8; 32], [u8::MAX; 32]])
+            {
+                assert_neighbors(&db, &committed_state, key).await;
             }
 
             let batch = db.new_batch().merkleize(&db, None).await.unwrap();

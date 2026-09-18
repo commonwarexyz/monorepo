@@ -1,13 +1,17 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::cache::Clock;
+use commonware_utils::cache::Cache;
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashMap, num::NonZeroUsize};
 
 /// Keys are confined to a small space so a small-capacity cache churns and
-/// evicts heavily, exercising the CLOCK sweep and slot reuse.
-const KEY_SPACE: u8 = 8;
+/// evicts heavily, exercising eviction sweeps, Ghost history, and slot reuse.
+const KEY_SPACE: u8 = 64;
+
+/// Largest cache capacity. Clock2Q+ gives Small more than one slot only from
+/// capacity 20, so the range must reach well past it.
+const MAX_CAPACITY: u8 = 48;
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -36,11 +40,12 @@ struct Plan {
 }
 
 fn run(plan: Plan) {
-    let cap = (plan.capacity % 4) as usize + 1;
-    let mut cache: Clock<u8, u16> = Clock::new(NonZeroUsize::new(cap).unwrap());
+    let cap = (plan.capacity % MAX_CAPACITY) as usize + 1;
+    let mut cache: Cache<u8, u16> = Cache::new(NonZeroUsize::new(cap).unwrap());
     if plan.prefill {
         cache.prefill(|| 0u16);
     }
+
     // Oracle: last value written for each logically-present key. A key the cache
     // reports as present must hold its last-written value (no stale or conjured
     // values); an evicted key is simply absent.

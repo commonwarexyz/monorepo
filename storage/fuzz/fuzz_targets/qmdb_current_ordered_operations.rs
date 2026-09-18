@@ -13,6 +13,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
+use commonware_storage_fuzz::assert_ordered_neighbors;
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use futures::{StreamExt as _, pin_mut};
 use libfuzzer_sys::fuzz_target;
@@ -66,6 +67,9 @@ enum CurrentOperation {
     },
     StreamRange {
         start: RawKey,
+    },
+    GetNeighbors {
+        key: RawKey,
     },
 }
 
@@ -138,6 +142,29 @@ async fn commit_pending<F: Graftable>(
     db
 }
 
+/// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
+async fn assert_neighbors<F: Graftable>(
+    db: &Db<F>,
+    committed_state: &HashMap<RawKey, RawValue>,
+    key: RawKey,
+) {
+    let query = Key::new(key);
+    let prev = db
+        .get_prev_key(&query)
+        .await
+        .expect("get_prev_key should not fail");
+    let next = db
+        .get_next_key(&query)
+        .await
+        .expect("get_next_key should not fail");
+    assert_ordered_neighbors(
+        committed_state.keys().copied().map(Key::new),
+        &query,
+        prev,
+        next,
+    );
+}
+
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let cfg = deterministic::Config::new().with_rng(FuzzRng::new(data.raw_bytes.clone()));
     let runner = deterministic::Runner::new(cfg);
@@ -170,7 +197,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             },
             grafted_metadata_partition: format!("fuzz-current-ord-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(3)),
+            init_cache: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         };
@@ -224,6 +251,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     pending_writes.push((k, None));
                     pending_inserts.remove(key);
                     pending_deletes.insert(*key);
+                    all_keys.insert(*key);
                     db
                 }
 
@@ -507,6 +535,12 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     assert_eq!(actual, expected, "range stream should match the ordered model");
                     db
                 }
+
+                CurrentOperation::GetNeighbors { key } => {
+                    assert_neighbors(&db, &committed_state, *key).await;
+                    all_keys.insert(*key);
+                    db
+                }
             };
         }
 
@@ -534,6 +568,14 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     assert!(result.is_none(), "Unset key {key:?} should not exist");
                 }
             }
+        }
+
+        for key in all_keys
+            .iter()
+            .copied()
+            .chain([[0u8; 32], [u8::MAX; 32]])
+        {
+            assert_neighbors(&db, &committed_state, key).await;
         }
 
         db.destroy().await.expect("Destroy should not fail");
