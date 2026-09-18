@@ -237,25 +237,33 @@ contract LibBLS12381MultisigTest is Test {
             bool minSig = family == 0;
             for (uint256 i; i < sizes.length; ++i) {
                 uint256 participants = sizes[i];
-                uint256 quorum = participants - (participants - 1) / 3;
-                Case memory c = _generate(
-                    minSig, "certificate", abi.encode(uint256(7)), participants, _signers(participants, quorum, 0), 9
-                );
-                assertTrue(
-                    harness.verify(
-                        minSig, c.signature, c.signers, c.keys, quorum, "certificate", abi.encode(uint256(7))
-                    )
-                );
-                vm.snapshotGasLastFrame(
-                    "BLS12381Multisig",
-                    string.concat(
-                        minSig ? "minsig" : "minpk",
-                        "_participants=",
-                        vm.toString(participants),
-                        "_signers=",
-                        vm.toString(quorum)
-                    )
-                );
+                uint256[2] memory quorums = [uint256(1), participants - (participants - 1) / 3];
+                for (uint256 j; j < quorums.length; ++j) {
+                    uint256 quorum = quorums[j];
+                    Case memory c = _generate(
+                        minSig,
+                        "certificate",
+                        abi.encode(uint256(7)),
+                        participants,
+                        _signers(participants, quorum, 0),
+                        9
+                    );
+                    assertTrue(
+                        harness.verify(
+                            minSig, c.signature, c.signers, c.keys, quorum, "certificate", abi.encode(uint256(7))
+                        )
+                    );
+                    vm.snapshotGasLastFrame(
+                        "BLS12381Multisig",
+                        string.concat(
+                            minSig ? "minsig" : "minpk",
+                            "_participants=",
+                            vm.toString(participants),
+                            "_signers=",
+                            vm.toString(quorum)
+                        )
+                    );
+                }
             }
         }
     }

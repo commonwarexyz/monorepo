@@ -1,8 +1,14 @@
 {
+  "minpk_participants=16_signers=1": "178446",
   "minpk_participants=16_signers=11": "191159",
+  "minpk_participants=4_signers=1": "171757",
   "minpk_participants=4_signers=3": "174278",
+  "minpk_participants=64_signers=1": "207078",
   "minpk_participants=64_signers=43": "262248",
+  "minsig_participants=16_signers=1": "142049",
   "minsig_participants=16_signers=11": "160323",
+  "minsig_participants=4_signers=1": "133206",
   "minsig_participants=4_signers=3": "136783",
+  "minsig_participants=64_signers=1": "181862",
   "minsig_participants=64_signers=43": "265176"
 }
