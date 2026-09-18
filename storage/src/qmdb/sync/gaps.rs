@@ -3,10 +3,6 @@
 use crate::merkle::{Family, Location};
 use core::ops::Range;
 
-mod step;
-
-use step::{Step, scan_step};
-
 /// Find the next gap in operations that needs to be fetched.
 /// Returns a Range of operations to fetch, or None if no gaps.
 /// Empty coverage ranges are ignored, and returned gaps are bounded by `range`.
@@ -50,15 +46,23 @@ pub fn find_next<F: Family>(
             (None, None) => break,
         };
 
-        match scan_step(
-            next_uncovered.as_u64(),
-            range.end.as_u64(),
-            covered_range.start.as_u64(),
-            covered_range.end.as_u64(),
-        ) {
-            Step::Gap(end) => return Some(next_uncovered..Location::new(end)),
-            Step::Advance(frontier) => next_uncovered = Location::new(frontier),
-            Step::Complete => return None,
+        // Empty ranges cover no operations, so they must not split a gap.
+        if covered_range.is_empty() {
+            continue;
+        }
+
+        // Check if there's a gap before this covered range
+        if next_uncovered < covered_range.start {
+            // Found a gap between next_uncovered and the start of this range
+            return Some(next_uncovered..covered_range.start.min(range.end));
+        }
+
+        // Update next_uncovered to the end of this covered range (or keep current if overlapping)
+        next_uncovered = next_uncovered.max(covered_range.end);
+
+        // Early exit if we've covered everything up to range.end
+        if next_uncovered >= range.end {
+            return None;
         }
     }
 
@@ -425,29 +429,5 @@ mod tests {
     fn family_maximum_locations() {
         assert_family_maximum::<crate::merkle::mmr::Family>();
         assert_family_maximum::<crate::merkle::mmb::Family>();
-    }
-
-    #[test]
-    fn scalar_step_u64_maximum_boundaries() {
-        assert_eq!(
-            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 1, u64::MAX),
-            Step::Gap(u64::MAX - 1)
-        );
-        assert_eq!(
-            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 2, u64::MAX - 1),
-            Step::Advance(u64::MAX - 1)
-        );
-        assert_eq!(
-            scan_step(u64::MAX - 2, u64::MAX, u64::MAX - 2, u64::MAX),
-            Step::Complete
-        );
-        assert_eq!(
-            scan_step(u64::MAX - 1, u64::MAX, u64::MAX, u64::MAX),
-            Step::Advance(u64::MAX - 1)
-        );
-        assert_eq!(
-            scan_step(u64::MAX - 1, u64::MAX, u64::MAX, 0),
-            Step::Advance(u64::MAX - 1)
-        );
     }
 }

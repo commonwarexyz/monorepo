@@ -50,15 +50,18 @@ use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
 
-mod geometry;
 pub mod operation;
 
 /// Validate the chunk width before deriving bitmap indices or Merkle heights.
 pub(super) fn chunk_bits(chunk_size: usize) -> Result<u64, commonware_codec::Error> {
-    geometry::chunk_bits(chunk_size).ok_or(commonware_codec::Error::Invalid(
-        "current proof",
-        "invalid bitmap chunk size",
-    ))
+    chunk_size
+        .checked_mul(8)
+        .and_then(|bits| u64::try_from(bits).ok())
+        .filter(|bits| bits.is_power_of_two() && bits.trailing_zeros() < 63)
+        .ok_or(commonware_codec::Error::Invalid(
+            "current proof",
+            "invalid bitmap chunk size",
+        ))
 }
 
 /// Bitmap chunk indices read by [RangeProof::new] or [constant::OperationProof::new].
@@ -2173,6 +2176,17 @@ mod tests {
         let element = hasher.digest(&(*loc).to_be_bytes());
         let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
         assert!(proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
+    }
+
+    #[test]
+    fn chunk_width_boundaries() {
+        let max_exponent = (usize::BITS - 4).min(59);
+        let largest = 1usize << max_exponent;
+        assert_eq!(chunk_bits(largest).unwrap(), (largest * 8) as u64);
+
+        for width in [largest << 1, 0, 3, usize::MAX] {
+            assert!(chunk_bits(width).is_err());
+        }
     }
 
     fn invalid_chunk_sizes() -> impl Iterator<Item = usize> {

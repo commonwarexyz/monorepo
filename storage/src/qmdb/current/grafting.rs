@@ -60,8 +60,6 @@
 //!
 //! The grafted tree is incrementally maintained when grafted leaves change.
 
-mod count;
-
 use crate::{
     merkle::{
         self, Family, Graftable, Location, Position, Readable, hasher::Hasher as HasherTrait,
@@ -99,7 +97,11 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     assert!(grafting_height >= 1, "grafting_height must be >= 1");
     let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
     let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
-    count::graftable_chunks(ops_leaves, grafting_height, birth_chunk_0)
+    if ops_leaves < birth_chunk_0 {
+        return 0;
+    }
+    let chunk_size = 1u64 << grafting_height;
+    (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
 /// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:

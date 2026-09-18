@@ -122,9 +122,10 @@ test *args='':
 
 # Run Verus proofs
 test-verus:
-    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/current/grafting/count.rs
-    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/current/proof/geometry.rs
-    "${VERUS_BIN:-verus}" --edition=2024 --crate-type=lib --no-cheating storage/src/qmdb/sync/gaps/step.rs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    verus_dir="$(dirname "$(command -v "${VERUS_BIN:-verus}")")"
+    RUSTC_WRAPPER='' RUSTUP_TOOLCHAIN=1.97.1 "$verus_dir/cargo-verus" verus focus --package commonware-utils --features verus --no-default-features --locked --lib -- --no-cheating
 
 # Run loom tests
 test-loom *args='':

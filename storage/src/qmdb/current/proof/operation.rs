@@ -1,6 +1,6 @@
 //! Operation proofs with fixed-size or runtime-sized bitmap chunks.
 
-use super::{RangeProof, chunk_bits, geometry};
+use super::{RangeProof, chunk_bits};
 use crate::{
     merkle::{Graftable, Location, storage::Storage},
     qmdb::Error,
@@ -62,16 +62,15 @@ impl<F: Graftable, D: Digest, C: AsRef<[u8]>> Proof<F, D, C> {
     /// the provided `root`.
     pub fn verify<H: Hasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
         let chunk = self.chunk.as_ref();
-        match geometry::active_bit(chunk, *self.loc) {
-            None => {
-                debug!("proof verification failed, invalid chunk size");
-                return false;
-            }
-            Some(false) => {
-                debug!(?self.loc, "proof verification failed, operation is inactive");
-                return false;
-            }
-            Some(true) => {}
+        let Ok(bits) = chunk_bits(chunk.len()) else {
+            debug!("proof verification failed, invalid chunk size");
+            return false;
+        };
+
+        let bit = *self.loc % bits;
+        if chunk[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+            debug!(?self.loc, "proof verification failed, operation is inactive");
+            return false;
         }
 
         self.range_proof.verify_with_chunk_size::<H, O>(
