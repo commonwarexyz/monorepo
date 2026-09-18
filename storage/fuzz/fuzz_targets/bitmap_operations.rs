@@ -234,6 +234,8 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
+                    // A blob has one open at a time, so release the live bitmap first.
+                    drop(bitmap);
                     let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE, Sequential>::init(
                         context.child("bitmap").with_attribute("instance", restarts),
                         PARTITION,
