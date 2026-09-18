@@ -14,6 +14,8 @@ commonware_macros::stability_scope!(BETA {
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
+    mod config;
+    pub use config::Config;
     pub mod encrypted;
     pub mod utils;
 
@@ -156,6 +158,8 @@ commonware_macros::stability_scope!(BETA {
         use super::*;
         use crate::utils::{Timeout, TimeoutError};
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
+        use commonware_utils::sync::Mutex;
+        use futures::{FutureExt as _, future::Either};
         use std::time::Duration;
         use std::{
             convert::Infallible,
@@ -209,19 +213,35 @@ commonware_macros::stability_scope!(BETA {
         #[error("authentication rejected")]
         struct Rejected;
 
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct HandshakeParameters {
+            namespace: Vec<u8>,
+            max_message_size: u32,
+        }
+
         #[derive(Clone)]
-        struct OpaqueHandshake(Outcome);
+        struct OpaqueHandshake {
+            outcome: Outcome,
+            received: Arc<Mutex<Vec<HandshakeParameters>>>,
+        }
 
         impl OpaqueHandshake {
+            fn new(outcome: Outcome) -> Self {
+                Self {
+                    outcome,
+                    received: Arc::default(),
+                }
+            }
+
             async fn establish<I: Stream, O: Sink>(
                 self,
                 stream: I,
                 sink: O,
             ) -> Result<(SharedHalf<I, O>, SharedHalf<I, O>), Rejected> {
-                if matches!(self.0, Outcome::Pending) {
+                if matches!(self.outcome, Outcome::Pending) {
                     future::pending::<()>().await;
                 }
-                if matches!(self.0, Outcome::Error) {
+                if matches!(self.outcome, Outcome::Error) {
                     return Err(Rejected);
                 }
                 let session = Arc::new(Session {
@@ -252,8 +272,8 @@ commonware_macros::stability_scope!(BETA {
             fn dial<C, I, O>(
                 self,
                 _context: C,
-                _namespace: &[u8],
-                _max_message_size: u32,
+                namespace: &[u8],
+                max_message_size: u32,
                 _peer: Self::PublicKey,
                 stream: I,
                 sink: O,
@@ -263,14 +283,18 @@ commonware_macros::stability_scope!(BETA {
                 I: Stream,
                 O: Sink,
             {
+                self.received.lock().push(HandshakeParameters {
+                    namespace: namespace.to_vec(),
+                    max_message_size,
+                });
                 self.establish(stream, sink)
             }
 
             fn listen<C, I, O, B, F>(
                 self,
                 _context: C,
-                _namespace: &[u8],
-                _max_message_size: u32,
+                namespace: &[u8],
+                max_message_size: u32,
                 bouncer: B,
                 stream: I,
                 sink: O,
@@ -287,6 +311,10 @@ commonware_macros::stability_scope!(BETA {
                 B: FnOnce(Self::PublicKey) -> F + Send,
                 F: Future<Output = bool> + Send,
             {
+                self.received.lock().push(HandshakeParameters {
+                    namespace: namespace.to_vec(),
+                    max_message_size,
+                });
                 let accepted = bouncer(self.public_key());
                 async move {
                     if !accepted.await {
@@ -299,33 +327,107 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[test]
-        fn handshake_supports_opaque_identity_and_shared_session() {
+        fn configured_handshake_supports_opaque_identity_and_shared_session() {
             fn assert_send<T: Send>(_: T) {}
 
             deterministic::Runner::default().start(|context| async move {
-                let handshake = Timeout::new(OpaqueHandshake(Outcome::Success), Duration::from_secs(1));
-                let _: OpaqueIdentity = handshake.public_key();
-                let namespace = vec![1, 2, 3];
-                let (sink, stream) = mocks::Channel::init();
-                assert_send(handshake.clone().dial(
-                    context.child("handshake"),
-                    &namespace,
-                    1,
-                    handshake.public_key(),
-                    stream,
-                    sink,
-                ));
-                let (sink, stream) = mocks::Channel::init();
-                let accepted = true;
-                assert_send(handshake.listen(
-                    context,
-                    &namespace,
-                    1,
-                    |_| async { accepted },
-                    stream,
-                    sink,
-                ));
+                for (namespace, max_message_size) in [
+                    (vec![1, 2, 3], 1),
+                    (b"configured".to_vec(), OpaqueHandshake::MAX_SIZE),
+                ] {
+                    let handshake = OpaqueHandshake::new(Outcome::Success);
+                    let received = handshake.received.clone();
+                    let handshake = Timeout::new(handshake, Duration::from_secs(1));
+                    let _: OpaqueIdentity = handshake.public_key();
+                    let config = Config::new(handshake, namespace.clone(), max_message_size);
+
+                    // Reuse one configuration for multiple connections in each direction.
+                    for _ in 0..2 {
+                        let (sink, stream) = mocks::Channel::init();
+                        assert_send(config.dial(
+                            context.child("dialer"),
+                            OpaqueIdentity(PhantomData),
+                            stream,
+                            sink,
+                        ));
+                        let (sink, stream) = mocks::Channel::init();
+                        let accepted = true;
+                        assert_send(config.listen(
+                            context.child("listener"),
+                            |_| async { accepted },
+                            stream,
+                            sink,
+                        ));
+                    }
+                    assert_eq!(
+                        *received.lock(),
+                        vec![HandshakeParameters {
+                            namespace,
+                            max_message_size,
+                        }; 4]
+                    );
+                }
             });
+        }
+
+        #[test]
+        fn configured_handshake_message_size_bounds() {
+            for max_message_size in [0, OpaqueHandshake::MAX_SIZE] {
+                Config::new(OpaqueHandshake::new(Outcome::Success), b"", max_message_size);
+            }
+            assert!(std::panic::catch_unwind(|| {
+                Config::new(
+                    OpaqueHandshake::new(Outcome::Success),
+                    b"",
+                    OpaqueHandshake::MAX_SIZE + 1,
+                )
+            })
+            .is_err());
+        }
+
+        #[test]
+        fn configured_handshake_starts_timeout_when_called() {
+            for dialer in [false, true] {
+                deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+                    let (sink, mut peer_stream) = mocks::Channel::init();
+                    let (mut peer_sink, stream) = mocks::Channel::init();
+                    let config = Config::new(
+                        Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50)),
+                        b"timeout",
+                        1,
+                    );
+                    let attempt = if dialer {
+                        Either::Left(config.dial(
+                            context.child("handshake"),
+                            OpaqueIdentity(PhantomData),
+                            stream,
+                            sink,
+                        ))
+                    } else {
+                        Either::Right(
+                            config
+                                .listen(
+                                    context.child("handshake"),
+                                    |_| async { true },
+                                    stream,
+                                    sink,
+                                )
+                                .map(|result| result.map(|(_, sender, receiver)| (sender, receiver))),
+                        )
+                    };
+                    let mut attempt = Box::pin(attempt);
+
+                    // An unpolled attempt expires relative to the method call.
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert!(matches!(
+                        futures::poll!(attempt.as_mut()),
+                        std::task::Poll::Ready(Err(TimeoutError::Timeout))
+                    ));
+                    drop(attempt);
+                    assert!(peer_sink.send(&b"x"[..]).await.is_err());
+                    assert!(peer_stream.recv(1).await.is_err());
+                });
+            }
         }
 
         #[test]
@@ -337,7 +439,7 @@ commonware_macros::stability_scope!(BETA {
                             |context| async move {
                                 let (sink, mut peer_stream) = mocks::Channel::init();
                                 let (mut peer_sink, stream) = mocks::Channel::init();
-                                let handshake = Timeout::new(OpaqueHandshake(outcome), duration);
+                                let handshake = Timeout::new(OpaqueHandshake::new(outcome), duration);
                                 let start = context.current();
                                 let result = if dialer {
                                     handshake
@@ -404,7 +506,7 @@ commonware_macros::stability_scope!(BETA {
                     let dropped = Arc::new(AtomicBool::new(false));
                     let admission = Admission(dropped.clone());
                     let handshake =
-                        Timeout::new(OpaqueHandshake(Outcome::Success), Duration::from_millis(50));
+                        Timeout::new(OpaqueHandshake::new(Outcome::Success), Duration::from_millis(50));
                     let mut attempt = Box::pin(handshake.listen(
                         context,
                         b"timeout",
@@ -436,7 +538,7 @@ commonware_macros::stability_scope!(BETA {
             deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
                 let (sink, stream) = mocks::Channel::init();
                 let handshake =
-                    Timeout::new(OpaqueHandshake(Outcome::Pending), Duration::from_millis(50));
+                    Timeout::new(OpaqueHandshake::new(Outcome::Pending), Duration::from_millis(50));
                 let mut attempt = Box::pin(handshake.dial(
                     context.child("handshake"),
                     b"timeout",

@@ -8,7 +8,7 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
-        MAX_PAYLOAD_OVERHEAD, StreamConfig,
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         discovery::types::{Info, InfoVerifier},
         max_size, router,
@@ -20,9 +20,10 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::utils::Timeout;
+use commonware_stream::{Config as StreamConfig, utils::Timeout};
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Unique suffix for signed discovery address records.
@@ -240,18 +241,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Inbound and outbound connections share the same handshake policy.
-        let stream_cfg = StreamConfig {
-            handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
-            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.max_frame_size,
-        };
+        let stream = Arc::new(StreamConfig::new(
+            Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
+            union(&self.cfg.namespace, STREAM_SUFFIX),
+            self.max_frame_size,
+        ));
 
         // Start listener
         let listener = listener::Actor::new(
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                stream_cfg: stream_cfg.clone(),
+                stream: stream.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
@@ -265,7 +266,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                stream_cfg,
+                stream,
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,

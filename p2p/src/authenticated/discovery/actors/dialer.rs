@@ -1,7 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
-    Mailbox, StreamConfig,
+    Mailbox,
     discovery::{
         actors::{
             spawner,
@@ -17,10 +17,10 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Config as StreamConfig, Handshake};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tracing::debug;
 
 // Mailbox for the spawner actor.
@@ -35,7 +35,7 @@ type SupervisorMailbox<E, H> = Mailbox<
 /// Configuration for the dialer actor.
 pub struct Config<H: Handshake> {
     /// Settings for authenticating and wrapping connections.
-    pub stream_cfg: StreamConfig<H>,
+    pub stream: Arc<StreamConfig<H>>,
 
     /// Maximum duration of an outbound dial attempt.
     pub dial_timeout: Duration,
@@ -65,7 +65,7 @@ where
     queue: Vec<H::PublicKey>,
 
     // ---------- Configuration ----------
-    stream_cfg: StreamConfig<H>,
+    stream: Arc<StreamConfig<H>>,
     dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
@@ -86,7 +86,7 @@ where
         Self {
             context: ContextCell::new(context),
             queue: Vec::new(),
-            stream_cfg: cfg.stream_cfg,
+            stream: cfg.stream,
             dial_timeout: cfg.dial_timeout,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
@@ -111,7 +111,7 @@ where
 
         // Spawn dialer to connect to peer
         self.context.child("dialer").spawn({
-            let stream_cfg = self.stream_cfg.clone();
+            let stream = self.stream.clone();
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             let dial_timeout = self.dial_timeout;
@@ -130,8 +130,8 @@ where
                     };
 
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
-                        Ok(stream) => stream,
+                    let (sink, raw_stream) = match context.dial(address).await {
+                        Ok(connection) => connection,
                         Err(err) => {
                             debug!(?err, "failed to dial peer");
                             return;
@@ -140,17 +140,7 @@ where
                     debug!(?peer, ?ingress, "dialed peer");
 
                     // Upgrade connection
-                    let connection = stream_cfg
-                        .handshake
-                        .dial(
-                            context,
-                            &stream_cfg.namespace,
-                            stream_cfg.max_message_size,
-                            peer.clone(),
-                            stream,
-                            sink,
-                        )
-                        .await;
+                    let connection = stream.dial(context, peer.clone(), raw_stream, sink).await;
                     let connection = match connection {
                         Ok(connection) => connection,
                         Err(err) => {
@@ -268,14 +258,11 @@ mod tests {
             let mut dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(
-                            StreamHandshake::new(signer),
-                            Duration::from_secs(5),
-                        ),
-                        namespace: b"test".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout,
                     dial_frequency: Duration::from_secs(1),
                     peer_connection_cooldown: Duration::from_secs(60),
@@ -326,11 +313,11 @@ mod tests {
             let dial_frequency = Duration::from_millis(100);
 
             let dialer_cfg = Config {
-                stream_cfg: StreamConfig {
-                    handshake: Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
-                    namespace: b"test".to_vec(),
-                    max_message_size: 1024,
-                },
+                stream: Arc::new(StreamConfig::new(
+                    Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                    b"test",
+                    1024,
+                )),
                 dial_timeout: Duration::from_secs(15),
                 dial_frequency,
                 peer_connection_cooldown: Duration::from_secs(60),
@@ -416,14 +403,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(
-                            StreamHandshake::new(signer),
-                            Duration::from_secs(5),
-                        ),
-                        namespace: b"test".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: dial_frequency,
@@ -483,14 +467,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(
-                            StreamHandshake::new(signer),
-                            Duration::from_secs(5),
-                        ),
-                        namespace: b"test".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_secs(60),
@@ -569,14 +550,11 @@ mod tests {
             let dialer = Actor::new(
                 context.child("dialer"),
                 Config {
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(
-                            StreamHandshake::new(signer),
-                            Duration::from_secs(5),
-                        ),
-                        namespace: b"test".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        b"test",
+                        1024,
+                    )),
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_millis(50),

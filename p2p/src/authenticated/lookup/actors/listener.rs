@@ -1,7 +1,7 @@
 //! Listener
 
 use crate::authenticated::{
-    Mailbox as SpawnerMailbox, StreamConfig,
+    Mailbox as SpawnerMailbox,
     lookup::actors::{spawner, tracker},
 };
 use commonware_actor::Feedback;
@@ -12,7 +12,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Config as StreamConfig, Handshake};
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
@@ -22,6 +22,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     pin::Pin,
+    sync::Arc,
 };
 use tracing::debug;
 
@@ -60,7 +61,7 @@ impl Mailbox {
 /// Configuration for the listener actor.
 pub struct Config<H: Handshake> {
     pub address: SocketAddr,
-    pub stream_cfg: StreamConfig<H>,
+    pub stream: Arc<StreamConfig<H>>,
     pub allow_private_ips: bool,
     pub bypass_ip_check: bool,
     pub max_concurrent_handshakes: NonZeroU32,
@@ -72,7 +73,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     context: ContextCell<E>,
 
     address: SocketAddr,
-    stream_cfg: StreamConfig<H>,
+    stream: Arc<StreamConfig<H>>,
     allow_private_ips: bool,
     bypass_ip_check: bool,
     handshake_limiter: Limiter,
@@ -113,7 +114,7 @@ where
             context: ContextCell::new(context),
 
             address: cfg.address,
-            stream_cfg: cfg.stream_cfg,
+            stream: cfg.stream,
             allow_private_ips: cfg.allow_private_ips,
             bypass_ip_check: cfg.bypass_ip_check,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
@@ -132,9 +133,9 @@ where
     async fn handshake(
         context: E,
         address: SocketAddr,
-        stream_cfg: StreamConfig<H>,
+        stream: Arc<StreamConfig<H>>,
         sink: SinkOf<E>,
-        stream: StreamOf<E>,
+        raw_stream: StreamOf<E>,
         tracker: tracker::Mailbox<H::PublicKey>,
         mut supervisor: SpawnerMailbox<
             spawner::Message<
@@ -146,14 +147,11 @@ where
     ) {
         // Perform handshake
         let source_ip = address.ip();
-        let connection = stream_cfg
-            .handshake
+        let connection = stream
             .listen(
                 context,
-                &stream_cfg.namespace,
-                stream_cfg.max_message_size,
                 |peer| tracker.acceptable(peer, source_ip),
-                stream,
+                raw_stream,
                 sink,
             )
             .await;
@@ -236,8 +234,8 @@ where
             },
             listener = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream) = match listener {
-                    Ok((address, sink, stream)) => (address, sink, stream),
+                let (address, sink, raw_stream) = match listener {
+                    Ok(connection) => connection,
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
@@ -300,12 +298,12 @@ where
 
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
-                    let stream_cfg = self.stream_cfg.clone();
+                    let stream = self.stream.clone();
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            context, address, stream, sink, raw_stream, tracker, supervisor,
                         )
                         .await;
 
@@ -375,11 +373,11 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
-                        namespace: b"test-rate-limit".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     bypass_ip_check: false,
@@ -544,11 +542,11 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
-                        namespace: b"test-rate-limit".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     bypass_ip_check: false,
                     max_concurrent_handshakes: NZU32!(8),
@@ -630,11 +628,11 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
-                        namespace: b"test-rate-limit".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),
@@ -716,11 +714,11 @@ mod tests {
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg: StreamConfig {
-                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
-                        namespace: b"test-private-ips".to_vec(),
-                        max_message_size: 1024,
-                    },
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-private-ips",
+                        1024,
+                    )),
                     allow_private_ips: false,
                     bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),

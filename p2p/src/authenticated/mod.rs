@@ -18,14 +18,3 @@ mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
 mod router;
-
-/// Settings shared by inbound and outbound stream establishment.
-#[derive(Clone)]
-pub(crate) struct StreamConfig<H> {
-    /// Handshake used to authenticate and wrap a connection.
-    pub handshake: H,
-    /// Namespace for the stream handshake.
-    pub namespace: Vec<u8>,
-    /// Maximum stream message size, including p2p framing.
-    pub max_message_size: u32,
-}

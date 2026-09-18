@@ -7,7 +7,7 @@ use super::{
 use crate::{
     Channel,
     authenticated::{
-        MAX_PAYLOAD_OVERHEAD, StreamConfig,
+        MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         max_size, router,
     },
@@ -19,9 +19,10 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Handshake, utils::Timeout};
+use commonware_stream::{Config as StreamConfig, Handshake, utils::Timeout};
 use commonware_utils::union;
 use rand_core::CryptoRng;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -203,18 +204,18 @@ where
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
         // Inbound and outbound connections share the same handshake policy.
-        let stream_cfg = StreamConfig {
-            handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
-            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.max_frame_size,
-        };
+        let stream = Arc::new(StreamConfig::new(
+            Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
+            union(&self.cfg.namespace, STREAM_SUFFIX),
+            self.max_frame_size,
+        ));
 
         // Start listener
         let listener = listener::Actor::new(
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                stream_cfg: stream_cfg.clone(),
+                stream: stream.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
                 bypass_ip_check: self.cfg.bypass_ip_check,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
@@ -230,7 +231,7 @@ where
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                stream_cfg,
+                stream,
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,

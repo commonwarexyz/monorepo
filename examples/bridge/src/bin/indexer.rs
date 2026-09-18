@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -237,13 +237,17 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let handshake = Timeout::new(
-            Handshake {
-                signer,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(60),
-            },
-            Duration::from_secs(5),
+        let handshake = StreamConfig::new(
+            Timeout::new(
+                Handshake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(60),
+                },
+                Duration::from_secs(5),
+            ),
+            INDEXER_NAMESPACE,
+            MAX_MESSAGE_SIZE,
         );
         loop {
             // Listen for connection
@@ -253,11 +257,8 @@ fn main() {
             };
 
             let (peer, mut sender, mut receiver) = match handshake
-                .clone()
                 .listen(
                     context.child("listener"),
-                    INDEXER_NAMESPACE,
-                    MAX_MESSAGE_SIZE,
                     |peer| {
                         let out = validators.position(&peer).is_some();
                         async move { out }
