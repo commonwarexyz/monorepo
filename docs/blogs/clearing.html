@@ -421,14 +421,14 @@ O’Grady</a></div>
         payout ranges. Bajillion validators store the underlying account
         and log records offchain.</p>
         <h2 id="certifying-settlement">Certifying Settlement</h2>
-        <p>A committee of <span class="math inline">n=3f+1</span>
-        validators tolerates at most <span class="math inline">f</span>
-        faulty or malicious members. Before signing, every validator
-        checks the complete close, computes the new balances and roots,
-        and durably retains the full account and log data. A certificate
-        requires at least <span class="math inline">q=f+1</span>
-        signatures on the resulting commitment, ensuring at least one
-        honest validator checked and holds the complete close.</p>
+        <p>Assume at most <span class="math inline">f</span> of the
+        committee’s <span class="math inline">n</span> validators are
+        faulty or malicious. Before signing, every validator checks the
+        complete close, computes the new balances and roots, and durably
+        retains the full account and log data. A certificate requires at
+        least <span class="math inline">q=f+1</span> signatures on the
+        resulting commitment, ensuring at least one honest validator
+        checked and holds the complete close.</p>
         <p>The operator hashes the dealing with the epoch’s registered
         parameters to identify its proposal. Validators include this
         hash in the commitment they sign, tying their settlement results
@@ -439,8 +439,8 @@ O’Grady</a></div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
         <div class="image-caption">
         <p>Figure 4: Every signer derives the same three QMDB roots
-        before signing one close commitment. For 100 validators, 34
-        signatures suffice.</p>
+        before signing one close commitment. For 100 validators with at
+        most 33 faulty members, 34 signatures suffice.</p>
         </div>
         <p>The certificate is one 48-byte aggregate signature plus a
         <span class="math inline">\lceil n/8\rceil</span>-byte signer

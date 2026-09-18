@@ -215,7 +215,7 @@ The settlement chain holds deposited funds and tracks commitments, counts, pendi
 
 ## Certifying Settlement
 
-A committee of $n=3f+1$ validators tolerates at most $f$ faulty or malicious members. Before signing, every validator checks the complete close, computes the new balances and roots, and durably retains the full account and log data. A certificate requires at least $q=f+1$ signatures on the resulting commitment, ensuring at least one honest validator checked and holds the complete close.
+Assume at most $f$ of the committee's $n$ validators are faulty or malicious. Before signing, every validator checks the complete close, computes the new balances and roots, and durably retains the full account and log data. A certificate requires at least $q=f+1$ signatures on the resulting commitment, ensuring at least one honest validator checked and holds the complete close.
 
 The operator hashes the dealing with the epoch's registered parameters to identify its proposal. Validators include this hash in the commitment they sign, tying their settlement results to the operator's proposal and the previous state.
 
@@ -226,7 +226,7 @@ The operator can then verify the certificate and check that the proposal hash ma
 ```
 
 ::: {.image-caption}
-Figure 4: Every signer derives the same three QMDB roots before signing one close commitment. For 100 validators, 34 signatures suffice.
+Figure 4: Every signer derives the same three QMDB roots before signing one close commitment. For 100 validators with at most 33 faulty members, 34 signatures suffice.
 :::
 
 The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes.
