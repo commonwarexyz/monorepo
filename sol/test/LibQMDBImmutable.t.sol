@@ -132,24 +132,29 @@ contract LibQMDBImmutableTest is HashTest {
         internal
         returns (ImmutableCase memory c)
     {
-        string[] memory args = new string[](variableEncoding ? 16 : 14);
+        string[] memory args = new string[](variableEncoding ? 21 : 19);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "immutable";
-        args[3] = vm.toString(n);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = "--inactivity-floor";
-        args[7] = vm.toString(floor);
-        args[8] = "--family";
-        args[9] = _mmb() ? "mmb" : "mmr";
-        args[10] = "--encoding";
-        args[11] = variableEncoding ? "variable" : "fixed";
-        args[12] = "--operation";
-        args[13] = kind == 0 ? "set" : kind == 1 ? "commit" : "commit-metadata";
+        args[3] = "--leaves";
+        args[4] = vm.toString(n);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--inactivity-floor";
+        args[10] = vm.toString(floor);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--encoding";
+        args[14] = variableEncoding ? "variable" : "fixed";
+        args[15] = "--operation";
+        args[16] = kind == 0 ? "set" : kind == 1 ? "commit" : "commit-metadata";
+        args[17] = "--chunk-bytes";
+        args[18] = "32";
         if (variableEncoding) {
-            args[14] = "--value-length";
-            args[15] = vm.toString(length);
+            args[19] = "--value-length";
+            args[20] = vm.toString(length);
         }
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));

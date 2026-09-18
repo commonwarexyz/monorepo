@@ -25,13 +25,11 @@ abstract contract HashTest is Test, HashSelection {
     /// @dev Ask the Rust oracle to use the same hash algorithm as the verifier.
     function _ffi(string[] memory args) internal returns (bytes memory) {
         string[] memory selected = new string[](args.length + 2);
-        // QMDB selects its hash per operation. BMT and Merkle select it at the family command.
-        uint256 hashIndex = keccak256(bytes(args[1])) == keccak256("qmdb") ? args.length : 2;
         for (uint256 i; i < args.length; ++i) {
-            selected[i < hashIndex ? i : i + 2] = args[i];
+            selected[i < 2 ? i : i + 2] = args[i];
         }
-        selected[hashIndex] = "--hash";
-        selected[hashIndex + 1] = _hasher() == address(0) ? "keccak" : "sha256";
+        selected[2] = "--hash";
+        selected[3] = _hasher() == address(0) ? "keccak" : "sha256";
         return vm.ffi(selected);
     }
 
@@ -74,30 +72,33 @@ abstract contract UnorderedOracle is HashTest {
     ) internal returns (bytes memory) {
         bool historical = bytes(history).length != 0;
         bool variableLength = keccak256(bytes(encoding)) == keccak256("variable");
-        string[] memory args = new string[](14 + (historical ? 2 : 0) + (current ? 3 : 0) + (variableLength ? 2 : 0));
+        string[] memory args = new string[](19 + (historical ? 2 : 0) + (current ? 1 : 0) + (variableLength ? 2 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "unordered";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = "--inactivity-floor";
-        args[7] = vm.toString(floor);
-        args[8] = "--family";
-        args[9] = _mmb() ? "mmb" : "mmr";
-        args[10] = "--encoding";
-        args[11] = encoding;
-        args[12] = "--operation";
-        args[13] = operation;
-        uint256 offset = 14;
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--inactivity-floor";
+        args[10] = vm.toString(floor);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--encoding";
+        args[14] = encoding;
+        args[15] = "--operation";
+        args[16] = operation;
+        args[17] = "--chunk-bytes";
+        args[18] = vm.toString(chunkBytes);
+        uint256 offset = 19;
         if (historical) {
             args[offset++] = "--history";
             args[offset++] = history;
         }
         if (current) {
             args[offset++] = "--current";
-            args[offset++] = "--chunk-bytes";
-            args[offset++] = vm.toString(chunkBytes);
         }
         if (variableLength) {
             args[offset++] = "--value-length";

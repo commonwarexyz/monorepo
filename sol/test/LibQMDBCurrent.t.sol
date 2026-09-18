@@ -593,19 +593,22 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         internal
         returns (QMDBCase memory c)
     {
-        string[] memory args = new string[](12);
+        string[] memory args = new string[](15);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "current";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = "--inactivity-floor";
-        args[7] = vm.toString(floor);
-        args[8] = "--family";
-        args[9] = _mmb() ? "mmb" : "mmr";
-        args[10] = "--chunk-bytes";
-        args[11] = vm.toString(chunkBytes);
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--inactivity-floor";
+        args[10] = vm.toString(floor);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--chunk-bytes";
+        args[14] = vm.toString(chunkBytes);
         (
             c.root,
             c.proof.leaves,
@@ -767,19 +770,27 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         internal
         returns (QMDBCase memory c, bool expected)
     {
-        string[] memory args = new string[](metadata ? 12 : 11);
+        string[] memory args = new string[](metadata ? 20 : 19);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "exclude";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = vm.toString(key);
-        args[7] = "--family";
-        args[8] = _mmb() ? "mmb" : "mmr";
-        args[9] = "--mode";
-        args[10] = mode;
-        if (metadata) args[11] = "--metadata";
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--keyhex";
+        args[10] = vm.toString(key);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--mode";
+        args[14] = mode;
+        args[15] = "--inactivity-floor";
+        args[16] = "0";
+        args[17] = "--chunk-bytes";
+        args[18] = "32";
+        if (metadata) args[19] = "--metadata";
         (
             c.root,
             c.proof.leaves,
@@ -1043,21 +1054,27 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         QMDBCase memory c;
         uint256 variableSize = type(uint256).max;
         string[] memory args = new string[](
-            11 + (encoding.keySize != variableSize ? 2 : 0) + (encoding.valueSize != variableSize ? 2 : 0)
+            17 + (encoding.keySize != variableSize ? 2 : 0) + (encoding.valueSize != variableSize ? 2 : 0)
                 + options.length
         );
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "exclude-variable";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = vm.toString(key);
-        args[7] = "--family";
-        args[8] = _mmb() ? "mmb" : "mmr";
-        args[9] = "--chunk-bytes";
-        args[10] = vm.toString(chunkBytes);
-        uint256 cursor = 11;
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--keyhex";
+        args[10] = vm.toString(key);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--chunk-bytes";
+        args[14] = vm.toString(chunkBytes);
+        args[15] = "--inactivity-floor";
+        args[16] = "0";
+        uint256 cursor = 17;
         if (encoding.keySize != variableSize) {
             args[cursor++] = "--key-size";
             args[cursor++] = vm.toString(encoding.keySize);
@@ -1097,9 +1114,11 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     function test_DifferentialVariableExclusion() public {
         uint256 variableSize = type(uint256).max;
         LibQMDBCurrent.ExclusionEncoding memory encoding = LibQMDBCurrent.ExclusionEncoding(variableSize, variableSize);
-        string[] memory options = new string[](2);
+        string[] memory options = new string[](4);
         options[0] = "--keys";
         options[1] = "00,01,010000";
+        options[2] = "--mode";
+        options[3] = "interval";
         bytes[5] memory queries = [bytes(hex"0000"), hex"00", hex"01", hex"0100", hex""];
         uint256[5] memory locations = [uint256(0), 0, 0, 1, 2];
         bool[5] memory expected = [true, false, false, true, true];
@@ -1161,7 +1180,10 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         uint256[6] memory chunks = [uint256(1), 2, 16, 32, 64, 128];
         LibQMDBCurrent.ExclusionEncoding memory encoding =
             LibQMDBCurrent.ExclusionEncoding(type(uint256).max, type(uint256).max);
-        checkVariableExclusion(leaves, location, query, encoding, chunks[chunkSeed % chunks.length], new string[](0));
+        string[] memory options = new string[](2);
+        options[0] = "--mode";
+        options[1] = "interval";
+        checkVariableExclusion(leaves, location, query, encoding, chunks[chunkSeed % chunks.length], options);
     }
 }
 

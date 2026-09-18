@@ -124,18 +124,19 @@ pub(crate) enum Command {
 
 #[derive(Args)]
 pub(crate) struct GenerateArgs {
+    #[arg(long)]
     leaves: u64,
+    #[arg(long)]
     location: u64,
+    #[arg(long)]
     seed: u64,
-    #[arg(long, value_enum, default_value = "keccak")]
-    hash: Hash,
-    #[arg(long, value_enum, default_value = "mmb")]
+    #[arg(long, value_enum)]
     family: TreeKind,
     /// Operations below this location are inactive; current proofs fold chunk-aligned peaks.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long)]
     inactivity_floor: u64,
     /// Current activity bitmap chunk size in bytes.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long)]
     chunk_bytes: usize,
 }
 
@@ -175,9 +176,9 @@ pub(crate) struct UnorderedArgs {
     /// Return a Current proof and its Rust activity verdict.
     #[arg(long)]
     current: bool,
-    #[arg(long, value_enum, default_value = "fixed")]
+    #[arg(long, value_enum)]
     encoding: Encoding,
-    #[arg(long, value_enum, default_value = "update")]
+    #[arg(long, value_enum)]
     operation: UnorderedOperation,
     /// Repeat one key before a final overwrite or delete.
     #[arg(long, value_enum)]
@@ -198,9 +199,9 @@ enum KeylessOperation {
 pub(crate) struct KeylessArgs {
     #[command(flatten)]
     tree: GenerateArgs,
-    #[arg(long, value_enum, default_value = "fixed")]
+    #[arg(long, value_enum)]
     encoding: Encoding,
-    #[arg(long, value_enum, default_value = "append")]
+    #[arg(long, value_enum)]
     operation: KeylessOperation,
     /// Variable value and metadata length; defaults to a boundary size selected by the seed.
     #[arg(long)]
@@ -218,9 +219,9 @@ enum ImmutableOperation {
 pub(crate) struct ImmutableArgs {
     #[command(flatten)]
     tree: GenerateArgs,
-    #[arg(long, value_enum, default_value = "fixed")]
+    #[arg(long, value_enum)]
     encoding: Encoding,
-    #[arg(long, value_enum, default_value = "set")]
+    #[arg(long, value_enum)]
     operation: ImmutableOperation,
     /// Variable value and metadata length; defaults to a boundary size selected by the seed.
     #[arg(long)]
@@ -238,8 +239,9 @@ enum ExclusionMode {
 pub(crate) struct ExcludeArgs {
     #[command(flatten)]
     tree: GenerateArgs,
+    #[arg(long)]
     keyhex: String,
-    #[arg(long, value_enum, default_value = "interval")]
+    #[arg(long, value_enum)]
     mode: ExclusionMode,
     #[arg(long)]
     metadata: bool,
@@ -819,20 +821,20 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
 }
 
 impl Command {
-    pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
+    pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match self {
-            Self::Lifecycle(args) => args.execute(),
-            Self::ExcludeVariable(args) => args.execute(),
-            Self::Range(args) => args.execute(),
-            Self::Multi(args) => args.execute(),
-            Self::Unordered(args) => match (args.tree.family, args.tree.hash) {
+            Self::Lifecycle(args) => args.execute(hash),
+            Self::ExcludeVariable(args) => args.execute(hash),
+            Self::Range(args) => args.execute(hash),
+            Self::Multi(args) => args.execute(hash),
+            Self::Unordered(args) => match (args.tree.family, hash) {
                 (TreeKind::Mmr, Hash::Keccak) => unordered::<mmr::Family, Keccak256>(&args),
                 (TreeKind::Mmr, Hash::Sha256) => unordered::<mmr::Family, Sha256>(&args),
                 (TreeKind::Mmb, Hash::Keccak) => unordered::<mmb::Family, Keccak256>(&args),
                 (TreeKind::Mmb, Hash::Sha256) => unordered::<mmb::Family, Sha256>(&args),
             },
             Self::Any(args) => {
-                let output = match (args.tree.family, args.tree.hash) {
+                let output = match (args.tree.family, hash) {
                     (TreeKind::Mmr, Hash::Keccak) => any::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => any::<mmr::Family, Sha256>(&args),
                     (TreeKind::Mmb, Hash::Keccak) => any::<mmb::Family, Keccak256>(&args),
@@ -841,7 +843,7 @@ impl Command {
                 Ok(output.abi_encode_params())
             }
             Self::Keyless(args) => {
-                let output = match (args.tree.family, args.tree.hash) {
+                let output = match (args.tree.family, hash) {
                     (TreeKind::Mmr, Hash::Keccak) => keyless::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => keyless::<mmr::Family, Sha256>(&args),
                     (TreeKind::Mmb, Hash::Keccak) => keyless::<mmb::Family, Keccak256>(&args),
@@ -850,7 +852,7 @@ impl Command {
                 Ok(output.abi_encode_params())
             }
             Self::Immutable(args) => {
-                let output = match (args.tree.family, args.tree.hash) {
+                let output = match (args.tree.family, hash) {
                     (TreeKind::Mmr, Hash::Keccak) => immutable::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => immutable::<mmr::Family, Sha256>(&args),
                     (TreeKind::Mmb, Hash::Keccak) => immutable::<mmb::Family, Keccak256>(&args),
@@ -859,7 +861,7 @@ impl Command {
                 Ok(output.abi_encode_params())
             }
             Self::Current(args) => {
-                let output = match (args.family, args.hash) {
+                let output = match (args.family, hash) {
                     (TreeKind::Mmr, Hash::Keccak) => current::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => current::<mmr::Family, Sha256>(&args),
                     (TreeKind::Mmb, Hash::Keccak) => current::<mmb::Family, Keccak256>(&args),
@@ -867,7 +869,7 @@ impl Command {
                 }?;
                 Ok(output.abi_encode_params())
             }
-            Self::Exclude(args) => match (args.tree.family, args.tree.hash) {
+            Self::Exclude(args) => match (args.tree.family, hash) {
                 (TreeKind::Mmr, Hash::Keccak) => exclude::<mmr::Family, Keccak256>(&args),
                 (TreeKind::Mmr, Hash::Sha256) => exclude::<mmr::Family, Sha256>(&args),
                 (TreeKind::Mmb, Hash::Keccak) => exclude::<mmb::Family, Keccak256>(&args),
@@ -884,6 +886,171 @@ mod tests {
     use clap::Parser;
     use commonware_codec::{Copying, DecodeExt};
     use commonware_storage::{merkle::Proof, qmdb::current::proof::RangeProof};
+
+    #[test]
+    fn cli_requires_explicit_named_inputs() {
+        use clap::error::ErrorKind;
+
+        for (command, selection) in [
+            ("lifecycle", vec![]),
+            ("any", vec!["--leaves", "3", "--location", "1"]),
+            ("current", vec!["--leaves", "3", "--location", "1"]),
+            (
+                "unordered",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--encoding",
+                    "fixed",
+                    "--operation",
+                    "update",
+                ],
+            ),
+            (
+                "keyless",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--encoding",
+                    "fixed",
+                    "--operation",
+                    "append",
+                ],
+            ),
+            (
+                "immutable",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--encoding",
+                    "fixed",
+                    "--operation",
+                    "set",
+                ],
+            ),
+            (
+                "exclude",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--keyhex",
+                    "00",
+                    "--mode",
+                    "interval",
+                ],
+            ),
+            (
+                "exclude-variable",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--keyhex",
+                    "00",
+                    "--mode",
+                    "interval",
+                ],
+            ),
+            (
+                "range",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--start",
+                    "1",
+                    "--count",
+                    "2",
+                    "--variant",
+                    "ordered",
+                    "--encoding",
+                    "fixed",
+                    "--activity",
+                    "all",
+                ],
+            ),
+            (
+                "multi",
+                vec![
+                    "--leaves",
+                    "3",
+                    "--locations",
+                    "2,0,2",
+                    "--variant",
+                    "ordered",
+                    "--encoding",
+                    "fixed",
+                    "--activity",
+                    "all",
+                ],
+            ),
+        ] {
+            for hash in ["keccak", "sha256"] {
+                let mut args = vec![
+                    "fuzz", "qmdb", "--hash", hash, command, "--seed", "42", "--family", "mmb",
+                ];
+                if command != "lifecycle" {
+                    args.extend(["--inactivity-floor", "0", "--chunk-bytes", "32"]);
+                }
+                args.extend_from_slice(&selection);
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+
+                for index in (2..args.len()).filter(|&index| args[index].starts_with("--")) {
+                    let mut missing = args.clone();
+                    missing.drain(index..index + 2);
+                    let error = Cli::try_parse_from(&missing).err().unwrap();
+                    assert_eq!(
+                        error.kind(),
+                        ErrorKind::MissingRequiredArgument,
+                        "{missing:?}: {error}"
+                    );
+                    assert!(error.to_string().contains(args[index]), "{error}");
+
+                    if matches!(
+                        args[index],
+                        "--leaves"
+                            | "--location"
+                            | "--seed"
+                            | "--start"
+                            | "--count"
+                            | "--locations"
+                            | "--keyhex"
+                    ) {
+                        let mut positional = args.clone();
+                        positional.remove(index);
+                        let error = Cli::try_parse_from(&positional).err().unwrap();
+                        assert_eq!(
+                            error.kind(),
+                            ErrorKind::UnknownArgument,
+                            "{positional:?}: {error}"
+                        );
+                    }
+                }
+
+                let mut misplaced = args.clone();
+                misplaced.drain(2..4);
+                misplaced.extend(["--hash", hash]);
+                let error = Cli::try_parse_from(&misplaced).err().unwrap();
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::UnknownArgument,
+                    "{misplaced:?}: {error}"
+                );
+
+                args[3] = "blake3";
+                let error = Cli::try_parse_from(&args).err().unwrap();
+                assert_eq!(error.kind(), ErrorKind::InvalidValue, "{args:?}: {error}");
+            }
+        }
+    }
 
     fn current_proof<F: Graftable, H: Hasher, const N: usize>(
         output: &OperationOutput,
@@ -1161,20 +1328,25 @@ mod tests {
                         let mut args = vec![
                             "fuzz".to_owned(),
                             "qmdb".into(),
+                            "--hash".into(),
+                            hash.into(),
                             "unordered".into(),
+                            "--leaves".into(),
                             leaves.to_string(),
+                            "--location".into(),
                             location.to_string(),
+                            "--seed".into(),
                             "71".into(),
                             "--family".into(),
                             family.into(),
-                            "--hash".into(),
-                            hash.into(),
                             "--inactivity-floor".into(),
                             floor.to_string(),
                             "--encoding".into(),
                             encoding.into(),
                             "--operation".into(),
                             operation.into(),
+                            "--chunk-bytes".into(),
+                            "32".into(),
                         ];
                         if current {
                             args.push("--current".into());
@@ -1221,36 +1393,166 @@ mod tests {
     #[test]
     fn unordered_cli_rejects_invalid_options_and_active_floors() {
         for tail in [
-            vec!["0", "0", "71"],
-            vec!["1000001", "0", "71"],
-            vec!["3", "3", "71"],
-            vec!["3", "1", "71", "--inactivity-floor", "2"],
-            vec!["3", "1", "71", "--value-length", "32"],
-            vec!["1", "0", "71", "--history", "updated"],
             vec![
+                "--leaves",
+                "0",
+                "--location",
+                "0",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
+                "1000001",
+                "--location",
+                "0",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
                 "3",
+                "--location",
+                "3",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
+                "3",
+                "--location",
                 "1",
+                "--seed",
+                "71",
+                "--inactivity-floor",
+                "2",
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
+                "3",
+                "--location",
+                "1",
+                "--seed",
+                "71",
+                "--value-length",
+                "32",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
+                "1",
+                "--location",
+                "0",
+                "--seed",
+                "71",
+                "--history",
+                "updated",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--operation",
+                "update",
+            ],
+            vec![
+                "--leaves",
+                "3",
+                "--location",
+                "1",
+                "--seed",
                 "71",
                 "--history",
                 "updated",
                 "--operation",
                 "delete",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
             ],
             vec![
+                "--leaves",
                 "3",
+                "--location",
                 "2",
+                "--seed",
                 "71",
                 "--current",
                 "--inactivity-floor",
                 "2",
                 "--operation",
                 "commit",
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
             ],
         ] {
-            let result = Cli::try_parse_from(["fuzz", "qmdb", "unordered"].into_iter().chain(tail))
-                .unwrap()
-                .command
-                .execute();
+            let result = Cli::try_parse_from(
+                ["fuzz", "qmdb", "--hash", "keccak", "unordered"]
+                    .into_iter()
+                    .chain(tail),
+            )
+            .unwrap()
+            .command
+            .execute();
             assert!(result.is_err());
         }
     }
@@ -1278,20 +1580,25 @@ mod tests {
                             let mut args = vec![
                                 "fuzz".to_string(),
                                 "qmdb".into(),
+                                "--hash".into(),
+                                hash.into(),
                                 "immutable".into(),
+                                "--leaves".into(),
                                 leaves.to_string(),
+                                "--location".into(),
                                 location.to_string(),
+                                "--seed".into(),
                                 "71".into(),
                                 "--family".into(),
                                 family.into(),
-                                "--hash".into(),
-                                hash.into(),
                                 "--encoding".into(),
                                 encoding.into(),
                                 "--operation".into(),
                                 operation.into(),
                                 "--inactivity-floor".into(),
                                 floor.to_string(),
+                                "--chunk-bytes".into(),
+                                "32".into(),
                             ];
                             if encoding == "variable" {
                                 args.extend(["--value-length".into(), "128".into()]);
@@ -1358,14 +1665,25 @@ mod tests {
             let mut args = vec![
                 "fuzz".to_string(),
                 "qmdb".into(),
+                "--hash".into(),
+                "keccak".into(),
                 "immutable".into(),
+                "--leaves".into(),
                 leaves.to_string(),
+                "--location".into(),
                 location.to_string(),
+                "--seed".into(),
                 "71".into(),
                 "--inactivity-floor".into(),
                 floor.to_string(),
                 "--operation".into(),
                 operation.into(),
+                "--family".into(),
+                "mmb".into(),
+                "--chunk-bytes".into(),
+                "32".into(),
+                "--encoding".into(),
+                "fixed".into(),
             ];
             if let Some(length) = length {
                 args.extend(["--value-length".into(), length.into()]);
@@ -1388,9 +1706,14 @@ mod tests {
                 let args = [
                     "fuzz",
                     "qmdb",
+                    "--hash",
+                    "keccak",
                     "keyless",
+                    "--leaves",
                     "3",
+                    "--location",
                     "1",
+                    "--seed",
                     "42",
                     "--encoding",
                     "variable",
@@ -1398,6 +1721,12 @@ mod tests {
                     operation,
                     "--value-length",
                     &length.to_string(),
+                    "--family",
+                    "mmb",
+                    "--inactivity-floor",
+                    "0",
+                    "--chunk-bytes",
+                    "32",
                 ];
                 let encoded = Cli::try_parse_from(args)
                     .unwrap()
@@ -1421,12 +1750,27 @@ mod tests {
         let result = Cli::try_parse_from([
             "fuzz",
             "qmdb",
+            "--hash",
+            "keccak",
             "keyless",
+            "--leaves",
             "3",
+            "--location",
             "1",
+            "--seed",
             "42",
             "--value-length",
             "32",
+            "--family",
+            "mmb",
+            "--inactivity-floor",
+            "0",
+            "--chunk-bytes",
+            "32",
+            "--encoding",
+            "fixed",
+            "--operation",
+            "append",
         ])
         .unwrap()
         .command
@@ -1447,14 +1791,25 @@ mod tests {
             let result = Cli::try_parse_from([
                 "fuzz",
                 "qmdb",
+                "--hash",
+                "keccak",
                 "keyless",
+                "--leaves",
                 &leaves.to_string(),
+                "--location",
                 &location.to_string(),
+                "--seed",
                 "42",
                 "--inactivity-floor",
                 &floor.to_string(),
                 "--operation",
                 operation,
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
             ])
             .unwrap()
             .command
@@ -1483,20 +1838,25 @@ mod tests {
                                 let encoded = Cli::try_parse_from([
                                     "fuzz",
                                     "qmdb",
+                                    "--hash",
+                                    hash,
                                     "keyless",
+                                    "--leaves",
                                     &leaves.to_string(),
+                                    "--location",
                                     &location.to_string(),
+                                    "--seed",
                                     &seed.to_string(),
                                     "--family",
                                     family,
-                                    "--hash",
-                                    hash,
                                     "--inactivity-floor",
                                     &floor.to_string(),
                                     "--encoding",
                                     encoding,
                                     "--operation",
                                     operation,
+                                    "--chunk-bytes",
+                                    "32",
                                 ])
                                 .unwrap()
                                 .command
@@ -1550,16 +1910,21 @@ mod tests {
                                 let mut args = vec![
                                     "fuzz".to_owned(),
                                     "qmdb".into(),
+                                    "--hash".into(),
+                                    hash.into(),
                                     "any".into(),
+                                    "--leaves".into(),
                                     leaves.to_string(),
+                                    "--location".into(),
                                     location.to_string(),
+                                    "--seed".into(),
                                     "42".into(),
                                     "--family".into(),
                                     family.into(),
-                                    "--hash".into(),
-                                    hash.into(),
                                     "--inactivity-floor".into(),
                                     floor.to_string(),
+                                    "--chunk-bytes".into(),
+                                    "32".into(),
                                 ];
                                 if let Some(history) = history {
                                     args.extend(["--history".into(), history.into()]);
@@ -1602,7 +1967,6 @@ mod tests {
                     leaves: 3,
                     location: 0,
                     seed: 42,
-                    hash: Hash::Keccak,
                     family: TreeKind::Mmb,
                     inactivity_floor: 0,
                     chunk_bytes: 32,
@@ -1656,16 +2020,21 @@ mod tests {
                             let encoded = Cli::try_parse_from([
                                 "fuzz",
                                 "qmdb",
+                                "--hash",
+                                hash,
                                 "current",
+                                "--leaves",
                                 &leaves.to_string(),
+                                "--location",
                                 &location.to_string(),
+                                "--seed",
                                 "42",
                                 "--family",
                                 family,
-                                "--hash",
-                                hash,
                                 "--inactivity-floor",
                                 &floor.to_string(),
+                                "--chunk-bytes",
+                                "32",
                             ])
                             .unwrap()
                             .command
@@ -1737,17 +2106,25 @@ mod tests {
                                     let mut arguments = vec![
                                         "fuzz".to_owned(),
                                         "qmdb".into(),
+                                        "--hash".into(),
+                                        hash.into(),
                                         "exclude".into(),
+                                        "--leaves".into(),
                                         leaves.to_string(),
+                                        "--location".into(),
                                         location.to_string(),
+                                        "--seed".into(),
                                         "42".into(),
+                                        "--keyhex".into(),
                                         queryhex,
                                         "--family".into(),
                                         family.into(),
-                                        "--hash".into(),
-                                        hash.into(),
                                         "--mode".into(),
                                         mode.into(),
+                                        "--inactivity-floor".into(),
+                                        "0".into(),
+                                        "--chunk-bytes".into(),
+                                        "32".into(),
                                     ];
                                     if metadata {
                                         arguments.push("--metadata".into());
@@ -1786,26 +2163,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_defaults_to_mmb() {
-        for hash in ["keccak", "sha256"] {
-            let args = [
-                "fuzz", "qmdb", "current", "383", "256", "42", "--hash", hash,
-            ];
-            let default = Cli::try_parse_from(args)
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
-            let explicit = Cli::try_parse_from(args.into_iter().chain(["--family", "mmb"]))
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
-            assert_eq!(default, explicit);
-        }
-    }
-
-    #[test]
     fn current_singletons_use_configured_bitmap_chunks() {
         for chunk_bytes in [1usize, 2, 16, 32, 64, 128] {
             let chunk_bits = u64::try_from(chunk_bytes * 8).unwrap();
@@ -1815,14 +2172,21 @@ mod tests {
                 let encoded = Cli::try_parse_from([
                     "fuzz",
                     "qmdb",
+                    "--hash",
+                    "keccak",
                     "current",
+                    "--leaves",
                     &leaves.to_string(),
+                    "--location",
                     &location.to_string(),
+                    "--seed",
                     "42",
                     "--family",
                     family,
                     "--chunk-bytes",
                     &chunk_bytes.to_string(),
+                    "--inactivity-floor",
+                    "0",
                 ])
                 .unwrap()
                 .command
@@ -1849,12 +2213,21 @@ mod tests {
             let result = Cli::try_parse_from([
                 "fuzz",
                 "qmdb",
+                "--hash",
+                "keccak",
                 "current",
+                "--leaves",
                 "3",
+                "--location",
                 "1",
+                "--seed",
                 "42",
                 "--chunk-bytes",
                 &chunk_bytes.to_string(),
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
             ])
             .unwrap()
             .command

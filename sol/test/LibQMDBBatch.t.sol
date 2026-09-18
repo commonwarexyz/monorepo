@@ -581,22 +581,27 @@ contract LibQMDBBatchTest is HashTest {
         uint256 chunkBytes,
         string memory encoding
     ) internal returns (BatchCase memory c) {
-        string[] memory args = new string[]((sparse ? 14 : 15) + (current ? 5 : 0));
+        string[] memory args = new string[]((sparse ? 21 : 23) + (current ? 1 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = sparse ? "multi" : "range";
-        args[3] = vm.toString(n);
-        uint256 offset = 4;
+        args[3] = "--leaves";
+        args[4] = vm.toString(n);
+        uint256 offset = 5;
         if (sparse) {
             string memory query = vm.toString(selected[0]);
             for (uint256 i = 1; i < selected.length; ++i) {
                 query = string.concat(query, ",", vm.toString(selected[i]));
             }
+            args[offset++] = "--locations";
             args[offset++] = query;
         } else {
+            args[offset++] = "--start";
             args[offset++] = vm.toString(selected[0]);
+            args[offset++] = "--count";
             args[offset++] = vm.toString(selected.length);
         }
+        args[offset++] = "--seed";
         args[offset++] = "71";
         args[offset++] = "--family";
         args[offset++] = _mmb() ? "mmb" : "mmr";
@@ -606,12 +611,12 @@ contract LibQMDBBatchTest is HashTest {
         args[offset++] = encoding;
         args[offset++] = "--inactivity-floor";
         args[offset++] = vm.toString(floor);
+        args[offset++] = "--activity";
+        args[offset++] = current ? activity : "all";
+        args[offset++] = "--chunk-bytes";
+        args[offset++] = vm.toString(current ? chunkBytes : 32);
         if (current) {
-            args[offset++] = "--current";
-            args[offset++] = "--activity";
-            args[offset++] = activity;
-            args[offset++] = "--chunk-bytes";
-            args[offset] = vm.toString(chunkBytes);
+            args[offset] = "--current";
         }
         c.sparse = sparse;
         c.current = current;

@@ -42,16 +42,15 @@ sol! {
 
 #[derive(Args)]
 pub(crate) struct LifecycleArgs {
+    #[arg(long)]
     seed: u64,
-    #[arg(long, value_enum, default_value = "keccak")]
-    hash: Hash,
-    #[arg(long, value_enum, default_value = "mmb")]
+    #[arg(long, value_enum)]
     family: TreeKind,
 }
 
 impl LifecycleArgs {
-    pub(super) fn execute(self) -> Result<Vec<u8>, String> {
-        match (self.family, self.hash) {
+    pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
+        match (self.family, hash) {
             (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(self.seed),
             (TreeKind::Mmr, Hash::Sha256) => generate::<mmr::Family, Sha256>(self.seed),
             (TreeKind::Mmb, Hash::Keccak) => generate::<mmb::Family, Keccak256>(self.seed),
@@ -249,15 +248,7 @@ mod tests {
     fn persistent_lifecycle_is_deterministic() {
         for family in [TreeKind::Mmr, TreeKind::Mmb] {
             for hash in [Hash::Keccak, Hash::Sha256] {
-                let run = || {
-                    LifecycleArgs {
-                        seed: 71,
-                        family,
-                        hash,
-                    }
-                    .execute()
-                    .unwrap()
-                };
+                let run = || LifecycleArgs { seed: 71, family }.execute(hash).unwrap();
                 let encoded = run();
                 assert_eq!(encoded, run());
                 let fixture = LifecycleOutput::abi_decode_validate(&encoded).unwrap();

@@ -75,13 +75,14 @@ contract LibQMDBLifecycleTest is HashTest {
     function test_Differential_PersistentLifecycle() public {
         uint64[2] memory seeds = [uint64(71), type(uint64).max];
         for (uint256 i; i < seeds.length; ++i) {
-            string[] memory args = new string[](6);
+            string[] memory args = new string[](7);
             args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
             args[1] = "qmdb";
             args[2] = "lifecycle";
-            args[3] = vm.toString(seeds[i]);
-            args[4] = "--family";
-            args[5] = _mmb() ? "mmb" : "mmr";
+            args[3] = "--seed";
+            args[4] = vm.toString(seeds[i]);
+            args[5] = "--family";
+            args[6] = _mmb() ? "mmb" : "mmr";
             Lifecycle memory c = abi.decode(_ffi(args), (Lifecycle));
             assertGt(c.retainedStart, 0, "pruning must remove stored operations");
             assertLt(c.empty.leaves, 2048, "bounded lifecycle");

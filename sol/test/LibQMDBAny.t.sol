@@ -264,20 +264,25 @@ contract LibQMDBAnyTest is UnorderedOracle {
         returns (AnyCase memory c)
     {
         bool historical = bytes(history).length != 0;
-        string[] memory args = new string[](historical ? 12 : 10);
+        string[] memory args = new string[](historical ? 17 : 15);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "any";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = "71";
-        args[6] = "--inactivity-floor";
-        args[7] = vm.toString(floor);
-        args[8] = "--family";
-        args[9] = _mmb() ? "mmb" : "mmr";
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = "71";
+        args[9] = "--inactivity-floor";
+        args[10] = vm.toString(floor);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--chunk-bytes";
+        args[14] = "32";
         if (historical) {
-            args[10] = "--history";
-            args[11] = history;
+            args[15] = "--history";
+            args[16] = history;
         }
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));

@@ -43,8 +43,12 @@ enum Command {
         command: merkle::Command,
     },
     /// QMDB operation and exclusion proofs over MMR and MMB.
-    #[command(subcommand)]
-    Qmdb(qmdb::Command),
+    Qmdb {
+        #[arg(long, value_enum)]
+        hash: Hash,
+        #[command(subcommand)]
+        command: qmdb::Command,
+    },
     /// Simplex signatures.
     #[command(subcommand)]
     Simplex(simplex::Command),
@@ -56,7 +60,7 @@ impl Command {
             Self::Bmt { hash, command } => command.execute(hash),
             Self::Certificate(command) => command.execute(),
             Self::Merkle { hash, command } => command.execute(hash),
-            Self::Qmdb(command) => command.execute(),
+            Self::Qmdb { hash, command } => command.execute(hash),
             Self::Simplex(command) => command.execute(),
         }
     }

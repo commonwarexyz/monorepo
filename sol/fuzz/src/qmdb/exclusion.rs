@@ -24,6 +24,7 @@ use commonware_utils::sequence::FixedBytes;
 pub(crate) struct ExcludeVariableArgs {
     #[command(flatten)]
     tree: GenerateArgs,
+    #[arg(long)]
     keyhex: String,
     /// Fixed key width (0, 1, 4, or 32). Omitted means length-prefixed `Vec<u8>`.
     #[arg(long)]
@@ -37,7 +38,7 @@ pub(crate) struct ExcludeVariableArgs {
     /// Complete active key set as comma-separated hex, sorted into cyclic order. Use 0x for empty.
     #[arg(long, value_delimiter = ',')]
     keys: Vec<String>,
-    #[arg(long, value_enum, default_value = "interval")]
+    #[arg(long, value_enum)]
     mode: ExclusionMode,
     #[arg(long)]
     metadata: bool,
@@ -98,8 +99,8 @@ macro_rules! with_field_type {
 }
 
 impl ExcludeVariableArgs {
-    pub(super) fn execute(self) -> Result<Vec<u8>, String> {
-        match (self.tree.family, self.tree.hash) {
+    pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
+        match (self.tree.family, hash) {
             (TreeKind::Mmr, Hash::Keccak) => self.dispatch::<mmr::Family, Keccak256>(),
             (TreeKind::Mmr, Hash::Sha256) => self.dispatch::<mmr::Family, Sha256>(),
             (TreeKind::Mmb, Hash::Keccak) => self.dispatch::<mmb::Family, Keccak256>(),
@@ -252,13 +253,13 @@ mod tests {
 
     type Output = <sol!((bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
 
-    fn run(arguments: &[&str]) -> Result<Output, String> {
+    fn run(hash: &str, arguments: &[&str]) -> Result<Output, String> {
         let encoded = Cli::try_parse_from(
-            ["fuzz", "qmdb", "exclude-variable"]
+            ["fuzz", "qmdb", "--hash", hash, "exclude-variable"]
                 .into_iter()
                 .chain(arguments.iter().copied()),
         )
-        .map_err(|e| e.to_string())?
+        .unwrap()
         .command
         .execute()?;
         Output::abi_decode_params_validate(&encoded).map_err(|e| e.to_string())
@@ -275,18 +276,29 @@ mod tests {
                     ("1", "0100", true),
                     ("2", "0x", true),
                 ] {
-                    let output = run(&[
-                        "3",
-                        location,
-                        "42",
-                        query,
-                        "--keys",
-                        "00,01,010000",
-                        "--family",
-                        family,
-                        "--hash",
+                    let output = run(
                         hash,
-                    ])
+                        &[
+                            "--leaves",
+                            "3",
+                            "--location",
+                            location,
+                            "--seed",
+                            "42",
+                            "--keyhex",
+                            query,
+                            "--keys",
+                            "00,01,010000",
+                            "--family",
+                            family,
+                            "--inactivity-floor",
+                            "0",
+                            "--chunk-bytes",
+                            "32",
+                            "--mode",
+                            "interval",
+                        ],
+                    )
                     .unwrap();
                     assert_eq!(output.10, expected);
                     let cfg = ((RangeCfg::from(..), ()), (RangeCfg::from(..), ()));
@@ -305,7 +317,6 @@ mod tests {
                 leaves: 3,
                 location: 0,
                 seed: 0,
-                hash: Hash::Keccak,
                 family: TreeKind::Mmb,
                 inactivity_floor: 0,
                 chunk_bytes: 32,
@@ -335,9 +346,26 @@ mod tests {
                 let keyhex = const_hex::encode(&raw_key);
                 let key_size_text = key_size.unwrap_or(0).to_string();
                 let value_size_text = value_size.unwrap_or(0).to_string();
-                let mut arguments = vec!["1", "0", "42", &keyhex, "--mode", "single", "--keys"];
+                let mut arguments = vec![
+                    "--leaves",
+                    "1",
+                    "--location",
+                    "0",
+                    "--seed",
+                    "42",
+                    "--keyhex",
+                    &keyhex,
+                    "--mode",
+                    "single",
+                    "--family",
+                    "mmb",
+                    "--inactivity-floor",
+                    "0",
+                    "--chunk-bytes",
+                    "32",
+                ];
                 let explicit_key = format!("0x{keyhex}");
-                arguments.push(&explicit_key);
+                arguments.extend(["--keys", &explicit_key]);
                 if key_size.is_some() {
                     arguments.extend(["--key-size", &key_size_text]);
                 }
@@ -346,7 +374,7 @@ mod tests {
                 } else {
                     arguments.extend(["--value-length", "128"]);
                 }
-                let output = run(&arguments).unwrap();
+                let output = run("keccak", &arguments).unwrap();
                 assert!(!output.10);
                 let mut expected = vec![0xd2];
                 if key_size.is_none() {
@@ -383,12 +411,22 @@ mod tests {
                     let location = floor.to_string();
                     let width = value_size.unwrap_or(0).to_string();
                     let mut arguments = vec![
+                        "--leaves",
                         leaves.as_str(),
+                        "--location",
                         location.as_str(),
+                        "--seed",
                         "42",
+                        "--keyhex",
                         "0x",
                         "--mode",
                         "empty",
+                        "--family",
+                        "mmb",
+                        "--inactivity-floor",
+                        "0",
+                        "--chunk-bytes",
+                        "32",
                     ];
                     if metadata {
                         arguments.push("--metadata");
@@ -398,7 +436,7 @@ mod tests {
                     } else {
                         arguments.extend(["--value-length", "0"]);
                     }
-                    let output = run(&arguments).unwrap();
+                    let output = run("keccak", &arguments).unwrap();
                     assert!(output.10);
                     let mut expected = vec![0xd3, u8::from(metadata)];
                     if metadata {
@@ -418,16 +456,29 @@ mod tests {
     #[test]
     fn selected_chunk_width_reaches_the_current_proof() {
         for chunk in ["1", "128"] {
-            let output = run(&[
-                "3",
-                "0",
-                "42",
-                "0000",
-                "--keys",
-                "00,01,010000",
-                "--chunk-bytes",
-                chunk,
-            ])
+            let output = run(
+                "keccak",
+                &[
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "0",
+                    "--seed",
+                    "42",
+                    "--keyhex",
+                    "0000",
+                    "--keys",
+                    "00,01,010000",
+                    "--chunk-bytes",
+                    chunk,
+                    "--family",
+                    "mmb",
+                    "--inactivity-floor",
+                    "0",
+                    "--mode",
+                    "interval",
+                ],
+            )
             .unwrap();
             assert!(output.10);
             assert_eq!(output.4.len(), chunk.parse::<usize>().unwrap());
@@ -437,26 +488,185 @@ mod tests {
     #[test]
     fn invalid_fixture_requests_are_rejected() {
         for args in [
-            vec!["1", "0", "42", "00", "--key-size", "2"],
-            vec!["1", "0", "42", "00", "--key-size", "4"],
             vec![
+                "--leaves",
                 "1",
+                "--location",
                 "0",
+                "--seed",
                 "42",
+                "--keyhex",
+                "00",
+                "--key-size",
+                "2",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "1",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--key-size",
+                "4",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "1",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
                 "00",
                 "--value-size",
                 "1",
                 "--value-length",
                 "1",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
             ],
-            vec!["2", "0", "42", "00", "--mode", "single"],
-            vec!["2", "0", "42", "00", "--keys", "00,00"],
-            vec!["2", "0", "42", "00", "--keys", "00"],
-            vec!["1", "0", "42", "00", "--metadata"],
-            vec!["2", "1", "42", "00", "--inactivity-floor", "1"],
-            vec!["2", "0", "42", "0x", "--key-size", "0"],
+            vec![
+                "--leaves",
+                "2",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--mode",
+                "single",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+            ],
+            vec![
+                "--leaves",
+                "2",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--keys",
+                "00,00",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "2",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--keys",
+                "00",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "1",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--metadata",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "2",
+                "--location",
+                "1",
+                "--seed",
+                "42",
+                "--keyhex",
+                "00",
+                "--inactivity-floor",
+                "1",
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
+            vec![
+                "--leaves",
+                "2",
+                "--location",
+                "0",
+                "--seed",
+                "42",
+                "--keyhex",
+                "0x",
+                "--key-size",
+                "0",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--mode",
+                "interval",
+            ],
         ] {
-            assert!(run(&args).is_err(), "{args:?}");
+            assert!(run("keccak", &args).is_err(), "{args:?}");
         }
     }
 }

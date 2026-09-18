@@ -216,21 +216,26 @@ contract LibQMDBKeylessTest is HashTest {
         bool variableEncoding,
         uint256 operation
     ) internal returns (KeylessCase memory c) {
-        string[] memory args = new string[](14);
+        string[] memory args = new string[](19);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "keyless";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(location);
-        args[5] = vm.toString(seed);
-        args[6] = "--inactivity-floor";
-        args[7] = vm.toString(floor);
-        args[8] = "--family";
-        args[9] = _mmb() ? "mmb" : "mmr";
-        args[10] = "--encoding";
-        args[11] = variableEncoding ? "variable" : "fixed";
-        args[12] = "--operation";
-        args[13] = location == 0 || operation == 1 ? "commit" : operation == 0 ? "append" : "commit-metadata";
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = "--location";
+        args[6] = vm.toString(location);
+        args[7] = "--seed";
+        args[8] = vm.toString(seed);
+        args[9] = "--inactivity-floor";
+        args[10] = vm.toString(floor);
+        args[11] = "--family";
+        args[12] = _mmb() ? "mmb" : "mmr";
+        args[13] = "--encoding";
+        args[14] = variableEncoding ? "variable" : "fixed";
+        args[15] = "--operation";
+        args[16] = location == 0 || operation == 1 ? "commit" : operation == 0 ? "append" : "commit-metadata";
+        args[17] = "--chunk-bytes";
+        args[18] = "32";
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));
         assertEq(c.proof.leaves, leaves);

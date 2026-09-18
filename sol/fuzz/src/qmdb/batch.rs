@@ -72,33 +72,35 @@ enum Activity {
 
 #[derive(Args)]
 struct Options {
-    #[arg(long, value_enum, default_value = "keccak")]
-    hash: Hash,
-    #[arg(long, value_enum, default_value = "mmb")]
+    #[arg(long, value_enum)]
     family: TreeKind,
-    #[arg(long, value_enum, default_value = "ordered")]
+    #[arg(long, value_enum)]
     variant: Variant,
     /// Production operation codec; variable values span word and varint boundaries.
-    #[arg(long, value_enum, default_value = "fixed")]
+    #[arg(long, value_enum)]
     encoding: Encoding,
     /// Use a canonical Current root; sparse proofs authenticate historical operations only.
     #[arg(long)]
     current: bool,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long)]
     inactivity_floor: u64,
     /// Materialized Current activity; mixed has every third chunk zero and every third bit inactive.
-    #[arg(long, value_enum, default_value = "all")]
+    #[arg(long, value_enum)]
     activity: Activity,
     /// Current activity bitmap chunk size in bytes.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long)]
     chunk_bytes: usize,
 }
 
 #[derive(Args)]
 pub(crate) struct RangeArgs {
+    #[arg(long)]
     leaves: u64,
+    #[arg(long)]
     start: u64,
+    #[arg(long)]
     count: u64,
+    #[arg(long)]
     seed: u64,
     #[command(flatten)]
     options: Options,
@@ -106,10 +108,12 @@ pub(crate) struct RangeArgs {
 
 #[derive(Args)]
 pub(crate) struct MultiArgs {
+    #[arg(long)]
     leaves: u64,
     /// Comma-separated locations in caller order; duplicates must name identical operation bytes.
-    #[arg(value_delimiter = ',', num_args = 1, required = true)]
+    #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
+    #[arg(long)]
     seed: u64,
     #[command(flatten)]
     options: Options,
@@ -121,8 +125,9 @@ enum Selection {
 }
 
 impl RangeArgs {
-    pub(super) fn execute(self) -> Result<Vec<u8>, String> {
+    pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         execute(
+            hash,
             self.leaves,
             self.seed,
             &self.options,
@@ -135,8 +140,9 @@ impl RangeArgs {
 }
 
 impl MultiArgs {
-    pub(super) fn execute(self) -> Result<Vec<u8>, String> {
+    pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         execute(
+            hash,
             self.leaves,
             self.seed,
             &self.options,
@@ -146,6 +152,7 @@ impl MultiArgs {
 }
 
 fn execute(
+    hash: Hash,
     leaves: u64,
     seed: u64,
     options: &Options,
@@ -157,7 +164,7 @@ fn execute(
     if !options.current && !matches!(options.activity, Activity::All) {
         return Err("activity requires --current".into());
     }
-    match (options.family, options.hash) {
+    match (options.family, hash) {
         (TreeKind::Mmr, Hash::Keccak) => with_chunk_bytes!(options.chunk_bytes, |N| {
             generate::<mmr::Family, Keccak256, N>(leaves, seed, options, &selection)
         }),
@@ -204,7 +211,6 @@ fn generate<F: Graftable, H: Hasher, const N: usize>(
         leaves,
         location,
         seed,
-        hash: options.hash,
         family: options.family,
         inactivity_floor: options.inactivity_floor,
         chunk_bytes: options.chunk_bytes,
@@ -503,19 +509,29 @@ mod tests {
                         (1023, 768, 255, 768),
                     ] {
                         let encoded = run(&[
+                            "--hash",
+                            hash,
                             "range",
+                            "--leaves",
                             &leaves.to_string(),
+                            "--start",
                             &start.to_string(),
+                            "--count",
                             &count.to_string(),
+                            "--seed",
                             "71",
                             "--family",
                             family,
-                            "--hash",
-                            hash,
                             "--variant",
                             variant,
                             "--inactivity-floor",
                             &floor.to_string(),
+                            "--chunk-bytes",
+                            "32",
+                            "--encoding",
+                            "fixed",
+                            "--activity",
+                            "all",
                         ])
                         .unwrap();
                         let range = <RangeOutput as SolValue>::abi_decode_params_validate(&encoded)
@@ -529,18 +545,27 @@ mod tests {
                         }
                         let locations = format!("{},{},{}", start + count - 1, start, start);
                         let encoded = run(&[
+                            "--hash",
+                            hash,
                             "multi",
+                            "--leaves",
                             &leaves.to_string(),
+                            "--locations",
                             &locations,
+                            "--seed",
                             "71",
                             "--family",
                             family,
-                            "--hash",
-                            hash,
                             "--variant",
                             variant,
                             "--inactivity-floor",
                             &floor.to_string(),
+                            "--chunk-bytes",
+                            "32",
+                            "--encoding",
+                            "fixed",
+                            "--activity",
+                            "all",
                         ])
                         .unwrap();
                         let multi = <MultiOutput as SolValue>::abi_decode_params_validate(&encoded)
@@ -588,19 +613,24 @@ mod tests {
                         let mut options = vec![
                             "--family",
                             family,
-                            "--hash",
-                            hash,
                             "--variant",
                             variant,
                             "--encoding",
                             "variable",
+                            "--inactivity-floor",
+                            "0",
+                            "--activity",
+                            if current { "mixed" } else { "all" },
                             "--chunk-bytes",
                             "1",
                         ];
                         if current {
-                            options.extend(["--current", "--activity", "mixed"]);
+                            options.push("--current");
                         }
-                        let mut args = vec!["range", "17", "0", "8", "0"];
+                        let mut args = vec![
+                            "--hash", hash, "range", "--leaves", "17", "--start", "0", "--count",
+                            "8", "--seed", "0",
+                        ];
                         args.extend_from_slice(&options);
                         let encoded = run(&args).unwrap();
                         let (root, operations) = if current {
@@ -618,7 +648,17 @@ mod tests {
                                 overhead + length + if length < 128 { 1 } else { 2 }
                             );
                         }
-                        let mut args = vec!["multi", "17", "7,0,7", "0"];
+                        let mut args = vec![
+                            "--hash",
+                            hash,
+                            "multi",
+                            "--leaves",
+                            "17",
+                            "--locations",
+                            "7,0,7",
+                            "--seed",
+                            "0",
+                        ];
                         args.extend_from_slice(&options);
                         let encoded = run(&args).unwrap();
                         let (multi_root, multi_operations) = if current {
@@ -662,15 +702,19 @@ mod tests {
                         (1535, 1024, 511, 1024),
                     ] {
                         let encoded = run(&[
+                            "--hash",
+                            hash,
                             "range",
+                            "--leaves",
                             &leaves.to_string(),
+                            "--start",
                             &start.to_string(),
+                            "--count",
                             &count.to_string(),
+                            "--seed",
                             "71",
                             "--family",
                             family,
-                            "--hash",
-                            hash,
                             "--variant",
                             "unordered",
                             "--current",
@@ -678,6 +722,10 @@ mod tests {
                             activity,
                             "--inactivity-floor",
                             &floor.to_string(),
+                            "--chunk-bytes",
+                            "32",
+                            "--encoding",
+                            "fixed",
                         ])
                         .unwrap();
                         let output = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
@@ -720,14 +768,17 @@ mod tests {
                         }
                         let locations = format!("{},{},{}", start + count - 1, start, start);
                         let encoded = run(&[
+                            "--hash",
+                            hash,
                             "multi",
+                            "--leaves",
                             &leaves.to_string(),
+                            "--locations",
                             &locations,
+                            "--seed",
                             "71",
                             "--family",
                             family,
-                            "--hash",
-                            hash,
                             "--variant",
                             "unordered",
                             "--current",
@@ -735,6 +786,10 @@ mod tests {
                             activity,
                             "--inactivity-floor",
                             &floor.to_string(),
+                            "--chunk-bytes",
+                            "32",
+                            "--encoding",
+                            "fixed",
                         ])
                         .unwrap();
                         let multi = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
@@ -758,10 +813,16 @@ mod tests {
             let count = chunk_bits + 5;
             for family in ["mmr", "mmb"] {
                 let encoded = run(&[
+                    "--hash",
+                    "keccak",
                     "range",
+                    "--leaves",
                     &leaves.to_string(),
+                    "--start",
                     &start.to_string(),
+                    "--count",
                     &count.to_string(),
+                    "--seed",
                     "71",
                     "--family",
                     family,
@@ -772,6 +833,10 @@ mod tests {
                     "mixed",
                     "--chunk-bytes",
                     &chunk_bytes.to_string(),
+                    "--inactivity-floor",
+                    "0",
+                    "--encoding",
+                    "fixed",
                 ])
                 .unwrap();
                 let range = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
@@ -789,9 +854,14 @@ mod tests {
 
                 let locations = format!("{},{},{}", start + count - 1, start, start);
                 let encoded = run(&[
+                    "--hash",
+                    "keccak",
                     "multi",
+                    "--leaves",
                     &leaves.to_string(),
+                    "--locations",
                     &locations,
+                    "--seed",
                     "71",
                     "--family",
                     family,
@@ -802,6 +872,10 @@ mod tests {
                     "mixed",
                     "--chunk-bytes",
                     &chunk_bytes.to_string(),
+                    "--inactivity-floor",
+                    "0",
+                    "--encoding",
+                    "fixed",
                 ])
                 .unwrap();
                 let witness = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
@@ -816,33 +890,276 @@ mod tests {
     #[test]
     fn batch_rejects_invalid_requests() {
         for args in [
-            vec!["range", "0", "0", "1", "71"],
-            vec!["range", "3", "0", "0", "71"],
-            vec!["range", "3", "2", "2", "71"],
-            vec!["range", "3", "18446744073709551615", "2", "71"],
-            vec!["range", "3", "0", "1", "71", "--inactivity-floor", "1"],
-            vec!["range", "1000001", "0", "1", "71"],
-            vec!["range", "3", "0", "1", "71", "--activity", "zero"],
             vec![
+                "--hash",
+                "keccak",
                 "range",
-                "3",
+                "--leaves",
                 "0",
+                "--start",
+                "0",
+                "--count",
                 "1",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "0",
+                "--count",
+                "0",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "2",
+                "--count",
+                "2",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "18446744073709551615",
+                "--count",
+                "2",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "0",
+                "--count",
+                "1",
+                "--seed",
+                "71",
+                "--inactivity-floor",
+                "1",
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "1000001",
+                "--start",
+                "0",
+                "--count",
+                "1",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "0",
+                "--count",
+                "1",
+                "--seed",
+                "71",
+                "--activity",
+                "zero",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "0",
+                "--count",
+                "1",
+                "--seed",
                 "71",
                 "--current",
                 "--variant",
                 "keyless",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
             ],
-            vec!["multi", "3", "3", "71"],
-            vec!["multi", "3", "0,2", "71", "--inactivity-floor", "1"],
             vec![
+                "--hash",
+                "keccak",
                 "multi",
+                "--leaves",
                 "3",
+                "--locations",
+                "3",
+                "--seed",
+                "71",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "multi",
+                "--leaves",
+                "3",
+                "--locations",
                 "0,2",
+                "--seed",
+                "71",
+                "--inactivity-floor",
+                "1",
+                "--family",
+                "mmb",
+                "--chunk-bytes",
+                "32",
+                "--variant",
+                "ordered",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
+            ],
+            vec![
+                "--hash",
+                "keccak",
+                "multi",
+                "--leaves",
+                "3",
+                "--locations",
+                "0,2",
+                "--seed",
                 "71",
                 "--current",
                 "--variant",
                 "immutable",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+                "--encoding",
+                "fixed",
+                "--activity",
+                "all",
             ],
         ] {
             assert!(run(&args).is_err(), "{args:?}");
