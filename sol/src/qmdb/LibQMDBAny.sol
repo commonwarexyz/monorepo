@@ -3,7 +3,7 @@ pragma solidity ^0.8.15;
 
 import { Common } from "./Common.sol";
 
-/// @notice Verify inclusion of encoded operations in an ordered any QMDB.
+/// @notice Verify inclusion of encoded operations in an ordered or unordered any QMDB.
 /// @dev Inclusion authenticates operation bytes at a location, not their current activity or key exclusion.
 /// Uses QMDB's backward peak fold and big-endian position and count encodings.
 /// The caller supplies an authenticated root and a trusted hash target.
@@ -18,7 +18,7 @@ library LibQMDBAny {
         bytes32[] digests;
     }
 
-    /// @notice Verify an encoded operation against a trusted ordered any MMB root.
+    /// @notice Verify an encoded operation against a trusted any MMB root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
     /// @param proof Single-operation membership proof.
@@ -34,7 +34,7 @@ library LibQMDBAny {
         );
     }
 
-    /// @notice Verify an encoded operation against a trusted ordered any MMR root.
+    /// @notice Verify an encoded operation against a trusted any MMR root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
     /// @param proof Single-operation membership proof.

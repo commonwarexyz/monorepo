@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { UnorderedOracle } from "./Common.t.sol";
 import { LibQMDBAny } from "../src/qmdb/LibQMDBAny.sol";
 
 struct AnyCase {
@@ -18,9 +18,9 @@ struct AnyNode {
     uint256 right;
 }
 
-contract LibQMDBAnyTest is HashTest {
+contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev Select the delayed-merge MMB family.
-    function _mmb() internal pure virtual returns (bool) {
+    function _mmb() internal pure virtual override returns (bool) {
         return true;
     }
 
@@ -283,6 +283,60 @@ contract LibQMDBAnyTest is HashTest {
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));
         assertEq(c.proof.leaves, leaves);
         assertEq(c.proof.location, location);
+    }
+
+    /// @dev Production unordered fixed and variable operations share the opaque Any verifier.
+    function test_DifferentialUnorderedOperations() public {
+        string[4] memory operations = [string("update"), "delete", "commit", "commit-metadata"];
+        uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 127, 128, 129];
+        for (uint256 encoding; encoding < 2; ++encoding) {
+            for (uint256 i; i < operations.length; ++i) {
+                for (uint256 j; j < (encoding == 0 ? 1 : lengths.length); ++j) {
+                    AnyCase memory c;
+                    (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
+                        abi.decode(
+                            unorderedFixture(
+                                1023,
+                                1022,
+                                768,
+                                encoding == 0 ? "fixed" : "variable",
+                                operations[i],
+                                "",
+                                false,
+                                lengths[j]
+                            ),
+                            (bytes32, uint256, uint256, uint256, bytes32[], bytes)
+                        );
+                    assertGt(c.proof.inactivePeaks, 0, "unordered inactive prefix missing");
+                    if (encoding == 0) assertEq(c.operation.length, 65, "unordered fixed width");
+                    rejectMutations(c);
+                }
+            }
+        }
+    }
+
+    /// @dev Overwritten and deleted updates remain members of the unordered operations log.
+    function test_DifferentialUnorderedHistory() public {
+        for (uint256 encoding; encoding < 2; ++encoding) {
+            for (uint256 history; history < 2; ++history) {
+                AnyCase memory c;
+                (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
+                    abi.decode(
+                        unorderedFixture(
+                            257,
+                            0,
+                            0,
+                            encoding == 0 ? "fixed" : "variable",
+                            "update",
+                            history == 0 ? "updated" : "deleted",
+                            false,
+                            128
+                        ),
+                        (bytes32, uint256, uint256, uint256, bytes32[], bytes)
+                    );
+                assertTrue(this.checked(c), "historical unordered update rejected");
+            }
+        }
     }
 
     /// @dev Compare boundary proofs with the production Rust verifier.

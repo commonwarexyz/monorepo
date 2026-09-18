@@ -22,6 +22,8 @@ target/release/commonware-sol-fuzz simplex --help
   ordered operation proofs, including overwrite and deletion histories. The `exclude`
   subcommand generates ordered exclusion proofs with 32-byte keys and values. The
   `keyless` subcommand generates append and commit proofs with fixed or variable encodings.
+  The `unordered` subcommand generates fixed or variable operation proofs. Add `--current`
+  to include activity authentication.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.

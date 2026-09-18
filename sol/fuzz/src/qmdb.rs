@@ -10,13 +10,17 @@ use crate::{
 use alloy_sol_macro::sol;
 use alloy_sol_types::{SolType, SolValue};
 use clap::{Args, Subcommand};
-use commonware_codec::Encode;
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
     merkle::{Family, Graftable, Location, mem::Mem, mmb, mmr},
     qmdb::{
         self,
-        any::{ordered::fixed, value::FixedEncoding},
+        any::{
+            ordered::fixed,
+            unordered,
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
+        },
         current::{
             grafting,
             ordered::proof::ExclusionProof,
@@ -58,6 +62,8 @@ sol! {
 pub(crate) enum Command {
     /// Prove membership of an ordered operation in the plain operations root.
     Any(AnyArgs),
+    /// Prove unordered operations, optionally including their Current activity verdict.
+    Unordered(UnorderedArgs),
     /// Prove membership of an encoded keyless append or commit.
     Keyless(KeylessArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
@@ -99,6 +105,33 @@ pub(crate) struct AnyArgs {
 enum Encoding {
     Fixed,
     Variable,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum UnorderedOperation {
+    Update,
+    Delete,
+    Commit,
+    CommitMetadata,
+}
+
+#[derive(Args)]
+pub(crate) struct UnorderedArgs {
+    #[command(flatten)]
+    tree: GenerateArgs,
+    /// Return a Current proof and its Rust activity verdict using 32-byte chunks.
+    #[arg(long)]
+    current: bool,
+    #[arg(long, value_enum, default_value = "fixed")]
+    encoding: Encoding,
+    #[arg(long, value_enum, default_value = "update")]
+    operation: UnorderedOperation,
+    /// Repeat one key before a final overwrite or delete.
+    #[arg(long, value_enum)]
+    history: Option<History>,
+    /// Variable value and metadata length; otherwise selected by the seed.
+    #[arg(long)]
+    value_length: Option<u16>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -157,15 +190,7 @@ fn materialize_ops<F: Family, H: Hasher, O: Encode>(
     args: &GenerateArgs,
     operation: &impl Fn(u64) -> O,
 ) -> Result<Mem<F, H::Digest>, String> {
-    if args.leaves == 0
-        || args.leaves > 1_000_000
-        || args.location >= args.leaves
-        || args.location < args.inactivity_floor
-    {
-        return Err(
-            "require 1 <= leaves <= 1000000 and inactivity-floor <= location < leaves".into(),
-        );
-    }
+    validate_tree(args)?;
     let hasher = qmdb::hasher::<H>();
     let mut ops = Mem::<F, H::Digest>::new();
     let mut batch = ops.new_batch();
@@ -175,6 +200,19 @@ fn materialize_ops<F: Family, H: Hasher, O: Encode>(
     let batch = batch.merkleize(&ops, &hasher);
     ops.apply_batch(&batch).map_err(|e| e.to_string())?;
     Ok(ops)
+}
+
+fn validate_tree(args: &GenerateArgs) -> Result<(), String> {
+    if args.leaves == 0
+        || args.leaves > 1_000_000
+        || args.location >= args.leaves
+        || args.location < args.inactivity_floor
+    {
+        return Err(
+            "require 1 <= leaves <= 1000000 and inactivity-floor <= location < leaves".into(),
+        );
+    }
+    Ok(())
 }
 
 fn any_operation<F: Family>(args: &AnyArgs, index: u64) -> Operation<F> {
@@ -288,15 +326,132 @@ fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String
     }
 }
 
+fn unordered<F: Graftable, H: Hasher>(args: &UnorderedArgs) -> Result<Vec<u8>, String> {
+    validate_tree(&args.tree)?;
+    if args.value_length.is_some() && matches!(args.encoding, Encoding::Fixed) {
+        return Err("value-length requires --encoding variable".into());
+    }
+    if args.history.is_some()
+        && (args.tree.leaves < 2 || !matches!(args.operation, UnorderedOperation::Update))
+    {
+        return Err("history requires leaves >= 2 and --operation update".into());
+    }
+    match args.encoding {
+        Encoding::Fixed => {
+            unordered_encoded::<F, H, FixedEncoding<FixedBytes<32>>>(args, |index| {
+                FixedBytes::new(leaf(args.tree.seed, index))
+            })
+        }
+        Encoding::Variable => unordered_encoded::<F, H, VariableEncoding<Vec<u8>>>(args, |index| {
+            let len = args.value_length.map_or_else(
+                || VARIABLE_LENGTHS[(args.tree.seed % VARIABLE_LENGTHS.len() as u64) as usize],
+                usize::from,
+            );
+            leaf(args.tree.seed, index)
+                .into_iter()
+                .cycle()
+                .take(len)
+                .collect()
+        }),
+    }
+}
+
+fn unordered_encoded<F: Graftable, H: Hasher, V: ValueEncoding>(
+    args: &UnorderedArgs,
+    value: impl Fn(u64) -> V::Value,
+) -> Result<Vec<u8>, String>
+where
+    unordered::Operation<F, FixedBytes<32>, V>: Codec,
+{
+    let tree = &args.tree;
+    let op = |index| {
+        if let Some(history) = args.history {
+            return if matches!(history, History::Deleted) && index + 1 == tree.leaves {
+                unordered::Operation::Delete(key(0))
+            } else {
+                unordered::Operation::Update(unordered::Update(key(0), value(index)))
+            };
+        }
+        if index == tree.location {
+            match args.operation {
+                UnorderedOperation::Update => {}
+                UnorderedOperation::Delete => return unordered::Operation::Delete(key(0)),
+                UnorderedOperation::Commit => {
+                    return unordered::Operation::CommitFloor(
+                        None,
+                        Location::new(tree.inactivity_floor),
+                    );
+                }
+                UnorderedOperation::CommitMetadata => {
+                    return unordered::Operation::CommitFloor(
+                        Some(value(index)),
+                        Location::new(tree.inactivity_floor),
+                    );
+                }
+            }
+        }
+        unordered::Operation::Update(unordered::Update(
+            key(index % (tree.leaves - tree.inactivity_floor)),
+            value(index),
+        ))
+    };
+    if !args.current {
+        return plain_proof::<F, H, _>(tree, op).map(|output| output.abi_encode_params());
+    }
+    // Replay key ownership: only the latest surviving update and latest commit are active.
+    let mut live = std::collections::BTreeMap::new();
+    let mut commit = None;
+    for index in 0..tree.leaves {
+        match op(index) {
+            unordered::Operation::Update(unordered::Update(key, _)) => {
+                live.insert(key, index);
+            }
+            unordered::Operation::Delete(key) => {
+                live.remove(&key);
+            }
+            unordered::Operation::CommitFloor(_, _) => commit = Some(index),
+        }
+    }
+    let mut active = vec![false; usize::try_from(tree.leaves).map_err(|e| e.to_string())?];
+    for index in live.into_values().chain(commit) {
+        if index < tree.inactivity_floor {
+            return Err("inactivity-floor crosses an active operation".into());
+        }
+        active[index as usize] = true;
+    }
+    let fixture = materialize::<F, H, _>(tree, op, |index| active[index as usize])?;
+    let expected = fixture
+        .proof
+        .verify::<H, _>(op(tree.location), &fixture.root);
+    Ok(current_output(fixture.output, expected))
+}
+
+fn current_output(output: OperationOutput, expected: bool) -> Vec<u8> {
+    (
+        output.root,
+        output.leaves,
+        output.location,
+        output.inactivePeaks,
+        output.chunk,
+        output.opsRoot,
+        output.pending,
+        output.partial,
+        output.digests,
+        output.operation,
+        expected,
+    )
+        .abi_encode_params()
+}
+
 struct Materialized<F: Graftable, D: Digest> {
     output: OperationOutput,
     proof: operation::Proof<F, D, [u8; 32]>,
     root: D,
 }
 
-fn materialize<F: Graftable, H: Hasher>(
+fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
     args: &GenerateArgs,
-    operation: impl Fn(u64) -> Operation<F>,
+    operation: impl Fn(u64) -> O,
     active: impl Fn(u64) -> bool,
 ) -> Result<Materialized<F, H::Digest>, String> {
     let GenerateArgs {
@@ -359,7 +514,13 @@ fn materialize<F: Graftable, H: Hasher>(
     }
     .root::<H>(&ops_root);
     let op = operation(location);
-    if !proof.verify::<H, _>(op.clone(), &root) {
+    if !range.verify::<H, _, 32>(
+        Location::new(location),
+        core::slice::from_ref(&op),
+        &[proof.chunk],
+        &root,
+    ) || proof.verify::<H, _>(op.clone(), &root) != active(location)
+    {
         return Err("Commonware rejected proof against the materialized canonical root".into());
     }
     let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
@@ -390,7 +551,7 @@ fn materialize<F: Graftable, H: Hasher>(
 }
 
 fn generate<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOutput, String> {
-    materialize::<F, H>(
+    materialize::<F, H, _>(
         args,
         |index| operation::<F>(args.seed, index, args.leaves),
         |index| index >= args.inactivity_floor,
@@ -444,7 +605,7 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
         output,
         proof,
         root,
-    } = materialize::<F, H>(&tree, op, |index| {
+    } = materialize::<F, H, _>(&tree, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
     let exclusion: ExclusionProof<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>, H::Digest, _> =
@@ -454,25 +615,18 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
             _ => unreachable!(),
         };
     let expected = exclusion.verify::<H>(&query, &root);
-    Ok((
-        output.root,
-        output.leaves,
-        output.location,
-        output.inactivePeaks,
-        output.chunk,
-        output.opsRoot,
-        output.pending,
-        output.partial,
-        output.digests,
-        output.operation,
-        expected,
-    )
-        .abi_encode_params())
+    Ok(current_output(output, expected))
 }
 
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::Unordered(args) => match (args.tree.family, args.tree.hash) {
+                (TreeKind::Mmr, Hash::Keccak) => unordered::<mmr::Family, Keccak256>(&args),
+                (TreeKind::Mmr, Hash::Sha256) => unordered::<mmr::Family, Sha256>(&args),
+                (TreeKind::Mmb, Hash::Keccak) => unordered::<mmb::Family, Keccak256>(&args),
+                (TreeKind::Mmb, Hash::Sha256) => unordered::<mmb::Family, Sha256>(&args),
+            },
             Self::Any(args) => {
                 let output = match (args.tree.family, args.tree.hash) {
                     (TreeKind::Mmr, Hash::Keccak) => any::<mmr::Family, Keccak256>(&args),
@@ -518,11 +672,13 @@ mod tests {
     use commonware_codec::{Copying, DecodeExt};
     use commonware_storage::{merkle::Proof, qmdb::current::proof::RangeProof};
 
-    fn verify_output<F: Graftable, H: Hasher>(output: &OperationOutput) {
+    fn current_proof<F: Graftable, H: Hasher>(
+        output: &OperationOutput,
+    ) -> operation::Proof<F, H::Digest, [u8; 32]> {
         let leaves = u64::try_from(output.leaves).unwrap();
         let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
         let graftable = grafting::graftable_chunks::<F>(leaves, 8);
-        let proof = operation::Proof {
+        operation::Proof {
             loc: Location::<F>::new(u64::try_from(output.location).unwrap()),
             chunk: output.chunk.0,
             range_proof: RangeProof {
@@ -543,7 +699,12 @@ mod tests {
                     .then(|| digest(output.partial.as_slice())),
                 ops_root: digest(output.opsRoot.as_slice()),
             },
-        };
+        }
+    }
+
+    fn verify_output<F: Graftable, H: Hasher>(output: &OperationOutput) {
+        let proof = current_proof::<F, H>(output);
+        let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
         let op = Operation::<F>::decode(Copying(output.operation.as_ref())).unwrap();
         let root = digest(output.root.as_slice());
         assert!(proof.verify::<H, _>(op.clone(), &root));
@@ -683,6 +844,209 @@ mod tests {
         let mut changed = encoded.to_vec();
         *changed.last_mut().unwrap() ^= 1;
         assert!(!verify(&changed));
+    }
+
+    fn check_unordered<F: Graftable, H: Hasher, O: Codec + Clone>(
+        encoded: &[u8],
+        current: bool,
+        cfg: &O::Cfg,
+        expected: bool,
+        inactive: bool,
+    ) {
+        let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
+        if current {
+            type ResultTuple = <sol!((bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
+            let (
+                root,
+                leaves,
+                location,
+                inactive_peaks,
+                chunk,
+                ops_root,
+                pending,
+                partial,
+                digests,
+                operation,
+                verdict,
+            ) = ResultTuple::abi_decode_params_validate(encoded).unwrap();
+            assert_eq!(verdict, expected);
+            let output = OperationOutput {
+                root,
+                leaves,
+                location,
+                inactivePeaks: inactive_peaks,
+                chunk,
+                opsRoot: ops_root,
+                pending,
+                partial,
+                digests,
+                operation,
+            };
+            let op = O::decode_cfg(Copying(output.operation.as_ref()), cfg).unwrap();
+            assert_eq!(op.encode().as_ref(), output.operation.as_ref());
+            let proof = current_proof::<F, H>(&output);
+            let root = digest(output.root.as_slice());
+            assert!(proof.range_proof.verify::<H, _, 32>(
+                proof.loc,
+                core::slice::from_ref(&op),
+                &[proof.chunk],
+                &root
+            ));
+            assert_eq!(proof.verify::<H, _>(op.clone(), &root), expected);
+            let bit = *proof.loc % 256;
+            assert_eq!(
+                proof.chunk[(bit / 8) as usize] & (1 << (bit % 8)) != 0,
+                expected
+            );
+            let mut forged = proof;
+            forged.chunk[(bit / 8) as usize] ^= 1 << (bit % 8);
+            assert!(!forged.verify::<H, _>(op, &root));
+            if inactive {
+                assert_ne!(output.inactivePeaks, 0);
+            }
+        } else {
+            let output = <AnyOutput as SolValue>::abi_decode_params_validate(encoded).unwrap();
+            let op = O::decode_cfg(Copying(output.operation.as_ref()), cfg).unwrap();
+            assert_eq!(op.encode().as_ref(), output.operation.as_ref());
+            let proof = Proof::<F, H::Digest> {
+                leaves: Location::new(u64::try_from(output.leaves).unwrap()),
+                inactive_peaks: usize::try_from(output.inactivePeaks).unwrap(),
+                digests: output
+                    .digests
+                    .iter()
+                    .map(|d| digest(d.as_slice()))
+                    .collect(),
+            };
+            assert!(qmdb::verify_proof::<H, F, _>(
+                &proof,
+                Location::new(u64::try_from(output.location).unwrap()),
+                &[op],
+                &digest(output.root.as_slice())
+            ));
+            if inactive {
+                assert_ne!(output.inactivePeaks, 0);
+            }
+        }
+    }
+
+    fn unordered_matrix<F: Graftable, H: Hasher>(family: &str, hash: &str) {
+        for encoding in ["fixed", "variable"] {
+            for current in [false, true] {
+                for (leaves, location, floor, operation, history, expected) in [
+                    (1u64, 0u64, 0u64, "update", "", true),
+                    (1023, 1022, 768, "update", "", true),
+                    (257, 256, 0, "delete", "", false),
+                    (383, 382, 0, "commit", "", true),
+                    (639, 638, 0, "commit-metadata", "", true),
+                    (255, 0, 0, "update", "updated", false),
+                    (256, 255, 0, "update", "updated", true),
+                    (257, 0, 0, "update", "deleted", false),
+                    (513, 512, 0, "update", "deleted", false),
+                ] {
+                    for length in VARIABLE_LENGTHS {
+                        let mut args = vec![
+                            "fuzz".to_owned(),
+                            "qmdb".into(),
+                            "unordered".into(),
+                            leaves.to_string(),
+                            location.to_string(),
+                            "71".into(),
+                            "--family".into(),
+                            family.into(),
+                            "--hash".into(),
+                            hash.into(),
+                            "--inactivity-floor".into(),
+                            floor.to_string(),
+                            "--encoding".into(),
+                            encoding.into(),
+                            "--operation".into(),
+                            operation.into(),
+                        ];
+                        if current {
+                            args.push("--current".into());
+                        }
+                        if !history.is_empty() {
+                            args.extend(["--history".into(), history.into()]);
+                        }
+                        if encoding == "variable" {
+                            args.extend(["--value-length".into(), length.to_string()]);
+                        }
+                        let encoded = Cli::try_parse_from(args)
+                            .unwrap()
+                            .command
+                            .execute()
+                            .unwrap();
+                        if encoding == "fixed" {
+                            check_unordered::<
+                                F,
+                                H,
+                                unordered::fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>,
+                            >(
+                                &encoded, current, &(), expected, floor != 0
+                            );
+                            break;
+                        } else {
+                            check_unordered::<
+                                F,
+                                H,
+                                unordered::variable::Operation<F, FixedBytes<32>, Vec<u8>>,
+                            >(
+                                &encoded,
+                                current,
+                                &((), ((0..=129).into(), ())),
+                                expected,
+                                floor != 0,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unordered_cli_rejects_invalid_options_and_active_floors() {
+        for tail in [
+            vec!["0", "0", "71"],
+            vec!["1000001", "0", "71"],
+            vec!["3", "3", "71"],
+            vec!["3", "1", "71", "--inactivity-floor", "2"],
+            vec!["3", "1", "71", "--value-length", "32"],
+            vec!["1", "0", "71", "--history", "updated"],
+            vec![
+                "3",
+                "1",
+                "71",
+                "--history",
+                "updated",
+                "--operation",
+                "delete",
+            ],
+            vec![
+                "3",
+                "2",
+                "71",
+                "--current",
+                "--inactivity-floor",
+                "2",
+                "--operation",
+                "commit",
+            ],
+        ] {
+            let result = Cli::try_parse_from(["fuzz", "qmdb", "unordered"].into_iter().chain(tail))
+                .unwrap()
+                .command
+                .execute();
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes() {
+        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak");
+        unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256");
+        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak");
+        unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256");
     }
 
     #[test]

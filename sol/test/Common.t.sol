@@ -41,6 +41,53 @@ abstract contract HashTest is Test, HashSelection {
     }
 }
 
+/// @dev Shared FFI arguments select production unordered codecs and proof families.
+abstract contract UnorderedOracle is HashTest {
+    /// @dev The inherited suites specialize both append families.
+    function _mmb() internal pure virtual returns (bool);
+
+    /// @dev Return an Any tuple, or a Current tuple followed by the Rust activity verdict.
+    function unorderedFixture(
+        uint256 leaves,
+        uint256 location,
+        uint256 floor,
+        string memory encoding,
+        string memory operation,
+        string memory history,
+        bool current,
+        uint256 valueLength
+    ) internal returns (bytes memory) {
+        bool historical = bytes(history).length != 0;
+        bool variableLength = keccak256(bytes(encoding)) == keccak256("variable");
+        string[] memory args = new string[](14 + (historical ? 2 : 0) + (current ? 1 : 0) + (variableLength ? 2 : 0));
+        args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
+        args[1] = "qmdb";
+        args[2] = "unordered";
+        args[3] = vm.toString(leaves);
+        args[4] = vm.toString(location);
+        args[5] = "71";
+        args[6] = "--inactivity-floor";
+        args[7] = vm.toString(floor);
+        args[8] = "--family";
+        args[9] = _mmb() ? "mmb" : "mmr";
+        args[10] = "--encoding";
+        args[11] = encoding;
+        args[12] = "--operation";
+        args[13] = operation;
+        uint256 offset = 14;
+        if (historical) {
+            args[offset++] = "--history";
+            args[offset++] = history;
+        }
+        if (current) args[offset++] = "--current";
+        if (variableLength) {
+            args[offset++] = "--value-length";
+            args[offset] = vm.toString(valueLength);
+        }
+        return _ffi(args);
+    }
+}
+
 struct CompatibilityCase {
     bytes32 root;
     uint256 leaves;

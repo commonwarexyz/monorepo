@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { UnorderedOracle } from "./Common.t.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 
 /// @dev Operations remain opaque byte strings.
@@ -21,9 +21,9 @@ struct QMDBNode {
     uint256 right;
 }
 
-contract LibQMDBCurrentTest is HashTest {
+contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure virtual returns (bool) {
+    function _mmb() internal pure virtual override returns (bool) {
         return true;
     }
 
@@ -510,6 +510,89 @@ contract LibQMDBCurrentTest is HashTest {
             );
         assertEq(c.proof.leaves, leaves);
         assertEq(c.proof.location, location);
+    }
+
+    /// @dev Decode the production Current proof and activity verdict for an unordered log.
+    function generateUnordered(
+        uint256 leaves,
+        uint256 location,
+        uint256 floor,
+        string memory encoding,
+        string memory operation,
+        string memory history,
+        uint256 valueLength
+    ) internal returns (QMDBCase memory c, bool expected) {
+        (
+            c.root,
+            c.proof.leaves,
+            c.proof.location,
+            c.proof.inactivePeaks,
+            c.proof.chunk,
+            c.proof.opsRoot,
+            c.proof.pending,
+            c.proof.partialDigest,
+            c.proof.digests,
+            c.operation,
+            expected
+        ) =
+            abi.decode(
+                unorderedFixture(leaves, location, floor, encoding, operation, history, true, valueLength),
+                (bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
+            );
+    }
+
+    /// @dev Active unordered updates bind their bytes and nonzero inactive peak boundary.
+    function test_DifferentialUnorderedOperations() public {
+        string[4] memory operations = [string("update"), "delete", "commit", "commit-metadata"];
+        uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 127, 128, 129];
+        for (uint256 encoding; encoding < 2; ++encoding) {
+            for (uint256 i; i < operations.length; ++i) {
+                for (uint256 j; j < (encoding == 0 ? 1 : lengths.length); ++j) {
+                    (QMDBCase memory c, bool expected) = generateUnordered(
+                        1023,
+                        1022,
+                        i == 0 ? 768 : 0,
+                        encoding == 0 ? "fixed" : "variable",
+                        operations[i],
+                        "",
+                        lengths[j]
+                    );
+                    if (i == 0) assertGt(c.proof.inactivePeaks, 0, "unordered inactive prefix missing");
+                    assertEq(expected, i != 1, "delete activity");
+                    assertEq(this.checked(c), expected, "Rust unordered activity disagreement");
+                    if (expected) rejectMutations(c);
+                }
+            }
+        }
+    }
+
+    /// @dev Replay marks overwritten updates and deletes inactive, and only the final update active.
+    function test_DifferentialUnorderedHistory() public {
+        uint256[5] memory sizes = [uint256(255), 256, 257, 383, 639];
+        for (uint256 encoding; encoding < 2; ++encoding) {
+            for (uint256 history; history < 2; ++history) {
+                for (uint256 i; i < sizes.length; ++i) {
+                    for (uint256 target; target < 2; ++target) {
+                        uint256 location = target == 0 ? 0 : sizes[i] - 1;
+                        (QMDBCase memory c, bool expected) = generateUnordered(
+                            sizes[i],
+                            location,
+                            0,
+                            encoding == 0 ? "fixed" : "variable",
+                            "update",
+                            history == 0 ? "updated" : "deleted",
+                            128
+                        );
+                        assertEq(expected, history == 0 && target == 1, "history activity");
+                        assertEq(this.checked(c), expected, "Rust history disagreement");
+                        if (!expected) {
+                            c.proof.chunk |= bytes32(uint256(1) << (248 - (location % 256 / 8) * 8 + location % 8));
+                            assertFalse(this.checked(c), "forged activity accepted");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// @dev Production Commonware proofs cross every pending and partial chunk transition.
