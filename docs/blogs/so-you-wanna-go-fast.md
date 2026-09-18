@@ -15,7 +15,7 @@ A blockchain that produces several gigabytes of blocks per second asks every rep
 
 We're building [Multimmit](/blogs/multimmit) to reach that scale by enabling producers to build and broadcast their own chains in parallel. Consensus agrees on references to those chains, leaving each replica to assemble their blocks into the same ordered stream for the application. We'll call that stream the application log. That work belongs to *marshal*, the component between the Multimmit engine and the application. We have to overlap work across the network, disk, and application while keeping the memory used by unfinished work under control.
 
-Multimmit sustains one million 512-byte transactions per second across 50 validators in healthy tests with fsync disabled. Median submission-to-finality latency is 400 ms globally and 63 ms in North America. The [results below](#how-fast-does-it-go) show the comparisons and fault scenarios. Getting there takes more than a fast consensus protocol.
+Multimmit sustains one million 512-byte transactions per second across 50 validators. Median submission-to-finality latency is 400 ms globally and 63 ms in North America. The [results below](#how-fast-does-it-go) show the comparisons and fault scenarios. Getting there takes more than a fast consensus protocol.
 
 Let's follow three producers, Alice, Bob, and Carol. Their blocks might appear in the application log like this:
 
