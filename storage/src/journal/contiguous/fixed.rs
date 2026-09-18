@@ -664,23 +664,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         self.watermark
     }
 
-    /// Whether stored blobs hold bytes past the retained end: a blob was discarded unopened, or
-    /// the newest opened blob is longer than the items it retains. A partial trailing item counts
-    /// as excess.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn exceeded(&self) -> bool {
-        if !self.discarded.is_empty() {
-            return true;
-        }
-        let Some((&blob, writer)) = self.pending.last_key_value() else {
-            return false;
-        };
-        let items_per_blob = self.cfg.items_per_blob.get();
-        first_in_blob(self.bounds.start, blob, items_per_blob)
-            .and_then(|first| Inner::<E, A>::items_to_bytes(self.bounds.end.saturating_sub(first)))
-            .is_ok_and(|retained| writer.size() > retained)
-    }
-
     /// Read an item for recovery selection or validation.
     pub(super) async fn item(&self, pos: u64) -> Result<A, Error> {
         if pos < self.bounds.start {
