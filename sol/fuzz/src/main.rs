@@ -42,7 +42,7 @@ enum Command {
         #[command(subcommand)]
         command: merkle::Command,
     },
-    /// Current ordered QMDB operation proofs over MMB.
+    /// QMDB operation and exclusion proofs over MMR and MMB.
     #[command(subcommand)]
     Qmdb(qmdb::Command),
     /// Simplex signatures.

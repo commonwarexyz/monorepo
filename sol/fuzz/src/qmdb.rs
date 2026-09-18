@@ -112,7 +112,7 @@ pub(crate) enum Command {
     /// Prove membership of an encoded immutable set or commit.
     Immutable(ImmutableArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
-    Generate(GenerateArgs),
+    Current(GenerateArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
     Exclude(ExcludeArgs),
     /// Prove exclusion with independently fixed or vector byte fields.
@@ -689,7 +689,7 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
     })
 }
 
-fn generate<F: Graftable, H: Hasher, const N: usize>(
+fn current<F: Graftable, H: Hasher, const N: usize>(
     args: &GenerateArgs,
 ) -> Result<OperationOutput, String> {
     materialize::<F, H, _, N>(
@@ -799,27 +799,27 @@ impl Command {
                 }?;
                 Ok(output.abi_encode_params())
             }
-            Self::Generate(args) => {
+            Self::Current(args) => {
                 let output = match (args.family, args.hash) {
                     (TreeKind::Mmr, Hash::Keccak) => {
                         with_chunk_bytes!(
                             args.chunk_bytes,
-                            |N| generate::<mmr::Family, Keccak256, N>(&args)
+                            |N| current::<mmr::Family, Keccak256, N>(&args)
                         )
                     }
                     (TreeKind::Mmr, Hash::Sha256) => {
-                        with_chunk_bytes!(args.chunk_bytes, |N| generate::<mmr::Family, Sha256, N>(
+                        with_chunk_bytes!(args.chunk_bytes, |N| current::<mmr::Family, Sha256, N>(
                             &args
                         ))
                     }
                     (TreeKind::Mmb, Hash::Keccak) => {
                         with_chunk_bytes!(
                             args.chunk_bytes,
-                            |N| generate::<mmb::Family, Keccak256, N>(&args)
+                            |N| current::<mmb::Family, Keccak256, N>(&args)
                         )
                     }
                     (TreeKind::Mmb, Hash::Sha256) => {
-                        with_chunk_bytes!(args.chunk_bytes, |N| generate::<mmb::Family, Sha256, N>(
+                        with_chunk_bytes!(args.chunk_bytes, |N| current::<mmb::Family, Sha256, N>(
                             &args
                         ))
                     }
@@ -1637,7 +1637,7 @@ mod tests {
                             let encoded = Cli::try_parse_from([
                                 "fuzz",
                                 "qmdb",
-                                "generate",
+                                "current",
                                 &leaves.to_string(),
                                 &location.to_string(),
                                 "42",
@@ -1770,7 +1770,7 @@ mod tests {
     fn cli_defaults_to_mmb() {
         for hash in ["keccak", "sha256"] {
             let args = [
-                "fuzz", "qmdb", "generate", "383", "256", "42", "--hash", hash,
+                "fuzz", "qmdb", "current", "383", "256", "42", "--hash", hash,
             ];
             let default = Cli::try_parse_from(args)
                 .unwrap()
@@ -1796,7 +1796,7 @@ mod tests {
                 let encoded = Cli::try_parse_from([
                     "fuzz",
                     "qmdb",
-                    "generate",
+                    "current",
                     &leaves.to_string(),
                     &location.to_string(),
                     "42",
@@ -1830,7 +1830,7 @@ mod tests {
             let result = Cli::try_parse_from([
                 "fuzz",
                 "qmdb",
-                "generate",
+                "current",
                 "3",
                 "1",
                 "42",

@@ -596,7 +596,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         string[] memory args = new string[](12);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
-        args[2] = "generate";
+        args[2] = "current";
         args[3] = vm.toString(leaves);
         args[4] = vm.toString(location);
         args[5] = "71";

@@ -17,18 +17,22 @@ target/release/commonware-sol-fuzz simplex --help
 - `certificate`: Generate and check BLS12-381 certificates, or hash namespaced messages
   to curve points.
 - `merkle`: Generate and check MMR and MMB proofs.
-- `qmdb` generates active operation proofs for current QMDBs. Pass `--family mmr`
-  for MMR proofs or use the default MMB family. The `any` subcommand generates
-  ordered operation proofs, including overwrite and deletion histories. The `exclude`
-  subcommand generates ordered exclusion proofs with 32-byte keys and values.
-  `exclude-variable` accepts Vec keys and values by default. `--key-size` and
-  `--value-size` select fixed widths of 0, 1, 4, or 32 bytes.
-  The `keyless` subcommand generates append and commit proofs with fixed or variable encodings.
-  The `unordered` subcommand generates fixed or variable operation proofs. Add `--current`
-  to include activity authentication.
-  The `immutable` subcommand generates set and commit proofs.
-  The `range` and `multi` subcommands generate batch proofs. With `--current`, ranges
-  authenticate bitmap state and sparse proofs authenticate historical operations.
+- `qmdb` generates QMDB operation and exclusion proofs. Its subcommands are listed below.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.
+
+QMDB commands use MMB by default. Pass `--family mmr` for MMR proofs.
+
+- `qmdb current` generates active operation proofs for current QMDBs.
+- `qmdb any` generates ordered operation proofs, including overwrite and deletion histories.
+- `qmdb keyless` generates append and commit proofs with fixed or variable encodings.
+- `qmdb unordered` generates fixed or variable operation proofs. Add `--current`
+  to include activity authentication.
+- `qmdb immutable` generates set and commit proofs.
+- `qmdb exclude` generates ordered exclusion proofs with 32-byte keys and values.
+- `qmdb exclude-variable` generates ordered exclusion proofs with Vec keys and values
+  by default. `--key-size` and `--value-size` select fixed widths of 0, 1, 4, or 32 bytes.
+- `qmdb range` generates range proofs. Add `--current` to authenticate bitmap state.
+- `qmdb multi` generates sparse proofs. Add `--current` to authenticate historical
+  operations against a current QMDB root.
