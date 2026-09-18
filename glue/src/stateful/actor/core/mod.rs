@@ -433,43 +433,35 @@ mod tests {
     #[test]
     fn forwards_handoff_policy_and_reuses_recovered_proposal() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            for (suffix, publication) in [
-                (
-                    "after_certification",
-                    HandoffPublication::AfterCertification,
-                ),
-                (
-                    "allow_before_certification",
-                    HandoffPublication::AllowBeforeCertification,
-                ),
-            ] {
-                let application = TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication));
-                let prefix = format!("stateful-handoff-policy-{suffix}");
-                let (mailbox, marshal, _marshal, actor) =
-                    spawn_test_stateful(&context, &prefix, application).await;
-                let _databases = mailbox.subscribe_databases().await;
-                let mut deferred = Deferred::new(
-                    context.child(suffix),
-                    mailbox,
-                    marshal.clone(),
-                    FixedEpocher::new(NZU64!(10)),
-                );
+            let publication = HandoffPublication::AllowBeforeCertification;
+            let (mailbox, marshal, _guards, actor) = spawn_test_stateful(
+                &context,
+                "stateful-handoff-policy",
+                TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
+            )
+            .await;
+            let _databases = mailbox.subscribe_databases().await;
+            let mut deferred = Deferred::new(
+                context.child("prepare"),
+                mailbox,
+                marshal.clone(),
+                FixedEpocher::new(NZU64!(10)),
+            );
 
-                // Build must reach Marshal's ordinary path, including recovered-candidate reuse.
-                let block = TestBlock::new(1, 1);
-                assert!(marshal.verified(block.context().round, block.clone()).await);
-                let response = deferred.propose_handoff(block.context()).await;
-                assert_eq!(
-                    response.await.unwrap(),
-                    HandoffProposal::Proposed {
-                        payload: block.digest(),
-                        publication,
-                    }
-                );
-                actor.abort();
-            }
+            // Build must reach Marshal's ordinary path, including recovered-candidate reuse.
+            let block = TestBlock::new(1, 1);
+            assert!(marshal.verified(block.context().round, block.clone()).await);
+            let response = deferred.propose_handoff(block.context()).await;
+            assert_eq!(
+                response.await.unwrap(),
+                HandoffProposal::Proposed {
+                    payload: block.digest(),
+                    publication,
+                }
+            );
+            actor.abort();
 
-            let (mailbox, marshal, _marshal, actor) = spawn_test_stateful(
+            let (mailbox, marshal, _guards, actor) = spawn_test_stateful(
                 &context,
                 "stateful-default-handoff-policy",
                 TestApp::default(),

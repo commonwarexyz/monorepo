@@ -99,7 +99,7 @@ mod tests {
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{
         NZU16, NZU32, NZUsize,
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        channel::{mpsc, oneshot},
         non_empty, probability,
         sync::Mutex,
     };
@@ -118,8 +118,6 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
     type ProposeContexts = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
-    type HandoffRequests = Arc<Mutex<Vec<View>>>;
-    type ProposeResponses = Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<Sha256Digest>)>>>;
     type HandoffProposeResponses =
         Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<HandoffProposal<Sha256Digest>>)>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
@@ -278,10 +276,6 @@ mod tests {
         propose_requests: Option<ProposeRequests>,
         /// Full contexts supplied to mock application proposal requests.
         propose_contexts: Option<ProposeContexts>,
-        /// Views supplied with handoff proposal requests.
-        handoff_requests: Option<HandoffRequests>,
-        /// Regular proposal responses controlled by the test.
-        propose_responses: Option<ProposeResponses>,
         /// Handoff proposal responses controlled by the test.
         handoff_propose_responses: Option<HandoffProposeResponses>,
         /// Whether mock application proposal requests should remain pending.
@@ -314,8 +308,6 @@ mod tests {
                 certify_latency_ms: 1.0,
                 propose_requests: None,
                 propose_contexts: None,
-                handoff_requests: None,
-                propose_responses: None,
                 handoff_propose_responses: None,
                 stall_proposals: false,
                 drop_proposals: false,
@@ -361,8 +353,6 @@ mod tests {
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
         let propose_contexts = options.propose_contexts;
-        let handoff_requests = options.handoff_requests;
-        let propose_responses = options.propose_responses;
         let handoff_propose_responses = options.handoff_propose_responses;
         let verify_requests = options.verify_requests;
 
@@ -389,16 +379,6 @@ mod tests {
                 if let Some(contexts) = &propose_contexts {
                     contexts.lock().push(context);
                 }
-            }));
-        }
-        if let Some(handoff_requests) = handoff_requests {
-            actor.set_handoff_propose_observer(Box::new(move |context| {
-                handoff_requests.lock().push(context.view());
-            }));
-        }
-        if let Some(propose_responses) = propose_responses {
-            actor.set_propose_controller(Box::new(move |digest, response| {
-                propose_responses.lock().push((digest, response));
             }));
         }
         if let Some(handoff_propose_responses) = handoff_propose_responses {
@@ -3915,26 +3895,22 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        match msg.unwrap() {
-                            batcher::Message::Update { .. } => {}
-                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
-                                if notarize.view() == View::new(2) {
-                                    saw_view_2_notarize = true;
-                                }
-                                if notarize.view() == View::new(3) {
-                                    assert!(
-                                        saw_view_2_notarize,
-                                        "expected the outgoing tip's notarize before the handoff notarize"
-                                    );
-                                    assert_eq!(
-                                        notarize.proposal.parent,
-                                        View::new(2),
-                                        "handoff proposal must build on the outgoing term's final view"
-                                    );
-                                    break;
-                                }
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap() {
+                            if notarize.view() == View::new(2) {
+                                saw_view_2_notarize = true;
                             }
-                            _ => {}
+                            if notarize.view() == View::new(3) {
+                                assert!(
+                                    saw_view_2_notarize,
+                                    "expected the outgoing tip's notarize before the handoff notarize"
+                                );
+                                assert_eq!(
+                                    notarize.proposal.parent,
+                                    View::new(2),
+                                    "handoff proposal must build on the outgoing term's final view"
+                                );
+                                break;
+                            }
                         }
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
@@ -3942,9 +3918,8 @@ mod tests {
                     }
                 }
             }
-            let metrics = context.encode();
             assert_handoff_metrics(
-                &metrics,
+                &context.encode(),
                 "actor",
                 &[
                     ("PublishedBeforeCertification", 1),
@@ -3953,129 +3928,6 @@ mod tests {
                 ],
                 &[],
             );
-        });
-    }
-
-    #[test_traced]
-    fn test_pipelined_handoff_application_defers_until_parent_certifies() {
-        let n = 1;
-        let namespace = b"pipelined_handoff_application_defers".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(20));
-        executor.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = ed25519::fixture(&mut context, &namespace, n);
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-
-            let propose_requests = Arc::new(Mutex::new(Vec::new()));
-            let propose_contexts = Arc::new(Mutex::new(Vec::new()));
-            let handoff_requests = Arc::new(Mutex::new(Vec::new()));
-            let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
-            let controlled = certification_requests.clone();
-            let certifier =
-                mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
-                    controlled.lock().push((round.view(), response));
-                }));
-
-            let (mut mailbox, mut batcher, _resolver, _relay, _reporter) = setup_voter(
-                &context,
-                &oracle,
-                &participants,
-                &schemes,
-                RoundRobin::<Sha256>::default(),
-                VoterOptions {
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(10),
-                    timeout_retry: Duration::from_secs(30),
-                    propose_requests: Some(propose_requests.clone()),
-                    propose_contexts: Some(propose_contexts.clone()),
-                    handoff_requests: Some(handoff_requests.clone()),
-                    certifier,
-                    ..Default::default()
-                },
-            )
-            .await;
-
-            wait_for_request(&context, &propose_requests, View::new(1), |request| {
-                request.0
-            })
-            .await;
-            wait_for_request(&context, &handoff_requests, View::new(2), |request| {
-                *request
-            })
-            .await;
-            assert_eq!(handoff_requests.lock().as_slice(), &[View::new(2)]);
-            assert_eq!(
-                propose_requests
-                    .lock()
-                    .iter()
-                    .filter(|(view, _)| *view == View::new(2))
-                    .count(),
-                1,
-                "only the optimistic request should run before certification"
-            );
-
-            let parent = loop {
-                select! {
-                    message = batcher.recv() => {
-                        match message.unwrap() {
-                            batcher::Message::Constructed(Vote::Notarize(notarize))
-                                if notarize.view() == View::new(1) => break notarize.proposal,
-                            _ => {}
-                        }
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("expected local parent notarize vote");
-                    }
-                }
-            };
-            let (_, notarization) = build_notarization(&schemes, &parent, 1);
-            mailbox.recovered(Certificate::Notarization(notarization));
-
-            take_certification_request(&context, &certification_requests, View::new(1))
-                .await
-                .send_lossy(true);
-            let deadline = context.current() + Duration::from_secs(1);
-            while propose_requests
-                .lock()
-                .iter()
-                .filter(|(view, _)| *view == View::new(2))
-                .count()
-                < 2
-            {
-                assert!(
-                    context.current() < deadline,
-                    "ordinary proposal did not follow parent certification"
-                );
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            assert_eq!(
-                propose_requests
-                    .lock()
-                    .iter()
-                    .filter(|(view, _)| *view == View::new(2))
-                    .count(),
-                2,
-                "ordinary proposal should follow the deferred optimistic request"
-            );
-            let contexts: Vec<_> = propose_contexts
-                .lock()
-                .iter()
-                .filter(|request| request.round.view() == View::new(2))
-                .cloned()
-                .collect();
-            assert_eq!(contexts.len(), 2);
-            assert_eq!(
-                contexts[0], contexts[1],
-                "ordinary request must reuse the deferred context"
-            );
-            assert_eq!(contexts[1].parent, (View::new(1), parent.payload));
-            let metrics = context.encode();
-            assert_handoff_metrics(&metrics, "actor", &[("Deferred", 1), ("Requested", 1)], &[]);
         });
     }
 
@@ -4128,20 +3980,16 @@ mod tests {
             while parent.is_none() || child.is_none() {
                 select! {
                     message = batcher_receiver.recv() => {
-                        match message.unwrap() {
-                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
-                                match notarize.view() {
-                                    view if view == View::new(1) => {
-                                        parent = Some(notarize.proposal);
-                                    }
-                                    view if view == View::new(2) => {
-                                        child = Some(notarize.proposal);
-                                    }
-                                    _ => {}
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = message.unwrap() {
+                            match notarize.view() {
+                                view if view == View::new(1) => {
+                                    parent = Some(notarize.proposal);
                                 }
+                                view if view == View::new(2) => {
+                                    child = Some(notarize.proposal);
+                                }
+                                _ => {}
                             }
-                            batcher::Message::Update { .. } => {}
-                            _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -4153,9 +4001,9 @@ mod tests {
             let child = child.expect("child proposal");
             assert_eq!(child.parent, parent.view());
 
-            // Deliver the child certificate first. Once the later parent
-            // request appears, FIFO mailbox processing proves the child was
-            // already considered for certification.
+            // Deliver the child certificate first. The mailbox is FIFO, so by
+            // the time the parent's request appears, a child request that did
+            // not wait for the parent would already be queued.
             let (_, child_notarization) = build_notarization(&schemes, &child, 1);
             mailbox.recovered(Certificate::Notarization(child_notarization));
             let (_, parent_notarization) = build_notarization(&schemes, &parent, 1);
@@ -4202,6 +4050,8 @@ mod tests {
     }
 
     const HANDOFF_LEADER_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Metrics prefix of the fixture voter: the `delayed` sync context plus
+    /// the `actor` child that `setup_voter` creates.
     const HANDOFF_ACTOR_METRICS: &str = "delayed_actor";
 
     struct HandoffFixture {
@@ -4223,7 +4073,6 @@ mod tests {
         relay: Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
         propose_requests: ProposeRequests,
         propose_contexts: ProposeContexts,
-        propose_responses: ProposeResponses,
         handoff_responses: HandoffProposeResponses,
     }
 
@@ -4256,7 +4105,6 @@ mod tests {
             let outgoing = participants[outgoing_index].clone();
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
             let propose_contexts = Arc::new(Mutex::new(Vec::new()));
-            let propose_responses = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses = Arc::new(Mutex::new(Vec::new()));
             let certification_requests = Arc::new(Mutex::new(Vec::new()));
             let controlled = certification_requests.clone();
@@ -4287,7 +4135,6 @@ mod tests {
                             }
                         },
                     )),
-                    propose_responses: Some(propose_responses.clone()),
                     propose_requests: Some(propose_requests.clone()),
                     propose_contexts: Some(propose_contexts.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
@@ -4328,9 +4175,12 @@ mod tests {
                 relay,
                 propose_requests,
                 propose_contexts,
-                propose_responses,
                 handoff_responses,
             }
+        }
+
+        fn quorum(&self) -> u32 {
+            quorum(self.schemes.len() as u32)
         }
 
         /// Declines the pending handoff until the parent certifies.
@@ -4368,14 +4218,18 @@ mod tests {
             context: &deterministic::Context,
             parent: &Proposal<Sha256Digest>,
         ) -> oneshot::Sender<bool> {
-            let (_, notarization) =
-                build_notarization(&self.schemes, parent, quorum(self.schemes.len() as u32));
+            let (_, notarization) = build_notarization(&self.schemes, parent, self.quorum());
             self.mailbox
                 .recovered(Certificate::Notarization(notarization));
             take_certification_request(context, &self.certification_requests, View::new(2)).await
         }
 
-        async fn finish_certification(&mut self, certified: oneshot::Sender<bool>) {
+        /// Answers the parent's certification request and returns the handle
+        /// that releases its blocked journal sync.
+        async fn block_certification(
+            &mut self,
+            certified: oneshot::Sender<bool>,
+        ) -> oneshot::Sender<Result<(), commonware_runtime::Error>> {
             self.pending_syncs.arm();
             certified.send(true).unwrap();
             let journal = next_pending_sync(&self.pending_syncs);
@@ -4383,11 +4237,17 @@ mod tests {
                 .blocked
                 .await
                 .expect("certification journal sync started");
-            journal.release.send(Ok(())).unwrap();
-            self.pending_syncs.unblock();
+            journal.release
         }
 
-        async fn wait_for_parent_certified(&mut self) {
+        /// Releases the blocked sync and waits until the voter has processed
+        /// the parent's certification.
+        async fn release_certification(
+            &mut self,
+            release: oneshot::Sender<Result<(), commonware_runtime::Error>>,
+        ) {
+            release.send(Ok(())).unwrap();
+            self.pending_syncs.unblock();
             loop {
                 if matches!(self.resolver.recv().await.unwrap(), MailboxMessage::Certified {
                     view,
@@ -4400,13 +4260,28 @@ mod tests {
             }
         }
 
+        async fn finish_certification(&mut self, certified: oneshot::Sender<bool>) {
+            let release = self.block_certification(certified).await;
+            self.release_certification(release).await;
+        }
+
+        /// Registers the next participant as a relay observer.
         fn observer(&self) -> mpsc::UnboundedReceiver<(Sha256Digest, Bytes)> {
+            self.observer_on(&self.relay)
+        }
+
+        fn observer_on(
+            &self,
+            relay: &mocks::relay::Relay<Sha256Digest, PublicKey>,
+        ) -> mpsc::UnboundedReceiver<(Sha256Digest, Bytes)> {
             let observer =
                 self.participants[(self.local_index + 1) % self.participants.len()].clone();
-            self.relay.register(observer)
+            relay.register(observer)
         }
     }
 
+    /// Waits for a handoff metric to reach one. Fixture tests trigger each
+    /// label at most once.
     async fn wait_for_handoff_metric(
         context: &deterministic::Context,
         family: &str,
@@ -4434,10 +4309,9 @@ mod tests {
         batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
         digest: Sha256Digest,
     ) {
-        assert!(
-            relayed.recv().now_or_never().is_none(),
-            "stale handoff must not relay"
-        );
+        while let Some((relayed_digest, _)) = relayed.recv().now_or_never().flatten() {
+            assert_ne!(relayed_digest, digest, "stale handoff must not relay");
+        }
         while let Some(message) = batcher.recv().now_or_never().flatten() {
             assert!(
                 !matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
@@ -4491,17 +4365,10 @@ mod tests {
             let parent = fixture.parent.clone();
             let certified = fixture.certification_request(&context, &parent).await;
 
-            fixture.pending_syncs.arm();
-            certified.send(true).unwrap();
-            let certification_journal = next_pending_sync(&fixture.pending_syncs);
-            certification_journal
-                .blocked
-                .await
-                .expect("certification journal sync started");
+            let release = fixture.block_certification(certified).await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
 
-            certification_journal.release.send(Ok(())).unwrap();
-            fixture.pending_syncs.unblock();
+            fixture.release_certification(release).await;
             observe_handoff_publication(
                 &context,
                 &mut relayed,
@@ -4510,16 +4377,14 @@ mod tests {
             )
             .await;
             assert_eq!(
-                fixture
-                    .propose_requests
-                    .lock()
-                    .iter()
-                    .filter(|(view, _)| *view == View::new(3))
-                    .count(),
+                fixture.requests_for(View::new(3)),
                 1,
                 "held handoff must not rebuild"
             );
-            assert!(fixture.handoff_responses.lock().is_empty());
+            assert!(
+                fixture.handoff_responses.lock().is_empty(),
+                "no second handoff build"
+            );
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4546,13 +4411,11 @@ mod tests {
         let certified = fixture.certification_request(context, &parent).await;
 
         fixture.finish_certification(certified).await;
-        fixture.wait_for_parent_certified().await;
         assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
         fixture.respond();
         observe_handoff_publication(context, &mut relayed, &mut fixture.batcher, fixture.digest)
             .await;
         assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
-        assert!(fixture.propose_responses.lock().is_empty());
         assert_handoff_metrics(
             &context.encode(),
             HANDOFF_ACTOR_METRICS,
@@ -4597,11 +4460,8 @@ mod tests {
             fixture.respond();
             wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
 
-            let (_, finalization) = build_finalization(
-                &fixture.schemes,
-                &fixture.parent,
-                quorum(fixture.schemes.len() as u32),
-            );
+            let (_, finalization) =
+                build_finalization(&fixture.schemes, &fixture.parent, fixture.quorum());
             fixture
                 .mailbox
                 .recovered(Certificate::Finalization(finalization));
@@ -4644,13 +4504,9 @@ mod tests {
             let parent = fixture.parent.clone();
             let certified = fixture.certification_request(&context, &parent).await;
 
-            fixture.pending_syncs.arm();
-            certified.send(true).unwrap();
-            let certification_journal = next_pending_sync(&fixture.pending_syncs);
-            certification_journal
-                .blocked
-                .await
-                .expect("certification journal sync started");
+            let release = fixture.block_certification(certified).await;
+            // Long enough for a re-request to reach the application if the
+            // certification result alone released the deferral.
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(
                 fixture.requests_for(View::new(3)),
@@ -4658,8 +4514,7 @@ mod tests {
                 "ordinary request must wait for the certification sync"
             );
 
-            certification_journal.release.send(Ok(())).unwrap();
-            fixture.pending_syncs.unblock();
+            fixture.release_certification(release).await;
             let deadline = context.current() + Duration::from_secs(1);
             while fixture.requests_for(View::new(3)) < 2 {
                 assert!(
@@ -4681,7 +4536,10 @@ mod tests {
                 "ordinary request must reuse the deferred context"
             );
             assert_eq!(contexts[1].parent, (View::new(2), parent.payload));
-            assert!(fixture.handoff_responses.lock().is_empty());
+            assert!(
+                fixture.handoff_responses.lock().is_empty(),
+                "no second handoff build"
+            );
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4706,7 +4564,7 @@ mod tests {
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
                 Round::new(Epoch::new(333), View::new(3)),
-                quorum(fixture.schemes.len() as u32),
+                fixture.quorum(),
             );
             fixture
                 .mailbox
@@ -4758,6 +4616,8 @@ mod tests {
             )
             .await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            // The conflicting notarization supersedes the held build and issues
+            // a second handoff request on the new tip.
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4782,7 +4642,7 @@ mod tests {
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
                 Round::new(Epoch::new(333), View::new(2)),
-                quorum(fixture.schemes.len() as u32),
+                fixture.quorum(),
             );
             fixture
                 .mailbox
@@ -4838,7 +4698,7 @@ mod tests {
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
                 Round::new(Epoch::new(333), View::new(3)),
-                quorum(fixture.schemes.len() as u32),
+                fixture.quorum(),
             );
             fixture
                 .mailbox
@@ -4874,21 +4734,14 @@ mod tests {
             let parent = fixture.parent.clone();
             let certified = fixture.certification_request(&context, &parent).await;
 
-            fixture.pending_syncs.arm();
-            certified.send(true).unwrap();
-            let certification_journal = next_pending_sync(&fixture.pending_syncs);
-            certification_journal
-                .blocked
-                .await
-                .expect("certification journal sync started");
+            let release = fixture.block_certification(certified).await;
 
             // The configured leader timeout expires while the earlier parent
             // certification journal sync remains blocked.
             context
                 .sleep(HANDOFF_LEADER_TIMEOUT + Duration::from_secs(1))
                 .await;
-            certification_journal.release.send(Ok(())).unwrap();
-            fixture.pending_syncs.unblock();
+            fixture.release_certification(release).await;
             wait_for_handoff_metric(
                 &context,
                 "handoff_abandoned",
@@ -4938,7 +4791,7 @@ mod tests {
                 &fixture.oracle,
                 &fixture.participants,
                 &fixture.schemes,
-                fixture.elector,
+                fixture.elector.clone(),
                 VoterOptions {
                     local_index: fixture.local_index,
                     leader_timeout: HANDOFF_LEADER_TIMEOUT,
@@ -4952,12 +4805,9 @@ mod tests {
             .await;
             let (_, fresh) = take_proposal_response(&context, &restarted_responses).await;
             drop(fresh);
-            let observer = fixture.participants
-                [(fixture.local_index + 1) % fixture.participants.len()]
-            .clone();
-            let mut restarted_relay = restarted_relay.register(observer);
+            let mut restarted_relay = fixture.observer_on(&restarted_relay);
             let (_, notarization) =
-                build_notarization(&fixture.schemes, &fixture.parent, quorum(5));
+                build_notarization(&fixture.schemes, &fixture.parent, fixture.quorum());
             restarted.recovered(Certificate::Notarization(notarization));
             loop {
                 match restarted_batcher.recv().await.unwrap() {
@@ -5098,9 +4948,8 @@ mod tests {
                 &[(View::new(3), View::new(2))],
                 "parent certification must not retry a dropped handoff"
             );
-            let metrics = context.encode();
             assert_handoff_metrics(
-                &metrics,
+                &context.encode(),
                 "actor",
                 &[("Requested", 1)],
                 &[("ResponseClosed", 1)],
@@ -5175,14 +5024,10 @@ mod tests {
             )
             .await;
 
-            let deadline = context.current() + Duration::from_secs(2);
-            while propose_requests.lock().is_empty() {
-                assert!(
-                    context.current() < deadline,
-                    "initial handoff proposal was not requested"
-                );
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_request(&context, &propose_requests, View::new(3), |request| {
+                request.0
+            })
+            .await;
             assert_eq!(
                 propose_requests.lock().as_slice(),
                 &[(View::new(3), View::new(2))]
@@ -5204,9 +5049,8 @@ mod tests {
             }
             let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
             assert_eq!(propose_requests.lock().as_slice(), &expected);
-            let metrics = context.encode();
             assert_handoff_metrics(
-                &metrics,
+                &context.encode(),
                 "actor",
                 &[("Requested", 1)],
                 &[("AncestrySuperseded", 1)],

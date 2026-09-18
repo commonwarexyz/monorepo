@@ -275,10 +275,19 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
-    handoff_policy: Option<HandoffPolicy>,
+    handoff_policy: HandoffPolicy,
+}
+
+impl Default for TestApp {
+    fn default() -> Self {
+        Self {
+            finalization_hooks: None,
+            handoff_policy: HandoffPolicy::AwaitCertification,
+        }
+    }
 }
 
 impl TestApp {
@@ -293,9 +302,9 @@ impl TestApp {
         )
     }
 
-    pub(crate) fn with_handoff_policy(policy: HandoffPolicy) -> Self {
+    pub(crate) fn with_handoff_policy(handoff_policy: HandoffPolicy) -> Self {
         Self {
-            handoff_policy: Some(policy),
+            handoff_policy,
             ..Self::default()
         }
     }
@@ -328,7 +337,6 @@ impl<
 
     fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
         self.handoff_policy
-            .unwrap_or(HandoffPolicy::AwaitCertification)
     }
 
     async fn propose(

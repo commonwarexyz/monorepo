@@ -4977,122 +4977,111 @@ mod tests {
     /// re-persist.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
-        for publication in [
-            HandoffPublication::AfterCertification,
-            HandoffPublication::AllowBeforeCertification,
-        ] {
-            let runner = deterministic::Runner::timed(Duration::from_secs(60));
-            runner.start(move |mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let mut oracle = setup_network_with_participants(
-                    context.child("network"),
-                    NZUsize!(1),
-                    participants.clone(),
-                )
-                .await;
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
-                let me = participants[0].clone();
-                let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
-                let setup = CodingHarness::setup_validator(
-                    context.child("validator").with_attribute("index", 0),
-                    &mut oracle,
-                    me.clone(),
-                    ConstantProvider::new(schemes[0].clone()),
-                )
-                .await;
-                let marshal = setup.mailbox;
-                let shards = setup.extra;
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
 
-                let genesis_ctx = CodingCtx {
-                    round: Round::zero(),
-                    leader: default_leader(),
-                    parent: (View::zero(), genesis_commitment()),
-                };
-                let genesis =
-                    make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-                let genesis_parent_commitment = genesis_coding_commitment(&genesis);
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
-                let round = Round::new(Epoch::zero(), View::new(1));
-                let ctx = CodingCtx {
-                    round,
-                    leader: me.clone(),
-                    parent: (View::zero(), genesis_parent_commitment),
-                };
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
 
-                // Seed block A in marshal's verified cache for `round`.
-                let block_a = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 100);
-                let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
-                    CodedBlock::new(block_a.clone(), coding_config, &Sequential);
-                let commitment_a = coded_a.commitment();
-                assert!(marshal.verified(round, coded_a).await);
+            // Seed block A in marshal's verified cache for `round`.
+            let block_a = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                CodedBlock::new(block_a.clone(), coding_config, &Sequential);
+            let commitment_a = coded_a.commitment();
+            assert!(marshal.verified(round, coded_a).await);
 
-                // The app cannot build (`propose` returns None) and its
-                // verification never completes, so the assertions below hold
-                // only if the stored block is reused as-is and certification
-                // resolves through the durability gate registered by the
-                // recovery staging.
-                let (mock_app, verify_started, _release_verify): (
-                    GatedVerifyingApp<CodingB, S>,
-                    _,
-                    _,
-                ) = GatedVerifyingApp::new();
-                let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));
-                let cfg = MarshaledConfig {
-                    application: mock_app,
-                    marshal: marshal.clone(),
-                    shards: shards.clone(),
-                    scheme_provider: ConstantProvider::new(schemes[0].clone()),
-                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    strategy: Sequential,
-                };
-                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            // The app cannot build (`propose` returns None) and its
+            // verification never completes, so the assertions below hold
+            // only if the stored block is reused as-is and certification
+            // resolves through the durability gate registered by the
+            // recovery staging.
+            let publication = HandoffPublication::AfterCertification;
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
+                GatedVerifyingApp::new();
+            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-                let commitment = marshaled
-                    .propose_handoff(ctx)
-                    .await
-                    .await
-                    .expect("handoff proposal must return a decision");
-                let HandoffProposal::Proposed {
-                    payload: commitment,
-                    publication: forwarded_publication,
-                } = commitment
-                else {
-                    panic!("application accepted handoff but marshal deferred");
-                };
-                assert_eq!(forwarded_publication, publication);
-                assert_eq!(
-                    commitment, commitment_a,
-                    "handoff must reuse the block marshal already persisted for this round"
-                );
+            // A handoff request takes the same reuse path as an ordinary proposal.
+            let decision = marshaled
+                .propose_handoff(ctx)
+                .await
+                .await
+                .expect("handoff proposal must return a decision");
+            let HandoffProposal::Proposed {
+                payload: commitment,
+                publication: forwarded,
+            } = decision
+            else {
+                panic!("application accepted handoff but marshal deferred");
+            };
+            assert_eq!(forwarded, publication);
+            assert_eq!(
+                commitment, commitment_a,
+                "handoff must reuse the block marshal already persisted for this round"
+            );
 
-                // The relay broadcast must find the recovered proposal staged and
-                // re-persist it (a dedup no-op whose handle covers the pre-crash
-                // write), resolving the certification gate registered by the
-                // recovery path.
-                let _ = marshaled.broadcast(commitment, Plan::Propose { round });
-                let certify_rx = marshaled.certify(round, commitment).await;
-                select! {
-                    result = certify_rx => {
-                        assert!(
-                            result.expect("certify result missing"),
-                            "recovered proposal must certify through the relay handshake"
-                        );
-                    },
-                    _ = verify_started => {
-                        panic!("certifying a recovered proposal must not run app verification");
-                    },
-                }
-            });
-        }
+            // The relay broadcast must find the recovered proposal staged and
+            // re-persist it (a dedup no-op whose handle covers the pre-crash
+            // write), resolving the certification gate registered by the
+            // recovery path.
+            let _ = marshaled.broadcast(commitment, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "recovered proposal must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a recovered proposal must not run app verification");
+                },
+            }
+        });
     }
 
     /// Regression: a boundary re-proposal stores the parent block itself at

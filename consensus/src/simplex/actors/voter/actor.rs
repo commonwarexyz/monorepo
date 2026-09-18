@@ -123,18 +123,22 @@ enum ProposalResponse<D> {
     AwaitCertification,
 }
 
+/// Pending automaton response for a regular or handoff proposal request.
 enum ProposalReceiver<D> {
     Regular(oneshot::Receiver<D>),
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
 }
 
+/// Lifecycle of the pending proposal slot.
 enum ProposalState<D> {
+    /// The automaton has not responded yet.
     Awaiting(ProposalReceiver<D>),
     /// A handoff the application declined until its parent certifies. An
     /// ordinary request for the same context follows durable certification.
     Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
+    /// A held result whose parent has certified. The next wait publishes it.
     Ready(D),
 }
 
@@ -442,6 +446,20 @@ impl<
         commonware_p2p::block!(self.blocker, equivocator, "blocking equivocator");
     }
 
+    /// Counts a handoff lifecycle event.
+    fn record_handoff_event(&self, event: HandoffEventKind) {
+        self.handoff_events
+            .get_or_create(&HandoffEvent { event })
+            .inc();
+    }
+
+    /// Counts a handoff abandoned before publication.
+    fn record_handoff_abandoned(&self, reason: HandoffAbandonedReason) {
+        self.handoff_abandoned
+            .get_or_create(&HandoffAbandoned { reason })
+            .inc();
+    }
+
     /// Attempt to propose a new block.
     async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
@@ -466,11 +484,7 @@ impl<
         );
         let receiver = match &request {
             ProposalRequest::Handoff(_) => {
-                self.handoff_events
-                    .get_or_create(&HandoffEvent {
-                        event: HandoffEventKind::Requested,
-                    })
-                    .inc();
+                self.record_handoff_event(HandoffEventKind::Requested);
                 let receiver = async {
                     debug!(round = ?context.round, "requested handoff proposal from automaton");
                     self.automaton.propose_handoff(context).await
@@ -555,9 +569,7 @@ impl<
             };
             if let Some(reason) = reason {
                 if matches!(&request.0, ProposalRequest::Handoff(_)) {
-                    self.handoff_abandoned
-                        .get_or_create(&HandoffAbandoned { reason })
-                        .inc();
+                    self.record_handoff_abandoned(reason);
                 }
                 *pending_propose = None;
             }
@@ -805,11 +817,7 @@ impl<
             Ok(proposed) => proposed,
             Err(err) => {
                 if is_handoff {
-                    self.handoff_abandoned
-                        .get_or_create(&HandoffAbandoned {
-                            reason: HandoffAbandonedReason::ResponseClosed,
-                        })
-                        .inc();
+                    self.record_handoff_abandoned(HandoffAbandonedReason::ResponseClosed);
                 }
                 debug!(?err, round = ?context.round, "failed to propose container");
                 self.state
@@ -823,11 +831,7 @@ impl<
         // future views are kept.
         if context.view() < self.state.current_view() {
             if is_handoff {
-                self.handoff_abandoned
-                    .get_or_create(&HandoffAbandoned {
-                        reason: HandoffAbandonedReason::ViewExit,
-                    })
-                    .inc();
+                self.record_handoff_abandoned(HandoffAbandonedReason::ViewExit);
             }
             debug!(round = ?context.round, current = ?self.state.current_view(), "dropping requested proposal");
             return None;
@@ -837,11 +841,7 @@ impl<
         // still valid.
         if !self.state.proposed(&context, proposed) {
             if is_handoff {
-                self.handoff_abandoned
-                    .get_or_create(&HandoffAbandoned {
-                        reason: HandoffAbandonedReason::IneligibleAtRecording,
-                    })
-                    .inc();
+                self.record_handoff_abandoned(HandoffAbandonedReason::IneligibleAtRecording);
             }
             warn!(round = ?context.round, "dropped our proposal");
             return None;
@@ -866,9 +866,7 @@ impl<
             } else {
                 HandoffEventKind::PublishedBeforeCertification
             };
-            self.handoff_events
-                .get_or_create(&HandoffEvent { event })
-                .inc();
+            self.record_handoff_event(event);
         }
         Some(view)
     }
@@ -1320,48 +1318,34 @@ impl<
                 // This checkpoint follows the prior iteration's journal sync. Never
                 // promote a held result in reconciliation, which also runs before sync.
                 // A deferred request becomes an ordinary request for the same context.
-                let promote = match pending_propose.as_ref() {
-                    Some(Request(request, _, ProposalState::Deferred | ProposalState::Held(_))) => {
-                        self.state.proposal_parent_certified(request.context())
+                if let Some(Request(request, _, state)) = pending_propose.as_mut()
+                    && matches!(state, ProposalState::Deferred | ProposalState::Held(_))
+                    && self.state.proposal_parent_certified(request.context())
+                {
+                    if let ProposalState::Held(payload) = state {
+                        *state = ProposalState::Ready(*payload);
+                    } else {
+                        let context = request.context().clone();
+                        pending_propose =
+                            Some(self.request_proposal(ProposalRequest::Regular(context)).await);
                     }
-                    _ => false,
-                };
-                if promote {
-                    let Request(request, span, state) =
-                        pending_propose.take().expect("request must exist");
-                    pending_propose = Some(match state {
-                        ProposalState::Held(payload) => {
-                            Request(request, span, ProposalState::Ready(payload))
-                        }
-                        ProposalState::Deferred => {
-                            self.request_proposal(ProposalRequest::Regular(request.into_context()))
-                                .await
-                        }
-                        state => Request(request, span, state),
-                    });
                 }
 
                 // Prepare waiters
                 let propose_wait = async {
-                    let (proposed, received) = match pending_propose.as_mut() {
-                        Some(Request(request, _, ProposalState::Awaiting(receiver))) => {
-                            let proposed = receiver.await;
-                            let received = matches!(request, ProposalRequest::Handoff(_))
-                                && matches!(&proposed, Ok(ProposalResponse::Proposed { .. }));
-                            (proposed, received)
-                        }
+                    let proposed = match pending_propose.as_mut() {
+                        Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
                         Some(Request(_, _, ProposalState::Ready(payload))) => {
-                            let proposed = Ok(ProposalResponse::Proposed {
+                            Ok(ProposalResponse::Proposed {
                                 payload: *payload,
                                 publication: None,
-                            });
-                            (proposed, false)
+                            })
                         }
                         _ => core::future::pending().await,
                     };
                     let Request(request, span, _) =
                         pending_propose.take().expect("request must exist");
-                    (request, span, proposed, received)
+                    (request, span, proposed)
                 };
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
@@ -1390,16 +1374,15 @@ impl<
                 (self, nullify) = self.timeout(reason).instrument(span).await;
                 view = self.state.current_view();
             },
-            (request, span, proposed, received) = propose_wait => {
+            (request, span, proposed) = propose_wait => {
                 // Clear propose waiter
                 pending_propose = None;
 
-                if received {
-                    self.handoff_events
-                        .get_or_create(&HandoffEvent {
-                            event: HandoffEventKind::Received,
-                        })
-                        .inc();
+                // A released held result carries no publication and is not received again.
+                if matches!(request, ProposalRequest::Handoff(_))
+                    && matches!(&proposed, Ok(ProposalResponse::Proposed { publication: Some(_), .. }))
+                {
+                    self.record_handoff_event(HandoffEventKind::Received);
                 }
 
                 // Keep a declined handoff or a build the application holds until
@@ -1407,11 +1390,7 @@ impl<
                 // request and build latch remain live until promotion.
                 let proposed = match proposed {
                     Ok(ProposalResponse::AwaitCertification) => {
-                        self.handoff_events
-                            .get_or_create(&HandoffEvent {
-                                event: HandoffEventKind::Deferred,
-                            })
-                            .inc();
+                        self.record_handoff_event(HandoffEventKind::Deferred);
                         pending_propose = Some(Request(request, span, ProposalState::Deferred));
                         continue;
                     }
@@ -1419,11 +1398,7 @@ impl<
                         if publication == Some(HandoffPublication::AfterCertification)
                             && !self.state.proposal_parent_certified(request.context())
                         {
-                            self.handoff_events
-                                .get_or_create(&HandoffEvent {
-                                    event: HandoffEventKind::Held,
-                                })
-                                .inc();
+                            self.record_handoff_event(HandoffEventKind::Held);
                             pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
                             continue;
                         }
