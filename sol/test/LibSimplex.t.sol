@@ -2,7 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
-import { LibBLS12381Threshold as Certificate } from "../src/certificate/LibBLS12381Threshold.sol";
+import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibSimplex as Simplex } from "../src/simplex/LibSimplex.sol";
 
 /// @dev External calls exercise the complete Simplex wrapper across the ABI boundary.
@@ -15,8 +15,8 @@ contract SimplexHarness {
         Simplex.Subject memory subject
     ) external view returns (bool) {
         return minSig
-            ? Simplex.verifyMinSig(signature, abi.decode(key, (Certificate.G2Point)), namespace, subject)
-            : Simplex.verifyMinPk(signature, abi.decode(key, (Certificate.G1Point)), namespace, subject);
+            ? Simplex.verifyMinSig(signature, abi.decode(key, (BLS.G2Point)), namespace, subject)
+            : Simplex.verifyMinPk(signature, abi.decode(key, (BLS.G1Point)), namespace, subject);
     }
 }
 

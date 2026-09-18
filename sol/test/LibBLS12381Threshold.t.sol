@@ -2,6 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
+import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibBLS12381Threshold as Certificate } from "../src/certificate/LibBLS12381Threshold.sol";
 
 /// @dev External calls exercise ABI boundaries and memory ownership around library calls.
@@ -15,15 +16,13 @@ contract CertificateHarness is Test {
         bytes memory message
     ) external view returns (bool) {
         return minSig
-            ? Certificate.verifyMinSig(signature, abi.decode(key, (Certificate.G2Point)), namespace, message)
-            : Certificate.verifyMinPk(signature, abi.decode(key, (Certificate.G1Point)), namespace, message);
+            ? Certificate.verifyMinSig(signature, abi.decode(key, (BLS.G2Point)), namespace, message)
+            : Certificate.verifyMinPk(signature, abi.decode(key, (BLS.G1Point)), namespace, message);
     }
 
     /// @dev Encode a hash point in the same padded format as the reference generator.
     function hash(bool minSig, bytes memory namespace, bytes memory message) public view returns (bytes memory) {
-        return minSig
-            ? abi.encode(Certificate.hashToG1(namespace, message))
-            : abi.encode(Certificate.hashToG2(namespace, message));
+        return minSig ? abi.encode(BLS.hashToG1(namespace, message)) : abi.encode(BLS.hashToG2(namespace, message));
     }
 
     /// @dev Exercise hashing after dirty scratch, then allocate and hash again.
@@ -77,11 +76,11 @@ contract LibBLS12381ThresholdTest is Test {
     }
 
     function test_EncodeMessage() public pure {
-        assertEq(Certificate.encodeMessage("", ""), hex"00");
-        assertEq(Certificate.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
-        assertNotEq(Certificate.encodeMessage("a", "bc"), Certificate.encodeMessage("ab", "c"));
-        assertEq(Certificate.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
-        assertEq(Certificate.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
+        assertEq(BLS.encodeMessage("", ""), hex"00");
+        assertEq(BLS.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
+        assertNotEq(BLS.encodeMessage("a", "bc"), BLS.encodeMessage("ab", "c"));
+        assertEq(BLS.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
+        assertEq(BLS.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
     }
 
     /// @dev Signature size checks must reject truncated and extended encodings.
@@ -129,7 +128,7 @@ contract LibBLS12381ThresholdTest is Test {
         public
     {
         Case memory c = _generate(minSig, namespace, message, seed);
-        assertEq(Certificate.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
+        assertEq(BLS.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
         assertEq(harness.hash(minSig, namespace, message), c.point, "hash point mismatch");
         _compare(minSig, namespace, message, c, true);
         _compare(minSig, namespace, bytes.concat(message, hex"01"), c, false);

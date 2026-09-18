@@ -78,7 +78,7 @@ pub(crate) fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("invalid hex: {error}"))
 }
 
-fn frame(namespace: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn frame(namespace: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
     // Commonware's codec encodes usize lengths through u32 for cross-platform compatibility.
     u32::try_from(namespace.len()).map_err(|_| "namespace exceeds u32")?;
     Ok(union_unique(namespace, message))
@@ -145,7 +145,7 @@ fn swap_fp2(bytes: &mut [u8]) {
     }
 }
 
-fn compact(point: &impl Encode) -> Result<Vec<u8>, String> {
+pub(crate) fn compact(point: &impl Encode) -> Result<Vec<u8>, String> {
     let compressed = point.encode();
     match compressed.len() {
         48 => blst::min_sig::Signature::from_bytes(&compressed)
@@ -160,7 +160,7 @@ fn compact(point: &impl Encode) -> Result<Vec<u8>, String> {
     .map_err(|error| format!("invalid Commonware point: {error:?}"))
 }
 
-fn pad(compact: &[u8]) -> Vec<u8> {
+pub(crate) fn pad(compact: &[u8]) -> Vec<u8> {
     let mut padded = Vec::with_capacity(compact.len() / 48 * 64);
     for field in compact.as_chunks::<48>().0 {
         padded.extend_from_slice(&[0; 16]);
@@ -169,7 +169,7 @@ fn pad(compact: &[u8]) -> Vec<u8> {
     padded
 }
 
-fn unpad(padded: &[u8], fields: usize) -> Option<Vec<u8>> {
+pub(crate) fn unpad(padded: &[u8], fields: usize) -> Option<Vec<u8>> {
     if padded.len() != fields * 64 {
         return None;
     }
@@ -184,7 +184,7 @@ fn unpad(padded: &[u8], fields: usize) -> Option<Vec<u8>> {
 }
 
 /// Rejects serialization flags: this interface accepts only raw affine coordinates.
-fn compress(compact: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn compress(compact: &[u8]) -> Option<Vec<u8>> {
     if compact
         .as_chunks::<48>()
         .0

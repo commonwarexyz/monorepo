@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.15;
+
+import { Test } from "forge-std/Test.sol";
+import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
+import { LibSimplex as Simplex } from "../src/simplex/LibSimplex.sol";
+
+/// @dev External calls exercise raw committee decoding and the complete Simplex wrapper.
+contract SimplexMultisigHarness {
+    function verify(
+        bool minSig,
+        bytes calldata signature,
+        bytes calldata signers,
+        bytes memory publicKeys,
+        bytes memory namespace,
+        Simplex.Subject memory subject
+    ) external view returns (bool) {
+        uint256 pointSize = minSig ? 256 : 128;
+        if (publicKeys.length % pointSize != 0) return false;
+        if (minSig) {
+            BLS.G2Point[] memory g2 = abi.decode(
+                bytes.concat(abi.encode(uint256(32), publicKeys.length / pointSize), publicKeys), (BLS.G2Point[])
+            );
+            return Simplex.verifyMinSig(signature, signers, g2, namespace, subject);
+        }
+        BLS.G1Point[] memory g1 = abi.decode(
+            bytes.concat(abi.encode(uint256(32), publicKeys.length / pointSize), publicKeys), (BLS.G1Point[])
+        );
+        return Simplex.verifyMinPk(signature, signers, g1, namespace, subject);
+    }
+}
+
+contract LibSimplexMultisigTest is Test {
+    struct Case {
+        bytes signature;
+        bytes publicKeys;
+        bytes signers;
+        bytes message;
+    }
+
+    SimplexMultisigHarness internal harness;
+
+    function setUp() public {
+        harness = new SimplexMultisigHarness();
+    }
+
+    /// @dev Empty and partial-point committees are rejected before quorum or ABI decoding.
+    function test_InvalidCommitteeEncoding() public view {
+        Simplex.Subject memory subject = _subject(Simplex.Kind.Finalization);
+        assertFalse(harness.verify(true, new bytes(96), "", "", "simplex", subject));
+        assertFalse(harness.verify(false, new bytes(192), "", "", "simplex", subject));
+        assertFalse(harness.verify(true, new bytes(96), hex"01", hex"00", "simplex", subject));
+        assertFalse(harness.verify(false, new bytes(192), hex"01", hex"00", "simplex", subject));
+    }
+
+    /// @dev Verify every vote domain and reject each field that belongs to its signed subject.
+    function test_DifferentialDomainsAndSubjects() public {
+        bytes memory namespace = new bytes(119);
+        for (uint256 family; family != 2; ++family) {
+            bool minSig = family == 0;
+            for (uint256 kind; kind != 3; ++kind) {
+                Simplex.Subject memory subject = _subject(Simplex.Kind(kind));
+                Case memory c = _generate(minSig, namespace, subject, 9, 4, _signers(4, 3));
+                _assertSubjectInputs(minSig, c, namespace, subject);
+            }
+        }
+    }
+
+    /// @dev Signatures, signer selections, and ordered committee keys are authenticated together.
+    function test_DifferentialCertificateMutations() public {
+        bytes memory namespace = bytes("simplex");
+        Simplex.Subject memory subject = _subject(Simplex.Kind.Notarization);
+        for (uint256 family; family != 2; ++family) {
+            bool minSig = family == 0;
+            Case memory c = _generate(minSig, namespace, subject, 11, 4, _signers(4, 3));
+            assertTrue(_verify(minSig, c, namespace, subject));
+
+            bytes memory signature = c.signature;
+            c.signature = bytes.concat(signature);
+            c.signature[0] ^= bytes1(uint8(1));
+            assertFalse(_verify(minSig, c, namespace, subject));
+            c.signature = signature;
+
+            bytes memory signers = c.signers;
+            c.signers = bytes.concat(signers);
+            c.signers[0] ^= bytes1(uint8(0x0c));
+            assertFalse(_verify(minSig, c, namespace, subject));
+            c.signers = signers;
+
+            bytes memory publicKeys = c.publicKeys;
+            c.publicKeys = bytes.concat(publicKeys);
+            c.publicKeys[0] ^= bytes1(uint8(1));
+            assertFalse(_verify(minSig, c, namespace, subject));
+            c.publicKeys = _swap(publicKeys, minSig ? 256 : 128, 0, 3);
+            assertFalse(_verify(minSig, c, namespace, subject));
+        }
+    }
+
+    /// @dev Simplex quorums cover small and non-3f+1 committees and reject one fewer signer.
+    function test_DifferentialQuorums() public {
+        uint256[4] memory sizes = [uint256(1), 2, 3, 5];
+        bytes memory namespace = bytes("simplex");
+        Simplex.Subject memory subject = _subject(Simplex.Kind.Finalization);
+        for (uint256 family; family != 2; ++family) {
+            bool minSig = family == 0;
+            for (uint256 i; i != sizes.length; ++i) {
+                uint256 participants = sizes[i];
+                uint256 quorum = participants - (participants - 1) / 3;
+                Case memory c = _generate(minSig, namespace, subject, 13, participants, _signers(participants, quorum));
+                assertTrue(_verify(minSig, c, namespace, subject));
+                if (quorum > 1) {
+                    c = _generate(minSig, namespace, subject, 13, participants, _signers(participants, quorum - 1));
+                    assertFalse(_verify(minSig, c, namespace, subject));
+                }
+            }
+        }
+    }
+
+    /// @dev Measure quorum verification for the standard four-member configuration.
+    function test_DifferentialGas() public {
+        bytes memory namespace = bytes("simplex");
+        Simplex.Subject memory subject = _subject(Simplex.Kind.Finalization);
+        for (uint256 family; family != 2; ++family) {
+            bool minSig = family == 0;
+            Case memory c = _generate(minSig, namespace, subject, 9, 4, _signers(4, 3));
+            assertTrue(_verify(minSig, c, namespace, subject));
+            vm.snapshotGasLastFrame(
+                "SimplexMultisig", minSig ? "minsig_participants=4_signers=3" : "minpk_participants=4_signers=3"
+            );
+        }
+    }
+
+    function _assertSubjectInputs(bool minSig, Case memory c, bytes memory namespace, Simplex.Subject memory subject)
+        internal
+        view
+    {
+        assertEq(Simplex.encodeMessage(namespace, subject), c.message, "signing transcript mismatch");
+        assertTrue(_verify(minSig, c, namespace, subject));
+
+        Simplex.Kind kind = subject.kind;
+        subject.kind = Simplex.Kind((uint256(kind) + 1) % 3);
+        assertFalse(_verify(minSig, c, namespace, subject));
+        subject.kind = kind;
+
+        subject.epoch ^= 1;
+        assertFalse(_verify(minSig, c, namespace, subject));
+        subject.epoch ^= 1;
+
+        subject.viewNumber ^= 1;
+        assertFalse(_verify(minSig, c, namespace, subject));
+        subject.viewNumber ^= 1;
+
+        subject.parent ^= 1;
+        assertEq(_verify(minSig, c, namespace, subject), subject.kind == Simplex.Kind.Nullification);
+        subject.parent ^= 1;
+
+        subject.payload ^= bytes32(uint256(1));
+        assertEq(_verify(minSig, c, namespace, subject), subject.kind == Simplex.Kind.Nullification);
+        subject.payload ^= bytes32(uint256(1));
+
+        assertFalse(_verify(minSig, c, bytes.concat(namespace, hex"00"), subject));
+    }
+
+    function _verify(bool minSig, Case memory c, bytes memory namespace, Simplex.Subject memory subject)
+        internal
+        view
+        returns (bool)
+    {
+        (bool ok, bytes memory result) = address(harness).staticcall{ gas: 2_000_000 }(
+            abi.encodeCall(harness.verify, (minSig, c.signature, c.signers, c.publicKeys, namespace, subject))
+        );
+        return ok && result.length == 32 && abi.decode(result, (bool));
+    }
+
+    /// @dev Ask Commonware for a multisignature and its independently encoded transcript.
+    function _generate(
+        bool minSig,
+        bytes memory namespace,
+        Simplex.Subject memory subject,
+        uint64 seed,
+        uint256 participants,
+        bytes memory signers
+    ) internal returns (Case memory c) {
+        string[] memory args = new string[](15);
+        args[0] = _binary();
+        args[1] = "simplex";
+        args[2] = "generate-multisig";
+        args[3] = minSig ? "minsig" : "minpk";
+        args[4] = subject.kind == Simplex.Kind.Notarization
+            ? "notarize"
+            : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
+        args[5] = vm.toString(namespace);
+        args[6] = vm.toString(uint256(subject.epoch));
+        args[7] = vm.toString(uint256(subject.viewNumber));
+        args[8] = vm.toString(uint256(subject.parent));
+        args[9] = vm.toString(subject.payload);
+        args[10] = vm.toString(uint256(seed));
+        args[11] = "--participants";
+        args[12] = vm.toString(participants);
+        args[13] = "--signers-hex";
+        args[14] = vm.toString(signers);
+        (c.signature, c.publicKeys, c.signers, c.message) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
+    }
+
+    function _subject(Simplex.Kind kind) internal pure returns (Simplex.Subject memory) {
+        return Simplex.Subject({
+            kind: kind, epoch: type(uint64).max, viewNumber: 128, parent: 127, payload: bytes32(uint256(7))
+        });
+    }
+
+    function _signers(uint256 participants, uint256 count) internal pure returns (bytes memory signers) {
+        signers = new bytes((participants + 7) / 8);
+        for (uint256 i; i != count; ++i) {
+            signers[i / 8] |= bytes1(uint8(1 << (i % 8)));
+        }
+    }
+
+    function _swap(bytes memory values, uint256 width, uint256 a, uint256 b)
+        internal
+        pure
+        returns (bytes memory result)
+    {
+        result = bytes.concat(values);
+        for (uint256 i; i != width; ++i) {
+            (result[a * width + i], result[b * width + i]) = (result[b * width + i], result[a * width + i]);
+        }
+    }
+
+    /// @dev Absolute FFI paths permit posix_spawn on macOS.
+    function _binary() internal view returns (string memory) {
+        return string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
+    }
+}

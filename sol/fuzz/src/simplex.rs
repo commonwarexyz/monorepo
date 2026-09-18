@@ -1,6 +1,9 @@
-//! Seeded Commonware Simplex threshold inputs.
+//! Seeded Commonware Simplex threshold and multi-signature inputs.
 
-use crate::certificate::{self, BlsVariant};
+use crate::{
+    certificate::{self, BlsVariant},
+    multisig,
+};
 use clap::{Args, Subcommand, ValueEnum};
 use commonware_consensus::{
     simplex::{
@@ -15,6 +18,15 @@ use commonware_cryptography::{certificate::Subject as _, keccak256};
 pub(crate) enum Command {
     /// Recover a 3-of-4 threshold signature for a Simplex voting subject.
     Generate(GenerateArgs),
+    /// Generate a BLS multi-signature for a Simplex voting subject.
+    GenerateMultisig {
+        #[command(flatten)]
+        args: GenerateArgs,
+        #[arg(long, default_value_t = 4)]
+        participants: u32,
+        #[arg(long, default_value = "0x07")]
+        signers_hex: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -39,7 +51,7 @@ pub(crate) struct GenerateArgs {
 }
 
 impl GenerateArgs {
-    fn generate(&self) -> Result<certificate::Output, String> {
+    fn subject(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
         let namespace = Namespace::new(&certificate::decode_hex(&self.namespace_hex)?);
         let payload = certificate::decode_hex(&self.payload_hex)?;
         let payload: [u8; 32] = payload.try_into().map_err(|_| "payload must be 32 bytes")?;
@@ -54,12 +66,15 @@ impl GenerateArgs {
                 proposal: &proposal,
             },
         };
-        certificate::generate_variant(
-            self.variant,
-            subject.namespace(&namespace),
-            &subject.message(),
-            self.seed,
-        )
+        Ok((
+            subject.namespace(&namespace).to_vec(),
+            subject.message().to_vec(),
+        ))
+    }
+
+    fn generate(&self) -> Result<certificate::Output, String> {
+        let (namespace, message) = self.subject()?;
+        certificate::generate_variant(self.variant, &namespace, &message, self.seed)
     }
 }
 
@@ -67,6 +82,22 @@ impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
             Self::Generate(args) => Ok(certificate::encode_output(args.generate()?)),
+            Self::GenerateMultisig {
+                args,
+                participants,
+                signers_hex,
+            } => {
+                let signers = certificate::decode_hex(&signers_hex)?;
+                let (namespace, message) = args.subject()?;
+                Ok(multisig::encode_output(multisig::generate_variant(
+                    args.variant,
+                    &namespace,
+                    &message,
+                    participants,
+                    &signers,
+                    args.seed,
+                )?))
+            }
         }
     }
 }
@@ -155,5 +186,79 @@ mod tests {
             expected.extend_from_slice(&[0; 32]);
             assert_eq!(message.as_ref(), expected);
         }
+    }
+
+    #[test]
+    fn multisig_generation_uses_simplex_subject_namespace_and_message() {
+        for kind in ["notarize", "nullify", "finalize"] {
+            let encoded = Cli::try_parse_from([
+                "commonware-sol-fuzz",
+                "simplex",
+                "generate-multisig",
+                "minsig",
+                kind,
+                "0x74657374",
+                "127",
+                "128",
+                "0",
+                &const_hex::encode([0; 32]),
+                "42",
+                "--participants",
+                "9",
+                "--signers-hex",
+                "0x0101",
+            ])
+            .unwrap()
+            .command
+            .execute()
+            .unwrap();
+            let (signature, public_keys, signers, message) =
+                <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
+            assert_eq!(signature.len(), 96);
+            assert_eq!(public_keys.len(), 9 * 256);
+            assert_eq!(signers.as_ref(), &[0x01, 0x01]);
+
+            let mut input = args(
+                match kind {
+                    "notarize" => Kind::Notarize,
+                    "nullify" => Kind::Nullify,
+                    "finalize" => Kind::Finalize,
+                    _ => unreachable!(),
+                },
+                42,
+            );
+            input.parent = 0;
+            input.payload_hex = const_hex::encode([0; 32]);
+            let (namespace, subject_message) = input.subject().unwrap();
+            assert_eq!(
+                message.as_ref(),
+                certificate::frame(&namespace, &subject_message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn multisig_generation_defaults_to_three_of_four() {
+        let encoded = Cli::try_parse_from([
+            "commonware-sol-fuzz",
+            "simplex",
+            "generate-multisig",
+            "minpk",
+            "nullify",
+            "0x74657374",
+            "1",
+            "2",
+            "3",
+            &const_hex::encode([0; 32]),
+            "7",
+        ])
+        .unwrap()
+        .command
+        .execute()
+        .unwrap();
+        let (_, public_keys, signers, _) =
+            <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
+        assert_eq!(public_keys.len(), 4 * 128);
+        assert_eq!(signers.as_ref(), &[0x07]);
     }
 }
