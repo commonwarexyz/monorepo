@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_resolver::{self as resolver, Delivery, p2p::Producer, request};
+use commonware_resolver::{self as resolver, Delivery, p2p::Producer};
 use commonware_storage::{merkle::Family, qmdb::sync::Request};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
@@ -16,7 +16,7 @@ pub(super) enum EngineMessage<F: Family> {
     /// The actor decodes the value, fans it out to waiting subscribers,
     /// and reports acceptance back through `response`.
     Deliver {
-        delivery: Delivery<Request<F>, request::Id>,
+        delivery: Delivery<Request<F>, u64>,
         value: Bytes,
         response: oneshot::Sender<bool>,
     },
@@ -109,7 +109,7 @@ impl<F: Family> Handler<F> {
 impl<F: Family> resolver::Consumer for Handler<F> {
     type Key = Request<F>;
     type Value = Bytes;
-    type Subscriber = request::Id;
+    type Subscriber = u64;
     type Outcome = bool;
 
     fn deliver(
@@ -141,7 +141,7 @@ impl<F: Family> Producer for Handler<F> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::mocks, *};
+    use super::*;
     use commonware_storage::mmr::{self, Location};
     use commonware_utils::{NZU64, non_empty_vec};
 
@@ -153,13 +153,6 @@ mod tests {
             start: Location::new(0),
             max_ops: NZU64!(1),
         };
-
-        // Use an identity assigned by the request tracker for both queued deliveries.
-        let (resolver, mut fetches) = mocks::resolver();
-        let mut requests = request::Tracker::<_, Bytes>::new(resolver);
-        let (response, _receiver) = oneshot::channel();
-        requests.fetch(key, tracing::Span::none(), response);
-        let subscriber = fetches.try_recv().unwrap().subscriber;
 
         // An overflowed produce request is dropped and its requester sees the
         // closed response.
@@ -177,7 +170,7 @@ mod tests {
             EngineMessage::Deliver {
                 delivery: Delivery {
                     key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(0, tracing::Span::none())],
                 },
                 value: Bytes::new(),
                 response,
@@ -189,7 +182,7 @@ mod tests {
             EngineMessage::Deliver {
                 delivery: Delivery {
                     key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(0, tracing::Span::none())],
                 },
                 value: Bytes::from_static(b"open"),
                 response,

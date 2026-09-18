@@ -5,8 +5,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_mod!(ALPHA, pub mod request);
-
 commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;

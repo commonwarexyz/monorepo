@@ -22,6 +22,3 @@ pub use mailbox::{Mailbox, ResponseDropped};
 mod handler;
 
 mod metrics;
-
-#[cfg(test)]
-mod mocks;
