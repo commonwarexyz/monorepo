@@ -18,7 +18,7 @@ pub struct ResponseDropped;
 
 /// Where the actor delivers a fetched response, along with the channel the caller reports
 /// verification feedback on.
-pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, FeedbackTx)>;
+pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, oneshot::Sender<bool>)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F: Family, Op, D: Digest> {
@@ -153,7 +153,9 @@ where
             cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
         let result = response_rx.await;
         guard.disarm();
-        result.map_err(|_| ResponseDropped)
+        result
+            .map(|(response, feedback)| (response, Some(feedback)))
+            .map_err(|_| ResponseDropped)
     }
 }
 
