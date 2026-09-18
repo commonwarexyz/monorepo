@@ -60,10 +60,17 @@ library Common {
         // forge-lint: disable-next-line(boolean-cst)
         if (start > leaves || operations.length > leaves - start) return (0, false);
         bytes32[] memory elements = new bytes32[](operations.length);
-        for (uint256 i; i < operations.length; ++i) {
-            uint256 position = MerkleCommon.position(MerkleCommon.peak(start + i, 1, mmb), 1, mmb);
+        uint256 position = MerkleCommon.position(MerkleCommon.peak(start, 1, mmb), 1, mmb);
+        for (uint256 i = 0; i < operations.length;) {
             // forge-lint: disable-next-line(unsafe-typecast)
             elements[i] = MerkleCommon.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
+            unchecked {
+                if (++i == operations.length) break;
+                uint256 next = start + i;
+                // MMR leaf positions advance by one plus the trailing zeros in `next`.
+                // MMB advances by two, or one when `next + 1` is a power of two.
+                position += mmb ? (((next + 1) & next) == 0 ? 1 : 2) : 1 + MerkleCommon.log2(next & (~next + 1));
+            }
         }
         return LibMerkle.reconstructPrehashed(leaves, start, elements, digests, inactivePeaks, graft, mmb, hasher);
     }
