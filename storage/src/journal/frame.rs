@@ -10,7 +10,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
 use std::future::Future;
-use zstd::{bulk::compress, decode_all};
+use zstd::{decode_all, zstd_safe::compress_bound};
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -172,6 +172,58 @@ pub(super) async fn read_frame_at<V: Codec>(
     Ok((next_offset, item_size, decoded))
 }
 
+/// Reusable workspace for encoding independent compressed frames.
+pub(super) struct Compressor {
+    context: zstd::bulk::Compressor<'static>,
+    encoded: Vec<u8>,
+    compressed: Vec<u8>,
+}
+
+impl Compressor {
+    pub(super) fn new(level: u8) -> Result<Self, Error> {
+        Ok(Self {
+            context: zstd::bulk::Compressor::new(level as i32)
+                .map_err(|_| Error::CompressionFailed)?,
+            encoded: Vec::new(),
+            compressed: Vec::new(),
+        })
+    }
+
+    /// Append a length-prefixed compressed frame, retaining scratch capacity for the next item.
+    pub(super) fn encode_frame_into<V: Codec>(
+        &mut self,
+        item: &V,
+        buf: &mut Vec<u8>,
+    ) -> Result<u32, Error> {
+        let encoded_len = item.encode_size();
+        self.encoded.clear();
+        self.encoded.reserve(encoded_len);
+        item.write(&mut self.encoded);
+        assert_eq!(
+            self.encoded.len(),
+            encoded_len,
+            "write() did not write expected bytes"
+        );
+
+        self.compressed.clear();
+        self.compressed.reserve(compress_bound(encoded_len));
+        self.context
+            .compress_to_buffer(&self.encoded, &mut self.compressed)
+            .map_err(|_| Error::CompressionFailed)?;
+
+        let item_len = self.compressed.len();
+        let item_len_u32 = u32::try_from(item_len).map_err(|_| Error::ItemTooLarge(item_len))?;
+        let entry_len = UInt(item_len_u32)
+            .encode_size()
+            .checked_add(item_len)
+            .ok_or(Error::OffsetOverflow)?;
+        buf.reserve(entry_len);
+        UInt(item_len_u32).write(buf);
+        buf.extend_from_slice(&self.compressed);
+        Ok(item_len_u32)
+    }
+}
+
 /// Encode an item as a frame (length prefix plus payload), appending the bytes to `buf`.
 ///
 /// Existing contents of `buf` are preserved; this allows callers to accumulate
@@ -184,25 +236,7 @@ pub(super) fn encode_frame_into<V: Codec>(
     buf: &mut Vec<u8>,
 ) -> Result<u32, Error> {
     if let Some(compression) = compression {
-        // Compressed: encode first, then compress
-        let encoded = item.encode();
-        let compressed =
-            compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?;
-        let item_len = compressed.len();
-        let item_len_u32: u32 = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
-        };
-        let size_len = UInt(item_len_u32).encode_size();
-        let entry_len = size_len
-            .checked_add(item_len)
-            .ok_or(Error::OffsetOverflow)?;
-
-        buf.reserve(entry_len);
-        UInt(item_len_u32).write(buf);
-        buf.extend_from_slice(&compressed);
-
-        Ok(item_len_u32)
+        Compressor::new(compression)?.encode_frame_into(item, buf)
     } else {
         // Uncompressed: pre-allocate exact size to avoid copying
         let item_len = item.encode_size();
@@ -229,6 +263,9 @@ mod tests {
     use crate::utils::codec::View;
     use bytes::{BufMut, Bytes};
     use commonware_codec::{Copying, Encode, Read, Write};
+    use commonware_utils::test_rng;
+    use rand::Rng as _;
+    use zstd::bulk::compress;
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
@@ -272,6 +309,58 @@ mod tests {
         let item: u64 =
             decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), true).unwrap();
         assert_eq!(item, 42);
+    }
+
+    #[test]
+    fn test_reused_compressor_matches_independent_frames() {
+        // Grow the scratch buffers, then reuse them for shorter and empty records.
+        let cases = [
+            ("empty", 0),
+            ("single byte", 1),
+            ("small record", 64),
+            ("grow to 1 KiB", 1024),
+            ("grow to 16 KiB", 16 * 1024),
+            ("small after large", 64),
+            ("empty after nonempty", 0),
+        ];
+        let mut rng = test_rng();
+        for level in [1, 3, 9] {
+            let mut encoder = Compressor::new(level).unwrap();
+            // Appending frames must preserve any existing contents.
+            let mut reused_frames = b"existing data".to_vec();
+            let mut independent_frames = reused_frames.clone();
+            for (case, len) in cases {
+                let repeated = vec![0xAB; len];
+                let mut random = vec![0; len];
+                rng.fill_bytes(&mut random);
+                for (pattern, item) in [("repeated", repeated), ("random", random)] {
+                    // Each reference frame uses a fresh compressor.
+                    let compressed = compress(&item.encode(), level as i32).unwrap();
+                    UInt(compressed.len() as u32).write(&mut independent_frames);
+                    independent_frames.extend_from_slice(&compressed);
+
+                    let frame_start = reused_frames.len();
+                    let compressed_len = encoder
+                        .encode_frame_into(&item, &mut reused_frames)
+                        .unwrap();
+                    assert_eq!(compressed_len as usize, compressed.len());
+                    assert_eq!(
+                        reused_frames, independent_frames,
+                        "{case}, {pattern}, compression level {level}"
+                    );
+
+                    // Decoding the new frame must not require any earlier frame.
+                    let mut frame = Copying(&reused_frames[frame_start..]);
+                    let (frame_len, _) = decode_length_prefix(&mut frame).unwrap();
+                    assert_eq!(frame.remaining(), frame_len);
+                    let decoded = decode_item::<Vec<u8>>(frame, &((..).into(), ()), true).unwrap();
+                    assert_eq!(
+                        decoded, item,
+                        "{case}, {pattern}, compression level {level}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -26,8 +26,8 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
+            Compressor, FrameInfo, decode_item, decode_length_prefix, encode_frame_into,
+            find_frame, read_frame_at,
         },
     },
 };
@@ -1389,9 +1389,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
         let mut encoded = Vec::new();
         let mut item_starts = Vec::with_capacity(items.len());
+        let mut compressor = self.compression.map(Compressor::new).transpose()?;
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
-            encode_frame_into(self.compression, item, &mut encoded)
+            match &mut compressor {
+                Some(compressor) => compressor.encode_frame_into(item, &mut encoded),
+                None => encode_frame_into(None, item, &mut encoded),
+            }
         };
         match items {
             Many::Flat(items) => {
@@ -3007,6 +3011,63 @@ mod tests {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prepared_compressed_nested_reopens() {
+        const MAX_ITEM_SIZE: usize = 2 * 1024;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prepared-compressed-nested".into(),
+                // Seven records span three sections, including a partially filled final section.
+                items_per_section: NZU64!(3),
+                compression: Some(3),
+                codec_config: (..=MAX_ITEM_SIZE).into(),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
+            };
+
+            // Grow the scratch buffers in the first batch.
+            let first_batch = [
+                Bytes::new(),
+                Bytes::from_static(b"a"),
+                Bytes::from(vec![0xAB; MAX_ITEM_SIZE / 2]),
+            ];
+            // Reuse the buffers for a short record, a record at the codec limit, and empty data.
+            let second_batch = [
+                Bytes::from_static(b"short after large"),
+                Bytes::from(vec![0xCD; MAX_ITEM_SIZE]),
+                Bytes::new(),
+                Bytes::from_static(b"tail"),
+            ];
+            let items = [first_batch.as_slice(), second_batch.as_slice()].concat();
+            let journal = Journal::<_, Bytes>::init(context.child("write"), cfg.clone())
+                .await
+                .unwrap();
+
+            // An empty nested batch must not add a record or alter the following frames.
+            let flat = journal.prepare_append(Many::Flat(&items)).unwrap();
+            let nested = journal
+                .prepare_append(Many::Nested(&[&first_batch, &[], &second_batch]))
+                .unwrap();
+            assert_eq!(flat.encoded, nested.encoded);
+            assert_eq!(flat.item_starts, nested.item_starts);
+
+            let (journal, last) = journal.append_prepared(nested).await.unwrap();
+            assert_eq!(last, items.len() as u64 - 1);
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Bytes>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            let positions: Vec<_> = (0..items.len() as u64).collect();
+            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
             journal.destroy().await.unwrap();
         });
     }
