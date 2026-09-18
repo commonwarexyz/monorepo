@@ -1338,15 +1338,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Verification can request this parent only from the proposal's leader.
-        // Certification bypasses that request latch. If the fetch is in flight,
-        // the resolver removes its target. The candidate remains dormant until
-        // its parent arrives, so this request does not repeat.
-        //
-        // Only mid-term candidates require the previous view as their parent,
-        // so the candidate and parent are in the same term. Any validator can
-        // hold the parent's notarization, so certification sends this request
-        // without a target.
+        // Verification may already have requested this parent with a target.
+        // Certification bypasses that request latch and asks any holder: an
+        // untargeted request replaces the target of an in-flight fetch. The
+        // candidate remains dormant until its parent arrives, so this request
+        // does not repeat.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
