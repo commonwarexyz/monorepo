@@ -1,0 +1,42 @@
+name: Verus
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-verus-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  Tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: 1.97.1
+    - name: Install just
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: just@1.43.0
+    - name: Install Verus
+      env:
+        VERUS_SHA256: b65483714e6bf2ae72bfe7c7199e1c608495a941306b979260e9ed585d5899c9
+        VERUS_URL: https://github.com/verus-lang/verus/releases/download/release/0.2026.08.23.fbbbbcf/verus-0.2026.08.23.fbbbbcf-x86-linux.zip
+      run: |
+        archive="$RUNNER_TEMP/verus.zip"
+        curl --fail --location --retry 3 --output "$archive" "$VERUS_URL"
+        echo "$VERUS_SHA256  $archive" | sha256sum --check
+        unzip -q "$archive" -d "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/verus-x86-linux" >> "$GITHUB_PATH"
+    - name: Run Verus proofs
+      run: just test-verus

@@ -32,6 +32,7 @@ rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"], optional = true }
 tracing = { workspace = true, optional = true }
+vstd = { workspace = true, optional = true, features = ["alloc"] }
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -64,6 +65,7 @@ rstest.workspace = true
 
 [features]
 default = [ "std" ]
+verus = [ "dep:vstd" ]
 std = [
 	"ahash/runtime-rng",
 	"ahash/std",
@@ -87,6 +89,7 @@ std = [
 	"thiserror/std",
 	"tokio",
 	"tracing",
+	"vstd?/std",
 	"zeroize/std",
 ]
 arbitrary = [
@@ -105,6 +108,9 @@ fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [lib]
 bench = false
+
+[package.metadata.verus]
+verify = true
 
 [[bench]]
 name = "cache"

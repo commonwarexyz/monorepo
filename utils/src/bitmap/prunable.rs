@@ -4,6 +4,8 @@ use super::BitMap;
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use thiserror::Error;
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
 /// Errors that can occur when working with a prunable bitmap.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -20,6 +22,7 @@ pub enum Error {
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, Debug)]
+#[cfg_attr(verus_keep_ghost, vstd::prelude::verus_verify)]
 pub struct Prunable<const N: usize> {
     /// The underlying BitMap storing the actual bits.
     bitmap: BitMap<N>,
@@ -374,6 +377,28 @@ impl<const N: usize> Prunable<N> {
 
         self.pruned_chunks -= chunks.len();
     }
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+impl<const N: usize> super::ScanModel<N> for Prunable<N> {
+    closed spec fn scan_snapshot(&self) -> super::scan_model::Snapshot {
+        let inner = self.bitmap.scan_snapshot();
+        super::scan_model::Snapshot {
+            len: (self.pruned_chunks as int * (N as int * 8) + inner.len) as u64,
+            pruned: self.pruned_chunks,
+            chunks: IMap::new(
+                |i: int| inner.chunks.dom().contains(i - self.pruned_chunks as int),
+                |i: int| inner.chunks[i - self.pruned_chunks as int],
+            ),
+        }
+    }
+
+    closed spec fn scan_coherent(&self) -> bool {
+        self.bitmap.scan_coherent()
+            && self.pruned_chunks as int * (N as int * 8) + self.bitmap.scan_snapshot().len <= u64::MAX
+    }
+}
 }
 
 impl<const N: usize> super::Readable<N> for Prunable<N> {
