@@ -1740,6 +1740,10 @@ impl Machine {
     where
         E: StorageContext + Spawner,
     {
+        if !crate::protocol::has_consensus_quorum(&request.certificate) {
+            return Ok(Step::rejected(Reject::Chain));
+        }
+
         // A close already finalized for this epoch conflicts permanently with
         // any admission that is not an exact replay.
         if let Some(admitted) = view.admitted(config.digest(), request.epoch).await?

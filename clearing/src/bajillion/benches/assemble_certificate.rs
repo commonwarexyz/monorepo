@@ -13,8 +13,8 @@ fn bench_assemble_certificate(c: &mut Criterion) {
                     black_box(
                         fixture
                             .assembler
-                            .assemble_exact(black_box(attestations))
-                            .expect("benchmark attestations form an exact certificate"),
+                            .assemble(black_box(attestations))
+                            .expect("benchmark attestations form a certificate"),
                     )
                 },
                 BatchSize::SmallInput,

@@ -70,7 +70,7 @@ Other `COMMONWARE_CLEARING_BENCH` selectors:
 | --- | --- |
 | `initialize` | Build canonical genesis, excluding key generation. |
 | `sign-vote` | Sign an already prepared header. |
-| `assemble-certificate` / `verify-certificate` | Assemble or check an exact-quorum certificate. |
+| `assemble-certificate` / `verify-certificate` | Assemble or check a minimum-quorum certificate. |
 | `verify-ack` | Verify authorizations and receipts, including receipt decode-and-verify. |
 | `verify-claim` | Verify withdrawal claims and Current account openings. |
 | `adjudicate` | Decode and adjudicate a bounded challenge. |

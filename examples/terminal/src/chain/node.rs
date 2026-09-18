@@ -87,7 +87,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{Context as StorageContext, archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    Acknowledgement as _, NZU64, NZUsize, Participant,
+    Acknowledgement as _, Faults as _, N3f1, NZU64, NZUsize, Participant,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt as _, oneshot},
     ordered::Set,
@@ -651,7 +651,7 @@ where
             votes = matching,
             "verified vote"
         );
-        if matching < self.verifier.committee().quorum() {
+        if matching < N3f1::quorum(self.verifier.committee().members().len()) as usize {
             return;
         }
         let outstanding = self
@@ -665,7 +665,7 @@ where
         let result = matching.next().expect("nonempty quorum");
         let certificate = self
             .verifier
-            .assemble_exact(
+            .assemble(
                 std::iter::once(result.vote.clone()).chain(matching.map(|ballot| ballot.vote)),
             )
             .expect("exactly quorum verified votes assemble");
@@ -1175,7 +1175,7 @@ mod tests {
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let verifier = protocol.verifier();
             let committee = committee().unwrap();
-            let quorum = committee.quorum();
+            let quorum = N3f1::quorum(committee.members().len()) as usize;
             let operator_key = PrivateKey::from_seed(9_300).public_key();
             let validator_keys = (0..committee.members().len())
                 .map(|index| PrivateKey::from_seed(9_301 + index as u64).public_key())
@@ -1381,7 +1381,7 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("quorum votes assemble the certificate");
-            assert!(verifier.verify_exact(&header, &certificate.certificate));
+            assert!(verifier.verify(&header, &certificate.certificate));
             assert_eq!(certificate.certificate.signers.count(), quorum);
             assert_eq!(messages.lock().len(), 2 * validator_keys.len());
             assert!(

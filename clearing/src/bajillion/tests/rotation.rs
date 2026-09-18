@@ -193,18 +193,19 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     let quorum_out = committee_out.quorum();
     assert!(
         schemes_out[0]
-            .assemble_exact(votes[..quorum_out - 1].to_vec())
+            .assemble(votes[..quorum_out - 1].to_vec())
             .is_err()
     );
-    assert!(schemes_out[0].assemble_exact(votes.clone()).is_err());
+    let full_certificate_out = schemes_out[0].assemble(votes.clone()).unwrap();
     let certificate_out = schemes_out[0]
-        .assemble_exact(votes.into_iter().take(quorum_out))
+        .assemble(votes.into_iter().take(quorum_out))
         .unwrap();
     let verifier_out = bls12381::Scheme::verifier(committee_out);
     let verifier_in = bls12381::Scheme::verifier(committee_in.clone());
     assert_eq!(certificate_out.signers.count(), quorum_out);
-    assert!(verifier_out.verify_exact(&first_close.header, &certificate_out));
-    assert!(!verifier_in.verify_exact(&first_close.header, &certificate_out));
+    assert!(verifier_out.verify(&first_close.header, &certificate_out));
+    assert!(verifier_out.verify(&first_close.header, &full_certificate_out));
+    assert!(!verifier_in.verify(&first_close.header, &certificate_out));
     assert!(first_close.header.verify::<Sha256, VerifyingKey>(
         &first.context,
         &first_close.roots,
@@ -454,14 +455,14 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
     );
     let quorum_in = committee_in.quorum();
     let certificate_in = schemes_in[1]
-        .assemble_exact(incoming_votes.into_iter().take(quorum_in))
+        .assemble(incoming_votes.into_iter().take(quorum_in))
         .unwrap();
     let header_next = &second.prepared.close().header;
     assert_eq!(certificate_in.signers.count(), quorum_in);
-    assert!(verifier_in.verify_exact(header_next, &certificate_in));
-    assert!(!verifier_out.verify_exact(header_next, &certificate_in));
-    assert!(!verifier_in.verify_exact(&first_close.header, &certificate_in));
-    assert!(!verifier_out.verify_exact(header_next, &certificate_out));
+    assert!(verifier_in.verify(header_next, &certificate_in));
+    assert!(!verifier_out.verify(header_next, &certificate_in));
+    assert!(!verifier_in.verify(&first_close.header, &certificate_in));
+    assert!(!verifier_out.verify(header_next, &certificate_out));
 }
 
 #[test]

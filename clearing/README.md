@@ -49,8 +49,11 @@ registered epoch and its predecessor. Each signer durably commits all three nati
 candidates and records its private signing decision before publishing a vote.
 Native stores recover their durable heads after interruptions; authenticated
 synchronization maintains and catches up replicas independently of the vote
-barrier. A committee of `n = 3f + 1` validators certifies a close with exactly
-`2f + 1` votes.
+barrier. A committee of `n = 3f + 1` validators certifies a close with
+`f + 1` or more votes. Because every honest signer first validates and durably retains
+the complete close, the certificate guarantees at least one honest full-data
+holder. It does not guarantee certificate uniqueness: distinct valid closes may
+each certify, and ordered admission selects the canonical close.
 
 Admission adds the close to an ordered queue and permits the next epoch to
 register. Finalization waits for the challenge deadline and all earlier closes,

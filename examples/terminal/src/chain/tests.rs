@@ -5774,11 +5774,15 @@ fn admit_requires_a_valid_committee_certificate() {
         seal(&db, 3, std::slice::from_ref(&swapped)).await;
         unconsumed(&db, &live).await;
 
-        // Fewer than quorum: assemble_exact cannot even construct one (see
-        // the certificate unit tests), so forge the encoding directly, which
-        // the codec permits. Exact-cardinality verification rejects it.
+        // A valid clearing certificate still needs the terminal's consensus quorum.
         let mut subquorum = genuine.clone();
-        subquorum.certificate.signers = Signers::new(4, signed[..2].iter().copied()).unwrap();
+        subquorum.certificate = crate::protocol::fixture_certificate(&subquorum.header, 2);
+        assert!(
+            Protocol::new(NonZeroUsize::MIN)
+                .unwrap()
+                .verifier()
+                .verify(&subquorum.header, &subquorum.certificate)
+        );
         let subquorum = SettlementTx::Admit(subquorum);
         assert_eq!(SettlementTx::decode(subquorum.encode()).unwrap(), subquorum);
         seal(&db, 4, std::slice::from_ref(&subquorum)).await;
@@ -5803,6 +5807,23 @@ fn admit_requires_a_valid_committee_certificate() {
         assert!(matches!(
             read(&db, &registration_key(&deployment())).await,
             Some(Record::Registration(record)) if record.admitted.is_some()
+        ));
+
+        // Every additional valid signer preserves admission eligibility.
+        let db = open(context.child("all_signers"), "all-signers").await;
+        seal(
+            &db,
+            1,
+            &[fixture.deposit_tx.clone(), fixture.register_tx.clone()],
+        )
+        .await;
+        let mut all_signers = genuine;
+        all_signers.certificate = crate::protocol::fixture_certificate(&all_signers.header, 4);
+        seal(&db, 2, &[SettlementTx::Admit(all_signers)]).await;
+        assert!(matches!(
+            read(&db, &admitted_key(&deployment(), 0)).await,
+            Some(Record::Admitted(admitted))
+                if admitted.batch_id == fixture.result.header.batch_id::<Sha256>()
         ));
     });
 }

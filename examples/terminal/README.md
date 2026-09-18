@@ -169,6 +169,11 @@ closes must finalize first.
 | Validator | Certified chain state; per deployment, a Current Ordered MMB balance QMDB, cumulative activity and payout MMRs, and a local compact keyless QMDB for checkpoints and saved votes. |
 
 Validators derive all three commitments from the same dealing before voting.
+The terminal requires at least three signatures from its four-validator committee
+for close admission and local recovery, matching the settlement consensus quorum.
+This stronger policy preserves a unique certified close across retired admission records.
+The clearing primitive permits a minimum of `f + 1` signatures for embeddings that
+authenticate the exact onchain close throughout recovery.
 The three protocol databases become durable before the local QMDB records their
 checkpoint and the validator's vote in Commit metadata. Native pruning makes that
 record durable and bounds its history before the vote is sent. The local decision

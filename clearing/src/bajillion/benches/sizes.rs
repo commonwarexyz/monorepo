@@ -558,12 +558,12 @@ pub(crate) fn benches(challenges_only: bool) {
             println!("clearing dealing fields: {} {parts:?}", profile_key(profile));
 
             let certificate = validators.signer(Participant::new(0))
-                .assemble_exact(validators.attestations(&close.header))
-                .expect("exact quorum certificate assembles");
+                .assemble(validators.attestations(&close.header))
+                .expect("minimum quorum certificate assembles");
             assert_eq!(certificate.signers.len(), VALIDATORS);
             assert_eq!(certificate.signers.count(), QUORUM);
             let verifier = bls12381::Scheme::verifier(validators.committee().clone());
-            assert!(verifier.verify_exact(&close.header, &certificate));
+            assert!(verifier.verify(&close.header, &certificate));
             assert!(close.header.verify::<Sha256, _>(&fixture.context, &close.roots, close.withdrawal_total));
             let header = encoded(&close.header).len();
             let roots = encoded(&close.roots).len();

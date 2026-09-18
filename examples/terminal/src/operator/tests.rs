@@ -1426,6 +1426,28 @@ fn restarted_observer_finishes_the_retired_certified_prefix_once() {
         assert!(serving.admitted(&context, 0).await.is_err());
         let first = operator.store.stored_result(0).unwrap().unwrap();
         let next = operator.store.stored_result(1).unwrap().unwrap();
+        let committee = crate::protocol::committee().unwrap();
+        let verifier =
+            commonware_clearing::bajillion::admission::bls12381::Scheme::verifier(committee);
+        for signer_count in 2..=4 {
+            let mut request = AdmitRequest::from(&first);
+            request.certificate =
+                crate::protocol::fixture_certificate(&request.header, signer_count);
+            assert!(verifier.verify(&request.header, &request.certificate));
+            assert_eq!(
+                crate::protocol::has_consensus_quorum(&request.certificate),
+                signer_count >= 3
+            );
+            let result = client::admit(&context, &mut serving, &first.context, request).await;
+            if signer_count == 2 {
+                assert!(
+                    result.is_err(),
+                    "retired admission accepted a sub-consensus certificate"
+                );
+            } else {
+                result.unwrap();
+            }
+        }
         for mutation in 0..5 {
             let mut request = AdmitRequest::from(&first);
             match mutation {
@@ -1461,22 +1483,9 @@ fn restarted_observer_finishes_the_retired_certified_prefix_once() {
         let mut request = AdmitRequest::from(&first);
         request.header =
             Header::new::<Sha256, _>(&inconsistent, &request.roots, request.withdrawal_total);
-        let committee = crate::protocol::committee().unwrap();
-        let verifier = commonware_clearing::bajillion::admission::bls12381::Scheme::verifier(
-            committee.clone(),
-        );
-        request.certificate = verifier
-            .assemble_exact((0..committee.quorum()).map(|index| {
-                commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
-                    committee.clone(),
-                    crate::protocol::clearing_private(index).unwrap(),
-                )
-                .unwrap()
-                .sign(&request.header)
-                .unwrap()
-            }))
-            .unwrap();
-        assert!(verifier.verify_exact(&request.header, &request.certificate));
+        request.certificate = crate::protocol::fixture_certificate(&request.header, 3);
+        assert!(crate::protocol::has_consensus_quorum(&request.certificate));
+        assert!(verifier.verify(&request.header, &request.certificate));
         assert!(
             client::admit(&context, &mut serving, &inconsistent, request)
                 .await

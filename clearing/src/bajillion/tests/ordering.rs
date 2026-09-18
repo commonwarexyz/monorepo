@@ -594,8 +594,8 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         .await
         .unwrap();
         assert!(scheme.verify_vote(&checked.close().header, &vote));
-        let certificate = scheme.assemble_exact([vote]).unwrap();
-        assert!(scheme.verify_exact(&checked.close().header, &certificate));
+        let certificate = scheme.assemble([vote]).unwrap();
+        assert!(scheme.verify(&checked.close().header, &certificate));
         let range = checked.close().roots.activity_range(&context).unwrap();
         let (state, retained) = Box::pin(checked.apply::<_, Sha256>(state)).await.unwrap();
         let epoch = Epoch::at(state.logs(), EPOCH, range).await.unwrap();

@@ -12,7 +12,7 @@ fn certifier_quorum_with_withdrawal_needs_no_proof_holder() {
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let verifier = protocol.verifier();
         let committee = committee().unwrap();
-        let quorum = committee.quorum();
+        let quorum = N3f1::quorum(committee.members().len()) as usize;
         let accounts = accounts();
         let wallet = wallets().remove(0);
         let genesis = protocol.fixture_genesis(&accounts).unwrap();
@@ -158,7 +158,7 @@ fn certifier_quorum_with_withdrawal_needs_no_proof_holder() {
         assert_eq!(certified.header, expected.header);
         assert_eq!(certified.roots, expected.roots);
         assert_eq!(certified.withdrawal_total, expected.withdrawal_total);
-        assert!(verifier.verify_exact(&certified.header, &certified.certificate));
+        assert!(verifier.verify(&certified.header, &certified.certificate));
         assert_eq!(certified.certificate.signers.count(), quorum);
     });
 }

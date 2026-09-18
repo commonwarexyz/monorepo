@@ -1,4 +1,4 @@
-//! Complete-dealing validation and exact-quorum header certification.
+//! Complete-dealing validation and minimum-quorum header certification.
 
 mod certificate;
 use crate::bajillion::{

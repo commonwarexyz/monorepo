@@ -4,7 +4,7 @@ use stateright::{Checker, Model, Property};
 const FAULTS: u32 = 1;
 const VALIDATORS: usize = (3 * FAULTS + 1) as usize;
 const HONEST: u8 = 0b0111;
-const QUORUM: u32 = 2 * FAULTS + 1;
+const QUORUM: u32 = FAULTS + 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RegistrationContext {
@@ -235,23 +235,44 @@ enum CertificationAction {
 struct CertificationModel;
 
 fn issued_valid_state(subject: CandidateSubject) -> CertificationState {
+    issued_valid_state_with_signers(subject, &[0, 1])
+}
+
+fn issued_valid_state_with_signers(
+    subject: CandidateSubject,
+    signers: &[usize],
+) -> CertificationState {
+    assert!((QUORUM as usize..=VALIDATORS).contains(&signers.len()));
     let model = CertificationModel;
     let mut state = CertificationState::valid_for(subject);
+    for action in [CertificationAction::Prepare, CertificationAction::Deal] {
+        state = model
+            .next_state(&state, action)
+            .expect("the canonical certification trace is valid");
+    }
+    for &signer in signers {
+        if HONEST & validator_bit(signer) != 0 {
+            for action in [
+                CertificationAction::DeliverExact(signer),
+                CertificationAction::Seal(signer),
+            ] {
+                state = model
+                    .next_state(&state, action)
+                    .expect("the selected honest signer can vote");
+            }
+        } else {
+            state = model
+                .next_state(&state, CertificationAction::ByzantineVote)
+                .expect("the Byzantine signer can vote");
+        }
+    }
     for action in [
-        CertificationAction::Prepare,
-        CertificationAction::Deal,
-        CertificationAction::DeliverExact(0),
-        CertificationAction::Seal(0),
-        CertificationAction::DeliverExact(1),
-        CertificationAction::Seal(1),
-        CertificationAction::DeliverExact(2),
-        CertificationAction::Seal(2),
         CertificationAction::FormCertificate,
         CertificationAction::Issue,
     ] {
         state = model
             .next_state(&state, action)
-            .expect("the canonical certification trace is valid");
+            .expect("the certificate can issue");
     }
     state
 }
@@ -284,8 +305,8 @@ const fn validator_bit(validator: usize) -> u8 {
 fn honest_can_seal(state: &CertificationState, validator: usize) -> bool {
     validator < VALIDATORS
         && state.stage == Stage::Dealt
+        && !state.certificate
         && HONEST & validator_bit(validator) != 0
-        && state.votes.count_ones() < QUORUM
         && state.votes & validator_bit(validator) == 0
         && state.deliveries[validator] == Delivery::Exact
         && state.attempt.is_valid()
@@ -294,6 +315,7 @@ fn honest_can_seal(state: &CertificationState, validator: usize) -> bool {
 fn honest_can_reject(state: &CertificationState, validator: usize) -> bool {
     validator < VALIDATORS
         && state.stage == Stage::Dealt
+        && !state.certificate
         && !state.failed_attempt
         && matches!(state.attempt.generation, AttemptGeneration::Initial)
         && HONEST & validator_bit(validator) != 0
@@ -303,7 +325,7 @@ fn honest_can_reject(state: &CertificationState, validator: usize) -> bool {
 
 fn certificate_is_sound(model: &CertificationModel, state: &CertificationState) -> bool {
     !state.certificate
-        || (state.votes.count_ones() == QUORUM
+        || (state.votes.count_ones() >= QUORUM
             && state.attempt.is_valid()
             && certified_dealing_is_retained(model, state)
             && honest_votes_follow_exact_valid_delivery(model, state))
@@ -313,7 +335,8 @@ const fn certified_dealing_is_retained(_: &CertificationModel, state: &Certifica
     if !state.certificate {
         return true;
     }
-    // A quorum guarantees q-f honest retainers. Byzantine signers need not retain anything.
+    // Any f+1-or-larger quorum guarantees at least one honest retainer. Byzantine signers need
+    // not retain anything.
     let honest_signers = state.votes & HONEST;
     honest_signers.count_ones() >= QUORUM - FAULTS
         && state.retained & honest_signers == honest_signers
@@ -380,20 +403,16 @@ fn reaches_incomplete_delivery(_: &CertificationModel, state: &CertificationStat
     state.deliveries.contains(&Delivery::Incomplete)
 }
 
-const fn quorum_012(_: &CertificationModel, state: &CertificationState) -> bool {
-    state.certificate && state.votes == 0b0111
+const fn minimum_certificate(_: &CertificationModel, state: &CertificationState) -> bool {
+    state.certificate && state.votes.count_ones() == QUORUM
 }
 
-const fn quorum_013(_: &CertificationModel, state: &CertificationState) -> bool {
-    state.certificate && state.votes == 0b1011
+const fn three_signer_certificate(_: &CertificationModel, state: &CertificationState) -> bool {
+    state.certificate && state.votes.count_ones() == 3
 }
 
-const fn quorum_023(_: &CertificationModel, state: &CertificationState) -> bool {
-    state.certificate && state.votes == 0b1101
-}
-
-const fn quorum_123(_: &CertificationModel, state: &CertificationState) -> bool {
-    state.certificate && state.votes == 0b1110
+const fn full_committee_certificate(_: &CertificationModel, state: &CertificationState) -> bool {
+    state.certificate && state.votes.count_ones() == VALIDATORS as u32
 }
 
 impl Model for CertificationModel {
@@ -416,10 +435,10 @@ impl Model for CertificationModel {
             Stage::Registered => actions.push(CertificationAction::Prepare),
             Stage::Prepared => actions.push(CertificationAction::Deal),
             Stage::Dealt if state.certificate => actions.push(CertificationAction::Issue),
-            Stage::Dealt if state.votes.count_ones() == QUORUM => {
-                actions.push(CertificationAction::FormCertificate);
-            }
             Stage::Dealt => {
+                if state.votes.count_ones() >= QUORUM {
+                    actions.push(CertificationAction::FormCertificate);
+                }
                 for validator in 0..VALIDATORS {
                     match state.deliveries[validator] {
                         Delivery::Missing => {
@@ -459,6 +478,7 @@ impl Model for CertificationModel {
             }
             CertificationAction::DeliverIncomplete(validator)
                 if state.stage == Stage::Dealt
+                    && !state.certificate
                     && validator < VALIDATORS
                     && state.deliveries[validator] == Delivery::Missing =>
             {
@@ -466,6 +486,7 @@ impl Model for CertificationModel {
             }
             CertificationAction::DeliverExact(validator)
                 if state.stage == Stage::Dealt
+                    && !state.certificate
                     && validator < VALIDATORS
                     && state.deliveries[validator] != Delivery::Exact =>
             {
@@ -481,14 +502,14 @@ impl Model for CertificationModel {
             }
             CertificationAction::ByzantineVote
                 if state.stage == Stage::Dealt
-                    && state.votes.count_ones() < QUORUM
+                    && !state.certificate
                     && state.votes & validator_bit(3) == 0 =>
             {
                 state.votes |= validator_bit(3);
             }
             CertificationAction::FormCertificate
                 if state.stage == Stage::Dealt
-                    && state.votes.count_ones() == QUORUM
+                    && state.votes.count_ones() >= QUORUM
                     && !state.certificate =>
             {
                 state.certificate = true;
@@ -511,7 +532,7 @@ impl Model for CertificationModel {
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
             Property::always(
-                "an exact quorum certifies one valid complete dealing",
+                "every accepted quorum certifies one valid complete dealing",
                 certificate_is_sound,
             ),
             Property::always(
@@ -548,10 +569,12 @@ impl Model for CertificationModel {
                 "an incomplete dealing delivery is represented",
                 reaches_incomplete_delivery,
             ),
-            Property::sometimes("quorum v0-v1-v2 certifies", quorum_012),
-            Property::sometimes("quorum v0-v1-v3 certifies", quorum_013),
-            Property::sometimes("quorum v0-v2-v3 certifies", quorum_023),
-            Property::sometimes("quorum v1-v2-v3 certifies", quorum_123),
+            Property::sometimes("a minimum certificate forms", minimum_certificate),
+            Property::sometimes("a three-signer certificate forms", three_signer_certificate),
+            Property::sometimes(
+                "a full-committee certificate forms",
+                full_committee_certificate,
+            ),
         ]
     }
 }
@@ -633,9 +656,11 @@ fn every_honest_validator_needs_exact_delivery_and_retains_before_voting() {
 }
 
 #[test]
-fn every_exact_quorum_retains_the_complete_dealing_at_every_honest_signer() {
+fn every_accepted_signer_set_retains_the_complete_dealing_at_every_honest_signer() {
     let model = CertificationModel;
-    for votes in [0b0111, 0b1011, 0b1101, 0b1110] {
+    for votes in [
+        0b0011, 0b0101, 0b0110, 0b1001, 0b1010, 0b1100, 0b0111, 0b1011, 0b1101, 0b1110, 0b1111,
+    ] {
         let mut state = CertificationState::valid();
         for action in [CertificationAction::Prepare, CertificationAction::Deal] {
             state = model.next_state(&state, action).unwrap();
@@ -666,6 +691,26 @@ fn every_exact_quorum_retains_the_complete_dealing_at_every_honest_signer() {
         assert!(certificate_is_sound(&model, &state));
         assert!(certified_dealing_is_retained(&model, &state));
     }
+}
+
+#[test]
+fn distinct_valid_certificates_can_share_only_the_byzantine_signer() {
+    let left_subject = CandidateSubject::new(RegistrationId::B2, Batch::B2).unwrap();
+    let right_subject = CandidateSubject::new(RegistrationId::B2, Batch::B2D).unwrap();
+    let left = issued_valid_state_with_signers(left_subject, &[0, 3]);
+    let right = issued_valid_state_with_signers(right_subject, &[1, 3]);
+    let model = CertificationModel;
+
+    assert!(certificate_is_sound(&model, &left));
+    assert!(certificate_is_sound(&model, &right));
+    assert_eq!(left.votes & right.votes, validator_bit(3));
+    assert_eq!(left.retained, validator_bit(0));
+    assert_eq!(right.retained, validator_bit(1));
+
+    let left = left.issue_close().unwrap();
+    let right = right.issue_close().unwrap();
+    assert_eq!(left.registration(), right.registration());
+    assert_ne!(left.batch(), right.batch());
 }
 
 #[test]
@@ -730,13 +775,6 @@ fn retry_replaces_only_candidate_scoped_state() {
 fn certification_checker_exhausts_every_quorum_and_verifier_outcome() {
     let checker = CertificationModel.checker().threads(1).spawn_bfs().join();
     assert!(checker.is_done());
-    // Each valid generation has 2 pre-dealing, 381 delivery/vote, 30 certified, and 30
-    // issued states. Invalid attempts have 2 pre-dealing, 162 delivery/vote, and 114
-    // rejected states. The valid initial and retry generations are distinct.
-    assert_eq!(
-        checker.unique_state_count(),
-        2 * (2 + 381 + 30 + 30) + 2 + 162 + 114
-    );
     checker.assert_properties();
 }
 
@@ -753,9 +791,7 @@ fn every_certification_invariant_has_a_direct_negative_control() {
     assert_eq!(unsound.issue_close(), None);
 
     let mut wrong_quorum = issued.clone();
-    wrong_quorum.votes = 0b0011;
-    assert!(!certificate_is_sound(&model, &wrong_quorum));
-    wrong_quorum.votes = 0b1111;
+    wrong_quorum.votes = 0b0001;
     assert!(!certificate_is_sound(&model, &wrong_quorum));
 
     let mut unretained = issued.clone();
