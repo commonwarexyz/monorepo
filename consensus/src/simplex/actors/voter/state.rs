@@ -2196,10 +2196,6 @@ mod tests {
             );
             Participant::new(0)
         }
-
-        fn elect_without_certificate(&self, _round: Rnd) -> Option<Participant> {
-            None
-        }
     }
 
     #[test]
