@@ -14,8 +14,7 @@ use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
         self, Floor, ForwardPolicy, HandoffPublication, Plan, SkipPolicy,
-        elector::Config as Elector, scheme,
-        types::Context,
+        elector::Config as Elector, scheme, types::Context,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
