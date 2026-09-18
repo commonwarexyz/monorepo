@@ -197,11 +197,6 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// this set.
     failed_certifications: BTreeSet<View>,
 
-    /// Pipelined handoff requests that the application chose to defer, keyed
-    /// by child view and the captured parent. These local decisions are not
-    /// persisted, so the application is consulted again after restart.
-    deferred_handoffs: BTreeMap<View, (View, D)>,
-
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -288,7 +283,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             failed_certifications: BTreeSet::new(),
-            deferred_handoffs: BTreeMap::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -983,17 +977,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             let is_handoff = view.is_term_start(self.term_length())
                 && view.previous() == Some(parent_view)
                 && self.explicit_ancestry_payload(parent_view).is_none();
-            if self
-                .deferred_handoffs
-                .get(&view)
-                .is_some_and(|(view, payload)| {
-                    is_handoff && *view == parent_view && payload == &parent_payload
-                })
-            {
-                continue;
-            }
-            self.deferred_handoffs.remove(&view);
-
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -1013,19 +996,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             });
         }
         None
-    }
-
-    /// Records that the application declined a pipelined handoff request.
-    ///
-    /// [`Self::try_propose`] skips the view while the same handoff remains
-    /// preferred, and proposes again once the captured parent certifies or
-    /// different ancestry replaces it.
-    pub fn defer_handoff(&mut self, context: &Context<D, S::PublicKey>) {
-        let view = context.view();
-        if let Some(round) = self.views.get_mut(&view) {
-            round.clear_proposal_request();
-        }
-        self.deferred_handoffs.insert(view, context.parent);
     }
 
     /// Returns whether the exact captured parent has certified or finalized.
@@ -1430,7 +1400,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
-        self.deferred_handoffs = self.deferred_handoffs.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -7352,44 +7321,6 @@ mod tests {
             assert!(is_handoff);
             assert_eq!(handoff.round.view(), View::new(11));
             assert_eq!(handoff.parent, (View::new(10), tip.payload));
-        });
-    }
-
-    #[test]
-    fn pipelined_handoff_application_can_defer() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
-                },
-                mut state,
-            ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms(), 0);
-            let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
-
-            let handoff = state
-                .try_propose()
-                .expect("application should receive the handoff opportunity");
-            let (handoff, is_handoff) = handoff.into_parts();
-            assert_eq!(handoff.parent, (View::new(5), tip.payload));
-            assert!(is_handoff);
-            state.defer_handoff(&handoff);
-
-            // Deferral suppresses repeated handoff requests for this parent.
-            assert!(state.try_propose().is_none());
-
-            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
-            assert!(state.add_notarization(tip_notarization).0);
-            assert!(state.certified(View::new(5), true).is_some());
-
-            let request = state
-                .try_propose()
-                .expect("term-start proposal should follow certification");
-            let (ctx, is_handoff) = request.into_parts();
-            assert_eq!(ctx.round.view(), View::new(6));
-            assert_eq!(ctx.parent, (View::new(5), tip.payload));
-            assert_eq!(state.current_view(), View::new(6));
-            assert!(!is_handoff);
         });
     }
 

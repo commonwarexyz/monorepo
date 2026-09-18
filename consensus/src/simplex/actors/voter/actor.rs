@@ -130,6 +130,9 @@ enum ProposalReceiver<D> {
 
 enum ProposalState<D> {
     Awaiting(ProposalReceiver<D>),
+    /// A handoff the application declined until its parent certifies. An
+    /// ordinary request for the same context follows durable certification.
+    Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
     Ready(D),
@@ -440,10 +443,18 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
     async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
+        Some(self.request_proposal(request).await)
+    }
+
+    /// Requests a proposal from the automaton for a claimed build opportunity.
+    #[allow(clippy::async_yields_async)]
+    async fn request_proposal(
+        &mut self,
+        request: ProposalRequest<D, S::PublicKey>,
+    ) -> Request<ProposalRequest<D, S::PublicKey>, ProposalState<D>> {
         let context = request.context().clone();
 
         // Request proposal from application
@@ -478,7 +489,7 @@ impl<
                 ProposalReceiver::Regular(receiver)
             }
         };
-        Some(Request(request, span, ProposalState::Awaiting(receiver)))
+        Request(request, span, ProposalState::Awaiting(receiver))
     }
 
     /// Attempt to verify a proposed block.
@@ -529,7 +540,8 @@ impl<
     ) {
         // Keep requests for optimistic future views unless their captured proposal
         // ancestry has been invalidated, and clear requests for exited views.
-        // Parent certification preserves both pending responses and held results.
+        // Parent certification preserves pending responses, deferred requests,
+        // and held results.
         // Certification for an exited view can continue after its verification
         // receiver is dropped.
         let current_view = self.state.current_view();
@@ -784,24 +796,13 @@ impl<
     fn process_proposed(
         &mut self,
         request: ProposalRequest<D, S::PublicKey>,
-        proposed: Result<ProposalResponse<D>, oneshot::error::RecvError>,
+        proposed: Result<D, oneshot::error::RecvError>,
     ) -> Option<View> {
         // Try to use result
         let is_handoff = matches!(&request, ProposalRequest::Handoff(_));
         let context = request.into_context();
         let proposed = match proposed {
-            Ok(ProposalResponse::Proposed {
-                payload: proposed, ..
-            }) => proposed,
-            Ok(ProposalResponse::AwaitCertification) => {
-                self.handoff_events
-                    .get_or_create(&HandoffEvent {
-                        event: HandoffEventKind::Deferred,
-                    })
-                    .inc();
-                self.state.defer_handoff(&context);
-                return None;
-            }
+            Ok(proposed) => proposed,
             Err(err) => {
                 if is_handoff {
                     self.handoff_abandoned
@@ -1318,11 +1319,26 @@ impl<
 
                 // This checkpoint follows the prior iteration's journal sync. Never
                 // promote a held result in reconciliation, which also runs before sync.
-                if let Some(Request(request, _, state)) = pending_propose.as_mut()
-                    && let ProposalState::Held(payload) = state
-                    && self.state.proposal_parent_certified(request.context())
-                {
-                    *state = ProposalState::Ready(*payload);
+                // A deferred request becomes an ordinary request for the same context.
+                let promote = match pending_propose.as_ref() {
+                    Some(Request(request, _, ProposalState::Deferred | ProposalState::Held(_))) => {
+                        self.state.proposal_parent_certified(request.context())
+                    }
+                    _ => false,
+                };
+                if promote {
+                    let Request(request, span, state) =
+                        pending_propose.take().expect("request must exist");
+                    pending_propose = Some(match state {
+                        ProposalState::Held(payload) => {
+                            Request(request, span, ProposalState::Ready(payload))
+                        }
+                        ProposalState::Deferred => {
+                            self.request_proposal(ProposalRequest::Regular(request.into_context()))
+                                .await
+                        }
+                        state => Request(request, span, state),
+                    });
                 }
 
                 // Prepare waiters
@@ -1386,23 +1402,35 @@ impl<
                         .inc();
                 }
 
-                // Keep a build the application holds until parent certification
-                // outside the round proposal slot. The captured request and build
-                // latch remain live until promotion.
-                if let Ok(ProposalResponse::Proposed {
-                    payload,
-                    publication: Some(HandoffPublication::AfterCertification),
-                }) = &proposed
-                    && !self.state.proposal_parent_certified(request.context())
-                {
-                    self.handoff_events
-                        .get_or_create(&HandoffEvent {
-                            event: HandoffEventKind::Held,
-                        })
-                        .inc();
-                    pending_propose = Some(Request(request, span, ProposalState::Held(*payload)));
-                    continue;
-                }
+                // Keep a declined handoff or a build the application holds until
+                // parent certification outside the round proposal slot. The captured
+                // request and build latch remain live until promotion.
+                let proposed = match proposed {
+                    Ok(ProposalResponse::AwaitCertification) => {
+                        self.handoff_events
+                            .get_or_create(&HandoffEvent {
+                                event: HandoffEventKind::Deferred,
+                            })
+                            .inc();
+                        pending_propose = Some(Request(request, span, ProposalState::Deferred));
+                        continue;
+                    }
+                    Ok(ProposalResponse::Proposed { payload, publication }) => {
+                        if publication == Some(HandoffPublication::AfterCertification)
+                            && !self.state.proposal_parent_certified(request.context())
+                        {
+                            self.handoff_events
+                                .get_or_create(&HandoffEvent {
+                                    event: HandoffEventKind::Held,
+                                })
+                                .inc();
+                            pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
+                            continue;
+                        }
+                        Ok(payload)
+                    }
+                    Err(err) => Err(err),
+                };
 
                 // Process the automaton's response
                 let Some(proposed_view) =
