@@ -317,11 +317,14 @@ mod tests {
 
     #[test]
     fn test_hashmap_encoding_matches_ordered_map() {
+        // Ordered maps provide the canonical encoding across collection sizes.
         for len in [0, 1, 20, 128, 1024] {
             let ordered: BTreeMap<_, _> = (0..len)
                 .map(|key: u32| (key, Bytes::copy_from_slice(&key.to_le_bytes())))
                 .collect();
             let expected = ordered.encode();
+
+            // Insertion order must not affect the encoded bytes.
             for reverse in [false, true] {
                 let mut entries: Vec<_> = ordered.iter().collect();
                 if reverse {
@@ -333,6 +336,7 @@ mod tests {
                     .collect();
                 assert_eq!(map.encode(), expected);
 
+                // Bytes values exercise external chunks alongside inline keys and lengths.
                 let mut buf = TrackingWriteBuf::new();
                 map.write_bufs(&mut buf);
                 assert_eq!(buf.freeze(), expected);

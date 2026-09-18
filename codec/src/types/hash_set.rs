@@ -268,11 +268,14 @@ mod tests {
 
     #[test]
     fn test_hashset_encoding_matches_ordered_set() {
+        // Ordered sets provide the canonical encoding across collection sizes.
         for len in [0, 1, 20, 128, 1024] {
             let ordered: BTreeSet<_> = (0..len)
                 .map(|key: u32| Bytes::copy_from_slice(&key.to_le_bytes()))
                 .collect();
             let expected = ordered.encode();
+
+            // Insertion order must not affect the encoded bytes.
             for reverse in [false, true] {
                 let mut entries: Vec<_> = ordered.iter().cloned().collect();
                 if reverse {
@@ -281,6 +284,7 @@ mod tests {
                 let set: HashSet<_> = entries.into_iter().collect();
                 assert_eq!(set.encode(), expected);
 
+                // Bytes items exercise external chunks alongside inline lengths.
                 let mut buf = TrackingWriteBuf::new();
                 set.write_bufs(&mut buf);
                 assert_eq!(buf.freeze(), expected);
