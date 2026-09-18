@@ -176,9 +176,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Controls when consensus may publish a prepared handoff proposal.
     ///
-    /// The application chooses this for each handoff. Certification means certification of
-    /// the exact captured parent; finalization of that parent also satisfies the publication
-    /// barrier.
+    /// The application chooses this for each handoff. Consensus requires certification or
+    /// finalization of the exact captured parent to satisfy the publication barrier.
     #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
     pub enum HandoffPublication {
         /// Wait until the captured parent certifies or finalizes before publication.
@@ -193,14 +192,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// An application's response to a handoff proposal request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HandoffProposal<D> {
-        /// The candidate is ready. Consensus controls when it is published and voted for.
+        /// The candidate is ready. Consensus applies its publication permission before
+        /// relaying or voting.
         Proposed {
             /// Prepared or reused candidate.
             payload: D,
             /// When consensus may publish this candidate.
             publication: HandoffPublication,
         },
-        /// Wait until the parent has been certified before requesting a proposal again.
+        /// Ask consensus to request an ordinary proposal after the parent certifies.
         AwaitCertification,
     }
 
@@ -214,13 +214,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// [`HandoffProposal::Proposed`] carries the same verification and certification
         /// commitments as a payload from [`Automaton::propose`].
-        /// [`HandoffProposal::AwaitCertification`] declines this request; consensus issues
-        /// an ordinary [`Automaton::propose`] once the parent certifies. Closing the
-        /// response abandons the local proposal opportunity for this view. Parent
-        /// certification does not retry it.
+        /// With [`HandoffProposal::AwaitCertification`], consensus issues an ordinary
+        /// [`Automaton::propose`] once the parent certifies. Closing the response abandons
+        /// the local proposal opportunity for this view. Parent certification does not retry it.
         ///
         /// Return the receiver promptly and do any work behind it. Parent certification
-        /// does not cancel this request: a pending response retains the proposal
+        /// does not cancel this request. A pending response retains the proposal
         /// opportunity until it resolves or consensus abandons the context. Consensus
         /// may hold a completed candidate until its parent certifies. Stop pending work
         /// when the receiver closes.
@@ -384,25 +383,21 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
-        /// Decide whether to prepare a proposal on a parent that has not yet been certified.
+        /// Decide whether to prepare a proposal before its parent certifies.
         ///
-        /// Returning [`HandoffPolicy::Prepare`] allows the marshal to continue through its
-        /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
-        /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
-        /// [`HandoffPolicy::AwaitCertification`] waits until the parent certifies before
-        /// requesting that ordinary path again. The [`HandoffPublication`] inside
-        /// [`HandoffPolicy::Prepare`] decides whether consensus may publish the candidate
-        /// before the parent certifies.
+        /// With [`HandoffPolicy::Prepare`], the marshal uses its ordinary proposal path.
+        /// Recovery and epoch-boundary reproposal may reuse a block without invoking
+        /// [`Self::propose`]. The supplied [`HandoffPublication`] controls when consensus
+        /// may publish the candidate. With [`HandoffPolicy::AwaitCertification`], consensus
+        /// waits for parent certification before requesting an ordinary proposal.
         ///
-        /// The decision applies to this request and cannot be revoked after returning it.
-        /// Publishing early trusts the outgoing consensus leader, the proposer of the parent,
-        /// not to equivocate. The context names the parent by view and digest. Its leader
-        /// field is the incoming leader making this request, not the outgoing one. The
-        /// application identifies the outgoing leader for the parent's consensus round from
-        /// the elector's schedule or from authenticated metadata for that round. A verified
-        /// parent block's embedded context can name an earlier proposer, as with an
-        /// epoch-boundary re-proposal. If that identity or trust is uncertain, prepare with
-        /// [`HandoffPublication::AfterCertification`].
+        /// The application cannot revoke this decision. Publishing early trusts the outgoing
+        /// consensus leader not to equivocate. The context names the parent by view and digest.
+        /// Its leader field names the incoming leader, not the outgoing one. Identify the
+        /// outgoing leader from the elector's schedule or authenticated metadata for the
+        /// parent's consensus round. A verified parent block can name an earlier proposer
+        /// in its embedded context, as with an epoch-boundary reproposal. If that identity
+        /// or trust is uncertain, prepare with [`HandoffPublication::AfterCertification`].
         ///
         /// Make this decision from information already available to the application. If
         /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].

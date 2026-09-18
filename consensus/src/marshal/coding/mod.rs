@@ -5046,7 +5046,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // A handoff request takes the same reuse path as an ordinary proposal.
+            // Handoff requests use the ordinary proposal reuse path.
             let decision = marshaled
                 .propose_handoff(ctx)
                 .await

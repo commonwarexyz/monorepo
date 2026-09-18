@@ -3309,8 +3309,8 @@ mod tests {
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
                 );
 
-                // Accepting a handoff enters the same automatic boundary
-                // re-proposal path without invoking the application builder.
+                // An accepted handoff uses the automatic boundary re-proposal path
+                // without invoking the application builder.
                 let publication = HandoffPublication::AllowBeforeCertification;
                 let pipeline_round =
                     Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));

@@ -116,8 +116,8 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 enum ProposalResponse<D> {
     Proposed {
         payload: D,
-        /// Publication permission from a handoff response. Ordinary proposals
-        /// carry `None` and publish immediately.
+        /// Handoff publication permission. Ordinary proposals carry `None`
+        /// and do not wait for parent certification.
         publication: Option<HandoffPublication>,
     },
     AwaitCertification,
@@ -138,7 +138,8 @@ enum ProposalState<D> {
     Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
-    /// A held result whose parent has certified. The next wait publishes it.
+    /// A held result whose parent has certified. The next wait checks its
+    /// eligibility before publication.
     Ready(D),
 }
 
@@ -552,12 +553,10 @@ impl<
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
-        // Keep requests for optimistic future views unless their captured proposal
-        // ancestry has been invalidated, and clear requests for exited views.
-        // Parent certification preserves pending responses, deferred requests,
-        // and held results.
-        // Certification for an exited view can continue after its verification
-        // receiver is dropped.
+        // Retain optimistic future-view requests unless their captured ancestry
+        // is invalid. Drop requests for exited views. Parent certification retains
+        // pending responses, deferred requests, and held results. Certification
+        // may continue after dropping an exited view's verification receiver.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -1315,9 +1314,10 @@ impl<
                 // delaying them.
                 self = self.prune_views().await;
 
-                // This checkpoint follows the prior iteration's journal sync. Never
-                // promote a held result in reconciliation, which also runs before sync.
-                // A deferred request becomes an ordinary request for the same context.
+                // The prior iteration's journal sync has completed at this checkpoint.
+                // Promote held results here because reconciliation also runs before the
+                // sync. Replace a deferred handoff with an ordinary request for the same
+                // context.
                 if let Some(Request(request, _, state)) = pending_propose.as_mut()
                     && matches!(state, ProposalState::Deferred | ProposalState::Held(_))
                     && self.state.proposal_parent_certified(request.context())
@@ -1378,16 +1378,16 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // A released held result carries no publication and is not received again.
+                // Released held results carry `None` to avoid counting them as received again.
                 if matches!(request, ProposalRequest::Handoff(_))
                     && matches!(&proposed, Ok(ProposalResponse::Proposed { publication: Some(_), .. }))
                 {
                     self.record_handoff_event(HandoffEventKind::Received);
                 }
 
-                // Keep a declined handoff or a build the application holds until
-                // parent certification outside the round proposal slot. The captured
-                // request and build latch remain live until promotion.
+                // Retain a declined handoff or held build outside the round proposal
+                // slot until the parent certifies. The captured request and build latch
+                // remain active until promotion.
                 let proposed = match proposed {
                     Ok(ProposalResponse::AwaitCertification) => {
                         self.record_handoff_event(HandoffEventKind::Deferred);

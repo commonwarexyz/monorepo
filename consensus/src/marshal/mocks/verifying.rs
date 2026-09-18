@@ -55,8 +55,8 @@ impl<B, S> MockVerifyingApp<B, S> {
         self
     }
 
-    /// Block the first proposal construction forever. Returns receivers that
-    /// fire when the build starts and when it is cancelled.
+    /// Blocks the first proposal build until cancellation. Returns receivers that
+    /// signal when the build starts and when it is cancelled.
     pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
         let (started, started_rx) = oneshot::channel();
         let (dropped, dropped_rx) = oneshot::channel();
@@ -73,7 +73,7 @@ struct ProposalGate {
     dropped: oneshot::Sender<()>,
 }
 
-/// Fires its sender when dropped unless disarmed first.
+/// Signals when dropped unless disarmed first.
 pub(crate) struct DropSignal(Option<oneshot::Sender<()>>);
 
 impl DropSignal {
@@ -81,7 +81,7 @@ impl DropSignal {
         Self(sender)
     }
 
-    /// Prevents the signal from firing on drop.
+    /// Disarms the drop signal.
     pub(crate) fn disarm(&mut self) {
         self.0.take();
     }

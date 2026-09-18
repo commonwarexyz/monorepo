@@ -189,10 +189,9 @@ where
 
 /// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits. Proposal,
-/// verification, and reporting calls are forwarded to the actor.
-/// Handoff policy is evaluated on an application clone retained by the mailbox,
-/// independently of the actor lifecycle, including after actor shutdown. A
+/// Implements the consensus application and verifying traits. The mailbox forwards
+/// proposal, verification, and reporting calls to the actor. It evaluates handoff
+/// policy on a retained application clone, including after actor shutdown. A
 /// [`HandoffPolicy::Prepare`] decision does not guarantee proposal availability.
 pub struct Mailbox<E, A>
 where

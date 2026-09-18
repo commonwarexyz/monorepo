@@ -448,7 +448,8 @@ mod tests {
                 FixedEpocher::new(NZU64!(10)),
             );
 
-            // Build must reach Marshal's ordinary path, including recovered-candidate reuse.
+            // The handoff build must use Marshal's ordinary path to reuse the
+            // recovered candidate.
             let block = TestBlock::new(1, 1);
             assert!(marshal.verified(block.context().round, block.clone()).await);
             let response = deferred.propose_handoff(block.context()).await;

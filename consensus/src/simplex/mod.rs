@@ -221,10 +221,9 @@
 //! proposal and broadcasts its `notarize` vote before the parent is certified, if all of the
 //! following hold:
 //!
-//! * The proposal's view is in the same term as its parent (optimistic validation never crosses
-//!   a term boundary; a term start always requires explicitly certified ancestry). Only a
-//!   [pipelined handoff](#pipelined-handoff) issues a proposal across the boundary, and only its
-//!   proposer votes for it early.
+//! * The proposal's view is in the same term as its parent. A term start requires explicitly
+//!   certified ancestry, except that a [pipelined handoff](#pipelined-handoff) lets the incoming
+//!   leader propose and cast its own vote early.
 //! * At most `optimistic_views` views lie between the proposal's view and the last *directly
 //!   notarized* view (a view with an observed notarization or finalization certificate; a view is
 //!   *indirectly notarized* when only a descendant's certificate implies it), bounding
@@ -250,11 +249,7 @@
 //! whether consensus may publish it before the parent certifies.
 //!
 //! A **handoff request** asks the incoming leader for a term-start candidate before its parent
-//! certifies. **Preparation** builds or reuses a candidate in response to that request. The
-//! response carries a [`crate::HandoffPublication`].
-//! [`crate::HandoffPublication::AfterCertification`] keeps the candidate unpublished until its
-//! exact parent certifies or finalizes. [`crate::HandoffPublication::AllowBeforeCertification`]
-//! permits publication and the proposer's notarize vote before parent certification.
+//! certifies. **Preparation** builds or reuses a candidate in response to that request.
 //!
 //! Handoff requests require an elector that can select the incoming leader without a certificate
 //! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
@@ -267,25 +262,24 @@
 //! | [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AllowBeforeCertification`] | Permit early relay and own notarize vote |
 //! | Closed response | Abandon the local proposal opportunity |
 //!
-//! Publication always passes the ordinary proposal eligibility checks. Parent certification
-//! preserves unfinished builds and completed candidates. View exit or replacement of invalid
-//! ancestry discards them; preparation is volatile across restart. Other validators still require
-//! explicitly certified ancestry before verifying a term-start proposal or voting for it.
+//! Consensus checks ordinary proposal eligibility before publication. Parent certification
+//! preserves unfinished builds and completed candidates. Consensus discards them on view exit
+//! or replacement of invalid ancestry. Restart also discards pending requests and held candidates.
+//! Other validators require explicitly certified ancestry before verifying or voting for a
+//! term-start proposal.
 //!
 //! Marshal applications use [`crate::Application::handoff_policy`] to choose
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
-//! Stateful Glue exposes the same policy. The decision is synchronous and uses available
-//! information. `Prepare(AfterCertification)` overlaps construction with certification while
-//! withholding publication. It uses the ordinary construction path, which may reuse an existing
-//! block without calling the application builder. `Prepare(AllowBeforeCertification)` also
-//! permits early publication. An application that publishes early by default can still hold an
-//! individual handoff, for example when it does not trust the outgoing leader. The decision is
-//! fixed for the request.
+//! Stateful Glue exposes the same policy. The application makes a synchronous decision from
+//! available information and cannot revoke it. `Prepare` uses the ordinary construction path,
+//! which may reuse an existing block without calling the application builder. With
+//! `AfterCertification`, construction can overlap certification while consensus holds publication.
+//! An application can choose this for individual handoffs whose outgoing leader it does not trust.
 //!
-//! With [`crate::HandoffPublication::AllowBeforeCertification`], the gain is largest with rotating
-//! leaders, where every view is a term boundary. Each proposal is distributed in parallel with its
-//! parent's votes, allowing network-bound view time to drop from two network trips to one. With
-//! stable leaders, optimistic validation pipelines every view except the term start, so the
+//! With [`crate::HandoffPublication::AllowBeforeCertification`], rotating leaders can pipeline
+//! every view. The leader distributes each proposal in parallel with its parent's votes, allowing
+//! network-bound view time to drop from two network trips to one. With stable leaders,
+//! optimistic validation pipelines every view except the term start, so the
 //! handoff only moves each term's first view one network trip earlier.
 //!
 //! Publication before certification trusts the outgoing leader not to equivocate. If the outgoing
@@ -302,8 +296,8 @@
 //! finalized at that point. They do not imply network delivery.
 //!
 //! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
-//! view exit, superseded ancestry, response closure, or ineligibility at recording. A deferral
-//! is counted once in `handoff_events`; the deferred request can still be abandoned later.
+//! view exit, superseded ancestry, response closure, or ineligibility at recording.
+//! `handoff_events` counts each deferral once. Consensus can still abandon the deferred request later.
 //! Neither family tracks losses across restart or distinguishes newly built candidates from
 //! reused blocks.
 //!
@@ -640,9 +634,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{
-            Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy,
-        };
+        pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -1804,11 +1796,8 @@ mod tests {
         Sha256Digest,
     >;
 
-    /// Spins up the fully-linked five-validator ed25519 round-robin cluster
-    /// shared by the stable-leader and pipelined-handoff end-to-end tests,
-    /// parameterized by the elector config and propose latency. Returns the
-    /// per-validator reporters, the index of the leader elected for view 1,
-    /// and the network oracle.
+    /// Starts a fully linked five-validator ed25519 round-robin cluster.
+    /// Returns each validator's reporter, the view-1 leader's index, and the network oracle.
     ///
     /// The 1.5s leader and 3.5s certification timeouts are tuned to the
     /// callers' link latencies: with latency near or above
@@ -1963,10 +1952,8 @@ mod tests {
         });
     }
 
-    /// A pipelined handoff removes one network trip from every term boundary.
-    /// The boundary view notarizes about one link latency after the outgoing
-    /// tip, like an intra-term view, instead of two (the proposal otherwise
-    /// distributes only after the tip certifies).
+    /// A pipelined handoff lets the boundary view notarize about one link latency
+    /// after the outgoing tip. Waiting for parent certification takes two.
     ///
     /// Without the handoff, intra-term optimism refills the pipeline one view
     /// after the boundary stall. The handoff therefore barely changes average
@@ -2007,9 +1994,8 @@ mod tests {
                 observed_at.push(context.current());
             }
 
-            // Every boundary view must land about one link latency after the
-            // outgoing tip; without the handoff it takes two (measured:
-            // ~120ms with the handoff, ~230ms without, at 100ms latency).
+            // Each boundary view must notarize before the two network trips
+            // required when proposal distribution waits for parent certification.
             for (view, window) in measured_views.skip(1).zip(observed_at.windows(2)) {
                 if !View::new(view).is_term_start(term_length) {
                     continue;
@@ -2032,10 +2018,8 @@ mod tests {
         });
     }
 
-    /// With rotating leaders, every view is a term boundary, so pipelining
-    /// the handoff removes one network trip from every view. Sustained view
-    /// time drops from two link latencies to one (measured: ~120ms with the
-    /// handoff, ~228ms without, at 100ms latency).
+    /// With rotating leaders, pipelined handoffs reduce sustained view time
+    /// from two link latencies to about one.
     #[test_traced]
     fn test_pipelined_handoff_halves_rotating_view_time() {
         let measured_views = 10u64..=100;

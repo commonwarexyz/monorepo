@@ -104,15 +104,6 @@ impl<D: Digest, P: PublicKey> ProposalRequest<D, P> {
             Self::Regular(context) | Self::Handoff(context) => context,
         }
     }
-
-    /// Splits the request into its proposal context and handoff status.
-    #[cfg(test)]
-    pub(super) fn into_parts(self) -> (Context<D, P>, bool) {
-        match self {
-            Self::Regular(context) => (context, false),
-            Self::Handoff(context) => (context, true),
-        }
-    }
 }
 
 impl<D: Digest, P: PublicKey> Viewable for ProposalRequest<D, P> {
@@ -411,8 +402,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.set_leader_once(view, leader);
     }
 
-    /// Stamps `leader` on `view`'s round unless one is already set, keeping
-    /// every leader source (election, inheritance, early handoff) idempotent.
+    /// Records `leader` for `view` if unset. This makes election, inheritance,
+    /// and early handoff updates idempotent.
     fn set_leader_once(&mut self, view: View, leader: Participant) {
         if self.leader_is_set(view) {
             return;
@@ -894,7 +885,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .and_then(|round| round.elapsed_since_start(now))
     }
 
-    /// Returns time since first local view entry, or None if no entry was recorded.
+    /// Returns time since first local view entry, or `None` if unrecorded.
     pub fn elapsed_since_entry(&self, view: View) -> Option<Duration> {
         let now = self.context.current();
         self.views
@@ -937,8 +928,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         round.latch_timeout(now, reason);
     }
 
-    /// Returns a request for the lowest locally admissible tracked view ready
-    /// to propose, distinguishing pipelined handoffs from ordinary proposals.
+    /// Returns a proposal request for the lowest admissible tracked view ready to propose.
+    /// The request identifies a pipelined handoff when applicable.
     pub(super) fn try_propose(&mut self) -> Option<ProposalRequest<D, S::PublicKey>> {
         // Nothing above the next term start is admissible (see
         // [`Self::admits_outbound`]), so bound the scan rather than walking every
@@ -1033,8 +1024,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Releases a proposal's build latch when its captured ancestry is invalid
-    /// and a replacement parent is available. Returns true when the caller
-    /// should drop the pending receiver.
+    /// and a replacement parent is available. Returns whether the caller should
+    /// drop the pending receiver.
     pub fn supersede_proposal_request(&mut self, context: &Context<D, S::PublicKey>) -> bool {
         let Ok(preferred) = self.find_parent(context.view()) else {
             return false;
@@ -1109,9 +1100,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns work for the lowest locally admissible tracked proposal awaiting
     /// verification.
     ///
-    /// Missing ancestry is requested from the proposal's elected leader, except
-    /// for a term-start parent notarization that any validator may hold (see
-    /// [`Self::resolve_ancestry`] for when an error justifies a fetch).
+    /// Requests missing ancestry from the proposal's elected leader. A
+    /// term-start parent notarization may come from any validator because the
+    /// pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
+    /// whether an error justifies a fetch.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -1338,11 +1330,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Verification may already have requested this parent with a target.
-        // Certification bypasses that request latch and asks any holder: an
-        // untargeted request replaces the target of an in-flight fetch. The
-        // candidate remains dormant until its parent arrives, so this request
-        // does not repeat.
+        // Certification repair asks any peer, even if verification already
+        // requested the parent from the leader. The untargeted duplicate widens
+        // the pending resolver request. The candidate remains dormant until its
+        // parent arrives, so certification does not request it repeatedly.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
@@ -1467,11 +1458,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .is_some()
     }
 
-    /// Returns the leader a pipelined handoff elects for term-start `view`,
-    /// before the certificate that unlocks the view exists.
+    /// Returns the leader elected for a term-start pipelined handoff before the
+    /// certificate that unlocks `view` exists.
     ///
-    /// `None` when `view` does not start a term or the elector does not elect
-    /// early (see [`Elector::elect_without_certificate`]).
+    /// Returns `None` when `view` does not start a term or the elector does not
+    /// elect early. See [`Elector::elect_without_certificate`].
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
@@ -1480,21 +1471,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .elect_without_certificate(Rnd::new(self.epoch, view))
     }
 
-    /// Returns true when a pipelined handoff may build on `parent`: `parent`
-    /// ends a term whose incoming leader is the local signer, and no
-    /// nullification has abandoned `parent`'s term.
-    ///
-    /// Only the incoming leader issues work on cross-term optimistic
-    /// ancestry. This signer check prevents callers from issuing that work for
-    /// another leader.
+    /// Returns whether `parent` can support a pipelined handoff. `parent` must
+    /// end a term, the incoming leader must be the local signer, and no
+    /// nullification may have abandoned the term.
     fn handoff_parent(&self, parent: View) -> bool {
         self.handoff_leader(parent.next())
             .is_some_and(|leader| self.is_me(leader))
             && self.highest_nullification_in_term(parent).is_none()
     }
 
-    /// Returns the payload of `parent` when a pipelined handoff may build on
-    /// it: `parent` must satisfy [`Self::handoff_parent`] and have usable
+    /// Returns `parent`'s payload when a pipelined handoff may build on it.
+    /// The parent must satisfy [`Self::handoff_parent`] and have usable
     /// optimistic ancestry.
     ///
     /// The [`Self::handoff_parent`] check runs first because
@@ -1767,15 +1754,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// In-term proposals require their immediate predecessor. Term-start
     /// proposals normally arrive through explicit ancestry and need no extra
-    /// gate, but a locally endorsed pipelined handoff links directly to the
-    /// outgoing term's tip before it certifies and must retain that barrier.
-    /// The barrier keys on round state (an own notarize vote on a tip-linked
-    /// proposal), not the transient application decision, so replay preserves
-    /// it across a restart. It also matches non-endorsement
-    /// term-start votes: those are cast only on explicitly certified
-    /// ancestry, and append-ordered journal replay restores the parent's
-    /// certification before the vote, so the barrier is already satisfied
-    /// for them.
+    /// gate. A locally endorsed pipelined handoff instead links directly to the
+    /// uncertified outgoing tip, so it retains that gate.
+    ///
+    /// The gate derives from a journaled fact in round state: our notarize vote
+    /// for a tip-linked proposal. Replay therefore restores the gate without
+    /// relying on the transient application decision. Non-endorsement
+    /// term-start votes also satisfy this rule. They are cast only with
+    /// explicitly certified ancestry, and append-ordered replay restores the
+    /// parent's certification before the vote.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {
@@ -7310,11 +7297,11 @@ mod tests {
             assert_eq!(state.leader_index(View::new(10)), None);
             assert_eq!(state.leader_index(View::new(11)), Some(Participant::new(0)));
 
-            let (handoff, is_handoff) = state
+            let request = state
                 .try_propose()
-                .expect("recovered tip should allow a handoff")
-                .into_parts();
-            assert!(is_handoff);
+                .expect("recovered tip should allow a handoff");
+            assert!(matches!(request, ProposalRequest::Handoff(_)));
+            let handoff = request.into_context();
             assert_eq!(handoff.round.view(), View::new(11));
             assert_eq!(handoff.parent, (View::new(10), tip.payload));
         });

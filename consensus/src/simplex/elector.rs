@@ -230,15 +230,14 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Returns the index of the selected leader in the participants list.
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant;
 
-    /// Selects the leader for `round` before the certificate that unlocks the
-    /// round exists.
+    /// Selects the leader for `round` without its unlocking certificate.
     ///
     /// Returning `Some` allows the application to consider a pipelined handoff
     /// (see [Pipelined Handoff]). The application decides whether to build for
     /// the term's first view while the prior term's final view is uncertified.
     ///
-    /// Return `Some` only when the leader is derivable without a certificate:
-    /// the result must equal [`Self::elect`] for every certificate that can
+    /// Return `Some` only when the elector can derive the leader without a certificate.
+    /// The result must equal [`Self::elect`] for every certificate that can
     /// unlock the round. The default returns `None`, which disables pipelined
     /// handoffs. Certificate-derived electors such as [`RandomElector`] keep
     /// the default.

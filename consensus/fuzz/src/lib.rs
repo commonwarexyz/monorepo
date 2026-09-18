@@ -128,7 +128,7 @@ pub struct FuzzInput {
     pub heterogeneous_optimism: bool,
     /// Whether honest applications prepare pipelined handoff candidates.
     pub accept_handoffs: bool,
-    /// Publication permission honest applications return with prepared candidates.
+    /// Publication permission that honest applications grant for prepared candidates.
     pub handoff_publication: HandoffPublication,
     pub degraded_network: bool,
     pub configuration: Configuration,

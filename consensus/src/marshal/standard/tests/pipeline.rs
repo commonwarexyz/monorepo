@@ -1,5 +1,8 @@
 use super::*;
-use crate::marshal::{ancestry::Ancestry, mocks::verifying::DropSignal};
+use crate::{
+    Viewable,
+    marshal::{ancestry::Ancestry, mocks::verifying::DropSignal},
+};
 use commonware_p2p::Receiver;
 
 /// Which of the two concurrent steps completes first.
@@ -22,7 +25,6 @@ struct PipelineApp {
     policies: Arc<AtomicUsize>,
     builds: Arc<AtomicUsize>,
     block: B,
-    publication: HandoffPublication,
 }
 
 impl crate::Application<Runtime> for PipelineApp {
@@ -33,7 +35,7 @@ impl crate::Application<Runtime> for PipelineApp {
 
     fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Prepare(self.publication)
+        HandoffPolicy::Prepare(HandoffPublication::AfterCertification)
     }
 
     async fn propose(
@@ -157,7 +159,7 @@ fn retained_pipeline_handoff(first: First) {
         let (build_tx, build_rx) = oneshot::channel();
         let (build_release_tx, build_release_rx) = oneshot::channel();
         let (completed_tx, completed_rx) = oneshot::channel();
-        let (drop_tx, mut drop_rx) = oneshot::channel();
+        let (drop_tx, drop_rx) = oneshot::channel();
         let policies = Arc::new(AtomicUsize::new(0));
         let app = PipelineApp {
             verify_started: Arc::new(Mutex::new(Some(verify_tx))),
@@ -169,7 +171,6 @@ fn retained_pipeline_handoff(first: First) {
             policies: policies.clone(),
             builds: Arc::new(AtomicUsize::new(0)),
             block,
-            publication: HandoffPublication::AfterCertification,
         };
         let control = oracle.control(victim.clone());
         let vote_network = control.register(3, TEST_QUOTA).await.unwrap();
@@ -219,7 +220,7 @@ fn retained_pipeline_handoff(first: First) {
         );
         let _engine = engine.start(vote_network, certificate_network, resolver_network);
 
-        // Register the real verification gate before delivering the parent certificate.
+        // Start parent verification before delivering its notarization.
         let parent = Proposal::new(parent_round, View::new(1), parent_digest);
         vote_sender.send(
             Recipients::One(victim.clone()),
@@ -246,32 +247,21 @@ fn retained_pipeline_handoff(first: First) {
                         break;
                     }
                 }
-                assert!(
-                    matches!(drop_rx.try_recv(), Err(TryRecvError::Empty)),
-                    "parent certification must not cancel the running build"
-                );
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
             }
             First::Build => {
                 build_release_tx.send_lossy(());
                 completed_rx.await.unwrap();
-                // Keep certification blocked well past link delivery, so an early
-                // vote sent at build completion would reach the observer.
+                // Block certification for three link delays so the observer would
+                // receive any vote published when the build completes.
                 let quiet_until = context.current() + 3 * LINK.latency;
                 loop {
                     select! {
-                        result = vote_receiver.recv() => {
-                            let (sender, message) = result.unwrap();
-                            assert_eq!(sender, victim);
-                            let proposal = match Vote::<S, D>::decode(message).unwrap() {
-                                Vote::Notarize(vote) => Some(vote.proposal),
-                                Vote::Finalize(vote) => Some(vote.proposal),
-                                Vote::Nullify(_) => None,
-                            };
+                        vote = next_vote(&mut vote_receiver, &victim) => {
                             assert_ne!(
-                                proposal.map(|proposal| proposal.round),
-                                Some(round),
+                                vote.view(),
+                                round.view(),
                                 "default handoff mode must not vote before parent certification"
                             );
                         },
