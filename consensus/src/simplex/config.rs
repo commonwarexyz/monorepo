@@ -3,7 +3,7 @@ use super::{
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
+    CertifiableAutomaton, Epochable, HandoffPublication, Relay, Reporter, Viewable,
     types::{Epoch, View, ViewDelta},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
@@ -83,22 +83,6 @@ impl ForwardPolicy {
     pub const fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
     }
-}
-
-/// Controls when consensus may publish a handoff proposal prepared by the application.
-///
-/// Certification means certification of the exact parent captured by the handoff request;
-/// finalization of that parent also satisfies the publication barrier. Proposal preparation
-/// remains application-owned through [`crate::Application::handoff_policy`].
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub enum HandoffPublication {
-    /// Wait until the captured parent certifies or finalizes before publication.
-    #[default]
-    AfterCertification,
-    /// Permit early relay and the proposer's notarize vote before parent certification.
-    ///
-    /// This trusts the outgoing leader not to equivocate.
-    AllowBeforeCertification,
 }
 
 /// The certified root from which a Simplex instance starts.
@@ -262,7 +246,9 @@ where
     /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
-    /// Policy governing publication of prepared handoff proposals.
+    /// Upper limit on publication permission for prepared handoff proposals.
+    ///
+    /// Early publication requires permission from both this setting and the application.
     ///
     /// Prefer [`HandoffPublication::AfterCertification`]: the application may prepare a
     /// proposal early, but consensus retains it until its exact parent certifies or finalizes.

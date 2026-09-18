@@ -251,19 +251,21 @@
 //!
 //! A **handoff request** asks the incoming leader for a term-start candidate before its parent
 //! certifies. **Preparation** builds or reuses a candidate in response to that request.
-//! [`HandoffPublication::AfterCertification`] keeps the candidate unpublished until its exact
-//! parent certifies or finalizes. [`HandoffPublication::AllowBeforeCertification`] permits
-//! publication and the proposer's notarize vote before parent certification.
+//! [`crate::HandoffPublication::AfterCertification`] keeps the candidate unpublished until its exact
+//! parent certifies or finalizes. [`crate::HandoffPublication::AllowBeforeCertification`] permits
+//! publication and the proposer's notarize vote before parent certification only when the
+//! application response also permits it.
 //!
 //! Handoff requests require an elector that can select the incoming leader without a certificate
 //! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
 //! the leader uses the ordinary proposal path. Applications decide whether to prepare a proposal;
 //! [`Config::handoff_publication`] separately controls its publication.
 //!
-//! | Handoff response | [`HandoffPublication::AfterCertification`] | [`HandoffPublication::AllowBeforeCertification`] |
+//! | Handoff response | [`crate::HandoffPublication::AfterCertification`] | [`crate::HandoffPublication::AllowBeforeCertification`] |
 //! | --- | --- | --- |
 //! | [`crate::HandoffProposal::AwaitCertification`] | Request an ordinary proposal after parent certification | Same |
-//! | [`crate::HandoffProposal::Proposed`] | Hold until the exact parent certifies or finalizes | Permit early relay and own notarize vote |
+//! | `Proposed` with `AfterCertification` | Hold until the exact parent certifies or finalizes | Same |
+//! | `Proposed` with `AllowBeforeCertification` | Hold until the exact parent certifies or finalizes | Permit early relay and own notarize vote |
 //! | Closed response | Abandon the local proposal opportunity | Same |
 //!
 //! Publication always passes the ordinary proposal eligibility checks. Parent certification
@@ -274,12 +276,13 @@
 //! Marshal applications use [`crate::Application::handoff_policy`] to choose
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
 //! Stateful Glue exposes the same policy. The decision is synchronous and uses available
-//! information. [`crate::HandoffPolicy::Prepare`] with
-//! [`HandoffPublication::AfterCertification`] overlaps construction with certification while
+//! information. `Prepare(AfterCertification)` overlaps construction with certification while
 //! withholding publication. It uses the ordinary construction path, which may reuse an existing
-//! block without calling the application builder.
+//! block without calling the application builder. `Prepare(AllowBeforeCertification)` also
+//! permits early publication when the node configuration allows it. An application can always
+//! require holding for an individual parent. This decision is fixed for the request.
 //!
-//! With [`HandoffPublication::AllowBeforeCertification`], the gain is largest with rotating
+//! With [`crate::HandoffPublication::AllowBeforeCertification`], the gain is largest with rotating
 //! leaders, where every view is a term boundary. Each proposal is distributed in parallel with its
 //! parent's votes, allowing network-bound view time to drop from two network trips to one. With
 //! stable leaders, optimistic validation pipelines every view except the term start, so the
@@ -623,7 +626,7 @@ cfg_if::cfg_if! {
         mod actors;
         pub mod config;
         pub use config::{
-            Config, Floor, ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy,
+            Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy,
         };
         mod engine;
         pub use engine::Engine;
@@ -719,7 +722,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Monitor, Viewable,
+        HandoffPublication, Monitor, Viewable,
         simplex::{
             elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{

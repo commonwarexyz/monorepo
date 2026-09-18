@@ -20,14 +20,14 @@ use crate::dkg::{
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Application, Block as ConsensusBlock, CertifiableBlock, HandoffPublication, Heightable,
     marshal::{
         self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver, standard::Deferred,
     },
     simplex::{
         self, Floor,
-        config::{ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy},
+        config::{ForwardPolicy, SkipBudget, SkipPolicy},
         elector::RoundRobin,
         types::Context,
     },

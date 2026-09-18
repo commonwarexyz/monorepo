@@ -49,7 +49,8 @@ mod gui;
 
 use clap::{Arg, Command, value_parser};
 use commonware_consensus::{
-    simplex::{self, ForwardPolicy, HandoffPublication, SkipPolicy, elector::RoundRobin},
+    HandoffPublication,
+    simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{Sha256, Signer as _, ed25519};

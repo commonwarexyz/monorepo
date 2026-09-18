@@ -4,8 +4,9 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
+    HandoffPublication,
     simplex::{
-        self, Engine, Floor, ForwardPolicy, HandoffPublication, SkipPolicy, elector::RoundRobin,
+        self, Engine, Floor, ForwardPolicy, SkipPolicy, elector::RoundRobin,
         scheme::bls12381_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},

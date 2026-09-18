@@ -44,8 +44,8 @@ mod tests {
     mod pipeline;
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, HandoffPolicy, HandoffProposal, Heightable, Relay,
-        Reporter,
+        Automaton, CertifiableAutomaton, HandoffPolicy, HandoffProposal, HandoffPublication,
+        Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -70,7 +70,7 @@ mod tests {
         },
         simplex::{
             self, Plan,
-            config::{ForwardPolicy, HandoffPublication, SkipBudget, SkipPolicy},
+            config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{
@@ -3238,7 +3238,9 @@ mod tests {
 
                 // Dropping a handoff response must cancel the ordinary build it forwards.
                 let (gated_app, started, _release, dropped) = MockVerifyingApp::new()
-                    .with_handoff_policy(HandoffPolicy::Prepare)
+                    .with_handoff_policy(HandoffPolicy::Prepare(
+                        HandoffPublication::AllowBeforeCertification,
+                    ))
                     .with_proposal_gate();
                 let mut gated = Wrapper::new(
                     kind,
@@ -3310,32 +3312,45 @@ mod tests {
 
                 // Accepting a handoff enters the same automatic boundary
                 // re-proposal path without invoking the application builder.
-                let pipeline_round =
-                    Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
-                let pipeline_context = Ctx {
-                    round: pipeline_round,
-                    leader: default_leader(),
-                    parent: (View::new(boundary_height.get()), boundary_digest),
-                };
-                let pipeline_app =
-                    MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Prepare);
-                let mut pipeline = Wrapper::new(
-                    kind,
-                    context.child("pipeline_wrapper"),
-                    pipeline_app,
-                    marshal.clone(),
-                );
-                let pipeline_rx = pipeline.propose_handoff(pipeline_context).await;
-                assert_eq!(
-                    pipeline_rx.await.expect("pipeline result missing"),
-                    HandoffProposal::Proposed(boundary_digest),
-                    "{kind:?}: accepted handoff should re-propose the boundary block"
-                );
-                let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
-                assert!(
-                    certify_rx.await.expect("pipeline certify result missing"),
-                    "{kind:?}: pipelined boundary re-proposal must certify"
-                );
+                for (offset, publication) in [
+                    HandoffPublication::AfterCertification,
+                    HandoffPublication::AllowBeforeCertification,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let pipeline_round = Round::new(
+                        Epoch::zero(),
+                        View::new(boundary_height.get() + 2 + offset as u64),
+                    );
+                    let pipeline_context = Ctx {
+                        round: pipeline_round,
+                        leader: default_leader(),
+                        parent: (View::new(boundary_height.get()), boundary_digest),
+                    };
+                    let pipeline_app = MockVerifyingApp::new()
+                        .with_handoff_policy(HandoffPolicy::Prepare(publication));
+                    let mut pipeline = Wrapper::new(
+                        kind,
+                        context.child("pipeline_wrapper"),
+                        pipeline_app,
+                        marshal.clone(),
+                    );
+                    let pipeline_rx = pipeline.propose_handoff(pipeline_context.clone()).await;
+                    assert_eq!(
+                        pipeline_rx.await.expect("pipeline result missing"),
+                        HandoffProposal::Proposed {
+                            payload: boundary_digest,
+                            publication,
+                        },
+                        "{kind:?}: accepted handoff should forward its publication permission"
+                    );
+                    let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
+                    assert!(
+                        certify_rx.await.expect("pipeline certify result missing"),
+                        "{kind:?}: pipelined boundary re-proposal must certify"
+                    );
+                }
             });
         }
     }

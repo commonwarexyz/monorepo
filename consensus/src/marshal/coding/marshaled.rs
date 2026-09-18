@@ -1136,11 +1136,13 @@ where
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
         let (tx, rx) = oneshot::channel();
-        let decision = self.application.handoff_policy(&consensus_context);
-        if decision == HandoffPolicy::AwaitCertification {
-            tx.send_lossy(HandoffProposal::AwaitCertification);
-            return rx;
-        }
+        let publication = match self.application.handoff_policy(&consensus_context) {
+            HandoffPolicy::Prepare(publication) => publication,
+            HandoffPolicy::AwaitCertification => {
+                tx.send_lossy(HandoffProposal::AwaitCertification);
+                return rx;
+            }
+        };
         let mut handoff = self.clone();
         let context = self
             .context
@@ -1151,7 +1153,10 @@ where
         context.spawn(move |_| async move {
             let proposal = Automaton::propose(&mut handoff, consensus_context).await;
             gates::forward(tx, proposal, |payload| {
-                Some(HandoffProposal::Proposed(payload))
+                Some(HandoffProposal::Proposed {
+                    payload,
+                    publication,
+                })
             })
             .await;
         });

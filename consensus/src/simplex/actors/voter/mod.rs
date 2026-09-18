@@ -5,8 +5,8 @@ mod slot;
 mod state;
 
 use crate::{
-    CertifiableAutomaton, Relay, Reporter,
-    simplex::{Floor, HandoffPublication, Plan, elector::Elector, types::Activity},
+    CertifiableAutomaton, HandoffPublication, Relay, Reporter,
+    simplex::{Floor, Plan, elector::Elector, types::Activity},
     types::{Epoch, ViewDelta},
 };
 pub use actor::Actor;
@@ -228,6 +228,7 @@ mod tests {
         drop_proposals: bool,
         /// Whether the mock application accepts pipelined handoff requests.
         accept_handoffs: bool,
+        application_handoff_publication: HandoffPublication,
         handoff_publication: HandoffPublication,
         actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
@@ -256,6 +257,7 @@ mod tests {
                 stall_proposals: false,
                 drop_proposals: false,
                 accept_handoffs: false,
+                application_handoff_publication: HandoffPublication::AllowBeforeCertification,
                 handoff_publication: HandoffPublication::AfterCertification,
                 actor_handle: None,
                 verify_requests: None,
@@ -314,6 +316,7 @@ mod tests {
         actor.set_stall_proposals(options.stall_proposals);
         actor.set_drop_proposals(options.drop_proposals);
         actor.set_accept_handoffs(options.accept_handoffs);
+        actor.set_handoff_publication(options.application_handoff_publication);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
@@ -4209,6 +4212,8 @@ mod tests {
     fn pipelined_handoff_retained_response_order(
         certification_first: bool,
         invalidation: Option<HeldInvalidation>,
+        configured_publication: HandoffPublication,
+        response_publication: HandoffPublication,
     ) {
         let n = 5;
         let namespace = if certification_first {
@@ -4276,7 +4281,8 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
                     accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AfterCertification,
+                    application_handoff_publication: response_publication,
+                    handoff_publication: configured_publication,
                     ..Default::default()
                 },
             )
@@ -4302,7 +4308,10 @@ mod tests {
             let (_, notarization) = build_notarization(&schemes, &certified_parent, quorum(n));
             let mut response = Some(response);
             if !certification_first {
-                response.take().unwrap().send(HandoffProposal::Proposed(digest)).expect("handoff retained");
+                response.take().unwrap().send(HandoffProposal::Proposed {
+                    payload: digest,
+                    publication: response_publication,
+                }).expect("handoff retained");
                 context.sleep(Duration::from_millis(100)).await;
             }
             mailbox.recovered(Certificate::Notarization(notarization));
@@ -4373,7 +4382,10 @@ mod tests {
                         if view == View::new(2)) { break; }
                 }
                 assert!(propose_responses.lock().is_empty(), "must not rebuild");
-                response.take().unwrap().send(HandoffProposal::Proposed(digest)).expect("handoff retained");
+                response.take().unwrap().send(HandoffProposal::Proposed {
+                    payload: digest,
+                    publication: response_publication,
+                }).expect("handoff retained");
             }
 
             if invalidation.is_some() {
@@ -4424,27 +4436,62 @@ mod tests {
 
     #[test_traced]
     fn test_pipelined_handoff_build_before_certification() {
-        pipelined_handoff_retained_response_order(false, None);
+        pipelined_handoff_retained_response_order(
+            false,
+            None,
+            HandoffPublication::AfterCertification,
+            HandoffPublication::AllowBeforeCertification,
+        );
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_application_holds_before_certification() {
+        pipelined_handoff_retained_response_order(
+            false,
+            None,
+            HandoffPublication::AllowBeforeCertification,
+            HandoffPublication::AfterCertification,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_certification_before_build() {
-        pipelined_handoff_retained_response_order(true, None);
+        pipelined_handoff_retained_response_order(
+            true,
+            None,
+            HandoffPublication::AfterCertification,
+            HandoffPublication::AllowBeforeCertification,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::ConflictingParent));
+        pipelined_handoff_retained_response_order(
+            false,
+            Some(HeldInvalidation::ConflictingParent),
+            HandoffPublication::AfterCertification,
+            HandoffPublication::AllowBeforeCertification,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_rejects_timeout() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Timeout));
+        pipelined_handoff_retained_response_order(
+            false,
+            Some(HeldInvalidation::Timeout),
+            HandoffPublication::AfterCertification,
+            HandoffPublication::AllowBeforeCertification,
+        );
     }
 
     #[test_traced]
     fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
-        pipelined_handoff_retained_response_order(false, Some(HeldInvalidation::Restart));
+        pipelined_handoff_retained_response_order(
+            false,
+            Some(HeldInvalidation::Restart),
+            HandoffPublication::AfterCertification,
+            HandoffPublication::AllowBeforeCertification,
+        );
     }
 
     /// A dropped handoff response is a terminal application failure for the

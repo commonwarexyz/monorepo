@@ -17,7 +17,7 @@ use crate::{
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, HandoffPublication, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -27,7 +27,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::{ForwardPolicy, HandoffPublication, SkipPolicy},
+        config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
