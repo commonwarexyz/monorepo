@@ -226,7 +226,9 @@ where
     ) -> impl Stream<Item = Result<(K, V::Value), crate::qmdb::Error<F>>> + Send + 'a {
         let cursor = match (range.start_bound(), range.end_bound()) {
             (Included(start), Included(end)) if start > end => Cursor::Done,
-            (Included(start) | Excluded(start), Included(end) | Excluded(end)) if start >= end => {
+            (Included(start), Excluded(end)) | (Excluded(start), Included(end) | Excluded(end))
+                if start >= end =>
+            {
                 Cursor::Done
             }
             _ => Cursor::Start,
