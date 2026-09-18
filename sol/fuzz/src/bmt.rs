@@ -29,36 +29,39 @@ sol! {
 pub(crate) enum Command {
     /// Build at most 1,000,000 leaves and return a contiguous range proof.
     Generate {
+        #[arg(long)]
         leaves: u32,
+        #[arg(long)]
         start: u32,
+        #[arg(long)]
         count: u32,
+        #[arg(long)]
         seed: u64,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
     },
     /// Build at most 1,000,000 leaves and prove comma-separated indices in input order.
     GenerateMulti {
+        #[arg(long)]
         leaves: u32,
+        #[arg(long)]
         indices: String,
+        #[arg(long)]
         seed: u64,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
     },
     /// Construct a single proof without allocating the complete tree.
     Synthetic {
+        #[arg(long)]
         leaves: u32,
+        #[arg(long)]
         index: u32,
+        #[arg(long)]
         seed: u64,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
     },
     /// Verify a canonical ABI tuple; single and range ignore the indices array.
     Check {
-        #[arg(value_enum)]
+        #[arg(long, value_enum)]
         mode: Mode,
+        #[arg(long)]
         abi_hex: String,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
     },
 }
 
@@ -268,13 +271,7 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
 }
 
 impl Command {
-    pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
-        let hash = match &self {
-            Self::Generate { hash, .. }
-            | Self::GenerateMulti { hash, .. }
-            | Self::Synthetic { hash, .. }
-            | Self::Check { hash, .. } => *hash,
-        };
+    pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match hash {
             Hash::Keccak => self.execute_with::<Keccak256>(),
             Hash::Sha256 => self.execute_with::<Sha256>(),
@@ -288,13 +285,11 @@ impl Command {
                 start,
                 count,
                 seed,
-                hash: _,
             } => generate_range::<H>(leaves, start, count, seed)?,
             Self::GenerateMulti {
                 leaves,
                 indices,
                 seed,
-                hash: _,
             } => {
                 let indices = if indices.is_empty() {
                     Vec::new()
@@ -314,13 +309,8 @@ impl Command {
                 leaves,
                 index,
                 seed,
-                hash: _,
             } => synthetic::<H>(leaves, index, seed)?,
-            Self::Check {
-                mode,
-                abi_hex,
-                hash: _,
-            } => {
+            Self::Check { mode, abi_hex } => {
                 let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
                 return Ok(check::<H>(mode, &encoded).abi_encode());
@@ -464,40 +454,102 @@ mod tests {
     #[test]
     fn cli_round_trips() {
         for args in [
-            vec!["generate", "11", "2", "1", "42"],
-            vec!["generate-multi", "11", "10,2,0", "42"],
-            vec!["generate-multi", "0", "", "42"],
-            vec!["synthetic", "4294967295", "4294967294", "42"],
+            vec![
+                "generate", "--leaves", "11", "--start", "2", "--count", "1", "--seed", "42",
+            ],
+            vec![
+                "generate-multi",
+                "--leaves",
+                "11",
+                "--indices",
+                "10,2,0",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "generate-multi",
+                "--leaves",
+                "0",
+                "--indices",
+                "",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "synthetic",
+                "--leaves",
+                "4294967295",
+                "--index",
+                "4294967294",
+                "--seed",
+                "42",
+            ],
         ] {
-            let encoded = Cli::try_parse_from(["fuzz", "bmt"].into_iter().chain(args))
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
+            let encoded =
+                Cli::try_parse_from(["fuzz", "bmt", "--hash", "keccak"].into_iter().chain(args))
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
             let hex = const_hex::encode(&encoded);
-            let accepted = Cli::try_parse_from(["fuzz", "bmt", "check", "multi", &hex])
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
+            let accepted = Cli::try_parse_from([
+                "fuzz",
+                "bmt",
+                "--hash",
+                "keccak",
+                "check",
+                "--mode",
+                "multi",
+                "--abi-hex",
+                &hex,
+            ])
+            .unwrap()
+            .command
+            .execute()
+            .unwrap();
             assert_eq!(accepted, true.abi_encode());
         }
     }
     #[test]
     fn cli_hash_selection() {
         for args in [
-            vec!["generate", "11", "2", "1", "42"],
-            vec!["generate-multi", "11", "10,2,0", "42"],
-            vec!["generate-multi", "0", "", "42"],
-            vec!["synthetic", "4294967295", "4294967294", "42"],
+            vec![
+                "generate", "--leaves", "11", "--start", "2", "--count", "1", "--seed", "42",
+            ],
+            vec![
+                "generate-multi",
+                "--leaves",
+                "11",
+                "--indices",
+                "10,2,0",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "generate-multi",
+                "--leaves",
+                "0",
+                "--indices",
+                "",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "synthetic",
+                "--leaves",
+                "4294967295",
+                "--index",
+                "4294967294",
+                "--seed",
+                "42",
+            ],
         ] {
             let mut outputs = Vec::new();
             for hash in ["keccak", "sha256"] {
                 let encoded = Cli::try_parse_from(
-                    ["fuzz", "bmt"]
+                    ["fuzz", "bmt", "--hash", hash]
                         .into_iter()
-                        .chain(args.iter().copied())
-                        .chain(["--hash", hash]),
+                        .chain(args.iter().copied()),
                 )
                 .unwrap()
                 .command
@@ -506,7 +558,15 @@ mod tests {
                 let hex = const_hex::encode(&encoded);
                 for check_hash in ["keccak", "sha256"] {
                     let accepted = Cli::try_parse_from([
-                        "fuzz", "bmt", "check", "multi", &hex, "--hash", check_hash,
+                        "fuzz",
+                        "bmt",
+                        "--hash",
+                        check_hash,
+                        "check",
+                        "--mode",
+                        "multi",
+                        "--abi-hex",
+                        &hex,
                     ])
                     .unwrap()
                     .command
@@ -517,12 +577,66 @@ mod tests {
                 outputs.push(encoded);
             }
             assert_ne!(outputs[0], outputs[1]);
-            let default = Cli::try_parse_from(["fuzz", "bmt"].into_iter().chain(args))
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
-            assert_eq!(default, outputs[0]);
         }
+    }
+
+    #[test]
+    fn cli_requires_valid_hash() {
+        for args in [
+            vec![
+                "generate", "--leaves", "11", "--start", "2", "--count", "1", "--seed", "42",
+            ],
+            vec![
+                "generate-multi",
+                "--leaves",
+                "11",
+                "--indices",
+                "10,2,0",
+                "--seed",
+                "42",
+            ],
+            vec![
+                "synthetic",
+                "--leaves",
+                "11",
+                "--index",
+                "2",
+                "--seed",
+                "42",
+            ],
+            vec!["check", "--mode", "single", "--abi-hex", "00"],
+        ] {
+            assert!(Cli::try_parse_from(["fuzz", "bmt"].into_iter().chain(args)).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "fuzz", "bmt", "--hash", "blake3", "generate", "--leaves", "11", "--start", "2",
+                "--count", "1", "--seed", "42"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_requires_named_fields() {
+        assert!(
+            Cli::try_parse_from([
+                "fuzz", "bmt", "--hash", "keccak", "generate", "11", "2", "1", "42"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fuzz", "bmt", "--hash", "keccak", "generate", "--leaves", "11", "--start", "2",
+                "--count", "1"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fuzz", "bmt", "--hash", "keccak", "check", "--mode", "single", "00"
+            ])
+            .is_err()
+        );
     }
 }

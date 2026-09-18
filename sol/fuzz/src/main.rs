@@ -9,10 +9,9 @@ mod merkle;
 mod simplex;
 
 /// Hash function used by the tree proof oracle.
-#[derive(Clone, Copy, Default, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum)]
 pub(crate) enum Hash {
     Sha256,
-    #[default]
     Keccak,
 }
 
@@ -26,15 +25,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Binary Merkle Tree proofs.
-    #[command(subcommand)]
-    Bmt(bmt::Command),
-    /// BLS12-381 threshold certificates and hash-to-curve points.
+    Bmt {
+        #[arg(long, value_enum)]
+        hash: Hash,
+        #[command(subcommand)]
+        command: bmt::Command,
+    },
+    /// BLS12-381 certificates and hash-to-curve points.
     #[command(subcommand)]
     Certificate(certificate::Command),
     /// MMR and MMB proofs.
-    #[command(subcommand)]
-    Merkle(merkle::Command),
-    /// Simplex threshold signatures.
+    Merkle {
+        #[arg(long, value_enum)]
+        hash: Hash,
+        #[command(subcommand)]
+        command: merkle::Command,
+    },
+    /// Simplex signatures.
     #[command(subcommand)]
     Simplex(simplex::Command),
 }
@@ -42,9 +49,9 @@ enum Command {
 impl Command {
     fn execute(self) -> Result<Vec<u8>, String> {
         match self {
-            Self::Bmt(command) => command.execute(),
+            Self::Bmt { hash, command } => command.execute(hash),
             Self::Certificate(command) => command.execute(),
-            Self::Merkle(command) => command.execute(),
+            Self::Merkle { hash, command } => command.execute(hash),
             Self::Simplex(command) => command.execute(),
         }
     }

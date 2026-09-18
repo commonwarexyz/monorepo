@@ -2,6 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
+import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibBLS12381Threshold as Certificate } from "../src/certificate/LibBLS12381Threshold.sol";
 
 /// @dev External calls exercise ABI boundaries and memory ownership around library calls.
@@ -15,15 +16,13 @@ contract CertificateHarness is Test {
         bytes memory message
     ) external view returns (bool) {
         return minSig
-            ? Certificate.verifyMinSig(signature, abi.decode(key, (Certificate.G2Point)), namespace, message)
-            : Certificate.verifyMinPk(signature, abi.decode(key, (Certificate.G1Point)), namespace, message);
+            ? Certificate.verifyMinSig(signature, abi.decode(key, (BLS.G2Point)), namespace, message)
+            : Certificate.verifyMinPk(signature, abi.decode(key, (BLS.G1Point)), namespace, message);
     }
 
     /// @dev Encode a hash point in the same padded format as the reference generator.
     function hash(bool minSig, bytes memory namespace, bytes memory message) public view returns (bytes memory) {
-        return minSig
-            ? abi.encode(Certificate.hashToG1(namespace, message))
-            : abi.encode(Certificate.hashToG2(namespace, message));
+        return minSig ? abi.encode(BLS.hashToG1(namespace, message)) : abi.encode(BLS.hashToG2(namespace, message));
     }
 
     /// @dev Exercise hashing after dirty scratch, then allocate and hash again.
@@ -77,11 +76,11 @@ contract LibBLS12381ThresholdTest is Test {
     }
 
     function test_EncodeMessage() public pure {
-        assertEq(Certificate.encodeMessage("", ""), hex"00");
-        assertEq(Certificate.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
-        assertNotEq(Certificate.encodeMessage("a", "bc"), Certificate.encodeMessage("ab", "c"));
-        assertEq(Certificate.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
-        assertEq(Certificate.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
+        assertEq(BLS.encodeMessage("", ""), hex"00");
+        assertEq(BLS.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
+        assertNotEq(BLS.encodeMessage("a", "bc"), BLS.encodeMessage("ab", "c"));
+        assertEq(BLS.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
+        assertEq(BLS.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
     }
 
     /// @dev Signature size checks must reject truncated and extended encodings.
@@ -113,13 +112,16 @@ contract LibBLS12381ThresholdTest is Test {
 
     /// @dev Compare namespaced hash-to-curve points for arbitrary namespace/message boundaries.
     function testFuzz_DifferentialHash(bool minSig, bytes memory namespace, bytes memory message) public {
-        string[] memory args = new string[](6);
+        string[] memory args = new string[](9);
         args[0] = _binary();
         args[1] = "certificate";
         args[2] = "hash";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
+        args[3] = "--variant";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = "--namespace-hex";
+        args[6] = vm.toString(namespace);
+        args[7] = "--message-hex";
+        args[8] = vm.toString(message);
         bytes memory expected = abi.decode(vm.ffi(args), (bytes));
         assertEq(harness.checkedHash(minSig, namespace, message), expected);
     }
@@ -129,7 +131,7 @@ contract LibBLS12381ThresholdTest is Test {
         public
     {
         Case memory c = _generate(minSig, namespace, message, seed);
-        assertEq(Certificate.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
+        assertEq(BLS.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
         assertEq(harness.hash(minSig, namespace, message), c.point, "hash point mismatch");
         _compare(minSig, namespace, message, c, true);
         _compare(minSig, namespace, bytes.concat(message, hex"01"), c, false);
@@ -194,14 +196,19 @@ contract LibBLS12381ThresholdTest is Test {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](7);
+        string[] memory args = new string[](12);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "generate";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
-        args[6] = vm.toString(uint256(seed));
+        args[2] = "threshold";
+        args[3] = "generate";
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--namespace-hex";
+        args[7] = vm.toString(namespace);
+        args[8] = "--message-hex";
+        args[9] = vm.toString(message);
+        args[10] = "--seed";
+        args[11] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
@@ -209,15 +216,21 @@ contract LibBLS12381ThresholdTest is Test {
     function _compare(bool minSig, bytes memory namespace, bytes memory message, Case memory c, bool expected)
         internal
     {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](14);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "check";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(c.key);
-        args[5] = vm.toString(namespace);
-        args[6] = vm.toString(message);
-        args[7] = vm.toString(c.signature);
+        args[2] = "threshold";
+        args[3] = "check";
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--public-key-hex";
+        args[7] = vm.toString(c.key);
+        args[8] = "--namespace-hex";
+        args[9] = vm.toString(namespace);
+        args[10] = "--message-hex";
+        args[11] = vm.toString(message);
+        args[12] = "--signature-hex";
+        args[13] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         (bool ok, bytes memory result) = address(harness).staticcall{ gas: 1_000_000 }(
             abi.encodeCall(harness.verify, (minSig, c.signature, c.key, namespace, message))

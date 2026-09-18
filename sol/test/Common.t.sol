@@ -24,13 +24,14 @@ abstract contract HashSelection {
 abstract contract HashTest is Test, HashSelection {
     /// @dev Ask the Rust oracle to use the same hash algorithm as the verifier.
     function _ffi(string[] memory args) internal returns (bytes memory) {
-        if (_hasher() == address(0)) return vm.ffi(args);
         string[] memory selected = new string[](args.length + 2);
-        for (uint256 i; i < args.length; ++i) {
-            selected[i] = args[i];
+        selected[0] = args[0];
+        selected[1] = args[1];
+        selected[2] = "--hash";
+        selected[3] = _hasher() == address(0) ? "keccak" : "sha256";
+        for (uint256 i = 2; i < args.length; ++i) {
+            selected[i + 2] = args[i];
         }
-        selected[args.length] = "--hash";
-        selected[args.length + 1] = "sha256";
         return vm.ffi(selected);
     }
 
@@ -642,26 +643,33 @@ abstract contract MerkleTestCommon is VerifierHarness {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](13);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = belt ? "mmb" : "mmr";
-        args[4] = vm.toString(leaves);
-        args[5] = vm.toString(start);
-        args[6] = vm.toString(length);
-        args[7] = vm.toString(uint256(seed));
+        args[3] = "--kind";
+        args[4] = belt ? "mmb" : "mmr";
+        args[5] = "--leaf-count";
+        args[6] = vm.toString(leaves);
+        args[7] = "--start";
+        args[8] = vm.toString(start);
+        args[9] = "--length";
+        args[10] = vm.toString(length);
+        args[11] = "--seed";
+        args[12] = vm.toString(uint256(seed));
         (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         assertEq(c.leaves, leaves);
     }
 
     function rustCheck(bool belt, Case memory c, uint256 start) internal returns (bool) {
-        string[] memory args = new string[](5);
+        string[] memory args = new string[](7);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = "check";
-        args[3] = belt ? "mmb" : "mmr";
-        args[4] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
+        args[3] = "--kind";
+        args[4] = belt ? "mmb" : "mmr";
+        args[5] = "--abi-hex";
+        args[6] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
         return abi.decode(_ffi(args), (bool));
     }
 
@@ -820,19 +828,24 @@ abstract contract MerkleTestCommon is VerifierHarness {
         internal
         returns (CompatibilityCase memory)
     {
-        string[] memory args = new string[](12);
+        string[] memory args = new string[](17);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = c.belt ? "mmb" : "mmr";
-        args[4] = vm.toString(c.leaves);
-        args[5] = vm.toString(c.start);
-        args[6] = vm.toString(length);
-        args[7] = vm.toString(uint256(seed));
-        args[8] = "--bagging";
-        args[9] = c.backward ? "backward" : "forward";
-        args[10] = "--inactive-peaks";
-        args[11] = vm.toString(c.inactive);
+        args[3] = "--kind";
+        args[4] = c.belt ? "mmb" : "mmr";
+        args[5] = "--leaf-count";
+        args[6] = vm.toString(c.leaves);
+        args[7] = "--start";
+        args[8] = vm.toString(c.start);
+        args[9] = "--length";
+        args[10] = vm.toString(length);
+        args[11] = "--seed";
+        args[12] = vm.toString(uint256(seed));
+        args[13] = "--bagging";
+        args[14] = c.backward ? "backward" : "forward";
+        args[15] = "--inactive-peaks";
+        args[16] = vm.toString(c.inactive);
         (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         return c;
     }
@@ -845,18 +858,22 @@ abstract contract MerkleTestCommon is VerifierHarness {
         for (uint256 i = 1; i < c.indices.length; ++i) {
             locations = string.concat(locations, ",", vm.toString(c.indices[i]));
         }
-        string[] memory args = new string[](11);
+        string[] memory args = new string[](15);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = synthetic ? "synthetic-multi" : "generate-multi";
-        args[3] = c.belt ? "mmb" : "mmr";
-        args[4] = vm.toString(c.leaves);
-        args[5] = locations;
-        args[6] = vm.toString(uint256(seed));
-        args[7] = "--bagging";
-        args[8] = c.backward ? "backward" : "forward";
-        args[9] = "--inactive-peaks";
-        args[10] = vm.toString(c.inactive);
+        args[3] = "--kind";
+        args[4] = c.belt ? "mmb" : "mmr";
+        args[5] = "--leaf-count";
+        args[6] = vm.toString(c.leaves);
+        args[7] = "--locations";
+        args[8] = locations;
+        args[9] = "--seed";
+        args[10] = vm.toString(uint256(seed));
+        args[11] = "--bagging";
+        args[12] = c.backward ? "backward" : "forward";
+        args[13] = "--inactive-peaks";
+        args[14] = vm.toString(c.inactive);
         (c.root, c.elements, c.proof, c.leaves, c.positions) =
             abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256, uint256[]));
         c.mode = 2;
@@ -864,18 +881,20 @@ abstract contract MerkleTestCommon is VerifierHarness {
     }
 
     function rustCheck(CompatibilityCase memory c) internal returns (bool) {
-        string[] memory args = new string[](9);
+        string[] memory args = new string[](11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = c.mode == 2 ? "check-multi" : "check";
-        args[3] = c.belt ? "mmb" : "mmr";
-        args[4] = c.mode == 2
+        args[3] = "--kind";
+        args[4] = c.belt ? "mmb" : "mmr";
+        args[5] = "--abi-hex";
+        args[6] = c.mode == 2
             ? vm.toString(abi.encode(c.root, c.leaves, c.indices, c.elements, c.proof, c.positions))
             : vm.toString(abi.encode(c.root, c.leaves, c.start, c.elements, c.proof));
-        args[5] = "--bagging";
-        args[6] = c.backward ? "backward" : "forward";
-        args[7] = "--inactive-peaks";
-        args[8] = vm.toString(c.inactive);
+        args[7] = "--bagging";
+        args[8] = c.backward ? "backward" : "forward";
+        args[9] = "--inactive-peaks";
+        args[10] = vm.toString(c.inactive);
         return abi.decode(_ffi(args), (bool));
     }
 
