@@ -79,8 +79,10 @@
 //! recovery still fails loudly when a blob no longer physically backs its acknowledged items.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
-//! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
-//! and watermark are persisted before `init` returns.
+//! exceeds the recovered size, an unbounded open returns a corruption error. A bounded open
+//! (`init_at_most`) compares the watermark clamped to its cap, since blobs at or above the cap
+//! are never opened, and publication persists the retained end as the watermark. Both the
+//! pruning boundary and watermark are persisted before `init` returns.
 //!
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
@@ -762,6 +764,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             if bytes < writer.size() {
                 writer.truncate(bytes).await?;
             } else {
+                // Appended tail bytes must be durable before publication raises the watermark.
                 writer.sync().await?;
             }
         }
@@ -2718,6 +2721,48 @@ mod tests {
             assert_eq!(journal.bounds(), 0..13);
             for value in 0..13 {
                 assert_eq!(journal.read(value).await.unwrap(), test_digest(100 + value));
+            }
+        });
+    }
+
+    /// A bounded publication raises the watermark to the retained end, so bytes rebuilt into
+    /// the tail during recovery must be durable before that raise. Crash right after
+    /// publication, before any commit, and reopen.
+    #[test]
+    fn test_bounded_publish_syncs_rebuilt_tail_before_watermark_raise() {
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = test_cfg(&context, NZU64!(5));
+                let checkpoint = Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                    .await
+                    .unwrap();
+                let mut recovery = Box::new(
+                    Recovery::<_, Digest>::open(
+                        context.child("rebuild"),
+                        cfg.clone(),
+                        checkpoint,
+                        Some(7),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                recovery = recovery.truncate(0).await.unwrap();
+                for i in 0..7 {
+                    recovery = recovery.append(&test_digest(i)).await.unwrap();
+                }
+                let journal = recovery.publish(7).await.unwrap();
+                assert_eq!(journal.size(), 7);
+                assert_eq!(journal.recovery_watermark(), 7);
+                drop(journal);
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..7);
+            for i in 0..7 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
         });
     }

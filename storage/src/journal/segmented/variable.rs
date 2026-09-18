@@ -387,8 +387,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// replay repairs only nonempty sections opened at initialization that have not yet been
+/// replayed: the first invalid data read in such a section becomes its new end (and the
+/// underlying [Blob] is truncated to the last valid item). Invalid data in a section created in
+/// this execution or already replayed is corruption and fails the replay. Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
 /// A nonempty section opened during initialization must be replayed from offset zero before it
 /// accepts new appends. Sections created during the current execution can be appended immediately.
@@ -656,10 +658,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
 /// Owned replay reader over a [Journal]'s items.
 ///
-/// Yields `(section, offset, size, item)` in order and repairs invalid trailing data as it is
-/// encountered. Dropping the reader before it is exhausted destroys the journal (leaving later
-/// sections unrepaired): recovery is re-initialization. Call [Replay::finish] on an exhausted
-/// reader to get the journal back.
+/// Yields `(section, offset, size, item)` in order and repairs invalid trailing data only in
+/// nonempty sections opened at initialization that have not yet been replayed. Dropping the
+/// reader before it is exhausted destroys the journal (leaving later sections unrepaired):
+/// recovery is re-initialization. Call [Replay::finish] on an exhausted reader to get the
+/// journal back.
 pub struct Replay<E: Storage + Metrics, V: Codec> {
     journal: Journal<E, V>,
     sections: VecDeque<SectionReplay<E::Blob>>,

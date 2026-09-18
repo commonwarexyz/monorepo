@@ -1696,15 +1696,16 @@ mod tests {
         });
     }
 
-    /// Finalize two targets, reopen at the first, apply without finalizing, then crash before any
-    /// sync. Recovery must yield a legitimate history, the first target must reopen, and the
-    /// discarded second target must be rejected.
-    #[test]
-    fn managed_db_bounded_init_then_apply_crash_recovers_history() {
+    /// Finalize two targets, reopen at the first, apply `writes` keys without finalizing, then
+    /// crash before any sync. The applied batch is one journal append: within the write buffer it
+    /// stays buffered and the crash drops it, beyond the buffer it is written to the blob and
+    /// survives. Recovery must yield exactly the history `durable` selects, the first target must
+    /// reopen, and the discarded second target must be rejected.
+    fn bounded_init_then_apply_crash(writes: u8, durable: bool) {
         type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
 
         // One operation per page makes the initialization truncation page aligned and one blob
-        // keeps both histories' writes overlapping.
+        // keeps the applied batch inside the discarded second target's bytes.
         fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
             let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash", pooler);
@@ -1715,12 +1716,16 @@ mod tests {
             config
         }
 
-        fn batch_for(i: u8) -> (Digest, Digest, Digest) {
-            (
-                Sha256::hash(&[b"key", &[i]]),
-                Sha256::hash(&[b"value", &[i]]),
-                Sha256::hash(&[b"metadata", &[i]]),
-            )
+        fn key(batch: u8, i: u8) -> Digest {
+            Sha256::hash(&[b"key", &[batch, i]])
+        }
+
+        fn value(batch: u8, i: u8) -> Digest {
+            Sha256::hash(&[b"value", &[batch, i]])
+        }
+
+        fn metadata(batch: u8) -> Digest {
+            Sha256::hash(&[b"metadata", &[batch]])
         }
 
         // Keep unsynced writes and drop unsynced resizes at the crash.
@@ -1738,15 +1743,16 @@ mod tests {
                     .unwrap();
                 let db = Shared::new("test", db);
 
+                // The second target is larger than the applied batch so a splice of the two
+                // would end at neither.
                 let mut targets = Vec::new();
-                for i in 1..=2 {
-                    let (key, value, metadata) = batch_for(i);
-                    let batch = db
-                        .new_batch_for_test::<_>()
-                        .await
-                        .write(key, Some(value))
-                        .with_metadata(metadata);
-                    let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
+                for (batch, writes) in [(1, 1), (2, writes + 1)] {
+                    let mut unmerkleized = db.new_batch_for_test::<_>().await;
+                    for i in 0..writes {
+                        unmerkleized = unmerkleized.write(key(batch, i), Some(value(batch, i)));
+                    }
+                    let unmerkleized = unmerkleized.with_metadata(metadata(batch));
+                    let merkleized = Unmerkleized::merkleize(unmerkleized).await.unwrap();
                     let (slot, database) = db.write().await;
                     slot.put(apply_and_finalize::<FixedDb>(database, merkleized).await);
                     let guard = db.read().await;
@@ -1769,34 +1775,30 @@ mod tests {
                 let db = Shared::new("test", db);
 
                 // Apply over the discarded target's bytes, then crash without finalizing.
-                let (key, value, metadata) = batch_for(3);
-                let batch = db
-                    .new_batch_for_test::<_>()
-                    .await
-                    .write(key, Some(value))
-                    .with_metadata(metadata);
-                let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
+                let mut unmerkleized = db.new_batch_for_test::<_>().await;
+                for i in 0..writes {
+                    unmerkleized = unmerkleized.write(key(3, i), Some(value(3, i)));
+                }
+                let unmerkleized = unmerkleized.with_metadata(metadata(3));
+                let merkleized = Unmerkleized::merkleize(unmerkleized).await.unwrap();
                 let (slot, database) = db.write().await;
                 let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
                 let applied = <FixedDb as ManagedDb<_>>::sync_target(&database);
                 assert_ne!(applied, first);
-                assert_ne!(applied, second);
+                assert!(applied.range.end() < second.range.end());
                 slot.put(database);
                 (first, second, applied)
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            // Only the first target, or the applied batch on top of it, is a legitimate history.
+            // A buffered batch is lost and a written batch survives, so recovery is exact.
             let db = FixedDb::init(context.child("recover"), config(&context), None)
                 .await
                 .unwrap();
             let recovered = <FixedDb as ManagedDb<_>>::sync_target(&db);
-            assert!(
-                recovered == first || recovered == applied,
-                "recovered {recovered:?} from neither history"
-            );
+            assert_eq!(recovered, if durable { applied } else { first.clone() });
             drop(db);
 
             // The first target reopens and durably discards anything above it.
@@ -1827,6 +1829,18 @@ mod tests {
                 .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), first);
         });
+    }
+
+    /// Three operations fit in the journal write buffer, so the crash drops the applied batch.
+    #[test]
+    fn managed_db_bounded_init_then_apply_crash_recovers_first() {
+        bounded_init_then_apply_crash(1, false);
+    }
+
+    /// Twenty writes exceed the journal write buffer, so the applied batch reaches the blob.
+    #[test]
+    fn managed_db_bounded_init_then_apply_crash_recovers_applied() {
+        bounded_init_then_apply_crash(20, true);
     }
 
     /// Pruning to the oldest retained target keeps every retained target initializable, so a

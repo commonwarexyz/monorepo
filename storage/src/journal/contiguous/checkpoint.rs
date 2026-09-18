@@ -101,8 +101,9 @@ impl<E: Context> Checkpoint<E> {
         if self.watermark() != Some(watermark) {
             self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         }
-        // Always sync, even if this call staged nothing, so an in-flight `start_watermark_sync`
-        // is joined and its failure surfaces here.
+        // Always sync, even if this call staged nothing of its own. `finish_clear` stages the
+        // clear intent's removal and relies on this sync to flush it. A started
+        // `start_watermark_sync` that failed must surface on the next checkpoint write.
         self.sync().await
     }
 

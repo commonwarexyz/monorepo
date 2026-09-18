@@ -320,8 +320,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
         if let Some((section, size)) = restore {
-            // The checkpoint preflight authorized this exact truncation. Make it durable before
-            // the paired value journal can release any corresponding bytes.
+            // The checkpoint preflight authorized this truncation. A shortening is made durable
+            // before the paired value journal can release the corresponding bytes. An exact size
+            // shortens nothing and was durable at open.
             manager.truncate_pending(section, size).await?;
             return Ok(Self {
                 manager,
@@ -571,10 +572,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay so clean initialization reads only each blob's terminal page. A nonempty section opened
-/// during initialization must be replayed from position zero before it accepts new appends.
+/// replay repairs only sections opened at initialization with an unvalidated suffix: the first
+/// invalid data read in such a section becomes its new end (and the underlying [Blob] is
+/// truncated to the last valid item). Invalid data in a section adopted at a durable validation
+/// marker or checkpoint, created in this execution, or already replayed is corruption and fails
+/// the replay. Repair occurs during replay so clean initialization reads only each blob's
+/// terminal page. A section opened during initialization with an unvalidated suffix must be
+/// replayed from position zero before it accepts new appends.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. [Journal::replay] consumes the journal into an owned [Replay]
@@ -903,9 +907,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
 /// Owned replay reader over a [Journal]'s items.
 ///
-/// Yields `(section, position, item)` in order. Dropping the reader before it is exhausted
-/// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an
-/// exhausted reader to get the journal back.
+/// Yields `(section, position, item)` in order and repairs invalid trailing data only in
+/// sections opened at initialization with an unvalidated suffix. Dropping the reader before it
+/// is exhausted destroys the journal: recovery is re-initialization. Call [Replay::finish] on
+/// an exhausted reader to get the journal back.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     journal: Journal<E, A>,
     sections: VecDeque<SectionReplay<E::Blob>>,

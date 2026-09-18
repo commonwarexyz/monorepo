@@ -2016,8 +2016,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
                 std::cmp::Ordering::Equal => {}
                 std::cmp::Ordering::Greater => {
-                    // Prune always removes data before offsets, so offsets should never be
-                    // ahead by a blob.
+                    // The live prune removes data before offsets, and recovery prunes offsets
+                    // only to a start inside the oldest retained data blob, so offsets are
+                    // never ahead by a blob.
                     return Err(Error::Corruption(format!(
                         "offsets start blob {offsets_start_blob} ahead of \
                          oldest data blob {oldest_blob}"
@@ -2216,15 +2217,17 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///   happen if we crash after pruning the data blobs but before pruning the offsets journal).
 ///
 /// Offsets may start after the data's blob-aligned start when both are in the same blob, as in a
-/// mid-blob `init_at_size`. Offsets starting in a later blob imply corruption because we
-/// always prune the data blobs before the offsets journal.
+/// mid-blob `init_at_size`. Offsets starting in a later blob imply corruption: the live prune
+/// removes data before offsets, and recovery prunes offsets only to a start inside the oldest
+/// retained data blob.
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
 /// The offsets journal's recovery watermark records a durable lower bound on the journal size and
-/// a preferred point for replaying data to rebuild offset entries after a crash. Fixed-journal
-/// recovery rejects watermarks beyond the recovered offsets size as corruption. A watermark below
-/// the recovered offsets start is stale after a prune, so init falls back to the offsets start. If
+/// a preferred point for replaying data to rebuild offset entries after a crash. In an unbounded
+/// open, fixed-journal recovery rejects watermarks beyond the recovered offsets size as
+/// corruption. A bounded open clamps the watermark to its cap first. A watermark below the
+/// recovered offsets start is stale after a prune, so init falls back to the offsets start. If
 /// retained data exists but ends before the watermark, init returns corruption because acknowledged
 /// data is missing. If no retained data exists, init reconciles both sides to an empty journal.
 /// Replay after a valid anchor stops at the first short data blob and truncates newer blobs so the

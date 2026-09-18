@@ -722,6 +722,11 @@ stability_scope!(BETA {
         /// Returns [`Error::BlobAlreadyOpen`] if a handle from an earlier open of the blob is
         /// still alive and the blob has not been removed since.
         ///
+        /// An implementation that retains durability failures returns the failure observed
+        /// through an earlier open of the blob (a failed [`Blob::sync`], [`Blob::start_sync`] or
+        /// [`WriteOptions::SYNC`] write, a failed flush while reopening, or a failed creation)
+        /// from every later open until the blob is removed or recreated.
+        ///
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns

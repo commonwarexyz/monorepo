@@ -525,7 +525,7 @@ impl<B: Blob> Writer<B> {
     /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// Later appends preserve this view, including its frozen partial page. Close all
-    /// disk-backed views before reopening the storage for initialization repair.
+    /// disk-backed views before opening the blob again.
     pub async fn snapshot(&mut self) -> Result<Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
