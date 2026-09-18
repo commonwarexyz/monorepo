@@ -31,6 +31,8 @@ use commonware_storage::{
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 
+mod batch;
+
 type Uint256 = <sol!(uint256) as SolType>::RustType;
 type Operation<F> = fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>;
 
@@ -60,6 +62,10 @@ sol! {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Prove a contiguous range of exact encoded operations.
+    Range(batch::RangeArgs),
+    /// Prove historical operations at sparse locations.
+    Multi(batch::MultiArgs),
     /// Prove membership of an ordered operation in the plain operations root.
     Any(AnyArgs),
     /// Prove unordered operations, optionally including their Current activity verdict.
@@ -524,6 +530,11 @@ struct Materialized<F: Graftable, D: Digest> {
     output: OperationOutput,
     proof: operation::Proof<F, D, [u8; 32]>,
     root: D,
+    ops_root: D,
+    ops: Mem<F, D>,
+    grafted: Mem<F, D>,
+    status: Prunable<32>,
+    witness: OpsRootWitness<F, D>,
 }
 
 fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
@@ -584,12 +595,12 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
             H::hash(&[status.get_chunk((leaves / 256) as usize)]),
         )
     });
-    let root = OpsRootWitness::<F, H::Digest> {
+    let witness = OpsRootWitness::<F, H::Digest> {
         grafted_root,
         pending_chunk_digest: pending.try_into().unwrap(),
         partial_chunk: partial,
-    }
-    .root::<H>(&ops_root);
+    };
+    let root = witness.root::<H>(&ops_root);
     let op = operation(location);
     if !range.verify::<H, _, 32>(
         Location::new(location),
@@ -624,6 +635,11 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
         output,
         proof,
         root,
+        ops_root,
+        ops,
+        grafted,
+        status,
+        witness,
     })
 }
 
@@ -682,6 +698,7 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
         output,
         proof,
         root,
+        ..
     } = materialize::<F, H, _>(&tree, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
@@ -698,6 +715,8 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
+            Self::Range(args) => args.execute(),
+            Self::Multi(args) => args.execute(),
             Self::Unordered(args) => match (args.tree.family, args.tree.hash) {
                 (TreeKind::Mmr, Hash::Keccak) => unordered::<mmr::Family, Keccak256>(&args),
                 (TreeKind::Mmr, Hash::Sha256) => unordered::<mmr::Family, Sha256>(&args),

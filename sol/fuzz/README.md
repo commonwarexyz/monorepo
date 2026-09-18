@@ -25,6 +25,8 @@ target/release/commonware-sol-fuzz simplex --help
   The `unordered` subcommand generates fixed or variable operation proofs. Add `--current`
   to include activity authentication.
   The `immutable` subcommand generates set and commit proofs.
+  The `range` and `multi` subcommands generate batch proofs. With `--current`, ranges
+  authenticate bitmap state and sparse proofs authenticate historical operations.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.

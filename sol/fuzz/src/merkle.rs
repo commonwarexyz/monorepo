@@ -150,6 +150,22 @@ pub(super) fn leaf(seed: u64, index: u64) -> [u8; 32] {
     Keccak256::hash(&[&seed.to_be_bytes(), &index.to_be_bytes()]).0
 }
 
+/// Return QMDB's sparse witness positions in the production proof's canonical order.
+pub(super) fn qmdb_positions<F: Family>(
+    leaves: u64,
+    locations: &[Location<F>],
+    inactive_peaks: usize,
+) -> Result<Vec<u64>, String> {
+    multi::canonical_positions(
+        leaves,
+        locations,
+        Policy {
+            bagging: Fold::Backward,
+            inactive_peaks,
+        },
+    )
+}
+
 /// Builds the full seed-derived tree and verifies its canonical range proof.
 fn generate<F: Family, H: Hasher>(
     leaf_count: u64,

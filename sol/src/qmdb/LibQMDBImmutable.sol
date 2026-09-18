@@ -49,4 +49,44 @@ library LibQMDBImmutable {
             root, operation, proof.leaves, proof.location, proof.digests, proof.inactivePeaks, false, hasher
         );
     }
+
+    /// @notice Verify a contiguous range of encoded operations against a trusted immutable MMB root.
+    /// @dev Each operation includes its exact codec tags, padding and length prefixes.
+    function verifyRange(bytes32 root, bytes[] memory operations, Common.RangeProof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return Common.verifyRange(root, operations, proof, true, hasher);
+    }
+
+    /// @notice Verify a contiguous range of encoded operations against a trusted immutable MMR root.
+    /// @dev Each operation includes its exact codec tags, padding and length prefixes.
+    function verifyRangeMMR(bytes32 root, bytes[] memory operations, Common.RangeProof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return Common.verifyRange(root, operations, proof, false, hasher);
+    }
+
+    /// @notice Verify a sparse selection of encoded operations against a trusted immutable MMB root.
+    /// @dev Each operation includes its exact codec tags, padding and length prefixes.
+    function verifyMulti(bytes32 root, bytes[] memory operations, Common.MultiProof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return Common.verifyMulti(root, operations, proof, true, hasher);
+    }
+
+    /// @notice Verify a sparse selection of encoded operations against a trusted immutable MMR root.
+    /// @dev Each operation includes its exact codec tags, padding and length prefixes.
+    function verifyMultiMMR(bytes32 root, bytes[] memory operations, Common.MultiProof calldata proof, address hasher)
+        internal
+        view
+        returns (bool)
+    {
+        return Common.verifyMulti(root, operations, proof, false, hasher);
+    }
 }

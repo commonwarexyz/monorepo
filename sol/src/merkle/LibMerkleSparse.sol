@@ -36,6 +36,85 @@ library LibMerkleSparse {
         bool belt,
         address hasher
     ) internal view returns (bool valid) {
+        return _verify(
+            root,
+            leaves,
+            indices,
+            elements,
+            count,
+            positions,
+            digests,
+            proofCount,
+            backward,
+            inactive,
+            cd,
+            belt,
+            false,
+            hasher
+        );
+    }
+
+    /// @dev Verify positioned leaf digests in memory with indices and witnesses in calldata.
+    /// Duplicate locations must carry equal digests. Every physical witness is authenticated.
+    /// Input arrays remain unchanged. Temporary pairs and peaks are cleared before returning.
+    function verifyPrehashed(
+        bytes32 root,
+        uint256 leaves,
+        uint256[] calldata indices,
+        bytes32[] memory elements,
+        uint256[] calldata positions,
+        bytes32[] calldata digests,
+        uint256 inactive,
+        bool belt,
+        address hasher
+    ) internal view returns (bool) {
+        if (indices.length != elements.length || positions.length != digests.length) return false;
+        uint256 indexData;
+        uint256 elementData;
+        uint256 positionData;
+        uint256 digestData;
+        assembly ("memory-safe") {
+            indexData := indices.offset
+            elementData := add(elements, 0x20)
+            positionData := positions.offset
+            digestData := digests.offset
+        }
+        return _verify(
+            root,
+            leaves,
+            indexData,
+            elementData,
+            elements.length,
+            positionData,
+            digestData,
+            digests.length,
+            true,
+            inactive,
+            true,
+            belt,
+            true,
+            hasher
+        );
+    }
+
+    /// @dev Reconstruct using raw words in the selected location or positioned digests in memory.
+    /// `prehashed` changes only element loading and hashing. Witness and index locations use `cd`.
+    function _verify(
+        bytes32 root,
+        uint256 leaves,
+        uint256 indices,
+        uint256 elements,
+        uint256 count,
+        uint256 positions,
+        uint256 digests,
+        uint256 proofCount,
+        bool backward,
+        uint256 inactive,
+        bool cd,
+        bool belt,
+        bool prehashed,
+        address hasher
+    ) private view returns (bool valid) {
         if (leaves > (uint256(1) << 62) + (belt ? 30 : 0)) return false;
         if (count == 0) {
             return leaves == 0 && inactive == 0 && proofCount == 0 && root == Merkle.emptyRoot(hasher);
@@ -49,7 +128,7 @@ library LibMerkleSparse {
         uint256 peaks = pairs + count * 64;
         uint256 end = peaks + Merkle.levels(leaves, belt) * 32;
         assembly ("memory-safe") { mstore(0x40, end) }
-        (uint256 unique, bool ok) = _elements(p, leaves, indices, elements, count, pairs);
+        (uint256 unique, bool ok) = _elements(p, leaves, indices, elements, count, pairs, prehashed);
         if (ok) {
             p.cursor = pairs;
             p.end = pairs + unique * 64;
@@ -61,12 +140,17 @@ library LibMerkleSparse {
         }
     }
 
-    /// @dev Sort selected elements and hash each distinct leaf after checking duplicate values.
-    function _elements(Proof memory p, uint256 n, uint256 indices, uint256 data, uint256 count, uint256 pairs)
-        private
-        view
-        returns (uint256 unique, bool ok)
-    {
+    /// @dev Sort selected elements and check duplicate values before hashing raw leaves.
+    /// Positioned digests are loaded from memory and retained without another hash.
+    function _elements(
+        Proof memory p,
+        uint256 n,
+        uint256 indices,
+        uint256 data,
+        uint256 count,
+        uint256 pairs,
+        bool prehashed
+    ) private view returns (uint256 unique, bool ok) {
         unchecked {
             if (p.belt) {
                 for (uint256 i = 1; i < p.length; ++i) {
@@ -82,7 +166,7 @@ library LibMerkleSparse {
                 if (index >= n) return (0, false);
                 if (index < previous) sorted = false;
                 previous = index;
-                uint256 element = _load(data + i * 32, p.cd);
+                uint256 element = _load(data + i * 32, p.cd && !prehashed);
                 assembly ("memory-safe") {
                     let slot := add(pairs, shl(6, i))
                     mstore(slot, index)
@@ -104,12 +188,13 @@ library LibMerkleSparse {
                     if (element != previousElement) return (0, false);
                     continue;
                 }
-                uint256 position = Merkle.position(Merkle.peak(index, 1, p.belt), 1, p.belt);
+                uint256 position = 0;
+                if (!prehashed) position = Merkle.position(Merkle.peak(index, 1, p.belt), 1, p.belt);
                 assembly ("memory-safe") {
                     let slot := add(pairs, shl(6, unique))
                     mstore(slot, index)
                 }
-                bytes32 digest = Merkle.hash(bytes32(position), element, 0x18, 0x28, p.hasher);
+                bytes32 digest = prehashed ? element : Merkle.hash(bytes32(position), element, 0x18, 0x28, p.hasher);
                 assembly ("memory-safe") {
                     mstore(add(add(pairs, shl(6, unique)), 0x20), digest)
                 }

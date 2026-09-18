@@ -269,7 +269,7 @@ impl<F: Family> Storage<F> for PositionStore<F> {
     }
 }
 
-fn canonical_positions<F: Family>(
+pub(super) fn canonical_positions<F: Family>(
     leaves: u64,
     locations: &[Location<F>],
     policy: Policy,

@@ -44,6 +44,69 @@ library LibMerkle {
         uint256 width;
     }
 
+    /// @dev Contiguous 256-bit activity chunks in memory. An empty array disables grafting.
+    /// `start` identifies `chunks[0]`. `graftable` excludes pending and partial chunks.
+    struct RangeGraft {
+        bytes32[] chunks;
+        uint256 start;
+        uint256 graftable;
+    }
+
+    /// @dev Reconstruct a backward-folded root from positioned leaf digests in memory.
+    /// Witness digests are read from calldata. Nonzero activity chunks prefix their
+    /// width-256 ancestor digest. Zero chunks leave that digest unchanged.
+    /// Callers authenticate the result and validate the snapshot's graftable boundary.
+    /// Input arrays remain caller-owned. Temporary state is cleared before restoring memory.
+    function reconstructPrehashed(
+        uint256 leaves,
+        uint256 start,
+        bytes32[] memory elements,
+        bytes32[] calldata proof,
+        uint256 inactive,
+        RangeGraft memory graft,
+        bool mmb,
+        address hasher
+    ) internal view returns (bytes32 root, bool valid) {
+        // forge-lint: disable-next-line(boolean-cst)
+        if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return (0, false);
+        uint256 count = elements.length;
+        // forge-lint: disable-next-line(boolean-cst)
+        if (start > leaves || count > leaves - start) return (0, false);
+        if (count == 0) {
+            if (leaves != 0 || start != 0 || proof.length != 0 || inactive != 0 || graft.chunks.length != 0) {
+                // forge-lint: disable-next-line(boolean-cst)
+                return (0, false);
+            }
+            // forge-lint: disable-next-line(boolean-cst)
+            return (Common.emptyRoot(hasher), true);
+        }
+        uint256 graftData = 0;
+        if (graft.chunks.length != 0) {
+            if (
+                graft.start != (start >> 8) || graft.graftable > (leaves >> 8)
+                    || graft.chunks.length != ((start + count - 1) >> 8) - (start >> 8) + 1
+            ) {
+                // forge-lint: disable-next-line(boolean-cst)
+                return (0, false);
+            }
+            assembly ("memory-safe") { graftData := graft }
+        }
+        uint256 free;
+        uint256 data;
+        uint256 proofData;
+        assembly ("memory-safe") {
+            free := mload(0x40)
+            data := add(elements, 0x20)
+            proofData := proof.offset
+        }
+        Proof memory p = Proof(data, start, start + count, proofData, proof.length);
+        uint256 scratch;
+        assembly ("memory-safe") { scratch := mload(0x40) }
+        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, false, true, mmb, 0, true, graftData, hasher);
+        _clear(free, scratch + Common.levels(leaves, mmb) * 32);
+        assembly ("memory-safe") { mstore(0x40, free) }
+    }
+
     /// @dev Reconstruct a backward-folded root from a positioned leaf digest in the selected tree family.
     /// `graft.prefix` is hashed before the ancestor digest at `graft.width` leaves.
     /// Width is zero to disable ancestor grafting or a power of two of at least two.
@@ -72,7 +135,7 @@ library LibMerkle {
         Proof memory p = Proof(uint256(leaf), index, index + 1, proofData, proof.length);
         uint256 scratch;
         assembly ("memory-safe") { scratch := mload(0x40) }
-        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, true, true, mmb, graftData, hasher);
+        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, true, true, mmb, graftData, false, 0, hasher);
         _clear(free, scratch + Common.levels(leaves, mmb) * 32);
         assembly ("memory-safe") { mstore(0x40, free) }
     }
@@ -152,7 +215,8 @@ library LibMerkle {
         uint256 scratch;
         assembly ("memory-safe") { scratch := mload(0x40) }
         bytes32 reconstructed;
-        (reconstructed, valid) = _backwardRoot(leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb, 0, hasher);
+        (reconstructed, valid) =
+            _backwardRoot(leaves, p, scratch, inactivePeaks, single, fromCalldata, mmb, 0, false, 0, hasher);
         valid = valid && reconstructed == root;
         _clear(free, scratch + Common.levels(leaves, mmb) * 32);
         assembly ("memory-safe") { mstore(0x40, free) }
@@ -185,8 +249,9 @@ library LibMerkle {
             } else {
                 uint256 base;
                 assembly ("memory-safe") { base := mload(0x40) }
-                (digest, next, ok) =
-                    _subtree(data, start, start + count, position, leaves, 0, proof, end, base, cd, belt, hasher);
+                (digest, next, ok) = _subtree(
+                    data, start, start + count, position, leaves, 0, proof, end, base, cd, belt, false, 0, hasher
+                );
             }
             return ok && next == end && Common.root(leaves, inactive, digest, hasher) == root;
         }
@@ -247,8 +312,9 @@ library LibMerkle {
                         if (single) {
                             (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, 0, hasher);
                         } else {
-                            (d, q, ok) =
-                                _subtree(data, start, end, position, w, cursor, q, qEnd, base, cd, belt, hasher);
+                            (d, q, ok) = _subtree(
+                                data, start, end, position, w, cursor, q, qEnd, base, cd, belt, false, 0, hasher
+                            );
                         }
                         if (!ok) return false;
                     }
@@ -300,6 +366,7 @@ library LibMerkle {
     /// optional backward suffix and finally left-first DFS siblings.
     /// Peak digests occupy temporary memory above the free memory pointer.
     /// All called helpers must remain allocation-free while those digests are live.
+    /// Separate subtree call sites keep leaf and graft modes constant inside traversal loops.
     function _backwardRoot(
         uint256 n,
         Proof memory p,
@@ -309,6 +376,8 @@ library LibMerkle {
         bool cd,
         bool belt,
         uint256 graft,
+        bool prehashed,
+        uint256 rangeGraft,
         address hasher
     ) private view returns (bytes32 root, bool valid) {
         unchecked {
@@ -372,6 +441,23 @@ library LibMerkle {
                                 graft,
                                 hasher
                             );
+                        } else if (prehashed) {
+                            (d, q, ok) = _subtree(
+                                p.data,
+                                p.start,
+                                p.end,
+                                position,
+                                w,
+                                cursor,
+                                q,
+                                p.digests + p.digestCount * 32,
+                                base,
+                                cd,
+                                belt,
+                                true,
+                                rangeGraft,
+                                hasher
+                            );
                         } else {
                             (d, q, ok) = _subtree(
                                 p.data,
@@ -385,6 +471,8 @@ library LibMerkle {
                                 base,
                                 cd,
                                 belt,
+                                false,
+                                0,
                                 hasher
                             );
                         }
@@ -671,6 +759,8 @@ library LibMerkle {
     }
 
     /// @dev Reconstruct a range using the selected input and tree family with one-word DFS frames.
+    /// `prehashed` selects positioned leaf digests in memory. Witnesses retain the `cd` location.
+    /// A nonzero `graft` points to a validated `RangeGraft` whose chunks cover the range.
     /// Every used frame is cleared and the free memory pointer is restored on either outcome.
     function _subtree(
         uint256 data,
@@ -684,9 +774,11 @@ library LibMerkle {
         uint256 base,
         bool cd,
         bool belt,
+        bool prehashed,
+        uint256 graft,
         address hasher
     ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
-        if (!cd && !belt) {
+        if (!prehashed && !cd && !belt) {
             return _memoryMMR(data, start, end, p, width, cursor, q, qEnd, base, hasher);
         }
         assembly ("memory-safe") {
@@ -740,13 +832,18 @@ library LibMerkle {
                 default {
                     switch width
                     case 1 {
-                        let pos := p
-                        if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
-                        mstore(0, pos)
-                        mstore(0x20, load(add(data, shl(5, sub(cursor, start))), cd))
-                        switch hasher
-                        case 0 { d := keccak256(0x18, 0x28) }
-                        default { d := externalHash(0x18, 0x28, hasher) }
+                        let slot := add(data, shl(5, sub(cursor, start)))
+                        switch prehashed
+                        case 0 {
+                            let pos := p
+                            if belt { pos := sub(shl(1, p), ilog2(add(p, 1))) }
+                            mstore(0, pos)
+                            mstore(0x20, load(slot, cd))
+                            switch hasher
+                            case 0 { d := keccak256(0x18, 0x28) }
+                            default { d := externalHash(0x18, 0x28, hasher) }
+                        }
+                        default { d := mload(slot) }
                         cursor := add(cursor, 1)
                     }
                     default {
@@ -783,6 +880,23 @@ library LibMerkle {
                     switch hasher
                     case 0 { d := keccak256(0x18, 0x48) }
                     default { d := externalHash(0x18, 0x48, hasher) }
+                    if graft {
+                        if eq(width, 256) {
+                            let chunk := shr(8, sub(cursor, width))
+                            if lt(chunk, mload(add(graft, 0x40))) {
+                                let chunks := mload(graft)
+                                let local := sub(chunk, mload(add(graft, 0x20)))
+                                let prefix := mload(add(add(chunks, 0x20), shl(5, local)))
+                                if prefix {
+                                    mstore(0, prefix)
+                                    mstore(0x20, d)
+                                    switch hasher
+                                    case 0 { d := keccak256(0, 0x40) }
+                                    default { d := externalHash(0, 0x40, hasher) }
+                                }
+                            }
+                        }
+                    }
                     mstore(frame, 0)
                     top := frame
                 }
