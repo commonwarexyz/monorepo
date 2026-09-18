@@ -290,16 +290,17 @@ contract LibBLS12381MultisigTest is Test {
         bytes memory signers,
         uint64 seed
     ) internal returns (Case memory c) {
-        string[] memory args = new string[](9);
+        string[] memory args = new string[](10);
         args[0] = _binary();
-        args[1] = "multisig";
-        args[2] = "generate";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
-        args[6] = vm.toString(participants);
-        args[7] = vm.toString(signers);
-        args[8] = vm.toString(uint256(seed));
+        args[1] = "certificate";
+        args[2] = "multisig";
+        args[3] = "generate";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = vm.toString(namespace);
+        args[6] = vm.toString(message);
+        args[7] = vm.toString(participants);
+        args[8] = vm.toString(signers);
+        args[9] = vm.toString(uint256(seed));
         (c.signature, c.keys, c.signers, c.message) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
@@ -311,17 +312,18 @@ contract LibBLS12381MultisigTest is Test {
         uint256 quorum,
         bool expected
     ) internal {
-        string[] memory args = new string[](10);
+        string[] memory args = new string[](11);
         args[0] = _binary();
-        args[1] = "multisig";
-        args[2] = "check";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(c.keys);
-        args[5] = vm.toString(c.signers);
-        args[6] = vm.toString(quorum);
-        args[7] = vm.toString(namespace);
-        args[8] = vm.toString(message);
-        args[9] = vm.toString(c.signature);
+        args[1] = "certificate";
+        args[2] = "multisig";
+        args[3] = "check";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = vm.toString(c.keys);
+        args[6] = vm.toString(c.signers);
+        args[7] = vm.toString(quorum);
+        args[8] = vm.toString(namespace);
+        args[9] = vm.toString(message);
+        args[10] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         assertEq(_verify(minSig, namespace, message, c, quorum), expected, "Solidity result");
     }

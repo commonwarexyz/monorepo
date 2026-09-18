@@ -6,7 +6,6 @@ use std::process::ExitCode;
 mod bmt;
 mod certificate;
 mod merkle;
-mod multisig;
 mod simplex;
 
 /// Hash function used by the tree proof oracle.
@@ -29,16 +28,13 @@ enum Command {
     /// Binary Merkle Tree proofs.
     #[command(subcommand)]
     Bmt(bmt::Command),
-    /// BLS12-381 threshold certificates and hash-to-curve points.
+    /// BLS12-381 certificates and hash-to-curve points.
     #[command(subcommand)]
     Certificate(certificate::Command),
     /// MMR and MMB proofs.
     #[command(subcommand)]
     Merkle(merkle::Command),
-    /// BLS12-381 multi-signatures.
-    #[command(subcommand)]
-    Multisig(multisig::Command),
-    /// Simplex threshold and multi-signatures.
+    /// Simplex signatures.
     #[command(subcommand)]
     Simplex(simplex::Command),
 }
@@ -49,7 +45,6 @@ impl Command {
             Self::Bmt(command) => command.execute(),
             Self::Certificate(command) => command.execute(),
             Self::Merkle(command) => command.execute(),
-            Self::Multisig(command) => command.execute(),
             Self::Simplex(command) => command.execute(),
         }
     }

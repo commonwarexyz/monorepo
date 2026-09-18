@@ -1,6 +1,6 @@
 //! Seeded BLS12-381 multi-signatures and authenticated-key verification.
 
-use crate::certificate::{self, BlsVariant};
+use super::{BlsVariant, compact, compress, decode_hex, frame, pad, unpad};
 use alloy_sol_macro::sol;
 use alloy_sol_types::SolValue;
 use clap::{Args, Subcommand};
@@ -37,6 +37,10 @@ pub(crate) enum Command {
     /// Generate an aggregate signature from a non-empty signer subset.
     Generate(GenerateArgs),
     /// Return ABI `bool` after checking quorum and the aggregate signature.
+    ///
+    /// Public keys must follow an authenticated participant order with distinct keys and
+    /// validated proofs of possession. Signers use a raw LSB-first bitmap, exactly
+    /// ceil(participants / 8) bytes with unused high bits cleared.
     Check {
         variant: BlsVariant,
         public_keys_hex: String,
@@ -106,7 +110,7 @@ pub(crate) fn generate<V: Variant>(
         return Err(format!("participants exceeds {MAX_PARTICIPANTS}"));
     }
     let signers = parse_signers(participants, bitmap)?;
-    let framed = certificate::frame(namespace, message)?;
+    let framed = frame(namespace, message)?;
     let mut rng = StdRng::seed_from_u64(seed);
     let mut privates = Vec::with_capacity(participants as usize);
     let mut publics = Vec::with_capacity(participants as usize);
@@ -141,11 +145,11 @@ pub(crate) fn generate<V: Variant>(
 
     let mut public_keys = Vec::with_capacity(participants as usize * public_size::<V>());
     for public in &publics {
-        public_keys.extend_from_slice(&certificate::pad(&certificate::compact(public)?));
+        public_keys.extend_from_slice(&pad(&compact(public)?));
     }
 
     Ok(Output {
-        signature: certificate::compact(&signature)?,
+        signature: compact(&signature)?,
         public_keys,
         signers: bitmap.to_vec(),
         message: framed,
@@ -184,7 +188,7 @@ fn check<V: Variant>(
     message: &[u8],
     signature: &[u8],
 ) -> bool {
-    if certificate::frame(namespace, message).is_err() {
+    if frame(namespace, message).is_err() {
         return false;
     }
     let public_size = public_size::<V>();
@@ -210,9 +214,7 @@ fn check<V: Variant>(
     for signer in signers.iter() {
         let start = usize::from(signer) * public_size;
         let padded = &public_keys[start..start + public_size];
-        let Some(compressed) =
-            certificate::unpad(padded, fields).and_then(|compact| certificate::compress(&compact))
-        else {
+        let Some(compressed) = unpad(padded, fields).and_then(|compact| compress(&compact)) else {
             return false;
         };
         let Ok(public) = V::Public::decode(compressed) else {
@@ -224,7 +226,7 @@ fn check<V: Variant>(
     if signature.len() != V::Signature::SIZE * 2 {
         return false;
     }
-    let Some(signature) = certificate::compress(signature) else {
+    let Some(signature) = compress(signature) else {
         return false;
     };
     let Ok(signature) = aggregate::Signature::<V>::decode(signature) else {
@@ -242,9 +244,9 @@ impl Command {
                 if args.participants > MAX_PARTICIPANTS {
                     return Err(format!("participants exceeds {MAX_PARTICIPANTS}"));
                 }
-                let namespace = certificate::decode_hex(&args.namespace_hex)?;
-                let message = certificate::decode_hex(&args.message_hex)?;
-                let signers = certificate::decode_hex(&args.signers_hex)?;
+                let namespace = decode_hex(&args.namespace_hex)?;
+                let message = decode_hex(&args.message_hex)?;
+                let signers = decode_hex(&args.signers_hex)?;
                 Ok(encode_output(generate_variant(
                     args.variant,
                     &namespace,
@@ -263,11 +265,11 @@ impl Command {
                 message_hex,
                 signature_hex,
             } => {
-                let public_keys = certificate::decode_hex(&public_keys_hex)?;
-                let signers = certificate::decode_hex(&signers_hex)?;
-                let namespace = certificate::decode_hex(&namespace_hex)?;
-                let message = certificate::decode_hex(&message_hex)?;
-                let signature = certificate::decode_hex(&signature_hex)?;
+                let public_keys = decode_hex(&public_keys_hex)?;
+                let signers = decode_hex(&signers_hex)?;
+                let namespace = decode_hex(&namespace_hex)?;
+                let message = decode_hex(&message_hex)?;
+                let signature = decode_hex(&signature_hex)?;
                 let accepted = quorum.parse::<u32>().is_ok_and(|quorum| match variant {
                     BlsVariant::Minsig => check::<MinSig>(
                         &public_keys,
@@ -311,10 +313,7 @@ mod tests {
                 b"message",
                 &output.signature,
             ));
-            assert_eq!(
-                output.message,
-                certificate::frame(b"domain", b"message").unwrap()
-            );
+            assert_eq!(output.message, frame(b"domain", b"message").unwrap());
             assert_eq!(
                 output.public_keys.len(),
                 participants as usize * public_size::<V>()
@@ -479,6 +478,7 @@ mod tests {
         {
             let encoded = Cli::try_parse_from([
                 "commonware-sol-fuzz",
+                "certificate",
                 "multisig",
                 "generate",
                 variant,
@@ -501,6 +501,7 @@ mod tests {
 
             let checked = Cli::try_parse_from([
                 "commonware-sol-fuzz",
+                "certificate",
                 "multisig",
                 "check",
                 variant,
@@ -519,6 +520,7 @@ mod tests {
 
             let excessive_quorum = Cli::try_parse_from([
                 "commonware-sol-fuzz",
+                "certificate",
                 "multisig",
                 "check",
                 variant,

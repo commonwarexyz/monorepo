@@ -193,14 +193,15 @@ contract LibBLS12381ThresholdTest is Test {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](7);
+        string[] memory args = new string[](8);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "generate";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
-        args[6] = vm.toString(uint256(seed));
+        args[2] = "threshold";
+        args[3] = "generate";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = vm.toString(namespace);
+        args[6] = vm.toString(message);
+        args[7] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
@@ -208,15 +209,16 @@ contract LibBLS12381ThresholdTest is Test {
     function _compare(bool minSig, bytes memory namespace, bytes memory message, Case memory c, bool expected)
         internal
     {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](9);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "check";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(c.key);
-        args[5] = vm.toString(namespace);
-        args[6] = vm.toString(message);
-        args[7] = vm.toString(c.signature);
+        args[2] = "threshold";
+        args[3] = "check";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = vm.toString(c.key);
+        args[6] = vm.toString(namespace);
+        args[7] = vm.toString(message);
+        args[8] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         (bool ok, bytes memory result) = address(harness).staticcall{ gas: 1_000_000 }(
             abi.encodeCall(harness.verify, (minSig, c.signature, c.key, namespace, message))

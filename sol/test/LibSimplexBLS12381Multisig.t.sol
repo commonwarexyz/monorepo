@@ -4,9 +4,10 @@ pragma solidity ^0.8.15;
 import { Test } from "forge-std/Test.sol";
 import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibSimplex as Simplex } from "../src/simplex/LibSimplex.sol";
+import { LibSimplexBLS12381Multisig as Scheme } from "../src/simplex/LibSimplexBLS12381Multisig.sol";
 
 /// @dev External calls exercise raw committee decoding and the complete Simplex wrapper.
-contract SimplexMultisigHarness {
+contract SimplexBLS12381MultisigHarness {
     function verify(
         bool minSig,
         bytes calldata signature,
@@ -21,16 +22,16 @@ contract SimplexMultisigHarness {
             BLS.G2Point[] memory g2 = abi.decode(
                 bytes.concat(abi.encode(uint256(32), publicKeys.length / pointSize), publicKeys), (BLS.G2Point[])
             );
-            return Simplex.verifyMinSig(signature, signers, g2, namespace, subject);
+            return Scheme.verifyMinSig(signature, signers, g2, namespace, subject);
         }
         BLS.G1Point[] memory g1 = abi.decode(
             bytes.concat(abi.encode(uint256(32), publicKeys.length / pointSize), publicKeys), (BLS.G1Point[])
         );
-        return Simplex.verifyMinPk(signature, signers, g1, namespace, subject);
+        return Scheme.verifyMinPk(signature, signers, g1, namespace, subject);
     }
 }
 
-contract LibSimplexMultisigTest is Test {
+contract LibSimplexBLS12381MultisigTest is Test {
     struct Case {
         bytes signature;
         bytes publicKeys;
@@ -38,10 +39,10 @@ contract LibSimplexMultisigTest is Test {
         bytes message;
     }
 
-    SimplexMultisigHarness internal harness;
+    SimplexBLS12381MultisigHarness internal harness;
 
     function setUp() public {
-        harness = new SimplexMultisigHarness();
+        harness = new SimplexBLS12381MultisigHarness();
     }
 
     /// @dev Empty and partial-point committees are rejected before quorum or ABI decoding.
@@ -125,7 +126,7 @@ contract LibSimplexMultisigTest is Test {
             Case memory c = _generate(minSig, namespace, subject, 9, 4, _signers(4, 3));
             assertTrue(_verify(minSig, c, namespace, subject));
             vm.snapshotGasLastFrame(
-                "SimplexMultisig", minSig ? "minsig_participants=4_signers=3" : "minpk_participants=4_signers=3"
+                "SimplexBLS12381Multisig", minSig ? "minsig_participants=4_signers=3" : "minpk_participants=4_signers=3"
             );
         }
     }
@@ -181,24 +182,25 @@ contract LibSimplexMultisigTest is Test {
         uint256 participants,
         bytes memory signers
     ) internal returns (Case memory c) {
-        string[] memory args = new string[](15);
+        string[] memory args = new string[](16);
         args[0] = _binary();
         args[1] = "simplex";
-        args[2] = "generate-multisig";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = subject.kind == Simplex.Kind.Notarization
+        args[2] = "generate";
+        args[3] = "multisig";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = subject.kind == Simplex.Kind.Notarization
             ? "notarize"
             : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
-        args[5] = vm.toString(namespace);
-        args[6] = vm.toString(uint256(subject.epoch));
-        args[7] = vm.toString(uint256(subject.viewNumber));
-        args[8] = vm.toString(uint256(subject.parent));
-        args[9] = vm.toString(subject.payload);
-        args[10] = vm.toString(uint256(seed));
-        args[11] = "--participants";
-        args[12] = vm.toString(participants);
-        args[13] = "--signers-hex";
-        args[14] = vm.toString(signers);
+        args[6] = vm.toString(namespace);
+        args[7] = vm.toString(uint256(subject.epoch));
+        args[8] = vm.toString(uint256(subject.viewNumber));
+        args[9] = vm.toString(uint256(subject.parent));
+        args[10] = vm.toString(subject.payload);
+        args[11] = vm.toString(uint256(seed));
+        args[12] = "--participants";
+        args[13] = vm.toString(participants);
+        args[14] = "--signers-hex";
+        args[15] = vm.toString(signers);
         (c.signature, c.publicKeys, c.signers, c.message) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
