@@ -32,19 +32,28 @@ pub(crate) enum Command {
     Generate(GenerateArgs),
     /// Return ABI `bool` for a signature over a namespace and message.
     Check {
+        #[arg(long, value_enum)]
         variant: BlsVariant,
+        #[arg(long)]
         public_key_hex: String,
+        #[arg(long)]
         namespace_hex: String,
+        #[arg(long)]
         message_hex: String,
+        #[arg(long)]
         signature_hex: String,
     },
 }
 
 #[derive(Args)]
 pub(crate) struct GenerateArgs {
+    #[arg(long, value_enum)]
     variant: BlsVariant,
+    #[arg(long)]
     namespace_hex: String,
+    #[arg(long)]
     message_hex: String,
+    #[arg(long)]
     seed: u64,
 }
 
@@ -289,9 +298,13 @@ mod tests {
                 "certificate",
                 "threshold",
                 "generate",
+                "--variant",
                 variant,
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
+                "--seed",
                 "42",
             ])
             .unwrap()
@@ -316,10 +329,15 @@ mod tests {
                 "certificate",
                 "threshold",
                 "check",
+                "--variant",
                 variant,
+                "--public-key-hex",
                 &const_hex::encode(&decoded.public_key),
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
+                "--signature-hex",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()
@@ -332,8 +350,11 @@ mod tests {
                 "commonware-sol-fuzz",
                 "certificate",
                 "hash",
+                "--variant",
                 variant,
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
             ])
             .unwrap()

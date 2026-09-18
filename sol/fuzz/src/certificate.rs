@@ -23,8 +23,11 @@ pub(crate) enum Command {
     Multisig(multisig::Command),
     /// Hash a namespace and message to an EIP-2537 point, returned as ABI `bytes`.
     Hash {
+        #[arg(long, value_enum)]
         variant: BlsVariant,
+        #[arg(long)]
         namespace_hex: String,
+        #[arg(long)]
         message_hex: String,
     },
 }
@@ -183,8 +186,11 @@ mod tests {
                 "commonware-sol-fuzz",
                 "certificate",
                 "hash",
+                "--variant",
                 variant,
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
             ])
             .unwrap()

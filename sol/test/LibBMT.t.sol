@@ -454,13 +454,19 @@ contract LibBMTTest is HashTest {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](synthetic ? 6 : 7);
+        string[] memory args = new string[](synthetic ? 9 : 11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
         args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(start);
-        if (!synthetic) args[5] = vm.toString(count);
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = synthetic ? "--index" : "--start";
+        args[6] = vm.toString(start);
+        if (!synthetic) {
+            args[7] = "--count";
+            args[8] = vm.toString(count);
+        }
+        args[args.length - 2] = "--seed";
         args[args.length - 1] = vm.toString(uint256(seed));
         return decodeCase(_ffi(args));
     }
@@ -473,12 +479,14 @@ contract LibBMTTest is HashTest {
 
     /// @dev Compare both Solidity input locations with the Rust verification result.
     function compare(Case memory c, uint256 mode) internal returns (bool result) {
-        string[] memory args = new string[](5);
+        string[] memory args = new string[](7);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
         args[2] = "check";
-        args[3] = mode == 0 ? "single" : mode == 1 ? "range" : "multi";
-        args[4] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
+        args[3] = "--mode";
+        args[4] = mode == 0 ? "single" : mode == 1 ? "range" : "multi";
+        args[5] = "--abi-hex";
+        args[6] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
         result = verifyCase(c, mode);
         assertEq(result, abi.decode(_ffi(args), (bool)), "Rust disagreement");
     }
@@ -510,13 +518,16 @@ contract LibBMTTest is HashTest {
         for (uint256 i = size - 1; i > 2; i -= 3) {
             csv = string.concat(csv, ",", vm.toString(i - 3));
         }
-        string[] memory args = new string[](6);
+        string[] memory args = new string[](9);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
         args[2] = "generate-multi";
-        args[3] = vm.toString(size);
-        args[4] = csv;
-        args[5] = vm.toString(uint256(seed));
+        args[3] = "--leaves";
+        args[4] = vm.toString(size);
+        args[5] = "--indices";
+        args[6] = csv;
+        args[7] = "--seed";
+        args[8] = vm.toString(uint256(seed));
         Case memory c = decodeCase(_ffi(args));
         assertTrue(compare(c, 2));
         if (c.proof.length > 1) {

@@ -26,7 +26,7 @@ struct Cli {
 enum Command {
     /// Binary Merkle Tree proofs.
     Bmt {
-        #[arg(value_enum)]
+        #[arg(long, value_enum)]
         hash: Hash,
         #[command(subcommand)]
         command: bmt::Command,
@@ -36,7 +36,7 @@ enum Command {
     Certificate(certificate::Command),
     /// MMR and MMB proofs.
     Merkle {
-        #[arg(value_enum)]
+        #[arg(long, value_enum)]
         hash: Hash,
         #[command(subcommand)]
         command: merkle::Command,

@@ -112,13 +112,16 @@ contract LibBLS12381ThresholdTest is Test {
 
     /// @dev Compare namespaced hash-to-curve points for arbitrary namespace/message boundaries.
     function testFuzz_DifferentialHash(bool minSig, bytes memory namespace, bytes memory message) public {
-        string[] memory args = new string[](6);
+        string[] memory args = new string[](9);
         args[0] = _binary();
         args[1] = "certificate";
         args[2] = "hash";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
+        args[3] = "--variant";
+        args[4] = minSig ? "minsig" : "minpk";
+        args[5] = "--namespace-hex";
+        args[6] = vm.toString(namespace);
+        args[7] = "--message-hex";
+        args[8] = vm.toString(message);
         bytes memory expected = abi.decode(vm.ffi(args), (bytes));
         assertEq(harness.checkedHash(minSig, namespace, message), expected);
     }
@@ -193,15 +196,19 @@ contract LibBLS12381ThresholdTest is Test {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](12);
         args[0] = _binary();
         args[1] = "certificate";
         args[2] = "threshold";
         args[3] = "generate";
-        args[4] = minSig ? "minsig" : "minpk";
-        args[5] = vm.toString(namespace);
-        args[6] = vm.toString(message);
-        args[7] = vm.toString(uint256(seed));
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--namespace-hex";
+        args[7] = vm.toString(namespace);
+        args[8] = "--message-hex";
+        args[9] = vm.toString(message);
+        args[10] = "--seed";
+        args[11] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
@@ -209,16 +216,21 @@ contract LibBLS12381ThresholdTest is Test {
     function _compare(bool minSig, bytes memory namespace, bytes memory message, Case memory c, bool expected)
         internal
     {
-        string[] memory args = new string[](9);
+        string[] memory args = new string[](14);
         args[0] = _binary();
         args[1] = "certificate";
         args[2] = "threshold";
         args[3] = "check";
-        args[4] = minSig ? "minsig" : "minpk";
-        args[5] = vm.toString(c.key);
-        args[6] = vm.toString(namespace);
-        args[7] = vm.toString(message);
-        args[8] = vm.toString(c.signature);
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--public-key-hex";
+        args[7] = vm.toString(c.key);
+        args[8] = "--namespace-hex";
+        args[9] = vm.toString(namespace);
+        args[10] = "--message-hex";
+        args[11] = vm.toString(message);
+        args[12] = "--signature-hex";
+        args[13] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         (bool ok, bytes memory result) = address(harness).staticcall{ gas: 1_000_000 }(
             abi.encodeCall(harness.verify, (minSig, c.signature, c.key, namespace, message))

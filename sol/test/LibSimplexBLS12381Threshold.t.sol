@@ -129,21 +129,29 @@ contract LibSimplexBLS12381ThresholdTest is Test {
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](12);
+        string[] memory args = new string[](20);
         args[0] = _binary();
         args[1] = "simplex";
         args[2] = "generate";
         args[3] = "threshold";
-        args[4] = minSig ? "minsig" : "minpk";
-        args[5] = subject.kind == Simplex.Kind.Notarization
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--kind";
+        args[7] = subject.kind == Simplex.Kind.Notarization
             ? "notarize"
             : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
-        args[6] = vm.toString(namespace);
-        args[7] = vm.toString(uint256(subject.epoch));
-        args[8] = vm.toString(uint256(subject.viewNumber));
-        args[9] = vm.toString(uint256(subject.parent));
-        args[10] = vm.toString(subject.payload);
-        args[11] = vm.toString(uint256(seed));
+        args[8] = "--namespace-hex";
+        args[9] = vm.toString(namespace);
+        args[10] = "--epoch";
+        args[11] = vm.toString(uint256(subject.epoch));
+        args[12] = "--view";
+        args[13] = vm.toString(uint256(subject.viewNumber));
+        args[14] = "--parent";
+        args[15] = vm.toString(uint256(subject.parent));
+        args[16] = "--payload-hex";
+        args[17] = vm.toString(subject.payload);
+        args[18] = "--seed";
+        args[19] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 

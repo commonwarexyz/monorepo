@@ -42,23 +42,36 @@ pub(crate) enum Command {
     /// validated proofs of possession. Signers use a raw LSB-first bitmap, exactly
     /// ceil(participants / 8) bytes with unused high bits cleared.
     Check {
+        #[arg(long, value_enum)]
         variant: BlsVariant,
+        #[arg(long)]
         public_keys_hex: String,
-        signers_hex: String,
+        #[arg(long)]
+        signers: String,
+        #[arg(long)]
         quorum: String,
+        #[arg(long)]
         namespace_hex: String,
+        #[arg(long)]
         message_hex: String,
+        #[arg(long)]
         signature_hex: String,
     },
 }
 
 #[derive(Args)]
 pub(crate) struct GenerateArgs {
+    #[arg(long, value_enum)]
     variant: BlsVariant,
+    #[arg(long)]
     namespace_hex: String,
+    #[arg(long)]
     message_hex: String,
+    #[arg(long)]
     participants: u32,
-    signers_hex: String,
+    #[arg(long)]
+    signers: String,
+    #[arg(long)]
     seed: u64,
 }
 
@@ -246,7 +259,7 @@ impl Command {
                 }
                 let namespace = decode_hex(&args.namespace_hex)?;
                 let message = decode_hex(&args.message_hex)?;
-                let signers = decode_hex(&args.signers_hex)?;
+                let signers = decode_hex(&args.signers)?;
                 Ok(encode_output(generate_variant(
                     args.variant,
                     &namespace,
@@ -259,14 +272,14 @@ impl Command {
             Self::Check {
                 variant,
                 public_keys_hex,
-                signers_hex,
+                signers,
                 quorum,
                 namespace_hex,
                 message_hex,
                 signature_hex,
             } => {
                 let public_keys = decode_hex(&public_keys_hex)?;
-                let signers = decode_hex(&signers_hex)?;
+                let signers = decode_hex(&signers)?;
                 let namespace = decode_hex(&namespace_hex)?;
                 let message = decode_hex(&message_hex)?;
                 let signature = decode_hex(&signature_hex)?;
@@ -481,11 +494,17 @@ mod tests {
                 "certificate",
                 "multisig",
                 "generate",
+                "--variant",
                 variant,
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
+                "--participants",
                 "4",
+                "--signers",
                 "0x03",
+                "--seed",
                 "42",
             ])
             .unwrap()
@@ -504,12 +523,19 @@ mod tests {
                 "certificate",
                 "multisig",
                 "check",
+                "--variant",
                 variant,
+                "--public-keys-hex",
                 &const_hex::encode(&decoded.public_keys),
+                "--signers",
                 &const_hex::encode(&decoded.signers),
+                "--quorum",
                 "2",
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
+                "--signature-hex",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()
@@ -523,12 +549,19 @@ mod tests {
                 "certificate",
                 "multisig",
                 "check",
+                "--variant",
                 variant,
+                "--public-keys-hex",
                 &const_hex::encode(&decoded.public_keys),
+                "--signers",
                 &const_hex::encode(&decoded.signers),
+                "--quorum",
                 "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                "--namespace-hex",
                 "0x74657374",
+                "--message-hex",
                 "0x6d657373616765",
+                "--signature-hex",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()

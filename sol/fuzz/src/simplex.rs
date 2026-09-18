@@ -14,13 +14,23 @@ use commonware_cryptography::{certificate::Subject as _, keccak256};
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Generate a signature for a Simplex voting subject.
-    Generate(GenerateArgs),
+    Generate {
+        #[command(subcommand)]
+        scheme: Scheme,
+    },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Scheme {
-    Threshold,
-    Multisig,
+#[derive(Subcommand)]
+pub(crate) enum Scheme {
+    Threshold(GenerateArgs),
+    Multisig {
+        #[command(flatten)]
+        args: GenerateArgs,
+        #[arg(long)]
+        participants: u32,
+        #[arg(long)]
+        signers: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -30,31 +40,26 @@ enum Kind {
     Finalize,
 }
 
-#[derive(Args, Default)]
-struct MultisigOptions {
-    /// Committee size, required for multisig.
-    #[arg(long)]
-    participants: Option<u32>,
-    /// Signer bitmap, required for multisig.
-    #[arg(long)]
-    signers_hex: Option<String>,
-}
-
 #[derive(Args)]
 pub(crate) struct GenerateArgs {
-    scheme: Scheme,
+    #[arg(long, value_enum)]
     variant: BlsVariant,
+    #[arg(long, value_enum)]
     kind: Kind,
+    #[arg(long)]
     namespace_hex: String,
+    #[arg(long)]
     epoch: u64,
+    #[arg(long)]
     view: u64,
     /// Ignored for nullification.
+    #[arg(long)]
     parent: u64,
     /// A 32-byte digest, ignored for nullification.
+    #[arg(long)]
     payload_hex: String,
+    #[arg(long)]
     seed: u64,
-    #[command(flatten)]
-    multisig: MultisigOptions,
 }
 
 impl GenerateArgs {
@@ -78,39 +83,34 @@ impl GenerateArgs {
             subject.message().to_vec(),
         ))
     }
+}
 
+impl Scheme {
     fn execute(self) -> Result<Vec<u8>, String> {
-        match self.scheme {
-            Scheme::Threshold => {
-                if self.multisig.participants.is_some() || self.multisig.signers_hex.is_some() {
-                    return Err(
-                        "--participants and --signers-hex are valid only for multisig".into(),
-                    );
-                }
-                let (namespace, message) = self.subject()?;
+        match self {
+            Self::Threshold(args) => {
+                let (namespace, message) = args.subject()?;
                 Ok(threshold::encode_output(threshold::generate_variant(
-                    self.variant,
+                    args.variant,
                     &namespace,
                     &message,
-                    self.seed,
+                    args.seed,
                 )?))
             }
-            Scheme::Multisig => {
-                let (Some(participants), Some(signers)) = (
-                    self.multisig.participants,
-                    self.multisig.signers_hex.as_deref(),
-                ) else {
-                    return Err("--participants and --signers-hex are required for multisig".into());
-                };
-                let (namespace, message) = self.subject()?;
-                let signers = certificate::decode_hex(signers)?;
+            Self::Multisig {
+                args,
+                participants,
+                signers,
+            } => {
+                let (namespace, message) = args.subject()?;
+                let signers = certificate::decode_hex(&signers)?;
                 Ok(multisig::encode_output(multisig::generate_variant(
-                    self.variant,
+                    args.variant,
                     &namespace,
                     &message,
                     participants,
                     &signers,
-                    self.seed,
+                    args.seed,
                 )?))
             }
         }
@@ -120,7 +120,7 @@ impl GenerateArgs {
 impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
-            Self::Generate(args) => args.execute(),
+            Self::Generate { scheme } => scheme.execute(),
         }
     }
 }
@@ -133,9 +133,8 @@ mod tests {
     use alloy_sol_types::SolType;
     use clap::Parser;
 
-    fn args(kind: Kind, seed: u64) -> GenerateArgs {
+    fn args(kind: Kind) -> GenerateArgs {
         GenerateArgs {
-            scheme: Scheme::Threshold,
             variant: BlsVariant::Minsig,
             kind,
             namespace_hex: const_hex::encode(b"test"),
@@ -143,14 +142,36 @@ mod tests {
             view: 128,
             parent: u64::MAX,
             payload_hex: const_hex::encode([0xa5; 32]),
-            seed,
-            multisig: MultisigOptions::default(),
+            seed: 7,
         }
     }
 
     fn threshold_output(input: &GenerateArgs) -> threshold::Output {
         let (namespace, message) = input.subject().unwrap();
         threshold::generate_variant(input.variant, &namespace, &message, input.seed).unwrap()
+    }
+
+    fn subject_args<'a>(scheme: &'a str, variant: &'a str, kind: &'a str) -> Vec<&'a str> {
+        vec![
+            "commonware-sol-fuzz",
+            "simplex",
+            "generate",
+            scheme,
+            "--variant",
+            variant,
+            "--kind",
+            kind,
+            "--namespace-hex",
+            "0x74657374",
+            "--epoch",
+            "127",
+            "--view",
+            "128",
+            "--parent",
+            "0",
+            "--payload-hex",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ]
     }
 
     #[test]
@@ -160,7 +181,7 @@ mod tests {
             (Kind::Nullify, b"_NULLIFY"),
             (Kind::Finalize, b"_FINALIZE"),
         ] {
-            let input = args(kind, 7);
+            let input = args(kind);
             let output = threshold_output(&input);
             let mut expected = vec![(4 + suffix.len()) as u8];
             expected.extend_from_slice(b"test");
@@ -175,7 +196,7 @@ mod tests {
             assert_eq!(output.message, expected);
         }
 
-        let mut input = args(Kind::Nullify, 7);
+        let mut input = args(Kind::Nullify);
         let before = threshold_output(&input);
         input.parent = 0;
         input.payload_hex = const_hex::encode([0; 32]);
@@ -189,33 +210,38 @@ mod tests {
         for (variant, signature_len, public_len, hash_len) in
             [("minsig", 96, 256, 128), ("minpk", 192, 128, 256)]
         {
-            let encoded = Cli::try_parse_from([
-                "commonware-sol-fuzz",
-                "simplex",
-                "generate",
-                "threshold",
-                variant,
-                "notarize",
-                "0x74657374",
-                "127",
-                "128",
-                "0",
-                &const_hex::encode([0; 32]),
-                "42",
-            ])
-            .unwrap()
-            .command
-            .execute()
-            .unwrap();
-            let (signature, public_key, message, hash_point) =
-                <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
-            assert_eq!(
-                (signature.len(), public_key.len(), hash_point.len()),
-                (signature_len, public_len, hash_len)
-            );
-            let mut expected = b"\x0dtest_NOTARIZE\x7f\x80\x01\x00".to_vec();
-            expected.extend_from_slice(&[0; 32]);
-            assert_eq!(message.as_ref(), expected);
+            for kind in ["notarize", "nullify", "finalize"] {
+                let encoded = Cli::try_parse_from(
+                    subject_args("threshold", variant, kind)
+                        .into_iter()
+                        .chain(["--seed", "42"]),
+                )
+                .unwrap()
+                .command
+                .execute()
+                .unwrap();
+                let (signature, public_key, message, hash_point) =
+                    <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded)
+                        .unwrap();
+                assert_eq!(
+                    (signature.len(), public_key.len(), hash_point.len()),
+                    (signature_len, public_len, hash_len)
+                );
+                let suffix = match kind {
+                    "notarize" => b"_NOTARIZE".as_slice(),
+                    "nullify" => b"_NULLIFY",
+                    "finalize" => b"_FINALIZE",
+                    _ => unreachable!(),
+                };
+                let mut expected = vec![(4 + suffix.len()) as u8];
+                expected.extend_from_slice(b"test");
+                expected.extend_from_slice(suffix);
+                expected.extend_from_slice(&[0x7f, 0x80, 0x01]);
+                if kind != "nullify" {
+                    expected.extend_from_slice(&[0; 33]);
+                }
+                assert_eq!(message.as_ref(), expected);
+            }
         }
     }
 
@@ -223,24 +249,16 @@ mod tests {
     fn multisig_routes_both_variants_with_simplex_subject_framing() {
         for (variant, public_size) in [("minsig", 256), ("minpk", 128)] {
             for kind in ["notarize", "nullify", "finalize"] {
-                let encoded = Cli::try_parse_from([
-                    "commonware-sol-fuzz",
-                    "simplex",
-                    "generate",
-                    "multisig",
-                    variant,
-                    kind,
-                    "0x74657374",
-                    "127",
-                    "128",
-                    "0",
-                    &const_hex::encode([0; 32]),
-                    "42",
-                    "--participants",
-                    "9",
-                    "--signers-hex",
-                    "0x0101",
-                ])
+                let encoded = Cli::try_parse_from(
+                    subject_args("multisig", variant, kind).into_iter().chain([
+                        "--participants",
+                        "9",
+                        "--signers",
+                        "0x0101",
+                        "--seed",
+                        "42",
+                    ]),
+                )
                 .unwrap()
                 .command
                 .execute()
@@ -251,15 +269,12 @@ mod tests {
                 assert_eq!(public_keys.len(), 9 * public_size);
                 assert_eq!(signers.as_ref(), &[0x01, 0x01]);
 
-                let mut input = args(
-                    match kind {
-                        "notarize" => Kind::Notarize,
-                        "nullify" => Kind::Nullify,
-                        "finalize" => Kind::Finalize,
-                        _ => unreachable!(),
-                    },
-                    42,
-                );
+                let mut input = args(match kind {
+                    "notarize" => Kind::Notarize,
+                    "nullify" => Kind::Nullify,
+                    "finalize" => Kind::Finalize,
+                    _ => unreachable!(),
+                });
                 input.parent = 0;
                 input.payload_hex = const_hex::encode([0; 32]);
                 let (namespace, subject_message) = input.subject().unwrap();
@@ -272,73 +287,66 @@ mod tests {
     }
 
     #[test]
-    fn multisig_requires_explicit_participants_and_signers() {
+    fn multisig_requires_named_inputs_and_signers() {
         for (variant, public_size) in [("minsig", 256), ("minpk", 128)] {
-            let base = [
-                "commonware-sol-fuzz",
-                "simplex",
-                "generate",
-                "multisig",
-                variant,
-                "nullify",
-                "0x74657374",
-                "1",
-                "2",
-                "3",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "7",
-            ];
-            for options in [
-                &[][..],
-                &["--participants", "4"][..],
-                &["--signers-hex", "0x01"][..],
+            let base = subject_args("multisig", variant, "nullify");
+            let complete: Vec<_> = base
+                .iter()
+                .copied()
+                .chain(["--participants", "4", "--signers", "0x01", "--seed", "7"])
+                .collect();
+            for option in [
+                "--variant",
+                "--kind",
+                "--namespace-hex",
+                "--epoch",
+                "--view",
+                "--parent",
+                "--payload-hex",
+                "--participants",
+                "--signers",
+                "--seed",
             ] {
-                let parsed =
-                    Cli::try_parse_from(base.into_iter().chain(options.iter().copied())).unwrap();
-                assert_eq!(
-                    parsed.command.execute().unwrap_err(),
-                    "--participants and --signers-hex are required for multisig"
+                let mut missing = complete.clone();
+                let index = missing
+                    .iter()
+                    .position(|argument| *argument == option)
+                    .unwrap();
+                missing.drain(index..=index + 1);
+                assert!(
+                    Cli::try_parse_from(missing).is_err(),
+                    "accepted missing {option}"
                 );
             }
 
-            let encoded = Cli::try_parse_from(base.into_iter().chain([
-                "--participants",
-                "4",
-                "--signers-hex",
-                "0x01",
-            ]))
-            .unwrap()
-            .command
-            .execute()
-            .unwrap();
+            let encoded = Cli::try_parse_from(complete.clone())
+                .unwrap()
+                .command
+                .execute()
+                .unwrap();
             let (_, public_keys, signers, _) =
                 <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
             assert_eq!(public_keys.len(), 4 * public_size);
             assert_eq!(signers.as_ref(), &[0x01]);
+            assert!(
+                Cli::try_parse_from(complete.iter().copied().chain(["--signers-hex", "0x01"]))
+                    .is_err()
+            );
         }
     }
 
     #[test]
-    fn threshold_rejects_multisig_options_and_old_routes_are_absent() {
-        let base = [
-            "commonware-sol-fuzz",
-            "simplex",
-            "generate",
-            "threshold",
-            "minsig",
-            "nullify",
-            "0x74657374",
-            "1",
-            "2",
-            "3",
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "7",
-        ];
-        for option in [["--participants", "4"], ["--signers-hex", "0x07"]] {
-            let parsed = Cli::try_parse_from(base.into_iter().chain(option)).unwrap();
-            assert_eq!(
-                parsed.command.execute().unwrap_err(),
-                "--participants and --signers-hex are valid only for multisig"
+    fn threshold_rejects_multisig_fields_and_old_flags() {
+        let base = subject_args("threshold", "minsig", "nullify");
+        for fields in [
+            ["4", "0x07"],
+            ["--participants", "4"],
+            ["--signers", "0x07"],
+            ["--signers-hex", "0x07"],
+        ] {
+            assert!(
+                Cli::try_parse_from(base.iter().copied().chain(["--seed", "7"]).chain(fields))
+                    .is_err()
             );
         }
 

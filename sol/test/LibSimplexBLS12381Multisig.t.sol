@@ -182,25 +182,33 @@ contract LibSimplexBLS12381MultisigTest is Test {
         uint256 participants,
         bytes memory signers
     ) internal returns (Case memory c) {
-        string[] memory args = new string[](16);
+        string[] memory args = new string[](24);
         args[0] = _binary();
         args[1] = "simplex";
         args[2] = "generate";
         args[3] = "multisig";
-        args[4] = minSig ? "minsig" : "minpk";
-        args[5] = subject.kind == Simplex.Kind.Notarization
+        args[4] = "--variant";
+        args[5] = minSig ? "minsig" : "minpk";
+        args[6] = "--kind";
+        args[7] = subject.kind == Simplex.Kind.Notarization
             ? "notarize"
             : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
-        args[6] = vm.toString(namespace);
-        args[7] = vm.toString(uint256(subject.epoch));
-        args[8] = vm.toString(uint256(subject.viewNumber));
-        args[9] = vm.toString(uint256(subject.parent));
-        args[10] = vm.toString(subject.payload);
-        args[11] = vm.toString(uint256(seed));
-        args[12] = "--participants";
-        args[13] = vm.toString(participants);
-        args[14] = "--signers-hex";
-        args[15] = vm.toString(signers);
+        args[8] = "--namespace-hex";
+        args[9] = vm.toString(namespace);
+        args[10] = "--epoch";
+        args[11] = vm.toString(uint256(subject.epoch));
+        args[12] = "--view";
+        args[13] = vm.toString(uint256(subject.viewNumber));
+        args[14] = "--parent";
+        args[15] = vm.toString(uint256(subject.parent));
+        args[16] = "--payload-hex";
+        args[17] = vm.toString(subject.payload);
+        args[18] = "--participants";
+        args[19] = vm.toString(participants);
+        args[20] = "--signers";
+        args[21] = vm.toString(signers);
+        args[22] = "--seed";
+        args[23] = vm.toString(uint256(seed));
         (c.signature, c.publicKeys, c.signers, c.message) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 

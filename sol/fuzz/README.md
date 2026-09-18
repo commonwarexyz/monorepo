@@ -12,15 +12,6 @@ target/release/commonware-sol-fuzz merkle --help
 target/release/commonware-sol-fuzz simplex --help
 ```
 
-```text
-certificate threshold generate <variant> <namespace_hex> <message_hex> <seed>
-certificate threshold check <variant> <public_key_hex> <namespace_hex> <message_hex> <signature_hex>
-certificate multisig generate <variant> <namespace_hex> <message_hex> <participants> <signers_hex> <seed>
-certificate multisig check <variant> <public_keys_hex> <signers_hex> <quorum> <namespace_hex> <message_hex> <signature_hex>
-certificate hash <variant> <namespace_hex> <message_hex>
-simplex generate <scheme> <variant> <kind> <namespace_hex> <epoch> <view> <parent> <payload_hex> <seed> [--participants <n>] [--signers-hex <bitmap>]
-```
-
 - `bmt`: Generate and check binary Merkle tree proofs.
 - `certificate`: Generate and check BLS12-381 certificates, or hash namespaced messages
   to curve points.
