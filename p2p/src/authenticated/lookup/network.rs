@@ -63,6 +63,8 @@ where
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
+        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+        // that adding the overhead back cannot overflow.
         assert!(
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
