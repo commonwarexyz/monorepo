@@ -5,7 +5,7 @@ import { HashSelection, HashTest } from "./Common.t.sol";
 import { LibBMT } from "../src/merkle/LibBMT.sol";
 
 /// @dev External entry points isolate gas measurements and expose calldata slices.
-contract BMTHarness is HashSelection {
+abstract contract BMTHarness is HashSelection {
     /// @dev Verify a memory single proof.
     function single(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
@@ -67,7 +67,7 @@ contract BMTHarness is HashSelection {
     }
 }
 
-contract LibBMTTest is HashTest {
+abstract contract LibBMTTest is HashTest {
     struct Case {
         bytes32 root;
         uint256 leaves;
@@ -77,7 +77,7 @@ contract LibBMTTest is HashTest {
         bytes32[] proof;
     }
 
-    BMTHarness internal harness = new BMTHarness();
+    BMTHarness internal harness;
 
     /// @dev Build an independent complete tree and collect missing siblings by level.
     function fixture(uint256 size, uint256[] memory indices, bytes32 seed) internal pure returns (Case memory c) {
@@ -631,22 +631,33 @@ contract LibBMTTest is HashTest {
     }
 }
 
-/// @dev SHA-256 specialization keeps the verifier's hasher constant at each call site.
+contract BMTKeccak256Harness is BMTHarness {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+}
+
+contract LibBMTKeccak256Test is LibBMTTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+
+    function setUp() public {
+        harness = new BMTKeccak256Harness();
+    }
+}
+
 contract BMTSha256Harness is BMTHarness {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-/// @dev Exercise the full BMT suite with SHA-256 and the Rust SHA-256 oracle.
 contract LibBMTSha256Test is LibBMTTest {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 
-    /// @dev Install the SHA-256 harness for memory and calldata verification.
     function setUp() public {
         harness = new BMTSha256Harness();
     }

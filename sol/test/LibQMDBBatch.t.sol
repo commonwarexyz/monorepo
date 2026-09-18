@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { QMDBTest, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
@@ -35,47 +35,45 @@ struct BatchNode {
     uint256 selected;
 }
 
-abstract contract LibQMDBBatchTest is HashTest {
-    function _mmb() internal pure virtual returns (bool);
-
+abstract contract LibQMDBBatchTest is QMDBTest {
     /// @dev Exercise every plain facade against the same operation bytes and proof.
     function callPlain(BatchCase calldata c, bytes[] memory operations, uint256 facade) internal view returns (bool) {
         if (c.current) {
             if (c.sparse) {
-                return _mmb()
+                return _family() == MerkleFamily.MMB
                     ? LibQMDBCurrentMMB.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
                     : LibQMDBCurrentMMR.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
             }
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBCurrentMMB.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
                 : LibQMDBCurrentMMR.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
         }
         if (c.sparse) {
             if (facade == 0) {
-                return _mmb()
+                return _family() == MerkleFamily.MMB
                     ? LibQMDBAnyMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                     : LibQMDBAnyMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
             if (facade == 1) {
-                return _mmb()
+                return _family() == MerkleFamily.MMB
                     ? LibQMDBKeylessMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                     : LibQMDBKeylessMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBImmutableMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                 : LibQMDBImmutableMMR.verifyMulti(c.root, operations, c.multi, _hasher());
         }
         if (facade == 0) {
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBAnyMMB.verifyRange(c.root, operations, c.range, _hasher())
                 : LibQMDBAnyMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
         if (facade == 1) {
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBKeylessMMB.verifyRange(c.root, operations, c.range, _hasher())
                 : LibQMDBKeylessMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBImmutableMMB.verifyRange(c.root, operations, c.range, _hasher())
             : LibQMDBImmutableMMR.verifyRange(c.root, operations, c.range, _hasher());
     }
@@ -171,7 +169,7 @@ abstract contract LibQMDBBatchTest is HashTest {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                if (_mmb()) break;
+                if (_family() == MerkleFamily.MMB) break;
                 j = count;
             }
         }
@@ -593,7 +591,7 @@ abstract contract LibQMDBBatchTest is HashTest {
         args[offset++] = "--seed";
         args[offset++] = "71";
         args[offset++] = "--family";
-        args[offset++] = _mmb() ? "mmb" : "mmr";
+        args[offset++] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[offset++] = "--variant";
         args[offset++] = variant;
         args[offset++] = "--encoding";
@@ -829,29 +827,37 @@ abstract contract LibQMDBBatchTest is HashTest {
     }
 }
 
-contract LibQMDBBatchMMBTest is LibQMDBBatchTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBBatchMMBTest is LibQMDBBatchTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBBatchMMBKeccak256Test is LibQMDBBatchMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBBatchMMBSha256Test is LibQMDBBatchMMBTest {
-    /// @dev Select the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBBatchMMRTest is LibQMDBBatchTest {
-    /// @dev Select eager merges.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBBatchMMRTest is LibQMDBBatchTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBBatchMMRKeccak256Test is LibQMDBBatchMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBBatchMMRSha256Test is LibQMDBBatchMMRTest {
-    /// @dev Select the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

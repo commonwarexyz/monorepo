@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { QMDBTest, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
-abstract contract LibQMDBLifecycleTest is HashTest {
+abstract contract LibQMDBLifecycleTest is QMDBTest {
     struct Operation {
         bytes32 root;
         uint256 leaves;
@@ -30,9 +30,6 @@ abstract contract LibQMDBLifecycleTest is HashTest {
         uint256 retainedStart;
     }
 
-    /// @dev Select the append family used by the database and verifier.
-    function _mmb() internal pure virtual returns (bool);
-
     /// @dev Expose the calldata proof entrypoints with the fixture's 32-byte bitmap chunks.
     function verify(
         bytes32 root,
@@ -42,11 +39,11 @@ abstract contract LibQMDBLifecycleTest is HashTest {
         bytes32 key
     ) external view returns (bool) {
         if (exclusion) {
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, 32, _hasher())
                 : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, 32, _hasher());
         }
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBCurrentMMB.verify(root, operation, proof, 32, _hasher())
             : LibQMDBCurrentMMR.verify(root, operation, proof, 32, _hasher());
     }
@@ -82,7 +79,7 @@ abstract contract LibQMDBLifecycleTest is HashTest {
             args[3] = "--seed";
             args[4] = vm.toString(seeds[i]);
             args[5] = "--family";
-            args[6] = _mmb() ? "mmb" : "mmr";
+            args[6] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
             Lifecycle memory c = abi.decode(_ffi(args), (Lifecycle));
             assertGt(c.retainedStart, 0, "pruning must remove stored operations");
             assertLt(c.empty.leaves, 2048, "bounded lifecycle");
@@ -105,29 +102,37 @@ abstract contract LibQMDBLifecycleTest is HashTest {
     }
 }
 
-contract LibQMDBLifecycleMMBTest is LibQMDBLifecycleTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBLifecycleMMBTest is LibQMDBLifecycleTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBLifecycleMMBKeccak256Test is LibQMDBLifecycleMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBLifecycleMMBSha256Test is LibQMDBLifecycleMMBTest {
-    /// @dev Select the SHA-256 precompile and matching Rust database hasher.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBLifecycleMMRTest is LibQMDBLifecycleTest {
-    /// @dev Select the MMR append family for the complete lifecycle.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBLifecycleMMRTest is LibQMDBLifecycleTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBLifecycleMMRKeccak256Test is LibQMDBLifecycleMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBLifecycleMMRSha256Test is LibQMDBLifecycleMMRTest {
-    /// @dev Select the SHA-256 precompile and matching Rust database hasher.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

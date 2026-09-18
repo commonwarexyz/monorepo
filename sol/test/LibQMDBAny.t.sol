@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { UnorderedOracle } from "./Common.t.sol";
+import { UnorderedOracle, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
 import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
@@ -23,7 +23,7 @@ struct AnyNode {
 abstract contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev Expose the selected family through a calldata proof entrypoint.
     function verify(AnyCase calldata c) external view returns (bool) {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher());
     }
@@ -43,7 +43,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                     mstore(p, not(0))
                 }
             }
-            bool result = _mmb()
+            bool result = _family() == MerkleFamily.MMB
                 ? LibQMDBAnyMMB.verify(c.root, operation, c.proof, _hasher())
                 : LibQMDBAnyMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
@@ -94,7 +94,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                if (_mmb()) break;
+                if (_family() == MerkleFamily.MMB) break;
                 j = count;
             }
         }
@@ -222,7 +222,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(this.checked(c), "empty tree accepted");
-        c.proof.leaves = (uint256(1) << 62) + (_mmb() ? 31 : 1);
+        c.proof.leaves = (uint256(1) << 62) + (_family() == MerkleFamily.MMB ? 31 : 1);
         assertFalse(this.checked(c), "unsupported leaf count accepted");
         c.proof.leaves = type(uint256).max;
         assertFalse(this.checked(c), "oversized leaf count accepted");
@@ -239,7 +239,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
 
     /// @dev A root and proof from a distinct topology fail under the other family.
     function rejectOtherFamily(AnyCase calldata c) external view {
-        bool valid = _mmb()
+        bool valid = _family() == MerkleFamily.MMB
             ? LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
@@ -274,7 +274,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--chunk-bytes";
         args[14] = "32";
         if (historical) {
@@ -392,29 +392,37 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
     }
 }
 
-contract LibQMDBAnyMMBTest is LibQMDBAnyTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBAnyMMBTest is LibQMDBAnyTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBAnyMMBKeccak256Test is LibQMDBAnyMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBAnyMMBSha256Test is LibQMDBAnyMMBTest {
-    /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBAnyMMRTest is LibQMDBAnyTest {
-    /// @dev Select the eagerly merged MMR family.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBAnyMMRTest is LibQMDBAnyTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBAnyMMRKeccak256Test is LibQMDBAnyMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBAnyMMRSha256Test is LibQMDBAnyMMRTest {
-    /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

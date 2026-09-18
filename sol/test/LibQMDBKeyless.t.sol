@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { QMDBTest, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
 import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
@@ -12,9 +12,7 @@ struct KeylessCase {
     LibQMDBCommon.Proof proof;
 }
 
-abstract contract LibQMDBKeylessTest is HashTest {
-    function _mmb() internal pure virtual returns (bool);
-
+abstract contract LibQMDBKeylessTest is QMDBTest {
     /// @dev Caller allocations and reusable scratch survive successful and rejected proofs.
     function checked(KeylessCase calldata c) external view returns (bool valid) {
         bytes memory operation = c.operation;
@@ -30,7 +28,7 @@ abstract contract LibQMDBKeylessTest is HashTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = _mmb()
+            bool result = _family() == MerkleFamily.MMB
                 ? LibQMDBKeylessMMB.verify(c.root, operation, c.proof, _hasher())
                 : LibQMDBKeylessMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
@@ -198,7 +196,7 @@ abstract contract LibQMDBKeylessTest is HashTest {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(this.checked(c), "empty tree accepted");
-        c.proof.leaves = (uint256(1) << 62) + (_mmb() ? 31 : 1);
+        c.proof.leaves = (uint256(1) << 62) + (_family() == MerkleFamily.MMB ? 31 : 1);
         assertFalse(this.checked(c), "unsupported leaf count accepted");
         c.proof.leaves = type(uint256).max;
         assertFalse(this.checked(c), "oversized leaf count accepted");
@@ -228,7 +226,7 @@ abstract contract LibQMDBKeylessTest is HashTest {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--encoding";
         args[14] = variableEncoding ? "variable" : "fixed";
         args[15] = "--operation";
@@ -286,7 +284,7 @@ abstract contract LibQMDBKeylessTest is HashTest {
 
     /// @dev A distinct merge history must not authenticate under the other tree family.
     function rejectOtherFamily(KeylessCase calldata c) external view {
-        bool valid = _mmb()
+        bool valid = _family() == MerkleFamily.MMB
             ? LibQMDBKeylessMMR.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBKeylessMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
@@ -340,29 +338,37 @@ abstract contract LibQMDBKeylessTest is HashTest {
     }
 }
 
-contract LibQMDBKeylessMMBTest is LibQMDBKeylessTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBKeylessMMBTest is LibQMDBKeylessTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBKeylessMMBKeccak256Test is LibQMDBKeylessMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBKeylessMMBSha256Test is LibQMDBKeylessMMBTest {
-    /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBKeylessMMRTest is LibQMDBKeylessTest {
-    /// @dev Select the eagerly merged MMR family.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBKeylessMMRTest is LibQMDBKeylessTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBKeylessMMRKeccak256Test is LibQMDBKeylessMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBKeylessMMRSha256Test is LibQMDBKeylessMMRTest {
-    /// @dev Run the inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashTest } from "./Common.t.sol";
+import { QMDBTest, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
 import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
@@ -12,9 +12,7 @@ struct ImmutableCase {
     LibQMDBCommon.Proof proof;
 }
 
-abstract contract LibQMDBImmutableTest is HashTest {
-    function _mmb() internal pure virtual returns (bool);
-
+abstract contract LibQMDBImmutableTest is QMDBTest {
     /// @dev Repeated verification preserves caller bytes, allocation alignment, and the zero slot.
     function checked(ImmutableCase calldata c) external view returns (bool valid) {
         bytes memory operation = c.operation;
@@ -30,7 +28,7 @@ abstract contract LibQMDBImmutableTest is HashTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = _mmb()
+            bool result = _family() == MerkleFamily.MMB
                 ? LibQMDBImmutableMMB.verify(c.root, operation, c.proof, _hasher())
                 : LibQMDBImmutableMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
@@ -144,7 +142,7 @@ abstract contract LibQMDBImmutableTest is HashTest {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--encoding";
         args[14] = variableEncoding ? "variable" : "fixed";
         args[15] = "--operation";
@@ -217,29 +215,37 @@ abstract contract LibQMDBImmutableTest is HashTest {
     }
 }
 
-contract LibQMDBImmutableMMBTest is LibQMDBImmutableTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBImmutableMMBTest is LibQMDBImmutableTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBImmutableMMBKeccak256Test is LibQMDBImmutableMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBImmutableMMBSha256Test is LibQMDBImmutableMMBTest {
-    /// @dev Run inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBImmutableMMRTest is LibQMDBImmutableTest {
-    /// @dev Select the eagerly merged MMR family.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBImmutableMMRTest is LibQMDBImmutableTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBImmutableMMRKeccak256Test is LibQMDBImmutableMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBImmutableMMRSha256Test is LibQMDBImmutableMMRTest {
-    /// @dev Run inherited cases through the SHA256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

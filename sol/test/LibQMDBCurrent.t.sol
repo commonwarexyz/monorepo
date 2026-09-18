@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { UnorderedOracle } from "./Common.t.sol";
+import { UnorderedOracle, MerkleFamily } from "./Common.t.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
@@ -27,21 +27,21 @@ struct QMDBNode {
 abstract contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Expose the calldata proof entrypoint for tests and gas measurements.
     function verify(QMDBCase calldata c) external view returns (bool) {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher())
             : LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher());
     }
 
     /// @dev Expose the default configuration as a literal for comparable gas measurements.
     function verify32(QMDBCase calldata c) external view returns (bool) {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, 32, _hasher())
             : LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, 32, _hasher());
     }
 
     /// @dev Reject the supplied root and proof under the other append family's topology.
     function rejectOtherFamily(QMDBCase calldata c) external view {
-        bool valid = _mmb()
+        bool valid = _family() == MerkleFamily.MMB
             ? LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher())
             : LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
@@ -79,7 +79,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             }
             bool result;
             if (mode == 2) {
-                result = _mmb()
+                result = _family() == MerkleFamily.MMB
                     ? LibQMDBCurrentMMB.verifyExclusionVariable(
                         c.root, key, operation, c.proof, encoding, c.chunkBytes, _hasher()
                     )
@@ -87,7 +87,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
                         c.root, key, operation, c.proof, encoding, c.chunkBytes, _hasher()
                     );
             } else if (mode == 1) {
-                result = _mmb()
+                result = _family() == MerkleFamily.MMB
                     ? LibQMDBCurrentMMB.verifyExclusion(
                         c.root, bytes32(key), operation, c.proof, c.chunkBytes, _hasher()
                     )
@@ -95,7 +95,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
                         c.root, bytes32(key), operation, c.proof, c.chunkBytes, _hasher()
                     );
             } else {
-                result = _mmb()
+                result = _family() == MerkleFamily.MMB
                     ? LibQMDBCurrentMMB.verify(c.root, operation, c.proof, c.chunkBytes, _hasher())
                     : LibQMDBCurrentMMR.verify(c.root, operation, c.proof, c.chunkBytes, _hasher());
             }
@@ -186,7 +186,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                if (_mmb()) break;
+                if (_family() == MerkleFamily.MMB) break;
                 j = count;
             }
         }
@@ -258,7 +258,9 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             uint256[4] memory locations = [uint256(0), n / 2, n > 256 ? 255 : n - 1, n - 1];
             for (uint256 j; j < locations.length; ++j) {
                 QMDBCase memory c = this.build(n, locations[j], hex"00112233445566778899aabbcc", true);
-                if (!_mmb()) assertEq(c.proof.pending, 0, "MMR leaves a complete chunk ungrafted");
+                if (_family() == MerkleFamily.MMR) {
+                    assertEq(c.proof.pending, 0, "MMR leaves a complete chunk ungrafted");
+                }
                 assertTrue(this.checked(c));
             }
         }
@@ -409,7 +411,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
-        c.proof.leaves = (uint256(1) << 62) + (_mmb() ? 31 : 1);
+        c.proof.leaves = (uint256(1) << 62) + (_family() == MerkleFamily.MMB ? 31 : 1);
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.leaves = type(uint256).max;
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
@@ -595,7 +597,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--chunk-bytes";
         args[14] = vm.toString(chunkBytes);
         (
@@ -772,7 +774,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         args[9] = "--keyhex";
         args[10] = vm.toString(key);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--mode";
         args[14] = mode;
         args[15] = "--inactivity-floor";
@@ -840,12 +842,14 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Measure only the verifier call for grafted, pending, and partial target chunks.
     function test_Gas() public {
         uint256[3] memory locations = [uint256(17), 256, 637];
-        string[3] memory names = [string("grafted"), _mmb() ? "pending" : "grafted-second", "partial"];
+        string[3] memory names =
+            [string("grafted"), _family() == MerkleFamily.MMB ? "pending" : "grafted-second", "partial"];
         for (uint256 i; i < locations.length; ++i) {
             QMDBCase memory c = this.build(638, locations[i], new bytes(97), true);
             assertTrue(this.verify32(c));
             emit log_named_uint(
-                string.concat(_group(_mmb() ? "QMDB" : "QMDBMMR"), "/", names[i]), vm.lastFrameGas().gasTotalUsed
+                string.concat(_group(_family() == MerkleFamily.MMB ? "QMDBMMB" : "QMDBMMR"), "/", names[i]),
+                vm.lastFrameGas().gasTotalUsed
             );
         }
     }
@@ -1056,7 +1060,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         args[9] = "--keyhex";
         args[10] = vm.toString(key);
         args[11] = "--family";
-        args[12] = _mmb() ? "mmb" : "mmr";
+        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
         args[13] = "--chunk-bytes";
         args[14] = vm.toString(chunkBytes);
         args[15] = "--inactivity-floor";
@@ -1174,29 +1178,37 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     }
 }
 
-contract LibQMDBCurrentMMBTest is LibQMDBCurrentTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+abstract contract LibQMDBCurrentMMBTest is LibQMDBCurrentTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
+    }
+}
+
+contract LibQMDBCurrentMMBKeccak256Test is LibQMDBCurrentMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBCurrentMMBSha256Test is LibQMDBCurrentMMBTest {
-    /// @dev Run the same compatibility and rejection cases through the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract LibQMDBCurrentMMRTest is LibQMDBCurrentTest {
-    /// @dev Select the eagerly merged MMR append family.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+abstract contract LibQMDBCurrentMMRTest is LibQMDBCurrentTest {
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
+    }
+}
+
+contract LibQMDBCurrentMMRKeccak256Test is LibQMDBCurrentMMRTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
     }
 }
 
 contract LibQMDBCurrentMMRSha256Test is LibQMDBCurrentMMRTest {
-    /// @dev Run MMR compatibility and rejection cases through the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { RawSha256Hasher } from "./Common.t.sol";
+import { RawSha256Hasher, MerkleFamily } from "./Common.t.sol";
 import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBBatchTest, BatchCase } from "./LibQMDBBatch.t.sol";
@@ -53,12 +53,14 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         precompile = LibQMDBBatchTest(
             deployCode(
-                _mmb() ? "LibQMDBBatch.t.sol:LibQMDBBatchMMBSha256Test" : "LibQMDBBatch.t.sol:LibQMDBBatchMMRSha256Test"
+                _family() == MerkleFamily.MMB
+                    ? "LibQMDBBatch.t.sol:LibQMDBBatchMMBSha256Test"
+                    : "LibQMDBBatch.t.sol:LibQMDBBatchMMRSha256Test"
             )
         );
         currentBuilder = LibQMDBCurrentTest(
             deployCode(
-                _mmb()
+                _family() == MerkleFamily.MMB
                     ? "LibQMDBCurrent.t.sol:LibQMDBCurrentMMBSha256Test"
                     : "LibQMDBCurrent.t.sol:LibQMDBCurrentMMRSha256Test"
             )
@@ -71,7 +73,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBAnyMMB.verify(root, operation, proof, hasher)
             : LibQMDBAnyMMR.verify(root, operation, proof, hasher);
     }
@@ -82,7 +84,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBKeylessMMB.verify(root, operation, proof, hasher)
             : LibQMDBKeylessMMR.verify(root, operation, proof, hasher);
     }
@@ -93,7 +95,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBImmutableMMB.verify(root, operation, proof, hasher)
             : LibQMDBImmutableMMR.verify(root, operation, proof, hasher);
     }
@@ -101,7 +103,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     /// @dev Select membership or a proper interior query in a fixed-width exclusion interval.
     function singleCurrent(QMDBCase calldata c, address hasher, bool exclusion) external view returns (bool) {
         if (exclusion) {
-            return _mmb()
+            return _family() == MerkleFamily.MMB
                 ? LibQMDBCurrentMMB.verifyExclusion(
                     c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
                 )
@@ -109,7 +111,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
                     c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
                 );
         }
-        return _mmb()
+        return _family() == MerkleFamily.MMB
             ? LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher)
             : LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher);
     }
@@ -241,17 +243,14 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     }
 }
 
-/// @dev Run the same raw-target contracts against eager MMR append geometry.
 contract LibQMDBHashMMBTest is LibQMDBHashTest {
-    /// @dev Select the delayed-merge MMB append family.
-    function _mmb() internal pure override returns (bool) {
-        return true;
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMB;
     }
 }
 
 contract LibQMDBHashMMRTest is LibQMDBHashTest {
-    /// @dev Select the eagerly merged append family for builders and verification.
-    function _mmb() internal pure override returns (bool) {
-        return false;
+    function _family() internal pure override returns (MerkleFamily) {
+        return MerkleFamily.MMR;
     }
 }
