@@ -91,9 +91,6 @@ where
     pub send_batch_size: NonZeroUsize,
 
     /// Maximum time into the future allowed for timestamps in discovery gossip.
-    ///
-    /// Configure the handshake's clock-skew tolerance separately. For the encrypted
-    /// handshake, see [`commonware_stream::encrypted::Handshake::synchrony_bound`].
     pub synchrony_bound: Duration,
 
     /// Maximum time to authenticate an established connection, including peer admission.

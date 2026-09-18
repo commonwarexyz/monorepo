@@ -19,13 +19,12 @@ commonware_macros::stability_scope!(BETA {
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
     ///
-    /// Implementations own their authentication mechanism, which may be asynchronous and fallible.
-    /// They must authenticate each peer's declared identity and bind the supplied application
-    /// namespace, both peer identities, and both message directions to the established session.
-    /// The returned sender and receiver must preserve message boundaries and protect message
-    /// integrity. Confidentiality depends on the implementation. A successful
-    /// dial must authenticate the expected peer. A listen may succeed only if the bouncer returns
-    /// `true` for the same authenticated peer that is returned.
+    /// Implementations must authenticate each peer's declared identity and bind the supplied
+    /// application namespace, both peer identities, and both message directions to the established
+    /// session. The returned sender and receiver must preserve message boundaries and protect message
+    /// integrity. Confidentiality depends on the implementation. A successful dial must authenticate
+    /// the expected peer. A listen may succeed only if the bouncer returns `true` for the same
+    /// authenticated peer that is returned.
     ///
     /// `max_message_size` sets the plaintext message limit for the returned streams. Callers must
     /// supply a limit no greater than [`Self::MAX_SIZE`]. Implementations must reject larger outbound
@@ -123,7 +122,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Sends messages in order, preserving each message's boundary.
         ///
-        /// Implementations may combine writes. An empty batch succeeds without sending data.
+        /// An empty batch succeeds without sending data.
         fn send_many<I>(&mut self, messages: I) -> impl Future<Output = Result<(), Self::Error>> + Send
         where
             I: IntoIterator + Send,

@@ -67,7 +67,7 @@ use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
 };
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{DurationExt, SystemTimeExt};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -118,20 +118,12 @@ impl From<HandshakeError> for Error {
 }
 
 /// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
-///
-/// # Warning
-///
-/// Coordinate timestamp tolerances across peers to accommodate clock skew and message delays.
-/// Incompatible tolerances can cause connections to be rejected.
 #[derive(Clone)]
 pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
     /// Maximum time drift allowed for future timestamps.
-    ///
-    /// This governs the encrypted handshake. Protocols running over the stream may have
-    /// their own clock-skew tolerance, which must be configured separately.
     pub synchrony_bound: Duration,
 
     /// Maximum age of handshake messages before rejection.
@@ -150,14 +142,9 @@ impl<S> Handshake<S> {
 
     /// Computes the current time and acceptable timestamp range.
     pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
-        fn duration_to_u64(d: Duration) -> u64 {
-            u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
-        }
-
-        let current_time_ms = duration_to_u64(ctx.current().epoch());
-        let ok_timestamps = (current_time_ms
-            .saturating_sub(duration_to_u64(self.max_handshake_age)))
-            ..(current_time_ms.saturating_add(duration_to_u64(self.synchrony_bound)));
+        let current_time_ms = ctx.current().epoch().as_millis_u64();
+        let ok_timestamps = (current_time_ms.saturating_sub(self.max_handshake_age.as_millis_u64()))
+            ..(current_time_ms.saturating_add(self.synchrony_bound.as_millis_u64()));
         (current_time_ms, ok_timestamps)
     }
 }
