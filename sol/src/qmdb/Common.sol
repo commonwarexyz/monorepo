@@ -36,7 +36,7 @@ library Common {
             proof.start,
             proof.digests,
             proof.inactivePeaks,
-            LibMerkle.RangeGraft(new bytes32[](0), 0, 0),
+            LibMerkle.RangeGraft(0, 0, 0, 0),
             mmb,
             hasher
         );

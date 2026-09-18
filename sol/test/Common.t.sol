@@ -57,9 +57,24 @@ abstract contract UnorderedOracle is HashTest {
         bool current,
         uint256 valueLength
     ) internal returns (bytes memory) {
+        return unorderedFixture(leaves, location, floor, encoding, operation, history, current, valueLength, 32);
+    }
+
+    /// @dev Return an Any tuple, or a Current tuple for the selected activity chunk size.
+    function unorderedFixture(
+        uint256 leaves,
+        uint256 location,
+        uint256 floor,
+        string memory encoding,
+        string memory operation,
+        string memory history,
+        bool current,
+        uint256 valueLength,
+        uint256 chunkBytes
+    ) internal returns (bytes memory) {
         bool historical = bytes(history).length != 0;
         bool variableLength = keccak256(bytes(encoding)) == keccak256("variable");
-        string[] memory args = new string[](14 + (historical ? 2 : 0) + (current ? 1 : 0) + (variableLength ? 2 : 0));
+        string[] memory args = new string[](14 + (historical ? 2 : 0) + (current ? 3 : 0) + (variableLength ? 2 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "unordered";
@@ -79,7 +94,11 @@ abstract contract UnorderedOracle is HashTest {
             args[offset++] = "--history";
             args[offset++] = history;
         }
-        if (current) args[offset++] = "--current";
+        if (current) {
+            args[offset++] = "--current";
+            args[offset++] = "--chunk-bytes";
+            args[offset++] = vm.toString(chunkBytes);
+        }
         if (variableLength) {
             args[offset++] = "--value-length";
             args[offset] = vm.toString(valueLength);

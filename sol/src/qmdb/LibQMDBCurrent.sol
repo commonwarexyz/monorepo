@@ -5,19 +5,21 @@ import { Common } from "../merkle/Common.sol";
 import { LibMerkle } from "../merkle/LibMerkle.sol";
 import { Common as QMDBCommon } from "./Common.sol";
 
-/// @notice Verify active operations and key exclusion in a current QMDB with 32-byte bitmap chunks.
+/// @notice Verify active operations and key exclusion in a current QMDB with configurable bitmap chunks.
 /// @dev Uses QMDB's backward peak fold and big-endian position and count encodings.
-/// The caller supplies an authenticated root and a trusted hash target.
+/// The caller supplies an authenticated root and a trusted hash target and chunk byte size.
+/// Chunk bytes must be a nonzero power of two below `2^60`, matching the authenticated database.
 /// Hash targets receive raw bytes and must return exactly 32 bytes.
 /// A failed call or any other return length reverts with `Common.HashFailed()`.
 library LibQMDBCurrent {
     /// @dev Absent pending and partial digests are zero. Their presence follows from
     /// `leaves` and the tree family. MMR proofs never have a pending digest.
+    /// `chunk` contains exactly the configured number of bitmap bytes.
     struct Proof {
         uint256 leaves;
         uint256 location;
         uint256 inactivePeaks;
-        bytes32 chunk;
+        bytes chunk;
         bytes32 opsRoot;
         bytes32 pending;
         bytes32 partialDigest;
@@ -25,12 +27,13 @@ library LibQMDBCurrent {
     }
 
     /// @dev A range authenticates operation bytes and their activity chunks, including inactive bits.
+    /// Chunks are packed in increasing chunk order, each with the configured byte size.
     /// Absent pending and partial digests are zero and their presence follows from `leaves`.
     struct RangeProof {
         uint256 start;
         uint256 leaves;
         uint256 inactivePeaks;
-        bytes32[] chunks;
+        bytes chunks;
         bytes32 opsRoot;
         bytes32 pending;
         bytes32 partialDigest;
@@ -47,23 +50,27 @@ library LibQMDBCurrent {
     }
 
     /// @notice Verify operation bytes and activity status for a Current MMB range.
-    /// @dev Inactive operations are valid and every touched 256-bit activity chunk is authenticated.
-    function verifyRange(bytes32 root, bytes[] memory operations, RangeProof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _verifyRange(root, operations, proof, true, hasher);
+    /// @dev Inactive operations are valid and every touched activity chunk is authenticated.
+    function verifyRange(
+        bytes32 root,
+        bytes[] memory operations,
+        RangeProof calldata proof,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _verifyRange(root, operations, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify operation bytes and activity status for a Current MMR range.
-    /// @dev Inactive operations are valid and every touched 256-bit activity chunk is authenticated.
-    function verifyRangeMMR(bytes32 root, bytes[] memory operations, RangeProof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _verifyRange(root, operations, proof, false, hasher);
+    /// @dev Inactive operations are valid and every touched activity chunk is authenticated.
+    function verifyRangeMMR(
+        bytes32 root,
+        bytes[] memory operations,
+        RangeProof calldata proof,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _verifyRange(root, operations, proof, false, chunkBytes, hasher);
     }
 
     /// @notice Verify historical operation inclusion under a canonical Current MMB root.
@@ -73,9 +80,10 @@ library LibQMDBCurrent {
         bytes[] memory operations,
         QMDBCommon.MultiProof calldata proof,
         OpsRootWitness calldata witness,
+        uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return _verifyOpsMulti(root, operations, proof, witness, true, hasher);
+        return _verifyOpsMulti(root, operations, proof, witness, true, chunkBytes, hasher);
     }
 
     /// @notice Verify historical operation inclusion under a canonical Current MMR root.
@@ -85,37 +93,40 @@ library LibQMDBCurrent {
         bytes[] memory operations,
         QMDBCommon.MultiProof calldata proof,
         OpsRootWitness calldata witness,
+        uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return _verifyOpsMulti(root, operations, proof, witness, false, hasher);
+        return _verifyOpsMulti(root, operations, proof, witness, false, chunkBytes, hasher);
     }
 
     /// @notice Verify an encoded operation and its active bit against a trusted current MMB root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation reconstructs `root` and consumes every digest.
-    function verify(bytes32 root, bytes memory operation, Proof calldata proof, address hasher)
+    function verify(bytes32 root, bytes memory operation, Proof calldata proof, uint256 chunkBytes, address hasher)
         internal
         view
         returns (bool)
     {
-        return _verify(root, operation, proof, true, hasher);
+        return _verify(root, operation, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify an encoded operation and its active bit against a trusted current MMR root.
     /// @param root Authenticated QMDB root.
     /// @param operation Exact Commonware operation encoding, without a length prefix.
-    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation reconstructs `root` and consumes every digest.
-    function verifyMMR(bytes32 root, bytes memory operation, Proof calldata proof, address hasher)
+    function verifyMMR(bytes32 root, bytes memory operation, Proof calldata proof, uint256 chunkBytes, address hasher)
         internal
         view
         returns (bool)
     {
-        return _verify(root, operation, proof, false, hasher);
+        return _verify(root, operation, proof, false, chunkBytes, hasher);
     }
 
     /// @notice Verify key exclusion against a trusted ordered current MMB root.
@@ -126,15 +137,19 @@ library LibQMDBCurrent {
     /// @param root Authenticated root of a database with this fixed ordered schema.
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusion(bytes32 root, bytes32 key, bytes memory operation, Proof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, true, hasher);
+    function verifyExclusion(
+        bytes32 root,
+        bytes32 key,
+        bytes memory operation,
+        Proof calldata proof,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, true, chunkBytes, hasher);
     }
 
     /// @notice Verify key exclusion against a trusted ordered current MMR root.
@@ -142,15 +157,19 @@ library LibQMDBCurrent {
     /// @param root Authenticated root of a database with 32-byte keys and fixed value encoding.
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with a 256-bit activity chunk.
+    /// @param proof Single-operation membership proof with a activity chunk.
+    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusionMMR(bytes32 root, bytes32 key, bytes memory operation, Proof calldata proof, address hasher)
-        internal
-        view
-        returns (bool)
-    {
-        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, false, hasher);
+    function verifyExclusionMMR(
+        bytes32 root,
+        bytes32 key,
+        bytes memory operation,
+        Proof calldata proof,
+        uint256 chunkBytes,
+        address hasher
+    ) internal view returns (bool) {
+        return _excludes(key, operation, proof.location) && _verify(root, operation, proof, false, chunkBytes, hasher);
     }
 
     /// @dev An active update excludes the open cyclic interval between its keys, including
@@ -185,40 +204,56 @@ library LibQMDBCurrent {
     }
 
     /// @dev Validate touched chunks before reconstructing their grafted operation range.
-    function _verifyRange(bytes32 root, bytes[] memory operations, RangeProof calldata proof, bool mmb, address hasher)
-        private
-        view
-        returns (bool)
-    {
+    function _verifyRange(
+        bytes32 root,
+        bytes[] memory operations,
+        RangeProof calldata proof,
+        bool mmb,
+        uint256 chunkBytes,
+        address hasher
+    ) private view returns (bool) {
+        if (!_validChunkBytes(chunkBytes)) return false;
+        uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         uint256 start = proof.start;
         uint256 count = operations.length;
         if (n > (uint256(1) << 62) + (mmb ? 30 : 0) || start >= n || count == 0 || count > n - start) {
             return false;
         }
-        uint256 firstChunk = start >> 8;
-        uint256 lastChunk = (start + count - 1) >> 8;
-        if (proof.chunks.length != lastChunk - firstChunk + 1) return false;
-        uint256 complete = n >> 8;
-        uint256 graftable = mmb ? Common.graftableMMBChunks(n, 8) : complete;
+        uint256 firstChunk = start >> height;
+        uint256 lastChunk = (start + count - 1) >> height;
+        bytes calldata chunks = proof.chunks;
+        if (chunks.length != (lastChunk - firstChunk + 1) * chunkBytes) return false;
+        uint256 complete = n >> height;
+        uint256 graftable = mmb ? Common.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
-        uint256 nextBit = n & 255;
+        uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && proof.pending != 0) || (nextBit == 0 && proof.partialDigest != 0)) return false;
         if (pending && firstChunk <= graftable && graftable <= lastChunk) {
-            if (Common.hash(proof.chunks[graftable - firstChunk], 0, 0, 32, hasher) != proof.pending) return false;
+            if (
+                Common.hash(
+                        chunks[(graftable - firstChunk) * chunkBytes:(graftable - firstChunk + 1) * chunkBytes], hasher
+                    ) != proof.pending
+            ) return false;
         }
         if (nextBit != 0 && lastChunk == complete) {
-            if (Common.hash(proof.chunks[lastChunk - firstChunk], 0, 0, 32, hasher) != proof.partialDigest) {
+            if (
+                Common.hash(
+                        chunks[(lastChunk - firstChunk) * chunkBytes:(lastChunk - firstChunk + 1) * chunkBytes], hasher
+                    ) != proof.partialDigest
+            ) {
                 return false;
             }
         }
+        uint256 chunkData;
+        assembly ("memory-safe") { chunkData := chunks.offset }
         (bytes32 merkleRoot, bool valid) = QMDBCommon.reconstructRange(
             operations,
             n,
             start,
             proof.digests,
             proof.inactivePeaks,
-            LibMerkle.RangeGraft(proof.chunks, firstChunk, graftable),
+            LibMerkle.RangeGraft(chunkData, firstChunk, graftable, chunkBytes << 3),
             mmb,
             hasher
         );
@@ -235,14 +270,17 @@ library LibQMDBCurrent {
         QMDBCommon.MultiProof calldata proof,
         OpsRootWitness calldata witness,
         bool mmb,
+        uint256 chunkBytes,
         address hasher
     ) private view returns (bool) {
+        if (!_validChunkBytes(chunkBytes)) return false;
+        uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         if (n > (uint256(1) << 62) + (mmb ? 30 : 0)) return false;
-        uint256 complete = n >> 8;
-        uint256 graftable = mmb ? Common.graftableMMBChunks(n, 8) : complete;
+        uint256 complete = n >> height;
+        uint256 graftable = mmb ? Common.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
-        uint256 nextBit = n & 255;
+        uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && witness.pending != 0) || (nextBit == 0 && witness.partialDigest != 0)) return false;
         if (
             _root(
@@ -259,24 +297,31 @@ library LibQMDBCurrent {
     }
 
     /// @dev The tree family determines the leaf bound, physical positions, and graftable chunks.
-    function _verify(bytes32 root, bytes memory operation, Proof calldata proof, bool mmb, address hasher)
-        private
-        view
-        returns (bool)
-    {
+    function _verify(
+        bytes32 root,
+        bytes memory operation,
+        Proof calldata proof,
+        bool mmb,
+        uint256 chunkBytes,
+        address hasher
+    ) private view returns (bool) {
+        if (!_validChunkBytes(chunkBytes)) return false;
+        uint256 height = Common.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
         uint256 loc = proof.location;
         if (n > (uint256(1) << 62) + (mmb ? 30 : 0) || loc >= n) return false;
-        if (uint8(proof.chunk[(loc & 255) >> 3]) & (uint256(1) << (loc & 7)) == 0) return false;
+        bytes calldata chunk = proof.chunk;
+        if (chunk.length != chunkBytes) return false;
+        if (uint8(chunk[(loc & ((chunkBytes << 3) - 1)) >> 3]) & (uint256(1) << (loc & 7)) == 0) return false;
 
-        uint256 complete = n >> 8;
-        uint256 graftable = mmb ? Common.graftableMMBChunks(n, 8) : complete;
+        uint256 complete = n >> height;
+        uint256 graftable = mmb ? Common.graftableMMBChunks(n, height) : complete;
         bool pending = complete != graftable;
-        uint256 nextBit = n & 255;
+        uint256 nextBit = n & ((chunkBytes << 3) - 1);
         if ((!pending && proof.pending != 0) || (nextBit == 0 && proof.partialDigest != 0)) return false;
-        uint256 chunkIndex = loc >> 8;
+        uint256 chunkIndex = loc >> height;
         if (chunkIndex >= graftable) {
-            bytes32 digest = Common.hash(proof.chunk, 0, 0, 32, hasher);
+            bytes32 digest = Common.hash(chunk, hasher);
             if (chunkIndex == complete) {
                 if (digest != proof.partialDigest) return false;
             } else if (digest != proof.pending) {
@@ -284,11 +329,25 @@ library LibQMDBCurrent {
             }
         }
 
+        uint256 chunkData;
+        assembly ("memory-safe") { chunkData := chunk.offset }
         (bytes32 merkleRoot, bool valid) = QMDBCommon.reconstruct(
-            n, loc, operation, proof.digests, proof.inactivePeaks, LibMerkle.Graft(proof.chunk, 256), mmb, hasher
+            n,
+            loc,
+            operation,
+            proof.digests,
+            proof.inactivePeaks,
+            LibMerkle.Graft(chunkData, chunkBytes << 3),
+            mmb,
+            hasher
         );
         if (!valid) return false;
         return _root(proof.opsRoot, merkleRoot, proof.pending, proof.partialDigest, pending, nextBit, hasher) == root;
+    }
+
+    /// @dev Rust bitmap chunks have a power-of-two byte length and a bit width below `2^63`.
+    function _validChunkBytes(uint256 chunkBytes) private pure returns (bool) {
+        return chunkBytes != 0 && chunkBytes < (uint256(1) << 60) && (chunkBytes & (chunkBytes - 1)) == 0;
     }
 
     /// @dev Pending precedes partial when both chunks are outside the grafted tree.

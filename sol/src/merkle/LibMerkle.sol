@@ -38,23 +38,26 @@ library LibMerkle {
         uint256 digestCount;
     }
 
-    /// @dev A prehashed leaf can bind additional data when its ancestor reaches `width` leaves.
+    /// @dev `prefix` addresses `width / 8` bitmap bytes in calldata. A zero width disables grafting.
+    /// Callers validate the extent and power-of-two width between 8 and `2^62`.
     struct Graft {
-        bytes32 prefix;
+        uint256 prefix;
         uint256 width;
     }
 
-    /// @dev Contiguous 256-bit activity chunks in memory. An empty array disables grafting.
-    /// `start` identifies `chunks[0]`. `graftable` excludes pending and partial chunks.
+    /// @dev `chunks` addresses packed bitmap bytes in calldata. A zero width disables grafting.
+    /// Callers validate the extent, touched chunk count, and power-of-two width between 8 and `2^62`.
+    /// `start` identifies the first chunk. `graftable` excludes pending and partial chunks.
     struct RangeGraft {
-        bytes32[] chunks;
+        uint256 chunks;
         uint256 start;
         uint256 graftable;
+        uint256 width;
     }
 
     /// @dev Reconstruct a backward-folded root from positioned leaf digests in memory.
     /// Witness digests are read from calldata. Nonzero activity chunks prefix their
-    /// width-256 ancestor digest. Zero chunks leave that digest unchanged.
+    /// chunk-width ancestor digest. Zero chunks leave that digest unchanged.
     /// Callers authenticate the result and validate the snapshot's graftable boundary.
     /// Input arrays remain caller-owned. Temporary state is cleared before restoring memory.
     function reconstructPrehashed(
@@ -73,7 +76,7 @@ library LibMerkle {
         // forge-lint: disable-next-line(boolean-cst)
         if (start > leaves || count > leaves - start) return (0, false);
         if (count == 0) {
-            if (leaves != 0 || start != 0 || proof.length != 0 || inactive != 0 || graft.chunks.length != 0) {
+            if (leaves != 0 || start != 0 || proof.length != 0 || inactive != 0 || graft.width != 0) {
                 // forge-lint: disable-next-line(boolean-cst)
                 return (0, false);
             }
@@ -81,14 +84,7 @@ library LibMerkle {
             return (Common.emptyRoot(hasher), true);
         }
         uint256 graftData = 0;
-        if (graft.chunks.length != 0) {
-            if (
-                graft.start != (start >> 8) || graft.graftable > (leaves >> 8)
-                    || graft.chunks.length != ((start + count - 1) >> 8) - (start >> 8) + 1
-            ) {
-                // forge-lint: disable-next-line(boolean-cst)
-                return (0, false);
-            }
+        if (graft.width != 0) {
             assembly ("memory-safe") { graftData := graft }
         }
         uint256 free;
@@ -108,8 +104,9 @@ library LibMerkle {
     }
 
     /// @dev Reconstruct a backward-folded root from a positioned leaf digest in the selected tree family.
-    /// `graft.prefix` is hashed before the ancestor digest at `graft.width` leaves.
-    /// Width is zero to disable ancestor grafting or a power of two of at least two.
+    /// Calldata bytes at `graft.prefix` are hashed before the ancestor at `graft.width` leaves.
+    /// Width is zero to disable ancestor grafting, or a power of two between 8 and `2^62`.
+    /// The caller validates exactly `width / 8` available bitmap bytes when grafting is enabled.
     /// The leaf is already positioned and hashed even when the width is zero.
     /// Callers authenticate the returned root.
     function reconstructGrafted(
@@ -245,7 +242,7 @@ library LibMerkle {
             uint256 next;
             bool ok;
             if (single) {
-                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt, 0, hasher);
+                (digest, next, ok) = _singleton(data, start, position, leaves, proof, end, cd, belt, 0, 0, hasher);
             } else {
                 uint256 base;
                 assembly ("memory-safe") { base := mload(0x40) }
@@ -310,7 +307,7 @@ library LibMerkle {
                             position = 2 * cursor - ones + 2 * w - 2;
                         }
                         if (single) {
-                            (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, 0, hasher);
+                            (d, q, ok) = _singleton(data, start - cursor, position, w, q, qEnd, cd, belt, 0, 0, hasher);
                         } else {
                             (d, q, ok) = _subtree(
                                 data, start, end, position, w, cursor, q, qEnd, base, cd, belt, false, 0, hasher
@@ -439,6 +436,7 @@ library LibMerkle {
                                 cd,
                                 belt,
                                 graft,
+                                base,
                                 hasher
                             );
                         } else if (prehashed) {
@@ -564,6 +562,7 @@ library LibMerkle {
         bool cd,
         bool belt,
         uint256 graft,
+        uint256 scratch,
         address hasher
     ) private view returns (bytes32 d, uint256 nextQ, bool ok) {
         assembly ("memory-safe") {
@@ -578,6 +577,40 @@ library LibMerkle {
                     revert(0x1c, 4)
                 }
                 digest := mload(0)
+            }
+            /// @dev Hash a nonzero bitmap prefix and digest. Zero chunks retain the operation digest.
+            /// The caller supplies scratch beyond live traversal state, cleared before returning.
+            function graftHash(pointer, length, digest, target, scratch_) -> result {
+                result := digest
+                switch gt(length, 32)
+                case 0 {
+                    let prefix := calldataload(pointer)
+                    let shift := shl(3, sub(32, length))
+                    if shr(shift, prefix) {
+                        mstore(0, prefix)
+                        mstore(length, digest)
+                        switch target
+                        case 0 { result := keccak256(0, add(length, 32)) }
+                        default { result := externalHash(0, add(length, 32), target) }
+                    }
+                }
+                default {
+                    let nonzero := 0
+                    for { let i := 0 } lt(i, length) { i := add(i, 32) } {
+                        let word := calldataload(add(pointer, i))
+                        nonzero := or(nonzero, word)
+                        mstore(add(scratch_, i), word)
+                    }
+                    if nonzero {
+                        mstore(add(scratch_, length), digest)
+                        switch target
+                        case 0 { result := keccak256(scratch_, add(length, 32)) }
+                        default { result := externalHash(scratch_, add(length, 32), target) }
+                    }
+                    for { let i := 0 } lt(i, add(length, 32)) { i := add(i, 32) } {
+                        mstore(add(scratch_, i), 0)
+                    }
+                }
             }
             /// @dev Return the highest set bit of a positive `uint64` using `Common.log2`'s lookup.
             function ilog2(x) -> r {
@@ -661,11 +694,7 @@ library LibMerkle {
                     // Constant zero removes grafting from ordinary proof loops.
                     if graft {
                         if eq(w, graftStep) {
-                            mstore(0, mload(graft))
-                            mstore(0x20, d)
-                            switch hasher
-                            case 0 { d := keccak256(0, 0x40) }
-                            default { d := externalHash(0, 0x40, hasher) }
+                            d := graftHash(mload(graft), shr(3, mload(add(graft, 32))), d, hasher, scratch)
                         }
                     }
                 }
@@ -794,6 +823,40 @@ library LibMerkle {
                 }
                 digest := mload(0)
             }
+            /// @dev Hash a nonzero bitmap prefix and digest. Zero chunks retain the operation digest.
+            /// The caller supplies scratch beyond live traversal state, cleared before returning.
+            function graftHash(pointer, length, digest, target, scratch_) -> result {
+                result := digest
+                switch gt(length, 32)
+                case 0 {
+                    let prefix := calldataload(pointer)
+                    let shift := shl(3, sub(32, length))
+                    if shr(shift, prefix) {
+                        mstore(0, prefix)
+                        mstore(length, digest)
+                        switch target
+                        case 0 { result := keccak256(0, add(length, 32)) }
+                        default { result := externalHash(0, add(length, 32), target) }
+                    }
+                }
+                default {
+                    let nonzero := 0
+                    for { let i := 0 } lt(i, length) { i := add(i, 32) } {
+                        let word := calldataload(add(pointer, i))
+                        nonzero := or(nonzero, word)
+                        mstore(add(scratch_, i), word)
+                    }
+                    if nonzero {
+                        mstore(add(scratch_, length), digest)
+                        switch target
+                        case 0 { result := keccak256(scratch_, add(length, 32)) }
+                        default { result := externalHash(scratch_, add(length, 32), target) }
+                    }
+                    for { let i := 0 } lt(i, add(length, 32)) { i := add(i, 32) } {
+                        mstore(add(scratch_, i), 0)
+                    }
+                }
+            }
             /// @dev Return the highest set bit of a positive `uint64` using `Common.log2`'s lookup.
             function ilog2(x) -> r {
                 r := shl(5, gt(x, 0xffffffff))
@@ -881,19 +944,14 @@ library LibMerkle {
                     case 0 { d := keccak256(0x18, 0x48) }
                     default { d := externalHash(0x18, 0x48, hasher) }
                     if graft {
-                        if eq(width, 256) {
-                            let chunk := shr(8, sub(cursor, width))
+                        if eq(width, mload(add(graft, 0x60))) {
+                            let chunk := div(sub(cursor, width), width)
                             if lt(chunk, mload(add(graft, 0x40))) {
-                                let chunks := mload(graft)
                                 let local := sub(chunk, mload(add(graft, 0x20)))
-                                let prefix := mload(add(add(chunks, 0x20), shl(5, local)))
-                                if prefix {
-                                    mstore(0, prefix)
-                                    mstore(0x20, d)
-                                    switch hasher
-                                    case 0 { d := keccak256(0, 0x40) }
-                                    default { d := externalHash(0, 0x40, hasher) }
-                                }
+                                let length := shr(3, width)
+                                let pointer := add(mload(graft), mul(local, length))
+                                // Leaf bounds limit DFS state to 63 words above base.
+                                d := graftHash(pointer, length, d, hasher, add(base, 0x800))
                             }
                         }
                     }

@@ -3,7 +3,9 @@
 //! Operations use production fixed codecs. Current bitmaps are materialized test
 //! inputs for grafting geometry; their status does not claim a database lifecycle.
 
-use super::{GenerateArgs, Uint256, key, materialize, materialize_ops, operation};
+use super::{
+    GenerateArgs, Uint256, key, materialize, materialize_ops, operation, with_chunk_bytes,
+};
 use crate::{
     Hash,
     merkle::{TreeKind, leaf, qmdb_positions},
@@ -22,7 +24,7 @@ use commonware_storage::{
         immutable, keyless,
     },
 };
-use commonware_utils::sequence::FixedBytes;
+use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 use futures::executor::block_on;
 
 type Bytes32 = <sol!(bytes32) as SolType>::RustType;
@@ -80,6 +82,9 @@ struct Options {
     /// Materialized Current activity; mixed has every third chunk zero and every third bit inactive.
     #[arg(long, value_enum, default_value = "all")]
     activity: Activity,
+    /// Current activity bitmap chunk size in bytes.
+    #[arg(long, default_value_t = 32)]
+    chunk_bytes: usize,
 }
 
 #[derive(Args)]
@@ -146,22 +151,22 @@ fn execute(
         return Err("activity requires --current".into());
     }
     match (options.family, options.hash) {
-        (TreeKind::Mmr, Hash::Keccak) => {
-            generate::<mmr::Family, Keccak256>(leaves, seed, options, &selection)
-        }
-        (TreeKind::Mmr, Hash::Sha256) => {
-            generate::<mmr::Family, Sha256>(leaves, seed, options, &selection)
-        }
-        (TreeKind::Mmb, Hash::Keccak) => {
-            generate::<mmb::Family, Keccak256>(leaves, seed, options, &selection)
-        }
-        (TreeKind::Mmb, Hash::Sha256) => {
-            generate::<mmb::Family, Sha256>(leaves, seed, options, &selection)
-        }
+        (TreeKind::Mmr, Hash::Keccak) => with_chunk_bytes!(options.chunk_bytes, |N| {
+            generate::<mmr::Family, Keccak256, N>(leaves, seed, options, &selection)
+        }),
+        (TreeKind::Mmr, Hash::Sha256) => with_chunk_bytes!(options.chunk_bytes, |N| {
+            generate::<mmr::Family, Sha256, N>(leaves, seed, options, &selection)
+        }),
+        (TreeKind::Mmb, Hash::Keccak) => with_chunk_bytes!(options.chunk_bytes, |N| {
+            generate::<mmb::Family, Keccak256, N>(leaves, seed, options, &selection)
+        }),
+        (TreeKind::Mmb, Hash::Sha256) => with_chunk_bytes!(options.chunk_bytes, |N| {
+            generate::<mmb::Family, Sha256, N>(leaves, seed, options, &selection)
+        }),
     }
 }
 
-fn generate<F: Graftable, H: Hasher>(
+fn generate<F: Graftable, H: Hasher, const N: usize>(
     leaves: u64,
     seed: u64,
     options: &Options,
@@ -195,23 +200,24 @@ fn generate<F: Graftable, H: Hasher>(
         hash: options.hash,
         family: options.family,
         inactivity_floor: options.inactivity_floor,
+        chunk_bytes: options.chunk_bytes,
     };
     super::validate_tree(&tree)?;
     match options.variant {
-        Variant::Ordered => prove::<F, H, _>(&tree, options, selection, |index| {
+        Variant::Ordered => prove::<F, H, _, N>(&tree, options, selection, |index| {
             operation::<F>(seed, index, leaves)
         }),
-        Variant::Unordered => prove::<F, H, _>(&tree, options, selection, |index| {
+        Variant::Unordered => prove::<F, H, _, N>(&tree, options, selection, |index| {
             unordered::fixed::Operation::<F, FixedBytes<32>, FixedBytes<32>>::Update(
                 unordered::Update(key(index), FixedBytes::new(leaf(seed, index))),
             )
         }),
-        Variant::Keyless => prove::<F, H, _>(&tree, options, selection, |index| {
+        Variant::Keyless => prove::<F, H, _, N>(&tree, options, selection, |index| {
             keyless::Operation::<F, FixedEncoding<FixedBytes<32>>>::Append(FixedBytes::new(leaf(
                 seed, index,
             )))
         }),
-        Variant::Immutable => prove::<F, H, _>(&tree, options, selection, |index| {
+        Variant::Immutable => prove::<F, H, _, N>(&tree, options, selection, |index| {
             immutable::Operation::<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>>::Set(
                 key(index),
                 FixedBytes::new(leaf(seed, index)),
@@ -224,18 +230,21 @@ fn bytes32<D: Digest>(digest: D) -> Bytes32 {
     Bytes32::from_slice(digest.as_ref())
 }
 
-fn prove<F: Graftable, H: Hasher, O: Codec + Clone>(
+fn prove<F: Graftable, H: Hasher, O: Codec + Clone, const N: usize>(
     tree: &GenerateArgs,
     options: &Options,
     selection: &Selection,
     operation: impl Fn(u64) -> O,
 ) -> Result<Vec<u8>, String> {
     if options.current {
-        let current = materialize::<F, H, _>(tree, &operation, &|index: u64| {
+        let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
+        let current = materialize::<F, H, _, N>(tree, &operation, &|index: u64| {
             index >= tree.inactivity_floor
                 && match options.activity {
                     Activity::All => true,
-                    Activity::Mixed => !(index / 256).is_multiple_of(3) && !index.is_multiple_of(3),
+                    Activity::Mixed => {
+                        !(index / chunk_bits).is_multiple_of(3) && !index.is_multiple_of(3)
+                    }
                     Activity::Zero => false,
                 }
         })?;
@@ -252,7 +261,7 @@ fn prove<F: Graftable, H: Hasher, O: Codec + Clone>(
         match selection {
             Selection::Range { start, count } => {
                 let end = start + count;
-                let proof = block_on(RangeProof::<F, H::Digest>::new::<H, _, 32>(
+                let proof = block_on(RangeProof::<F, H::Digest>::new::<H, _, N>(
                     &current.status,
                     &current.grafted,
                     Location::new(tree.inactivity_floor),
@@ -261,10 +270,10 @@ fn prove<F: Graftable, H: Hasher, O: Codec + Clone>(
                 ))
                 .map_err(|error| error.to_string())?;
                 let operations: Vec<_> = (*start..end).map(&operation).collect();
-                let chunks: Vec<_> = (*start / 256..=(end - 1) / 256)
+                let chunks: Vec<_> = (*start / chunk_bits..=(end - 1) / chunk_bits)
                     .map(|index| *current.status.get_chunk(index as usize))
                     .collect();
-                if !proof.verify::<H, _, 32>(
+                if !proof.verify::<H, _, N>(
                     Location::new(*start),
                     &operations,
                     &chunks,
@@ -287,7 +296,7 @@ fn prove<F: Graftable, H: Hasher, O: Codec + Clone>(
                         .iter()
                         .map(|op| Bytes::from(op.encode().to_vec()))
                         .collect::<Vec<_>>(),
-                    chunks.into_iter().map(Bytes32::from).collect::<Vec<_>>(),
+                    Bytes::from(chunks.into_iter().flatten().collect::<Vec<_>>()),
                     bytes32(current.ops_root),
                     pending,
                     partial,
@@ -413,7 +422,7 @@ mod tests {
     use crate::Cli;
     use clap::Parser;
 
-    type CurrentRange = <sol!((bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes32[], bytes32, bytes32, bytes32)) as SolType>::RustType;
+    type CurrentRange = <sol!((bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes, bytes32, bytes32, bytes32)) as SolType>::RustType;
     type CurrentMulti = <sol!((bytes32, uint256, uint256[], uint256, uint256[], bytes32[], bytes[], bytes32, bytes32, bytes32, bytes32)) as SolType>::RustType;
 
     fn run(args: &[&str]) -> Result<Vec<u8>, String> {
@@ -548,7 +557,7 @@ mod tests {
                         assert_eq!(output.5.len(), count as usize);
                         assert_eq!(
                             output.6.len(),
-                            ((start + count - 1) / 256 - start / 256 + 1) as usize
+                            ((start + count - 1) / 256 - start / 256 + 1) as usize * 32
                         );
                         if floor != 0 {
                             assert_ne!(output.3, 0);
@@ -560,7 +569,8 @@ mod tests {
                             assert_ne!(output.8, Bytes32::ZERO);
                             assert_ne!(output.9, Bytes32::ZERO);
                         }
-                        for (chunk_index, chunk) in output.6.iter().enumerate() {
+                        for (chunk_index, chunk) in output.6.as_chunks::<32>().0.iter().enumerate()
+                        {
                             for bit in 0..256u64 {
                                 let index = (start / 256 + chunk_index as u64) * 256 + bit;
                                 let active = index < leaves
@@ -606,6 +616,70 @@ mod tests {
                         assert!(multi.4.windows(2).all(|pair| pair[0] < pair[1]));
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn current_ranges_and_witnesses_use_configured_bitmap_chunks() {
+        for chunk_bytes in [1u64, 2, 16, 32, 64, 128] {
+            let chunk_bits = chunk_bytes * 8;
+            let leaves = 2 * chunk_bits + 3;
+            let start = chunk_bits - 2;
+            let count = chunk_bits + 5;
+            for family in ["mmr", "mmb"] {
+                let encoded = run(&[
+                    "range",
+                    &leaves.to_string(),
+                    &start.to_string(),
+                    &count.to_string(),
+                    "71",
+                    "--family",
+                    family,
+                    "--variant",
+                    "unordered",
+                    "--current",
+                    "--activity",
+                    "mixed",
+                    "--chunk-bytes",
+                    &chunk_bytes.to_string(),
+                ])
+                .unwrap();
+                let range = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
+                assert_eq!(range.6.len(), chunk_bytes as usize * 3);
+                for (chunk_offset, chunk) in range.6.chunks_exact(chunk_bytes as usize).enumerate()
+                {
+                    for bit in 0..chunk_bits {
+                        let index = (start / chunk_bits + chunk_offset as u64) * chunk_bits + bit;
+                        let expected = index < leaves
+                            && !(index / chunk_bits).is_multiple_of(3)
+                            && !index.is_multiple_of(3);
+                        assert_eq!(chunk[(bit / 8) as usize] & (1 << (bit % 8)) != 0, expected);
+                    }
+                }
+
+                let locations = format!("{},{},{}", start + count - 1, start, start);
+                let encoded = run(&[
+                    "multi",
+                    &leaves.to_string(),
+                    &locations,
+                    "71",
+                    "--family",
+                    family,
+                    "--variant",
+                    "unordered",
+                    "--current",
+                    "--activity",
+                    "mixed",
+                    "--chunk-bytes",
+                    &chunk_bytes.to_string(),
+                ])
+                .unwrap();
+                let witness = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
+                assert_eq!(witness.0, range.0);
+                assert_eq!(witness.7, range.7);
+                assert_eq!(witness.9, range.8);
+                assert_eq!(witness.10, range.9);
             }
         }
     }

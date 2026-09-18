@@ -8,6 +8,7 @@ import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 struct QMDBCase {
     bytes32 root;
     bytes operation;
+    uint256 chunkBytes;
     LibQMDBCurrent.Proof proof;
 }
 
@@ -30,15 +31,22 @@ contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Expose the calldata proof entrypoint for tests and gas measurements.
     function verify(QMDBCase calldata c) external view returns (bool) {
         return _mmb()
-            ? LibQMDBCurrent.verify(c.root, c.operation, c.proof, _hasher())
-            : LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, _hasher());
+            ? LibQMDBCurrent.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher())
+            : LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, c.chunkBytes, _hasher());
+    }
+
+    /// @dev Expose the default configuration as a literal for comparable gas measurements.
+    function verify32(QMDBCase calldata c) external view returns (bool) {
+        return _mmb()
+            ? LibQMDBCurrent.verify(c.root, c.operation, c.proof, 32, _hasher())
+            : LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, 32, _hasher());
     }
 
     /// @dev Reject the supplied root and proof under the other append family's topology.
     function rejectOtherFamily(QMDBCase calldata c) external view {
         bool valid = _mmb()
-            ? LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, _hasher())
-            : LibQMDBCurrent.verify(c.root, c.operation, c.proof, _hasher());
+            ? LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, c.chunkBytes, _hasher())
+            : LibQMDBCurrent.verify(c.root, c.operation, c.proof, c.chunkBytes, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
     }
 
@@ -70,12 +78,12 @@ contract LibQMDBCurrentTest is UnorderedOracle {
             bool result;
             if (exclusion) {
                 result = _mmb()
-                    ? LibQMDBCurrent.verifyExclusion(c.root, key, operation, c.proof, _hasher())
-                    : LibQMDBCurrent.verifyExclusionMMR(c.root, key, operation, c.proof, _hasher());
+                    ? LibQMDBCurrent.verifyExclusion(c.root, key, operation, c.proof, c.chunkBytes, _hasher())
+                    : LibQMDBCurrent.verifyExclusionMMR(c.root, key, operation, c.proof, c.chunkBytes, _hasher());
             } else {
                 result = _mmb()
-                    ? LibQMDBCurrent.verify(c.root, operation, c.proof, _hasher())
-                    : LibQMDBCurrent.verifyMMR(c.root, operation, c.proof, _hasher());
+                    ? LibQMDBCurrent.verify(c.root, operation, c.proof, c.chunkBytes, _hasher())
+                    : LibQMDBCurrent.verifyMMR(c.root, operation, c.proof, c.chunkBytes, _hasher());
             }
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
@@ -95,22 +103,46 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         }
     }
 
-    /// @dev Replay family-specific append merges, grafting each completed 256-leaf subtree once.
+    /// @dev Replay family-specific append merges using the default 32-byte bitmap chunks.
     function build(uint256 n, uint256 location, bytes memory operation, bool active)
         external
         pure
         returns (QMDBCase memory c)
     {
+        return _build(n, location, operation, active, 32);
+    }
+
+    /// @dev Replay append history with a caller-selected bitmap chunk size.
+    function buildChunk(uint256 n, uint256 location, bytes memory operation, bool active, uint256 chunkBytes)
+        external
+        pure
+        returns (QMDBCase memory c)
+    {
+        return _build(n, location, operation, active, chunkBytes);
+    }
+
+    /// @dev Build an independent proof using `chunkBytes * 8` activity bits per graft.
+    function _build(uint256 n, uint256 location, bytes memory operation, bool active, uint256 chunkBytes)
+        internal
+        pure
+        returns (QMDBCase memory c)
+    {
         c.operation = operation;
+        c.chunkBytes = chunkBytes;
         c.proof.leaves = n;
         c.proof.location = location;
-        bytes32[] memory chunks = new bytes32[]((n + 255) / 256);
+        uint256 chunkBits = chunkBytes * 8;
+        bytes[] memory chunks = new bytes[]((n + chunkBits - 1) / chunkBits);
+        for (uint256 i; i < chunks.length; ++i) {
+            chunks[i] = new bytes(chunkBytes);
+        }
         for (uint256 i; i < n; ++i) {
             if (i == location ? active : i % 3 != 0) {
-                chunks[i / 256] |= bytes32(uint256(1) << (248 - ((i % 256) / 8) * 8 + i % 8));
+                uint256 bit = i % chunkBits;
+                chunks[i / chunkBits][bit >> 3] |= bytes1(uint8(1 << (bit & 7)));
             }
         }
-        c.proof.chunk = chunks[location / 256];
+        c.proof.chunk = chunks[location / chunkBits];
         QMDBNode[] memory nodes = new QMDBNode[](2 * n);
         uint256[] memory peaks = new uint256[](n);
         uint256 count;
@@ -131,8 +163,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                 parent.right = right;
                 parent.plain = _hash(abi.encodePacked(uint64(position), nodes[left].plain, nodes[right].plain));
                 parent.digest = _hash(abi.encodePacked(uint64(position), nodes[left].digest, nodes[right].digest));
-                if (parent.width == 256) {
-                    parent.digest = _hash(abi.encodePacked(chunks[parent.start / 256], parent.digest));
+                if (parent.width == chunkBits) {
+                    parent.digest = _hash(abi.encodePacked(chunks[parent.start / chunkBits], parent.digest));
                 }
                 nodes[position] = parent;
                 peaks[j - 1] = position++;
@@ -154,15 +186,15 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         bytes memory rootInput = abi.encodePacked(c.proof.opsRoot, _hash(abi.encodePacked(uint64(n), grafted)));
         uint256 graftedChunks;
         for (uint256 i; i < position; ++i) {
-            if (nodes[i].width == 256) ++graftedChunks;
+            if (nodes[i].width == chunkBits) ++graftedChunks;
         }
-        if (graftedChunks < n / 256) {
+        if (graftedChunks < n / chunkBits) {
             c.proof.pending = _hash(abi.encodePacked(chunks[graftedChunks]));
             rootInput = abi.encodePacked(rootInput, c.proof.pending);
         }
-        if (n % 256 != 0) {
-            c.proof.partialDigest = _hash(abi.encodePacked(chunks[n / 256]));
-            rootInput = abi.encodePacked(rootInput, uint64(n % 256), c.proof.partialDigest);
+        if (n % chunkBits != 0) {
+            c.proof.partialDigest = _hash(abi.encodePacked(chunks[n / chunkBits]));
+            rootInput = abi.encodePacked(rootInput, uint64(n % chunkBits), c.proof.partialDigest);
         }
         c.root = _hash(rootInput);
         bytes32[] memory digests = new bytes32[](count + 64);
@@ -250,6 +282,62 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         }
     }
 
+    /// @dev Variable chunks authenticate both endpoint bits across complete and partial boundaries.
+    function test_VariableChunkBoundaries() public view {
+        uint256[6] memory sizes = [uint256(1), 2, 16, 32, 64, 128];
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 chunkBytes = sizes[i];
+            uint256 chunkBits = chunkBytes * 8;
+            uint256[5] memory leaves = [
+                chunkBits + chunkBits / 2 - 2,
+                chunkBits + chunkBits / 2 - 1,
+                chunkBits,
+                chunkBits + 1,
+                2 * chunkBits + 1
+            ];
+            for (uint256 j; j < leaves.length; ++j) {
+                uint256 n = leaves[j];
+                assertTrue(this.checked(this.buildChunk(n, 0, hex"00", true, chunkBytes)));
+                assertTrue(this.checked(this.buildChunk(n, n - 1, hex"01", true, chunkBytes)));
+            }
+        }
+    }
+
+    /// @dev Reject invalid chunk configurations and singleton payload lengths before reconstruction.
+    function test_MalformedChunkConfigurationAndLength() public view {
+        QMDBCase memory c = this.buildChunk(33, 32, hex"0102", true, 2);
+        assertTrue(this.checked(c));
+        uint256 valid = c.chunkBytes;
+        uint256[4] memory invalid = [uint256(0), 3, uint256(1) << 60, type(uint256).max];
+        for (uint256 i; i < invalid.length; ++i) {
+            c.chunkBytes = invalid[i];
+            assertFalse(this.checked(c), "invalid chunk configuration");
+        }
+        c.chunkBytes = valid;
+        bytes memory chunk = c.proof.chunk;
+        c.proof.chunk = new bytes(chunk.length - 1);
+        for (uint256 i; i < c.proof.chunk.length; ++i) {
+            c.proof.chunk[i] = chunk[i];
+        }
+        assertFalse(this.checked(c), "short chunk");
+        c.proof.chunk = new bytes(chunk.length + 1);
+        for (uint256 i; i < chunk.length; ++i) {
+            c.proof.chunk[i] = chunk[i];
+        }
+        assertFalse(this.checked(c), "long chunk");
+    }
+
+    /// @dev Fixed-schema exclusion remains independent of the authenticated bitmap chunk size.
+    function test_VariableChunkFixedSchemaExclusion() public view {
+        bytes memory operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
+        uint256[6] memory sizes = [uint256(1), 2, 16, 32, 64, 128];
+        for (uint256 i; i < sizes.length; ++i) {
+            QMDBCase memory c = this.buildChunk(17, 16, operation, true, sizes[i]);
+            assertTrue(this.checkedExclusion(c, bytes32(uint256(15))));
+            assertFalse(this.checkedExclusion(c, bytes32(uint256(10))));
+        }
+    }
+
     /// @dev Every supplied commitment, sibling, and coordinate is authenticated.
     function rejectMutations(QMDBCase memory c) internal view {
         rejectMutations(c, false, 0);
@@ -270,9 +358,9 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         c.proof.partialDigest ^= bytes32(uint256(1));
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
         c.proof.partialDigest ^= bytes32(uint256(1));
-        c.proof.chunk ^= bytes32(uint256(1) << 128);
+        c.proof.chunk[c.proof.chunk.length / 2] ^= 0x01;
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
-        c.proof.chunk ^= bytes32(uint256(1) << 128);
+        c.proof.chunk[c.proof.chunk.length / 2] ^= 0x01;
         uint256 inactive = c.proof.inactivePeaks;
         c.proof.inactivePeaks = type(uint256).max;
         assertFalse(exclusion ? this.checkedExclusion(c, key) : this.checked(c));
@@ -342,7 +430,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         c = this.build(1, 0, "", true);
         c.root = 0;
         assertFalse(this.checked(c));
-        c.proof.chunk = 0;
+        c.proof.chunk = new bytes(0);
         assertFalse(this.checked(c));
     }
 
@@ -482,7 +570,15 @@ contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Decode the Rust oracle's flat ABI tuple without imposing an operation type.
     function generate(uint256 leaves, uint256 location, uint256 floor) internal returns (QMDBCase memory c) {
-        string[] memory args = new string[](10);
+        return generate(leaves, location, floor, 32);
+    }
+
+    /// @dev Decode a Rust proof generated with a caller-selected chunk size.
+    function generate(uint256 leaves, uint256 location, uint256 floor, uint256 chunkBytes)
+        internal
+        returns (QMDBCase memory c)
+    {
+        string[] memory args = new string[](12);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "generate";
@@ -493,6 +589,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         args[7] = vm.toString(floor);
         args[8] = "--family";
         args[9] = _mmb() ? "mmb" : "mmr";
+        args[10] = "--chunk-bytes";
+        args[11] = vm.toString(chunkBytes);
         (
             c.root,
             c.proof.leaves,
@@ -506,8 +604,9 @@ contract LibQMDBCurrentTest is UnorderedOracle {
             c.operation
         ) =
             abi.decode(
-                _ffi(args), (bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes)
+                _ffi(args), (bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes)
             );
+        c.chunkBytes = chunkBytes;
         assertEq(c.proof.leaves, leaves);
         assertEq(c.proof.location, location);
     }
@@ -536,9 +635,10 @@ contract LibQMDBCurrentTest is UnorderedOracle {
             expected
         ) =
             abi.decode(
-                unorderedFixture(leaves, location, floor, encoding, operation, history, true, valueLength),
-                (bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
+                unorderedFixture(leaves, location, floor, encoding, operation, history, true, valueLength, 32),
+                (bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
             );
+        c.chunkBytes = 32;
     }
 
     /// @dev Active unordered updates bind their bytes and nonzero inactive peak boundary.
@@ -586,7 +686,8 @@ contract LibQMDBCurrentTest is UnorderedOracle {
                         assertEq(expected, history == 0 && target == 1, "history activity");
                         assertEq(this.checked(c), expected, "Rust history disagreement");
                         if (!expected) {
-                            c.proof.chunk |= bytes32(uint256(1) << (248 - (location % 256 / 8) * 8 + location % 8));
+                            uint256 bit = location % 256;
+                            c.proof.chunk[bit >> 3] |= bytes1(uint8(1 << (bit & 7)));
                             assertFalse(this.checked(c), "forged activity accepted");
                         }
                     }
@@ -602,6 +703,19 @@ contract LibQMDBCurrentTest is UnorderedOracle {
             assertTrue(this.checked(generate(sizes[i], 0, 0)));
             assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0)));
             if (sizes[i] > 256) assertTrue(this.checked(generate(sizes[i], 256, 0)));
+        }
+    }
+
+    /// @dev Production proofs cover every supported chunk size on both sides of chunk boundaries.
+    function test_DifferentialVariableChunks() public {
+        uint256[6] memory sizes = [uint256(1), 2, 16, 32, 64, 128];
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 chunkBytes = sizes[i];
+            uint256 chunkBits = chunkBytes * 8;
+            uint256 leaves = 2 * chunkBits + 1;
+            assertTrue(this.checked(generate(leaves, 0, 0, chunkBytes)));
+            assertTrue(this.checked(generate(leaves, chunkBits, 0, chunkBytes)));
+            assertTrue(this.checked(generate(leaves, leaves - 1, 0, chunkBytes)));
         }
     }
 
@@ -666,8 +780,9 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         ) =
             abi.decode(
                 _ffi(args),
-                (bytes32, uint256, uint256, uint256, bytes32, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
+                (bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)
             );
+        c.chunkBytes = 32;
         assertEq(c.proof.leaves, leaves);
         assertEq(c.proof.location, location);
     }
@@ -713,7 +828,7 @@ contract LibQMDBCurrentTest is UnorderedOracle {
         string[3] memory names = [string("grafted"), _mmb() ? "pending" : "grafted-second", "partial"];
         for (uint256 i; i < locations.length; ++i) {
             QMDBCase memory c = this.build(638, locations[i], new bytes(97), true);
-            assertTrue(this.verify(c));
+            assertTrue(this.verify32(c));
             emit log_named_uint(
                 string.concat(_group(_mmb() ? "QMDB" : "QMDBMMR"), "/", names[i]), vm.lastFrameGas().gasTotalUsed
             );

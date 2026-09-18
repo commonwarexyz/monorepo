@@ -15,6 +15,7 @@ struct BatchCase {
     Common.MultiProof multi;
     bool sparse;
     bool current;
+    uint256 chunkBytes;
     LibQMDBCurrent.RangeProof currentRange;
     LibQMDBCurrent.OpsRootWitness witness;
 }
@@ -40,12 +41,12 @@ contract LibQMDBBatchTest is HashTest {
         if (c.current) {
             if (c.sparse) {
                 return _mmb()
-                    ? LibQMDBCurrent.verifyOpsMulti(c.root, operations, c.multi, c.witness, _hasher())
-                    : LibQMDBCurrent.verifyOpsMultiMMR(c.root, operations, c.multi, c.witness, _hasher());
+                    ? LibQMDBCurrent.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
+                    : LibQMDBCurrent.verifyOpsMultiMMR(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
             }
             return _mmb()
-                ? LibQMDBCurrent.verifyRange(c.root, operations, c.currentRange, _hasher())
-                : LibQMDBCurrent.verifyRangeMMR(c.root, operations, c.currentRange, _hasher());
+                ? LibQMDBCurrent.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
+                : LibQMDBCurrent.verifyRangeMMR(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
         }
         if (c.sparse) {
             if (facade == 0) {
@@ -123,6 +124,7 @@ contract LibQMDBBatchTest is HashTest {
         returns (BatchCase memory c)
     {
         c.current = chunks.length != 0;
+        c.chunkBytes = c.current ? 32 : 0;
         c.sparse = sparse;
         c.operations = new bytes[](locations.length);
         c.range.leaves = n;
@@ -255,10 +257,14 @@ contract LibQMDBBatchTest is HashTest {
                 c.currentRange.digests = digests;
                 uint256 firstChunk = locations[0] / 256;
                 uint256 lastChunk = locations[locations.length - 1] / 256;
-                c.currentRange.chunks = new bytes32[](lastChunk - firstChunk + 1);
+                bytes memory packedChunks = new bytes((lastChunk - firstChunk + 1) * 32);
                 for (uint256 i = firstChunk; i <= lastChunk; ++i) {
-                    c.currentRange.chunks[i - firstChunk] = chunks[i];
+                    bytes32 chunk = chunks[i];
+                    assembly ("memory-safe") {
+                        mstore(add(add(packedChunks, 32), mul(sub(i, firstChunk), 32)), chunk)
+                    }
                 }
+                c.currentRange.chunks = packedChunks;
             }
         }
     }
@@ -451,6 +457,13 @@ contract LibQMDBBatchTest is HashTest {
 
     /// @dev Current commitment fields and touched chunks bind the same opaque operation batch.
     function rejectCurrentMutations(BatchCase memory c) internal view {
+        uint256 chunkBytes = c.chunkBytes;
+        uint256[4] memory invalid = [uint256(0), 3, uint256(1) << 60, type(uint256).max];
+        for (uint256 i; i < invalid.length; ++i) {
+            c.chunkBytes = invalid[i];
+            assertFalse(this.checked(c), "invalid chunk configuration");
+        }
+        c.chunkBytes = chunkBytes;
         bytes32 originalRoot = c.root;
         c.root ^= bytes32(uint256(1));
         assertFalse(this.checked(c), "current root");
@@ -514,18 +527,28 @@ contract LibQMDBBatchTest is HashTest {
                 assertFalse(this.checked(c), "current missing witness");
             }
             c.currentRange.digests = digests;
-            for (uint256 i; i < c.currentRange.chunks.length; ++i) {
-                c.currentRange.chunks[i] ^= bytes32(uint256(1));
+            for (uint256 i; i < c.currentRange.chunks.length; i += c.chunkBytes) {
+                c.currentRange.chunks[i] ^= 0x01;
                 assertFalse(this.checked(c), "current chunk");
-                c.currentRange.chunks[i] ^= bytes32(uint256(1));
+                c.currentRange.chunks[i] ^= 0x01;
             }
-            bytes32[] memory originalChunks = c.currentRange.chunks;
-            c.currentRange.chunks = new bytes32[](originalChunks.length + 1);
+            bytes memory originalChunks = c.currentRange.chunks;
+            c.currentRange.chunks = new bytes(originalChunks.length - 1);
+            for (uint256 i; i < c.currentRange.chunks.length; ++i) {
+                c.currentRange.chunks[i] = originalChunks[i];
+            }
+            assertFalse(this.checked(c), "nonintegral short chunks");
+            c.currentRange.chunks = new bytes(originalChunks.length + 1);
+            for (uint256 i; i < originalChunks.length; ++i) {
+                c.currentRange.chunks[i] = originalChunks[i];
+            }
+            assertFalse(this.checked(c), "nonintegral long chunks");
+            c.currentRange.chunks = new bytes(originalChunks.length + c.chunkBytes);
             for (uint256 i; i < originalChunks.length; ++i) {
                 c.currentRange.chunks[i] = originalChunks[i];
             }
             assertFalse(this.checked(c), "extra chunk");
-            c.currentRange.chunks = new bytes32[](originalChunks.length - 1);
+            c.currentRange.chunks = new bytes(originalChunks.length - c.chunkBytes);
             for (uint256 i; i < c.currentRange.chunks.length; ++i) {
                 c.currentRange.chunks[i] = originalChunks[i];
             }
@@ -543,7 +566,21 @@ contract LibQMDBBatchTest is HashTest {
         string memory variant,
         string memory activity
     ) internal returns (BatchCase memory c) {
-        string[] memory args = new string[]((sparse ? 12 : 13) + (current ? 3 : 0));
+        return generate(n, selected, floor, sparse, current, variant, activity, 32);
+    }
+
+    /// @dev Decode a Rust batch fixture with a caller-selected Current chunk size.
+    function generate(
+        uint256 n,
+        uint256[] memory selected,
+        uint256 floor,
+        bool sparse,
+        bool current,
+        string memory variant,
+        string memory activity,
+        uint256 chunkBytes
+    ) internal returns (BatchCase memory c) {
+        string[] memory args = new string[]((sparse ? 12 : 13) + (current ? 5 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = sparse ? "multi" : "range";
@@ -569,10 +606,13 @@ contract LibQMDBBatchTest is HashTest {
         if (current) {
             args[offset++] = "--current";
             args[offset++] = "--activity";
-            args[offset] = activity;
+            args[offset++] = activity;
+            args[offset++] = "--chunk-bytes";
+            args[offset] = vm.toString(chunkBytes);
         }
         c.sparse = sparse;
         c.current = current;
+        c.chunkBytes = current ? chunkBytes : 0;
         bytes memory output = _ffi(args);
         if (current && sparse) {
             (
@@ -618,8 +658,7 @@ contract LibQMDBBatchTest is HashTest {
                 c.currentRange.partialDigest
             ) =
                 abi.decode(
-                    output,
-                    (bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes32[], bytes32, bytes32, bytes32)
+                    output, (bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes, bytes32, bytes32, bytes32)
                 );
         } else if (sparse) {
             (
@@ -663,6 +702,41 @@ contract LibQMDBBatchTest is HashTest {
                 assertTrue(this.checked(c), "Rust Current disagreement");
                 rejectCurrentMutations(c);
             }
+        }
+    }
+
+    /// @dev Packed zero chunks and sparse historical operations verify at every supported chunk size.
+    function test_DifferentialVariableCurrentBatches() public {
+        uint256[6] memory sizes = [uint256(1), 2, 16, 32, 64, 128];
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 chunkBytes = sizes[i];
+            uint256 chunkBits = chunkBytes * 8;
+            uint256 n = 2 * chunkBits + 1;
+            BatchCase memory range =
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "zero", chunkBytes);
+            assertEq(range.currentRange.chunks.length, 2 * chunkBytes, "packed touched chunks");
+            assertTrue(this.checked(range), "variable Current range");
+            rejectCurrentMutations(range);
+
+            BatchCase memory mixed =
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "mixed", chunkBytes);
+            assertTrue(this.checked(mixed), "variable mixed Current range");
+            BatchCase memory active =
+                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "all", chunkBytes);
+            assertTrue(this.checked(active), "variable active Current range");
+            if (chunkBytes > 32) {
+                uint256 last = active.currentRange.chunks.length - 1;
+                active.currentRange.chunks[last] ^= 0x01;
+                assertFalse(this.checked(active), "large chunk last byte");
+            }
+
+            uint256[] memory selected = new uint256[](3);
+            selected[0] = n - 1;
+            selected[1] = 0;
+            selected[2] = chunkBits;
+            BatchCase memory historical = generate(n, selected, 0, true, true, "unordered", "zero", chunkBytes);
+            assertTrue(this.checked(historical), "variable historical operation witness");
+            rejectCurrentMutations(historical);
         }
     }
 
