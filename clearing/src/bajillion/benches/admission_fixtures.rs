@@ -16,7 +16,7 @@ use commonware_utils::Participant;
 
 pub(crate) const VALIDATORS: usize = 100;
 pub(crate) const FAULTS: usize = 33;
-pub(crate) const QUORUM: usize = 67;
+pub(crate) const QUORUM: usize = 34;
 const VALIDATOR_SEED_START: u64 = 1_000_000;
 
 pub(crate) struct Validators {
@@ -88,8 +88,8 @@ pub(crate) fn certificate_fixture() -> CertificateFixture {
         let attestations = validators.attestations(&header);
         let assembler = validators.signer(Participant::new(0));
         let certificate = assembler
-            .assemble_exact(attestations.clone())
-            .expect("exact certificate");
+            .assemble(attestations.clone())
+            .expect("minimum certificate");
         let verifier = bls12381::Scheme::verifier(validators.committee().clone());
         CertificateFixture {
             header,

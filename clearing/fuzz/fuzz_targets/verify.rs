@@ -1380,27 +1380,38 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
     }
     assert_eq!(*state.state().head(), before);
     let verifier = bls12381::Scheme::verifier(committee.clone());
-    let _ = verifier.verify_exact(&prepared.close().header, &case.certificate);
+    let _ = verifier.verify(&prepared.close().header, &case.certificate);
     assert!(
         verifier
-            .assemble_exact(votes.iter().take(committee.quorum() - 1).cloned())
+            .assemble(votes.iter().take(committee.quorum() - 1).cloned())
             .is_err()
     );
     assert!(
         verifier
-            .assemble_exact(vec![votes[0].clone(); committee.quorum()])
+            .assemble(votes.iter().cloned().chain([votes[0].clone()]))
             .is_err()
     );
-    let certificate = verifier
-        .assemble_exact(votes.into_iter().take(committee.quorum()))
-        .unwrap();
-    assert!(verifier.verify_exact(&prepared.close().header, &certificate));
+    assert!(
+        verifier
+            .assemble(vec![votes[0].clone(); committee.quorum()])
+            .is_err()
+    );
     let wrong = Header::new::<Sha256, _>(
         &context,
         &prepared.close().roots,
         prepared.close().withdrawal_total + 1,
     );
-    assert!(!verifier.verify_exact(&wrong, &certificate));
+    for count in [
+        committee.quorum(),
+        committee.quorum() + 1,
+        committee.members().len(),
+    ] {
+        let certificate = verifier
+            .assemble(votes.iter().take(count).cloned())
+            .unwrap();
+        assert!(verifier.verify(&prepared.close().header, &certificate));
+        assert!(!verifier.verify(&wrong, &certificate));
+    }
 }
 
 fuzz_target!(|data: &[u8]| {

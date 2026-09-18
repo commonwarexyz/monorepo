@@ -572,7 +572,7 @@ impl RefinementDriver {
             let successor = cache.extended(accepted, successor_liability);
             (vote, close, successor)
         });
-        let certificate = self.fixture.signer.assemble_exact([vote]).unwrap();
+        let certificate = self.fixture.signer.assemble([vote]).unwrap();
         let result = self.fixture.chain.admit(
             u64::from(self.now),
             close.header,

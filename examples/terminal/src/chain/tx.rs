@@ -27,7 +27,7 @@
 //! | `ClaimDeposit` | native credit recipient | finalized claim and signed destination deposit applied atomically | source claim position and destination deposit ID |
 //! | `QueueWithdrawal` | the account holder | the account signature inside [`SignedWithdrawal`], verified with its deployment and root context | account queue slot and withdrawal replay id (`WithdrawalConflict`) |
 //! | `RegisterEpoch` | the operator | the operator signature over exact boundary material and native fee | registration record and epoch sequence (`RegistrationConflict`, `EpochSequence`) |
-//! | `Admit` | anyone holding a genuine certificate | the committee certificate over the exact header (exact quorum, verified aggregate) against the chain's own registration | registration admitted mark and admitted record (`AdmissionConflict`) |
+//! | `Admit` | anyone holding a genuine certificate | the committee certificate over the exact header (at least `2f + 1` signers, verified aggregate) against the chain's own registration | registration admitted mark and admitted record (`AdmissionConflict`) |
 //! | `ClaimWithdrawal` | anyone holding bound evidence | the output opening against the current finalized payout head; funds go to the certified destination | insertion into the ordered claimed ranges |
 //! | `Challenge` | any holder of contradiction evidence (bearer, by design) | challenge adjudication over the admitted close | one proven challenge per batch (`ChallengeConflict`) |
 //! | `BeginHardFaultSettlement` | anyone, once a real deadline expired or a challenge proved | the chain's own hard-fault flag (block production observes every deadline) | idempotent snapshot, then `HardFaultAlreadySettled` |

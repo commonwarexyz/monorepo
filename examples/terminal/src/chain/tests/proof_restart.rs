@@ -5,6 +5,7 @@ use commonware_clearing::bajillion::{
 };
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
 use commonware_runtime::{Strategizer as _, reschedule};
+use commonware_utils::{Faults as _, N3f1};
 use std::net::SocketAddr;
 
 const DA_PARTITION: &str = "proof-restart-da";
@@ -108,7 +109,7 @@ fn metric_sum(context: &deterministic::Context, actor: &str, metric: &str) -> u6
 }
 
 fn exact_certificate(scheme: &bls12381::Scheme, ballot: &da::Ballot) -> bls12381::Certificate {
-    let quorum = scheme.committee().quorum();
+    let quorum = N3f1::quorum(scheme.committee().members().len()) as usize;
     let mut votes = vec![ballot.vote.clone()];
     for index in 1..scheme.committee().members().len() {
         if votes.len() == quorum {
@@ -121,7 +122,7 @@ fn exact_certificate(scheme: &bls12381::Scheme, ballot: &da::Ballot) -> bls12381
         votes.push(signer.sign(&ballot.header).unwrap());
     }
     assert_eq!(votes.len(), quorum);
-    scheme.assemble_exact(votes).unwrap()
+    scheme.assemble(votes).unwrap()
 }
 
 async fn submit_one(

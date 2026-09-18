@@ -45,9 +45,13 @@ claims against the frozen state and refunding unadmitted deposits. Previously
 finalized withdrawal reserves remain claimable throughout recovery.
 
 The [settlement model](settlement.rs) covers the queue and recovery flow above.
-[Certification](certification.rs) checks delivery, voting, and evidence retention,
-while [challenges](challenge.rs) checks authenticated contradictions. The
-[claims model](claims.rs) checks sparse native output positions, latest-root proof
+The [certification model](certification.rs) checks delivery, voting, and evidence
+retention and accepts every certificate with at least `f + 1` signers: each
+contains an honest validator that validated and retained the full dealing, while
+two minimum certificates may share only a Byzantine signer. Certification
+therefore does not choose between valid closes; ordered admission does. The
+[challenge model](challenge.rs) checks authenticated contradictions.
+The [claims model](claims.rs) checks sparse native output positions, latest-root proof
 refresh, stale neighbor hints, zero-value consumption, empty closes, and
 fault-frozen claims. It checks claimed ranges against an independent oracle of
 finalized Commit positions plus paid output positions after every step. Pending

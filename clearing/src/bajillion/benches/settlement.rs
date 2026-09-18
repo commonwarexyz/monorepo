@@ -346,8 +346,8 @@ async fn admission_fixture(
     assert_eq!(state.state().root(), close.roots.successor);
     let certificate = validators
         .signer(Participant::new(0))
-        .assemble_exact(validators.attestations(&close.header))
-        .expect("benchmark certificate has an exact quorum");
+        .assemble(validators.attestations(&close.header))
+        .expect("benchmark certificate has the minimum quorum");
     (
         state,
         AdmissionFixture {

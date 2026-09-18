@@ -1,4 +1,4 @@
-//! Exact-cardinality BLS12-381 commitment certificates over clearing headers.
+//! Minimum-threshold BLS12-381 commitment certificates over clearing headers.
 
 use alloc::vec::Vec;
 use bytes::BufMut;
@@ -60,9 +60,13 @@ impl Committee {
         self.0.max_faults::<N3f1>() as usize
     }
 
-    /// Exact number of attestations in an admission certificate.
+    /// Minimum number of attestations in an admission certificate.
+    ///
+    /// With at most `f` Byzantine validators, `f + 1` attestations guarantee at least one
+    /// honest signer validated and durably retained the complete dealing. Certificates do not
+    /// establish a unique close; the embedding's ordered admission chooses the canonical close.
     pub fn quorum(&self) -> usize {
-        self.0.quorum::<N3f1>() as usize
+        self.faults() + 1
     }
 
     /// Finds a validator's canonical certificate index.
@@ -147,9 +151,12 @@ pub enum Error {
     /// More than one attestation came from the same validator.
     #[error("certificate contains duplicate validator attestations")]
     DuplicateAttestation,
-    /// A certificate does not contain exactly `2f+1` attestations.
-    #[error("certificate does not contain the exact quorum")]
-    WrongQuorumSize,
+    /// A certificate contains fewer than `f+1` attestations.
+    #[error("certificate contains fewer than the minimum attestations")]
+    InsufficientAttestations,
+    /// A certificate contains more attestations than committee members.
+    #[error("certificate contains more attestations than committee members")]
+    TooManyAttestations,
     /// A full dealing failed structural, cryptographic, or state validation.
     #[error("invalid full dealing")]
     InvalidDealing,
@@ -161,7 +168,7 @@ pub enum Error {
     SigningUnavailable,
 }
 
-/// BLS12-381 MinSig exact-quorum admission certificates.
+/// BLS12-381 MinSig admission certificates.
 pub mod bls12381 {
     use super::{Committee, Error, HEADER_NAMESPACE};
     use crate::bajillion::transition::Header;
@@ -294,24 +301,25 @@ pub mod bls12381 {
                 .is_ok()
         }
 
-        /// Assembles exactly `2f+1` distinct in-committee votes.
+        /// Assembles at least `f+1` distinct in-committee votes.
         ///
         /// This checks encoding, committee membership, and uniqueness, but deliberately not the
         /// signatures themselves. The caller must verify every vote with [`Self::verify_vote`]
         /// before assembly. One unverified non-signature yields a certificate that fails
         /// settlement verification with no way to attribute the faulty signer.
-        pub fn assemble_exact<I>(&self, input: I) -> Result<Certificate, Error>
+        ///
+        /// The iterator is consumed through at most one item beyond the committee size, bounding
+        /// work for oversized or unbounded input.
+        pub fn assemble<I>(&self, input: I) -> Result<Certificate, Error>
         where
             I: IntoIterator<Item = Vote>,
         {
-            // Consume at most one item beyond quorum so oversized or unbounded iterators are
-            // rejected without unbounded work.
-            let quorum = self.committee.quorum();
+            let minimum = self.committee.quorum();
+            let maximum = self.committee.members().len();
             let mut input = input.into_iter();
-            let mut entries = Vec::with_capacity(quorum);
+            let mut entries = Vec::with_capacity(minimum);
             let mut signers = BTreeSet::new();
-            for _ in 0..quorum {
-                let vote = input.next().ok_or(Error::WrongQuorumSize)?;
+            for vote in input.by_ref().take(maximum) {
                 if usize::from(vote.signer) >= self.committee.members().len() {
                     return Err(Error::UnknownValidator);
                 }
@@ -325,8 +333,11 @@ pub mod bls12381 {
                     .ok_or(Error::InvalidAttestation)?;
                 entries.push((vote.signer, signature));
             }
-            if input.next().is_some() {
-                return Err(Error::WrongQuorumSize);
+            if entries.len() == maximum && input.next().is_some() {
+                return Err(Error::TooManyAttestations);
+            }
+            if entries.len() < minimum {
+                return Err(Error::InsufficientAttestations);
             }
 
             Ok(Certificate {
@@ -338,20 +349,16 @@ pub mod bls12381 {
                 .expect("assembled signers are unique in-committee indices"),
                 signature: aggregate::combine_signatures::<MinSig, _>(
                     NonEmpty::try_new(entries.iter().map(|(_, signature)| signature))
-                        .expect("an exact quorum holds at least one attestation"),
+                        .expect("the minimum quorum holds at least one attestation"),
                 )
                 .into(),
             })
         }
 
-        /// Verifies an exact-quorum certificate over one context-bound header.
-        pub fn verify_exact<D: Digest>(
-            &self,
-            header: &Header<D>,
-            certificate: &Certificate,
-        ) -> bool {
+        /// Verifies a certificate over one context-bound header.
+        pub fn verify<D: Digest>(&self, header: &Header<D>, certificate: &Certificate) -> bool {
             if certificate.signers.len() != self.committee.members().len()
-                || certificate.signers.count() != self.committee.quorum()
+                || certificate.signers.count() < self.committee.quorum()
             {
                 return false;
             }
@@ -397,6 +404,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_utils::{Participant, iter::NonEmpty};
+    use core::cell::Cell;
 
     fn fixture(count: u64) -> (Committee, Vec<Private>) {
         let keys = (0..count)
@@ -420,7 +428,7 @@ mod tests {
     fn committee_is_exact_canonical_and_commits_keys() {
         let (committee, keys) = fixture(4);
         assert_eq!(committee.faults(), 1);
-        assert_eq!(committee.quorum(), 3);
+        assert_eq!(committee.quorum(), 2);
         assert!(committee.members().windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             committee.index_of(committee.members().first().unwrap()),
@@ -455,28 +463,28 @@ mod tests {
     }
 
     #[test]
-    fn min_sig_exact_quorum_roundtrip_and_header_binding() {
+    fn min_sig_minimum_quorum_roundtrip_and_header_binding() {
         let (committee, keys) = fixture(4);
         let schemes = schemes(&committee, keys);
         let verifier = bls12381::Scheme::verifier(committee);
         let header = test_header(b"header");
         let votes = schemes
             .iter()
-            .take(3)
+            .take(2)
             .map(|scheme| scheme.sign(&header).unwrap())
             .collect::<Vec<_>>();
         for vote in &votes {
             assert!(verifier.verify_vote(&header, vote));
         }
-        let certificate = schemes[0].assemble_exact(votes).unwrap();
+        let certificate = schemes[0].assemble(votes).unwrap();
         assert_eq!(certificate.signers.len(), 4);
-        assert_eq!(certificate.signers.count(), 3);
-        assert!(verifier.verify_exact(&header, &certificate));
-        assert!(!verifier.verify_exact(&test_header(b"other"), &certificate));
+        assert_eq!(certificate.signers.count(), 2);
+        assert!(verifier.verify(&header, &certificate));
+        assert!(!verifier.verify(&test_header(b"other"), &certificate));
     }
 
     #[test]
-    fn assembly_rejects_non_exact_duplicate_unknown_and_malformed_votes() {
+    fn assembly_accepts_supersets_and_rejects_bounded_invalid_input() {
         let (committee, keys) = fixture(4);
         let schemes = schemes(&committee, keys);
         let header = test_header(b"header");
@@ -486,36 +494,50 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            schemes[0].assemble_exact(votes[..2].to_vec()),
-            Err(Error::WrongQuorumSize)
+            schemes[0].assemble(votes[..0].to_vec()),
+            Err(Error::InsufficientAttestations)
         );
         assert_eq!(
-            schemes[0].assemble_exact(votes.clone()),
-            Err(Error::WrongQuorumSize)
+            schemes[0].assemble(votes[..1].to_vec()),
+            Err(Error::InsufficientAttestations)
         );
+        for count in 2..=4 {
+            let certificate = schemes[0].assemble(votes[..count].to_vec()).unwrap();
+            assert_eq!(certificate.signers.count(), count);
+        }
+
+        let consumed = Cell::new(0);
+        let oversized = votes
+            .clone()
+            .into_iter()
+            .chain(core::iter::repeat(votes[0].clone()))
+            .inspect(|_| consumed.set(consumed.get() + 1));
         assert_eq!(
-            schemes[0].assemble_exact(vec![votes[0].clone(), votes[0].clone(), votes[1].clone(),]),
+            schemes[0].assemble(oversized),
+            Err(Error::TooManyAttestations)
+        );
+        assert_eq!(consumed.get(), 5);
+
+        assert_eq!(
+            schemes[0].assemble(vec![votes[0].clone(), votes[0].clone()]),
             Err(Error::DuplicateAttestation)
         );
 
-        let mut unknown = votes[..3].to_vec();
-        unknown[2].signer = Participant::new(99);
-        assert_eq!(
-            schemes[0].assemble_exact(unknown),
-            Err(Error::UnknownValidator)
-        );
+        let mut unknown = votes[..2].to_vec();
+        unknown[1].signer = Participant::new(99);
+        assert_eq!(schemes[0].assemble(unknown), Err(Error::UnknownValidator));
 
         let mut truncated = Bytes::from_static(b"truncated");
-        let mut malformed = votes[..3].to_vec();
+        let mut malformed = votes[..2].to_vec();
         malformed[0].signature = Lazy::deferred(&mut truncated, ());
         assert_eq!(
-            schemes[0].assemble_exact(malformed),
+            schemes[0].assemble(malformed),
             Err(Error::InvalidAttestation)
         );
     }
 
     #[test]
-    fn verification_rejects_non_exact_bitmaps() {
+    fn assembly_stops_at_first_iterator_end() {
         let (committee, keys) = fixture(4);
         let schemes = schemes(&committee, keys);
         let verifier = bls12381::Scheme::verifier(committee);
@@ -524,29 +546,100 @@ mod tests {
             .iter()
             .map(|scheme| scheme.sign(&header).unwrap())
             .collect::<Vec<_>>();
-        let exact = schemes[0].assemble_exact(votes[..3].to_vec()).unwrap();
-        let signatures = votes
+        let mut input = [
+            Some(votes[0].clone()),
+            Some(votes[1].clone()),
+            None,
+            Some(votes[2].clone()),
+        ]
+        .into_iter()
+        .scan((), |_, vote| vote);
+
+        let certificate = verifier.assemble(input.by_ref()).unwrap();
+        assert_eq!(certificate.signers.count(), 2);
+        assert!(verifier.verify(&header, &certificate));
+        assert_eq!(input.next(), Some(votes[2].clone()));
+    }
+
+    #[test]
+    fn verification_accepts_supersets_and_rejects_invalid_bitmaps() {
+        let (committee, keys) = fixture(4);
+        let schemes = schemes(&committee, keys);
+        let verifier = bls12381::Scheme::verifier(committee);
+        let header = test_header(b"header");
+        let votes = schemes
             .iter()
-            .map(|vote| *vote.signature.get().unwrap())
+            .map(|scheme| scheme.sign(&header).unwrap())
             .collect::<Vec<_>>();
-        let super_quorum = bls12381::Certificate {
-            signers: Signers::new(4, votes.iter().map(|vote| vote.signer)).unwrap(),
+        for count in 2..=4 {
+            let certificate = schemes[0].assemble(votes[..count].to_vec()).unwrap();
+            assert!(verifier.verify(&header, &certificate));
+        }
+        let minimum = schemes[0].assemble(votes[..2].to_vec()).unwrap();
+
+        let mut wrong_bitmap = minimum.clone();
+        wrong_bitmap.signers = Signers::new(5, votes[..2].iter().map(|vote| vote.signer)).unwrap();
+        assert!(!verifier.verify(&header, &wrong_bitmap));
+
+        let mut empty = minimum;
+        empty.signers = Signers::new(4, []).unwrap();
+        assert!(!verifier.verify(&header, &empty));
+
+        assert!(verifier.verify_vote(&header, &votes[0]));
+        let sub_quorum = bls12381::Certificate {
+            signers: Signers::new(4, votes[..1].iter().map(|vote| vote.signer)).unwrap(),
             signature: aggregate::combine_signatures::<MinSig, _>(
-                NonEmpty::try_new(signatures.iter()).unwrap(),
+                NonEmpty::try_new(core::iter::once(votes[0].signature.get().unwrap())).unwrap(),
             )
             .into(),
         };
-        assert!(!verifier.verify_exact(&header, &super_quorum));
+        assert!(!verifier.verify(&header, &sub_quorum));
+    }
 
-        let mut wrong_bitmap = exact.clone();
-        wrong_bitmap.signers = Signers::new(5, votes[..3].iter().map(|vote| vote.signer)).unwrap();
-        assert!(!verifier.verify_exact(&header, &wrong_bitmap));
+    #[test]
+    fn single_validator_committee_accepts_one_attestation() {
+        let (committee, keys) = fixture(1);
+        assert_eq!(committee.faults(), 0);
+        assert_eq!(committee.quorum(), 1);
+        let schemes = schemes(&committee, keys);
+        let verifier = bls12381::Scheme::verifier(committee);
+        let header = test_header(b"single-validator");
+        let vote = schemes[0].sign(&header).unwrap();
 
-        let sub_quorum = bls12381::Certificate {
-            signers: Signers::new(4, votes[..2].iter().map(|vote| vote.signer)).unwrap(),
-            signature: exact.signature,
-        };
-        assert!(!verifier.verify_exact(&header, &sub_quorum));
+        assert!(verifier.verify_vote(&header, &vote));
+        let certificate = schemes[0].assemble([vote]).unwrap();
+        assert_eq!(certificate.signers.count(), 1);
+        assert!(verifier.verify(&header, &certificate));
+    }
+
+    #[test]
+    fn distinct_minimum_certificates_may_share_only_one_signer() {
+        let (committee, keys) = fixture(4);
+        let schemes = schemes(&committee, keys);
+        let verifier = bls12381::Scheme::verifier(committee);
+        let left_header = test_header(b"left");
+        let right_header = test_header(b"right");
+        let left = schemes[0]
+            .assemble([
+                schemes[0].sign(&left_header).unwrap(),
+                schemes[3].sign(&left_header).unwrap(),
+            ])
+            .unwrap();
+        let right = schemes[1]
+            .assemble([
+                schemes[1].sign(&right_header).unwrap(),
+                schemes[3].sign(&right_header).unwrap(),
+            ])
+            .unwrap();
+
+        assert!(verifier.verify(&left_header, &left));
+        assert!(verifier.verify(&right_header, &right));
+        let shared = left
+            .signers
+            .iter()
+            .filter(|signer| right.signers.iter().any(|candidate| candidate == *signer))
+            .collect::<Vec<_>>();
+        assert_eq!(shared, vec![schemes[3].me().unwrap()]);
     }
 
     #[test]
@@ -556,13 +649,13 @@ mod tests {
         let header = test_header(b"hundred-validator-header");
         let votes = schemes
             .iter()
-            .take(67)
+            .take(34)
             .map(|scheme| scheme.sign(&header).unwrap())
             .collect::<Vec<_>>();
-        let certificate = schemes[0].assemble_exact(votes).unwrap();
+        let certificate = schemes[0].assemble(votes).unwrap();
 
         assert_eq!(certificate.signers.len(), 100);
-        assert_eq!(certificate.signers.count(), 67);
+        assert_eq!(certificate.signers.count(), 34);
         let signature_bytes = certificate.signature.encode_size();
         let bitmap_length_prefix_bytes = 100_u64.encode_size();
         let validator_bitmap_bytes = 100_usize.div_ceil(8);

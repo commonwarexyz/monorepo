@@ -1423,7 +1423,7 @@ impl Harness {
         .unwrap();
         assert_eq!(*self.state.as_ref().unwrap().state().head(), before);
         assert_eq!(candidate.close().header, prepared.close.header);
-        (self.validator.assemble_exact([vote]).unwrap(), candidate)
+        (self.validator.assemble([vote]).unwrap(), candidate)
     }
 
     fn deposit(

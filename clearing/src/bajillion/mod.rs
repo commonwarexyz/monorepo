@@ -19,8 +19,11 @@
 //!
 //! A committee has `n = 3f + 1` validators and tolerates at most `f` Byzantine members. Every honest
 //! signer checks the complete dealing and durably retains the native state and original proof
-//! sources before publishing a vote. An exact `q = 2f + 1` certificate therefore includes at least
-//! `f + 1` honest holders of those sources.
+//! sources before publishing a vote. A certificate with at least `q = f + 1` signatures therefore
+//! includes at least one honest validator that checked and retained the complete close. Distinct
+//! valid certificates may coexist; certification does not select a canonical close. Ordered
+//! admission owns that selection. Canonical state advancement and finality follow the admitted
+//! close, while speculative work may continue on other candidates.
 //! Certification proves the disclosed public relation. It cannot prove that the operator never
 //! signed an additional private receipt.
 //!
@@ -85,8 +88,9 @@
 //! `transition::Header` binds the exact registered context and predecessors, all three successor
 //! roots and native counts, canonical log floors, independent ProposalId, and withdrawal total.
 //! Every validator derives the append extension from its retained predecessor. Settlement checks
-//! the exact quorum certificate and derives successor liability from its registered deposits and
-//! certified outflow. The operator identifies its proposal without constructing the native trees.
+//! a certificate with at least the minimum quorum and derives successor liability from its
+//! registered deposits and certified outflow. The operator identifies its proposal without
+//! constructing the native trees.
 //! Registration captures log floors from one finalized snapshot; later finalizations cannot
 //! change the inputs used by signers processing that same proposal.
 //!
@@ -133,7 +137,7 @@
 //!       retain state/evidence, then publish votes
 //!                  |
 //!                  v
-//!             exact 2f+1 certificate
+//!           at least f+1 signatures
 //!                  |
 //!                  v
 //!       admit into the ordered pending queue

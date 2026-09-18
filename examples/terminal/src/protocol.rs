@@ -44,7 +44,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
     qmdb::current::FixedConfig, translator::EightCap,
 };
-use commonware_utils::{NZU64, NZUsize, Participant, sync::Mutex};
+use commonware_utils::{Faults as _, N3f1, NZU64, NZUsize, Participant, sync::Mutex};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -109,6 +109,12 @@ const CHAIN_REGISTRATION_SIGNATURE_NAMESPACE: &[u8] =
 const VALIDATOR_SEED_START: u64 = 10_000;
 const OPERATOR_ACK_SEED_START: u64 = 20_000;
 const VALIDATORS: usize = 4;
+
+/// The fixed terminal committee requires consensus intersection for admission and recovery.
+/// Signature verification and exact committee membership are checked separately.
+pub(crate) fn has_consensus_quorum(certificate: &bls12381::Certificate) -> bool {
+    certificate.signers.count() >= N3f1::quorum(VALIDATORS) as usize
+}
 
 /// Maximum funded accounts encoded in a deployment's authenticated bootstrap.
 pub(crate) const MAX_GENESIS_ACCOUNTS: usize = 1_024;
@@ -478,7 +484,8 @@ impl PreparedEpoch {
         }
         let verifier = bls12381::Scheme::verifier(committee()?);
         ensure!(
-            verifier.verify_exact(&certified.header, &certified.certificate),
+            has_consensus_quorum(&certified.certificate)
+                && verifier.verify(&certified.header, &certified.certificate),
             "assembled certificate failed verification"
         );
 
@@ -631,6 +638,24 @@ pub(crate) fn fixture_close(result: &SettlementResult) -> Arc<Close<Key, Digest>
     retained.close.clone()
 }
 
+/// Assembles a genuine fixed-committee certificate for threshold policy tests.
+#[cfg(test)]
+pub(crate) fn fixture_certificate(
+    header: &Header<Digest>,
+    signer_count: usize,
+) -> bls12381::Certificate {
+    let validators = Validators::new().unwrap();
+    bls12381::Scheme::verifier(validators.committee.clone())
+        .assemble((0..signer_count).map(|index| {
+            validators
+                .signer(Participant::from_usize(index))
+                .unwrap()
+                .sign(header)
+                .unwrap()
+        }))
+        .unwrap()
+}
+
 #[derive(Clone)]
 struct Validators {
     committee: Committee,
@@ -650,8 +675,8 @@ impl Validators {
         let committee = Committee::new(validators.iter().map(|(public, _)| *public).collect())
             .context("construct operator validator committee")?;
         ensure!(
-            committee.quorum() == 3,
-            "operator committee must have quorum 3"
+            N3f1::quorum(committee.members().len()) == 3,
+            "operator committee must have consensus quorum 3"
         );
         Ok(Self {
             committee,
@@ -1470,7 +1495,7 @@ impl Protocol {
             .context("bind close to validator state")?;
         let mut votes = Vec::<Vote>::new();
         let mut validated = None;
-        for index in 0..self.validators.committee.quorum() {
+        for index in 0..N3f1::quorum(self.validators.committee.members().len()) as usize {
             let scheme = self.validators.signer(Participant::from_usize(index))?;
             let (vote, candidate) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
                 &scheme,
@@ -1493,8 +1518,8 @@ impl Protocol {
         let certificate = self
             .validators
             .signer(Participant::new(0))?
-            .assemble_exact(votes)
-            .context("assemble exact-quorum certificate")?;
+            .assemble(votes)
+            .context("assemble consensus-quorum certificate")?;
         let (close, candidate) = validated.expect("nonempty quorum").into_parts();
         let certified = CertifiedEpoch {
             context: context.clone(),
@@ -1652,9 +1677,10 @@ where
             "fixture validator history artifacts disagree"
         );
         ensure!(
-            protocol
-                .verifier()
-                .verify_exact(&result.header, &result.certificate),
+            has_consensus_quorum(&result.certificate)
+                && protocol
+                    .verifier()
+                    .verify(&result.header, &result.certificate),
             "fixture validator history certificate is invalid"
         );
         let mutations = close
@@ -2022,9 +2048,20 @@ mod tests {
                 .await
                 .unwrap();
 
-            certification_input
-                .certify(certified(&result), 7, 11)
-                .expect("the exact context, input, artifacts, and certificate certify");
+            for count in 2..=4 {
+                let mut candidate = certified(&result);
+                candidate.certificate = fixture_certificate(&candidate.header, count);
+                assert!(
+                    protocol
+                        .verifier()
+                        .verify(&candidate.header, &candidate.certificate)
+                );
+                assert_eq!(
+                    certification_input.certify(candidate, 7, 11).is_ok(),
+                    count >= 3,
+                    "terminal certification requires consensus quorum: {count} signers"
+                );
+            }
 
             let mut wrong_context = certification_input.clone();
             wrong_context.registration.context = protocol

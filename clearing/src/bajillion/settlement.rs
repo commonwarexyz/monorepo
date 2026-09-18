@@ -61,7 +61,7 @@ pub enum BatchStatus<D: Digest> {
     Invalidated(BatchId<D>),
 }
 
-/// Header, root witness, exact certificate, successor liability, and current status retained
+/// Header, root witness, certificate, successor liability, and current status retained
 /// for an admitted close.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingBatch<D: Digest> {
@@ -71,7 +71,7 @@ pub struct PendingBatch<D: Digest> {
     pub roots: RootBundle<D>,
     /// Certified withdrawal reserve amount.
     pub withdrawal_total: u64,
-    /// Exact BLS12-381 MinSig quorum certificate over `header`.
+    /// BLS12-381 MinSig quorum certificate over `header`.
     pub certificate: bls12381::Certificate,
     /// Successor liability derived from the registered custody boundary.
     pub successor_liability: u64,
@@ -1233,7 +1233,7 @@ where
         Ok(())
     }
 
-    /// Admits a contextual header, its root witness, and its exact certificate.
+    /// Admits a contextual header, its root witness, and its certificate.
     pub fn admit(
         &mut self,
         now: u64,
@@ -1253,7 +1253,7 @@ where
             &roots,
             withdrawal_total,
         )?;
-        if !self.certificate_scheme.verify_exact(&header, &certificate) {
+        if !self.certificate_scheme.verify(&header, &certificate) {
             return Err(SettlementError::InvalidCertificate);
         }
 
@@ -2908,7 +2908,7 @@ pub enum SettlementError {
     /// An epoch's challenge interval falls outside the deployment's configured bounds.
     #[error("epoch challenge deadline falls outside the deployment policy")]
     EpochChallengeDuration,
-    /// The retained certificate is not an exact valid quorum certificate.
+    /// The retained certificate does not meet the minimum valid quorum.
     #[error("header certificate is invalid")]
     InvalidCertificate,
     /// No admitted close matches the requested operation.
@@ -3692,9 +3692,7 @@ mod tests {
         withdrawal_total: u64,
     ) -> (Header<ShaDigest>, bls12381::Certificate) {
         let header = Header::new::<Sha256, VerifyingKey>(ctx, roots, withdrawal_total);
-        let certificate = signer
-            .assemble_exact([signer.sign(&header).unwrap()])
-            .unwrap();
+        let certificate = signer.assemble([signer.sign(&header).unwrap()]).unwrap();
         (header, certificate)
     }
 
@@ -4147,7 +4145,7 @@ mod tests {
             assert_eq!(validated.close().header, expected);
         });
         signer
-            .assemble_exact([signer.sign(&close.header).unwrap()])
+            .assemble([signer.sign(&close.header).unwrap()])
             .unwrap()
     }
     #[allow(clippy::too_many_arguments)]

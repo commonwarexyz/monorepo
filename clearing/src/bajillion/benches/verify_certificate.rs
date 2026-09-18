@@ -10,7 +10,7 @@ fn bench_verify_certificate(c: &mut Criterion) {
             b.iter(|| {
                 let verified = fixture
                     .verifier
-                    .verify_exact(black_box(&fixture.header), black_box(&fixture.certificate));
+                    .verify(black_box(&fixture.header), black_box(&fixture.certificate));
                 assert!(verified, "benchmark certificate remains valid");
                 black_box(verified)
             });

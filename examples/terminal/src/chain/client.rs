@@ -969,8 +969,9 @@ pub(crate) async fn admit<C: Chain, E: Env>(
         "certified close does not match its admission context"
     );
     ensure!(
-        bls12381::Scheme::verifier(committee).verify_exact(&request.header, &request.certificate),
-        "close admission lacks its exact committee certificate"
+        crate::protocol::has_consensus_quorum(&request.certificate)
+            && bls12381::Scheme::verifier(committee).verify(&request.header, &request.certificate),
+        "close admission lacks a valid consensus-quorum certificate"
     );
     let epoch = request.epoch;
     let batch_id = request.header.batch_id::<Sha256>();
@@ -988,9 +989,9 @@ pub(crate) async fn admit<C: Chain, E: Env>(
                     return Ok(());
                 }
                 None => {
-                    // The fixed committee's durable vote decisions make the certified
-                    // Header unique for each deployment and epoch. FIFO finality
-                    // confirms that close after its admission record retires.
+                    // Consensus quorum and the fixed committee's durable vote decisions
+                    // make the certified Header unique for each deployment and epoch.
+                    // FIFO finality confirms that close after its admission record retires.
                     if verified
                         .payout_tip
                         .and_then(|tip| tip.finalized)
