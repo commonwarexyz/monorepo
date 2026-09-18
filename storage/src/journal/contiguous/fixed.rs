@@ -81,7 +81,8 @@
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
 //! exceeds the recovered size, an unbounded open returns a corruption error. A bounded open
 //! (`init_at_most`) compares the watermark clamped to its cap, since blobs at or above the cap
-//! are never opened, and publication persists the retained end as the watermark. Both the
+//! are discarded (a blob starting at the cap is reopened only as the empty durable tail), and
+//! publication persists the retained end as the watermark. Both the
 //! pruning boundary and watermark are persisted before `init` returns.
 //!
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
@@ -1493,8 +1494,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying blob will be truncated to the last valid item). Repair is performed during init.
+/// the first invalid data read above the recovery watermark's acknowledged prefix is considered
+/// the new end of the journal (and the underlying blob is truncated to the last valid item).
+/// Data at or below that prefix is never repaired: a blob that no longer backs its acknowledged
+/// items fails init, and other damage there surfaces as a read error. Repair is performed
+/// during init.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle.
@@ -1534,6 +1538,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Initialize a `Journal` in a fully-pruned state at `size`: existing data is cleared and the
     /// journal behaves as if `size` items were appended then pruned. It is empty (`bounds` is
     /// `size..size`) and the next `append` writes at position `size`. Used for state sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
     ///
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
@@ -2931,16 +2939,18 @@ mod tests {
             assert_eq!(journal.bounds(), 0..7);
             drop(journal);
 
-            // The discarded blob above the cap is never opened.
+            // No discarded blob above the cap is opened.
             let partition = blob_partition(&cfg);
-            assert!(
-                !recordings.storage_events().iter().any(|event| matches!(
-                    event,
-                    StorageEvent::Opened { partition: opened, name, .. }
-                        if *opened == partition && name.as_slice() == 3u64.to_be_bytes()
-                )),
-                "discarded blob 3 was opened"
-            );
+            for blob in 2..5u64 {
+                assert!(
+                    !recordings.storage_events().iter().any(|event| matches!(
+                        event,
+                        StorageEvent::Opened { partition: opened, name, .. }
+                            if *opened == partition && name.as_slice() == blob.to_be_bytes()
+                    )),
+                    "discarded blob {blob} was opened"
+                );
+            }
             let journal = Journal::<_, u64>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();

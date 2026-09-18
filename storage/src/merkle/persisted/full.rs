@@ -3285,8 +3285,8 @@ mod tests {
             assert!(newest * cfg.items_per_blob.get() >= *end_pos);
             drop(merkle);
 
-            // Discarding nodes beyond the range reinitializes the journal, which drops pins no
-            // boundary needs.
+            // init_sync retains only the selected boundary's pins, so the stale key planted
+            // here is dropped.
             let metadata_cfg = MConfig {
                 partition: cfg.metadata_partition.clone(),
                 codec_config: ((0..).into(), ()),
@@ -3544,8 +3544,8 @@ mod tests {
             .unwrap();
         assert_eq!(newest, *end_pos / items_per_blob);
 
-        // Discarding nodes beyond the range reinitializes the journal, which drops pins no
-        // boundary needs.
+        // init_sync retains only the selected boundary's pins, so the stale key planted here is
+        // dropped.
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition.clone(),
             codec_config: ((0..).into(), ()),
@@ -3788,7 +3788,8 @@ mod tests {
             assert!(watermark <= newest * items_per_blob);
             assert!(newest * items_per_blob < *end_pos);
 
-            // Resetting the journal reinitializes it, which drops pins no boundary needs.
+            // init_sync retains only the selected boundary's pins, so the stale key planted
+            // here is dropped.
             let metadata_cfg = MConfig {
                 partition: cfg.metadata_partition.clone(),
                 codec_config: ((0..).into(), ()),
@@ -3942,7 +3943,8 @@ mod tests {
             // capacity.
             assert!((newest + 1) * items_per_blob <= *prune_pos);
 
-            // Resetting the journal reinitializes it, which drops pins no boundary needs.
+            // init_sync retains only the selected boundary's pins, so the stale key planted
+            // here is dropped.
             let metadata_cfg = MConfig {
                 partition: cfg.metadata_partition.clone(),
                 codec_config: ((0..).into(), ()),

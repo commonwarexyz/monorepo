@@ -388,9 +388,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// replay repairs only nonempty sections opened at initialization that have not yet been
-/// replayed: the first invalid data read in such a section becomes its new end (and the
-/// underlying [Blob] is truncated to the last valid item). Invalid data in a section created in
-/// this execution or already replayed is corruption and fails the replay. Repair occurs during
+/// replayed: a torn page or an incomplete trailing item read in such a section becomes its new
+/// end (and the underlying [Blob] is truncated to the last valid item). Any other invalid read,
+/// and invalid data in a section created in this execution or already replayed, is corruption
+/// and fails the replay. Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
 /// A nonempty section opened during initialization must be replayed from offset zero before it
 /// accepts new appends. Sections created during the current execution can be appended immediately.
@@ -658,8 +659,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
 /// Owned replay reader over a [Journal]'s items.
 ///
-/// Yields `(section, offset, size, item)` in order and repairs invalid trailing data only in
-/// nonempty sections opened at initialization that have not yet been replayed. Dropping the
+/// Yields `(section, offset, size, item)` in order and repairs a torn page or an incomplete
+/// trailing item only in nonempty sections opened at initialization that have not yet been
+/// replayed. Dropping the
 /// reader before it is exhausted destroys the journal (leaving later sections unrepaired):
 /// recovery is re-initialization. Call [Replay::finish] on an exhausted reader to get the
 /// journal back.

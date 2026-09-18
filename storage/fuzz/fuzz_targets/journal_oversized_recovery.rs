@@ -604,6 +604,18 @@ fn fuzz(input: FuzzInput) {
                                 })
                                 .await
                                 .expect("bounded initialization failed");
+                                for partition in [INDEX_PARTITION, VALUE_PARTITION] {
+                                    for name in context.scan(partition).await.expect("scan failed")
+                                    {
+                                        let stored = u64::from_be_bytes(
+                                            name.as_slice().try_into().expect("section name"),
+                                        );
+                                        assert!(
+                                            stored <= section,
+                                            "bounded init left section {stored} in {partition}"
+                                        );
+                                    }
+                                }
                                 counts.retain(|candidate, _| *candidate <= section);
                                 model.retain(|candidate, _| *candidate <= section);
                                 counts.insert(section, keep);

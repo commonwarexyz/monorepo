@@ -1133,6 +1133,7 @@ pub trait BackingRecovery: Send + Sync + Sized {
     ) -> impl Future<Output = Result<<Self::Journal as Contiguous>::Item, JournalError>> + Send;
 
     /// Discard stored items and establish an empty journal at `size` during initialization.
+    ///
     /// Returns [JournalError::SizeOverflow] for `u64::MAX`.
     fn reset(self, size: u64) -> impl Future<Output = Result<Self, JournalError>> + Send;
 

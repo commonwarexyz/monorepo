@@ -2197,10 +2197,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the underlying
-/// blob will be truncated to the last valid item). Repair is performed during init.
-/// Incomplete trailing frames are repaired as torn writes; complete frames whose payloads fail to
-/// decode are treated as corruption.
+/// the first invalid data read above the recovery watermark's acknowledged prefix is considered
+/// the new end of the journal (and the underlying blob is truncated to the last valid item).
+/// Data at or below that prefix is never repaired: a blob that no longer backs its acknowledged
+/// items fails init, and other damage there surfaces as a read error. Repair is performed
+/// during init. Incomplete trailing frames are repaired as torn writes; complete frames whose
+/// payloads fail to decode are treated as corruption.
 ///
 /// # Invariants
 ///
@@ -2278,6 +2280,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(
@@ -3456,16 +3462,23 @@ mod tests {
             assert_eq!(journal.bounds(), 0..7);
             drop(journal);
 
-            // The discarded blob above the cap is never opened.
-            let partition = cfg.data_partition();
-            assert!(
-                !recordings.storage_events().iter().any(|event| matches!(
-                    event,
-                    StorageEvent::Opened { partition: opened, name, .. }
-                        if *opened == partition && name.as_slice() == 3u64.to_be_bytes()
-                )),
-                "discarded blob 3 was opened"
-            );
+            // No discarded data or offsets blob above the cap is opened.
+            let partitions = [
+                cfg.data_partition(),
+                format!("{}-blobs", cfg.offsets_partition()),
+            ];
+            for partition in &partitions {
+                for blob in 2..5u64 {
+                    assert!(
+                        !recordings.storage_events().iter().any(|event| matches!(
+                            event,
+                            StorageEvent::Opened { partition: opened, name, .. }
+                                if opened == partition && name.as_slice() == blob.to_be_bytes()
+                        )),
+                        "discarded blob {blob} was opened in {partition}"
+                    );
+                }
+            }
             let journal = Journal::<_, u64>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();

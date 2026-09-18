@@ -280,7 +280,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// The ceiling section is opened and tail-repaired like any retained section. Later sections
     /// are never read or repaired. They remain in storage and absent from every accessor until
-    /// [Self::truncate_pending] removes them, so callers must truncate to a section at most
+    /// [Self::truncate_pending] or [Self::clear] removes them, so callers must truncate to a
+    /// section at most
     /// `ceiling` before publishing the manager or creating sections.
     pub async fn init_bounded(context: E, cfg: Config<F>, ceiling: u64) -> Result<Self, Error> {
         // Open each canonical section in storage order.

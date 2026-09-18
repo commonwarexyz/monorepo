@@ -572,11 +572,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// replay repairs only sections opened at initialization with an unvalidated suffix: the first
-/// invalid data read in such a section becomes its new end (and the underlying [Blob] is
-/// truncated to the last valid item). Invalid data in a section adopted at a durable validation
-/// marker or checkpoint, created in this execution, or already replayed is corruption and fails
-/// the replay. Repair occurs during replay so clean initialization reads only each blob's
+/// replay repairs only sections opened at initialization with an unvalidated suffix: a torn
+/// page or an incomplete trailing item read in such a section above its validation floor
+/// becomes its new end (and the underlying [Blob] is truncated to the last valid item). Any
+/// other invalid read, and invalid data in a section adopted at a durable validation marker or
+/// checkpoint, created in this execution, or already replayed, is corruption and fails the
+/// replay. Repair occurs during replay so clean initialization reads only each blob's
 /// terminal page. A section opened during initialization with an unvalidated suffix must be
 /// replayed from position zero before it accepts new appends.
 ///
@@ -907,8 +908,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
 /// Owned replay reader over a [Journal]'s items.
 ///
-/// Yields `(section, position, item)` in order and repairs invalid trailing data only in
-/// sections opened at initialization with an unvalidated suffix. Dropping the reader before it
+/// Yields `(section, position, item)` in order and repairs a torn page or an incomplete trailing
+/// item only in sections opened at initialization with an unvalidated suffix. Dropping the reader before it
 /// is exhausted destroys the journal: recovery is re-initialization. Call [Replay::finish] on
 /// an exhausted reader to get the journal back.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
