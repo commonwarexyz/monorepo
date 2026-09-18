@@ -60,7 +60,7 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     }
 }
 
-impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
+impl<K: Read + Ord + Hash + Eq> Read for HashSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -88,7 +88,7 @@ mod tests {
     // Generic round trip test function for HashSet
     fn round_trip_hash<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
-        K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + Debug + PartialEq,
+        K: Write + EncodeSize + Read + Ord + Hash + Eq + Debug + PartialEq,
         HashSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug
