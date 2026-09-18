@@ -586,7 +586,7 @@ where
             std::future::pending::<()>().await;
         }
 
-        (self.any, _) = self.any.prune_log(prune_loc).await?;
+        self.any = self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
         self.update_metrics();
         Ok(self)
@@ -840,7 +840,9 @@ pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
 /// For the youngest of `chunk_count` chunks, return the `peak_birth_size` of its
 /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
 /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
-fn pair_absorption_threshold<F: Graftable, const N: usize>(chunk_count: u64) -> Option<u64> {
+pub(super) fn pair_absorption_threshold<F: Graftable, const N: usize>(
+    chunk_count: u64,
+) -> Option<u64> {
     if chunk_count == 0 {
         return None;
     }
@@ -1515,6 +1517,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("db"),
                 fixed_config::<OneCap>("operations-match-applied-range", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1544,6 +1547,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("first"),
                 fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1564,6 +1568,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("second"),
                 fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1584,6 +1589,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("prune-park", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1625,6 +1631,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("reopen"),
                 fixed_config::<OneCap>("prune-park", &ctx),
+                None,
             )
             .await
             .expect("prune crash must leave the db recoverable");
@@ -1643,6 +1650,7 @@ mod tests {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-full", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1679,6 +1687,7 @@ mod tests {
             let db = MmbDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1717,6 +1726,7 @@ mod tests {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1753,6 +1763,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
+                None,
             )
             .await
             .unwrap();
