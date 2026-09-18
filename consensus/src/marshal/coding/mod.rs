@@ -5031,7 +5031,8 @@ mod tests {
             // only if the stored block is reused as-is and certification
             // resolves through the durability gate registered by the
             // recovery staging.
-            let publication = HandoffPublication::AfterCertification;
+            // The non-default permission exposes accidental defaulting.
+            let publication = HandoffPublication::AllowBeforeCertification;
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
             let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));

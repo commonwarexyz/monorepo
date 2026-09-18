@@ -398,9 +398,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Publishing early trusts the outgoing consensus leader, the proposer of the parent,
         /// not to equivocate. The context names the parent by view and digest. Its leader
         /// field is the incoming leader making this request, not the outgoing one. The
-        /// application identifies the outgoing leader from the elector's schedule or from a
-        /// parent block it has already verified. If that identity or trust is uncertain,
-        /// prepare with [`HandoffPublication::AfterCertification`].
+        /// application identifies the outgoing leader for the parent's consensus round from
+        /// the elector's schedule or from authenticated metadata for that round. A verified
+        /// parent block's embedded context can name an earlier proposer, as with an
+        /// epoch-boundary re-proposal. If that identity or trust is uncertain, prepare with
+        /// [`HandoffPublication::AfterCertification`].
         ///
         /// Make this decision from information already available to the application. If
         /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
